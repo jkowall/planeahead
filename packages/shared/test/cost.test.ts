@@ -12,7 +12,15 @@ import {
   listPriceUsdMicros,
   pollEquivalents,
 } from '../src/cost';
-import { PROVIDER_IDS } from '../src/flight-status';
+import { PROVIDER_IDS, type ProviderId } from '../src/flight-status';
+
+/**
+ * A provider id as it arrives off the wire. With a literal provider the helpers check the
+ * operation at compile time (see `types.test.ts`); with a run-time id the table check throws.
+ */
+function wire(provider: ProviderId): ProviderId {
+  return provider;
+}
 
 const FREE_PROVIDERS = [
   'adsb_lol',
@@ -85,13 +93,14 @@ describe('listPriceUsdMicros', () => {
   });
 
   it('throws UnknownOperationError for an operation that is not priced', () => {
-    expect(() => listPriceUsdMicros('aeroapi', 'weather')).toThrow(UnknownOperationError);
-    expect(() => listPriceUsdMicros('aeroapi', 'weather')).toThrow(/aeroapi\.weather/);
+    expect(() => listPriceUsdMicros(wire('aeroapi'), 'weather')).toThrow(UnknownOperationError);
+    expect(() => listPriceUsdMicros(wire('aeroapi'), 'weather')).toThrow(/aeroapi\.weather/);
   });
 
   it('does not read prototype properties as operations', () => {
-    expect(() => listPriceUsdMicros('aeroapi', 'constructor')).toThrow(UnknownOperationError);
-    expect(() => listPriceUsdMicros('aeroapi', '__proto__')).toThrow(UnknownOperationError);
+    const aeroapi = wire('aeroapi');
+    expect(() => listPriceUsdMicros(aeroapi, 'constructor')).toThrow(UnknownOperationError);
+    expect(() => listPriceUsdMicros(aeroapi, '__proto__')).toThrow(UnknownOperationError);
   });
 });
 
@@ -114,7 +123,7 @@ describe('pollEquivalents', () => {
   });
 
   it('throws for an unpriced operation instead of returning 0', () => {
-    expect(() => pollEquivalents('adsb_lol', 'track')).toThrow(UnknownOperationError);
+    expect(() => pollEquivalents(wire('adsb_lol'), 'track')).toThrow(UnknownOperationError);
   });
 });
 
@@ -132,7 +141,7 @@ describe('costUnits', () => {
   });
 
   it('throws for an unpriced operation', () => {
-    expect(() => costUnits('aerodatabox', 'flight_plan')).toThrow(UnknownOperationError);
+    expect(() => costUnits(wire('aerodatabox'), 'flight_plan')).toThrow(UnknownOperationError);
   });
 });
 
@@ -151,8 +160,8 @@ describe('estimateCostUsdMicros', () => {
   });
 
   it('throws for an unpriced operation on every provider kind', () => {
-    expect(() => estimateCostUsdMicros('aeroapi', 'x', 1)).toThrow(UnknownOperationError);
-    expect(() => estimateCostUsdMicros('aerodatabox', 'x', 1)).toThrow(UnknownOperationError);
-    expect(() => estimateCostUsdMicros('nws', 'x', 1)).toThrow(UnknownOperationError);
+    for (const provider of ['aeroapi', 'aerodatabox', 'nws'] as const) {
+      expect(() => estimateCostUsdMicros(wire(provider), 'x', 1)).toThrow(UnknownOperationError);
+    }
   });
 });

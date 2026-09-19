@@ -32,8 +32,11 @@ describe('LiveActivityContentStateV1', () => {
     expect(LiveActivityContentStateV1.safeParse({ ...MINIMAL, flightKey: 'AA100' }).success).toBe(
       false,
     );
-    expect(LiveActivityContentStateV1.safeParse({ ...MINIMAL, status: 'delayed' }).success).toBe(
-      false,
+  });
+
+  it('degrades a status it does not know to unknown, like every other status on the wire', () => {
+    expect(LiveActivityContentStateV1.parse({ ...MINIMAL, status: 'delayed' }).status).toBe(
+      'unknown',
     );
   });
 

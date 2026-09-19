@@ -35,6 +35,9 @@ describe('docs/architecture.md cadence block', () => {
     expect(rendered).toContain(`| ${String(A2_EXPECTED_POLLS)} `);
     expect(rendered).toContain(`| ${String(A1_EXPECTED_POLLS)} `);
     expect(rendered).toContain(`| ${String(LITERAL_EXPECTED_POLLS)} `);
+    expect(rendered).toContain('fixed slots in+15min, in+30min, in+45min, in+60min, in+120min: 5');
+    expect(rendered).toMatch(/\| literal +\| Hourly window +\| 1 h +\| 15 min/);
+    expect(rendered).toContain('the SLO holds except on in+60min to in+120min');
     expect(rendered).toContain('Do not edit between the markers');
     expect(rendered).toContain('<!-- prettier-ignore-start -->');
     expect(rendered).toContain('<!-- prettier-ignore-end -->');

@@ -4,7 +4,8 @@ import { PLANEAHEAD } from '../src/index';
 
 /**
  * The public surface. Removing or renaming an export is a breaking change for apps/api and
- * apps/mobile, so the list is explicit: adding an export means adding it here.
+ * apps/mobile, so the list is explicit: adding an export means adding it here. This pins the
+ * value exports; `types.test.ts` pins the type exports the same way at typecheck time.
  */
 const EXPECTED_EXPORTS = [
   // index
@@ -45,7 +46,7 @@ const EXPECTED_EXPORTS = [
   'SLO_EVENTS',
   'SLO_TABLE',
   'SLO_WINDOWS',
-  'TIER_SLO_WINDOWS',
+  'SLO_WINDOW_BOUNDS',
   'days',
   'expectedCalls',
   'hours',
@@ -54,6 +55,7 @@ const EXPECTED_EXPORTS = [
   'nextSlot',
   'refreshIntervalFor',
   'resolveWindows',
+  'sloRelaxations',
   'slotCount',
   'strictestPollSlo',
   'windowAt',
@@ -117,6 +119,7 @@ const EXPECTED_EXPORTS = [
   'IsoInstantSchema',
   'PROVIDER_CALL_RESULTS',
   'PROVIDER_CALL_TRIGGERS',
+  'PROVIDER_EVENT_KINDS',
   'PROVIDER_IDS',
   'ProviderCallRecordSchema',
   'ProviderCallResultSchema',

@@ -24,7 +24,7 @@ import {
   SLO_EVENTS,
   SLO_TABLE,
   SLO_WINDOWS,
-  TIER_SLO_WINDOWS,
+  SLO_WINDOW_BOUNDS,
   days,
   expectedCalls,
   hours,
@@ -33,13 +33,13 @@ import {
   nextSlot,
   refreshIntervalFor,
   resolveWindows,
+  sloRelaxations,
   slotCount,
   strictestPollSlo,
   windowAt,
   type CadenceContext,
   type CadenceDefinition,
   type CadenceTier,
-  type IntervalWindow,
   type RefreshDecision,
   type TrackerPhase,
 } from '../src/cadence';
@@ -171,17 +171,34 @@ describe('cadence definitions', () => {
     ]);
   });
 
-  it('A2 keeps the plan intervals: hourly, 15, 30, 60; A1: hourly, 15, 15, 30 + final', () => {
+  it('A2 keeps the plan intervals: hourly, 15, 30, 60; A1: hourly, 15, 15, then fixed slots', () => {
     const intervals = (c: CadenceDefinition): (number | null)[] =>
       c.windows.slice(2).map((w) => (isIntervalWindow(w) ? w.intervalMinutes : null));
     expect(intervals(CADENCE_A2)).toEqual([60, 15, 30, 60]);
-    expect(intervals(CADENCE_A1)).toEqual([60, 15, 15, 30]);
+    expect(intervals(CADENCE_A1)).toEqual([60, 15, 15, null]);
     expect(intervals(CADENCE_LITERAL)).toEqual([60, 10, 2, 10]);
     expect(intervals(CADENCE_B)).toEqual([null, null, null, null]);
-    const a1Tail = CADENCE_A1.windows[5];
-    expect(a1Tail !== undefined && isIntervalWindow(a1Tail) && a1Tail.finalPoll).toBe(true);
     expect(CADENCE_LITERAL.windows[2]?.to).toBe(hours(3));
     expect(CADENCE_A2.windows[2]?.to).toBe(hours(6));
+  });
+
+  it('A1 tail is fixed slots at in+15, in+30, in+45, in+60 and a final poll at in+120 (R2)', () => {
+    const tail = CADENCE_A1.windows[5];
+    expect(tail !== undefined && !isIntervalWindow(tail) ? tail.slots : null).toEqual([
+      { edge: 'from', offsetMinutes: 15 },
+      { edge: 'from', offsetMinutes: 30 },
+      { edge: 'from', offsetMinutes: 45 },
+      { edge: 'from', offsetMinutes: 60 },
+      { edge: 'to', offsetMinutes: 0 },
+    ]);
+    expect(tail).toMatchObject({ from: 'arrival', to: 'stop', source: 'aeroapi', alerts: false });
+  });
+
+  it('B names a late-flight interval on its fixed-slot in-flight window', () => {
+    const inFlight = CADENCE_B.windows[4];
+    expect(
+      inFlight !== undefined && !isIntervalWindow(inFlight) ? inFlight.lateIntervalMinutes : null,
+    ).toBe(15);
   });
 
   it('only A2 and B assume alert deliveries', () => {
@@ -220,28 +237,58 @@ describe('SLO table', () => {
     expect(SLO_WINDOWS.map((w) => strictestPollSlo(w))).toEqual([2_880, 1_440, 60, 15, 15, 15]);
   });
 
-  it('maps every cadence tier to SLO windows', () => {
-    for (const tier of TIER_ORDER) {
-      expect(TIER_SLO_WINDOWS[tier].length).toBeGreaterThan(0);
-    }
+  it('bounds every SLO window, contiguous from creation to the tail stop', () => {
+    expect(SLO_WINDOWS.map((w) => [SLO_WINDOW_BOUNDS[w].from, SLO_WINDOW_BOUNDS[w].to])).toEqual([
+      [Number.POSITIVE_INFINITY, days(7)],
+      [days(7), hours(48)],
+      [hours(48), hours(6)],
+      [hours(6), hours(3)],
+      [hours(3), 'arrival'],
+      ['arrival', 'stop'],
+    ]);
   });
 
-  it('documents exactly the relaxations the plan accepts', () => {
-    const relaxed = (c: CadenceDefinition): CadenceTier[] =>
-      c.windows
-        .filter((w): w is IntervalWindow => isIntervalWindow(w))
-        .filter((w) => {
-          const strictest = Math.min(
-            ...TIER_SLO_WINDOWS[w.tier]
-              .map((s) => strictestPollSlo(s))
-              .filter((v): v is number => v !== null),
-          );
-          return w.intervalMinutes > strictest;
-        })
-        .map((w) => w.tier);
-    expect(relaxed(CADENCE_LITERAL)).toEqual([]);
-    expect(relaxed(CADENCE_A1)).toEqual(['post_arrival']);
-    expect(relaxed(CADENCE_A2)).toEqual(['in_flight', 'post_arrival']);
+  it('documents exactly the relaxations the plan accepts, measured against overlapping windows', () => {
+    const summary = (c: CadenceDefinition): [CadenceTier, number, number][] =>
+      sloRelaxations(c).map((r) => [r.tier, r.maxGapMinutes, r.strictestSloMinutes]);
+    expect(summary(CADENCE_LITERAL)).toEqual([['hourly', 60, 15]]);
+    expect(summary(CADENCE_A1)).toEqual([['post_arrival', 60, 15]]);
+    expect(summary(CADENCE_A2)).toEqual([
+      ['in_flight', 30, 15],
+      ['post_arrival', 60, 15],
+    ]);
+    expect(summary(CADENCE_B)).toEqual([
+      ['hourly', hours(42), 60],
+      ['pre_boarding', hours(3), 15],
+      ['in_flight', 165, 15],
+      ['post_arrival', 105, 15],
+    ]);
+  });
+
+  it('holds the literal hourly window to the 6 h to 3 h target it runs into', () => {
+    // A lookup by tier name mapped `hourly` to `48h_to_6h` only and reported no relaxation.
+    const [hourly] = sloRelaxations(CADENCE_LITERAL);
+    expect(hourly?.sloWindows).toEqual(['48h_to_6h', '6h_to_3h']);
+    expect(hourly?.intervalMinutes).toBe(60);
+    expect(hourly?.relaxedLegs).toEqual([]);
+    expect(sloRelaxations(CADENCE_A2).map((r) => r.sloWindows)).toEqual([
+      ['3h_to_arrival'],
+      ['post_arrival'],
+    ]);
+  });
+
+  it('A1 tail meets the 15-minute post-arrival SLO for the first hour; only in+60 to in+120 is relaxed', () => {
+    const [tail] = sloRelaxations(CADENCE_A1);
+    expect(tail).toMatchObject({
+      tier: 'post_arrival',
+      alerts: false,
+      intervalMinutes: null,
+      sloWindows: ['post_arrival'],
+    });
+    expect(tail?.relaxedLegs).toEqual([{ fromMinutes: BLOCK + 60, toMinutes: BLOCK + 120 }]);
+    expect(sloRelaxations(CADENCE_B)[0]?.relaxedLegs).toEqual([
+      { fromMinutes: -hours(48), toMinutes: -hours(6) },
+    ]);
   });
 });
 
@@ -328,9 +375,21 @@ describe('refreshIntervalFor (A2 unless stated)', () => {
     expect(refreshIntervalFor(CADENCE_A2, ctx(300))).toBeNull();
   });
 
-  it('A1 adds a final poll at the end of the tail', () => {
-    expect(nextMinutes(decide(CADENCE_A1, 180))).toBe(210);
-    expect(nextMinutes(decide(CADENCE_A1, 270))).toBe(300);
+  it('A1 tail fires at in+15, in+30, in+45, in+60 and in+120, then stops', () => {
+    const slots: number[] = [];
+    let t = 170;
+    for (let i = 0; i < 10; i += 1) {
+      const d = refreshIntervalFor(CADENCE_A1, ctx(t));
+      if (d === null) {
+        break;
+      }
+      t = nextMinutes(d);
+      slots.push(t);
+    }
+    expect(slots).toEqual([195, 210, 225, 240, 300]);
+    const first = decide(CADENCE_A1, 180);
+    expect(first.tier).toBe('post_arrival');
+    expect(first.nominalIntervalMinutes).toBeNull();
     expect(refreshIntervalFor(CADENCE_A1, ctx(300))).toBeNull();
   });
 
@@ -381,6 +440,35 @@ describe('refreshIntervalFor (A2 unless stated)', () => {
     });
     expect(landed.tier).toBe('in_flight');
     expect(nextMinutes(landed)).toBe(230);
+  });
+
+  it('B polls a late flight every 15 minutes from the planned arrival until the lifetime', () => {
+    // Before the fix, B's only in-flight slot (out + 15) was in the past and the tail had been
+    // dropped, so the tracker finished at the planned arrival with the aircraft still airborne.
+    const late = { phase: 'en_route' as const, actualIn: undefined };
+    expect(nextMinutes(decide(CADENCE_B, 179))).toBe(195);
+    const atArrival = decide(CADENCE_B, 180, late);
+    expect(nextMinutes(atArrival)).toBe(195);
+    expect(atArrival.tier).toBe('in_flight');
+    expect(atArrival.nominalIntervalMinutes).toBeNull();
+    expect(nextMinutes(decide(CADENCE_B, 200, late))).toBe(210);
+    const landed = { phase: 'landed' as const, actualOn: at(190), actualIn: undefined };
+    expect(nextMinutes(decide(CADENCE_B, 200, landed))).toBe(210);
+    const polls: number[] = [];
+    let t = 200;
+    for (let i = 0; i < 100; i += 1) {
+      const d = refreshIntervalFor(CADENCE_B, ctx(t, late));
+      if (d === null) {
+        break;
+      }
+      t = nextMinutes(d);
+      polls.push(t);
+    }
+    expect(polls[0]).toBe(210);
+    expect(polls[polls.length - 1]).toBe(360);
+    expect(polls).toHaveLength(11);
+    expect(maxLifetime(scheduledIn, scheduledOut, BLOCK)).toEqual(at(360));
+    expect(refreshIntervalFor(CADENCE_B, ctx(360, late))).toBeNull();
   });
 
   it('lets a provider arrival estimate move the tail', () => {
@@ -545,6 +633,7 @@ describe('window helpers', () => {
       end: OUT - 6 * 60 * MINUTE_MS,
     });
     expect(normal.windows[5]?.end).toBe(IN + 120 * MINUTE_MS);
+    expect(normal.windows.some((w) => w.extended)).toBe(false);
     expect(normal.bounds).toEqual({
       scheduledOut: OUT,
       boarding: OUT - 40 * MINUTE_MS,
@@ -555,6 +644,7 @@ describe('window helpers', () => {
     expect(late.windows).toHaveLength(5);
     expect(late.windows[4]?.window.tier).toBe('in_flight');
     expect(late.windows[4]?.end).toBe(Number.POSITIVE_INFINITY);
+    expect(late.windows[4]?.extended).toBe(true);
     expect(resolveWindows(CADENCE_A2, ctx(10, { phase: 'cancelled' })).windows).toEqual([]);
   });
 
@@ -578,6 +668,28 @@ describe('window helpers', () => {
     expect(slotCount({ ...base, intervalMinutes: 60 }, Number.NEGATIVE_INFINITY, 0)).toBe(
       Number.POSITIVE_INFINITY,
     );
+  });
+
+  it('rejects a fixed-slot in-flight window with no late-flight interval, only once it is needed', () => {
+    const noLateInterval: CadenceDefinition = {
+      ...CADENCE_B,
+      windows: CADENCE_B.windows.map((w) =>
+        w.tier === 'in_flight' && !isIntervalWindow(w)
+          ? {
+              tier: w.tier,
+              from: w.from,
+              to: w.to,
+              slots: w.slots,
+              source: w.source,
+              alerts: w.alerts,
+            }
+          : w,
+      ),
+    };
+    expect(nextMinutes(decide(noLateInterval, 100))).toBe(195);
+    expect(() =>
+      refreshIntervalFor(noLateInterval, ctx(200, { phase: 'en_route', actualIn: undefined })),
+    ).toThrow(CadenceError);
   });
 
   it('rejects windows whose anchor has no finite edge', () => {

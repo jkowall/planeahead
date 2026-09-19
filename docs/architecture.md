@@ -11,21 +11,21 @@ from `@planeahead/shared`.
 
 _Generated from `packages/shared/src/cadence.ts` by `pnpm --filter @planeahead/shared gen:cadence-table`. Do not edit between the markers; `packages/shared/test/cadence-table.test.ts` fails when this block drifts from the code._
 
-Assumptions: block 180 min, boarding at T-40 min, tail stops at in+120 min, on-time flight, one creation fetch at the lead time. Slot rule: start-anchored windows yield `round(duration / interval)` polls, so a trailing partial slot of at least half an interval earns a poll; the pre-48 h AeroDataBox windows count back from T-48 h (daily inside 14 d, every 2 d beyond) and yield `floor(duration / interval)`; the instant on a boundary belongs to the later window; `+ final` adds one poll at the tail's end. Prices are list prices from `cost.ts` (AeroAPI status $0.005, alert delivery $0.020; AeroDataBox 2 units per status call at $0.00025 per unit on Growth).
+Assumptions: block 180 min, boarding at T-40 min, tail stops at in+120 min, on-time flight, one creation fetch at the lead time. Slot rule: start-anchored windows yield `round(duration / interval)` polls, so a trailing partial slot of at least half an interval earns a poll; the pre-48 h AeroDataBox windows count back from T-48 h (daily inside 14 d, every 2 d beyond) and yield `floor(duration / interval)`; the instant on a boundary belongs to the later window; fixed-slot windows list their slots. A flight that passes its planned arrival without `in` keeps polling until `in` or `MAX_LIFETIME`: interval windows continue their grid, fixed-slot windows poll every `lateIntervalMinutes` from the planned arrival. Prices are list prices from `cost.ts` (AeroAPI status $0.005, alert delivery $0.020; AeroDataBox 2 units per status call at $0.00025 per unit on Growth).
 
 ### Windows inside 48 h (AeroAPI)
 
-| Window                             | Literal brief                        | A1 polls only                               | A2 polls + alerts                    | B ADB webhooks + AeroAPI OOOI alerts |
-| ---------------------------------- | ------------------------------------ | ------------------------------------------- | ------------------------------------ | ------------------------------------ |
-| Hourly window                      | 1 h interval, T-48h to T-3h: 45      | 1 h interval, T-48h to T-6h: 42             | 1 h interval, T-48h to T-6h: 42      | fixed slots, T-48h to T-6h: 1        |
-| Pre-boarding window                | 10 min interval, T-3h to T-40min: 14 | 15 min interval, T-6h to T-40min: 21        | 15 min interval, T-6h to T-40min: 21 | fixed slots, T-6h to T-40min: 1      |
-| In flight                          | 2 min interval, T-40min to in: 110   | 15 min interval, T-40min to in: 15          | 30 min interval, T-40min to in: 7    | fixed slots, T-40min to in: 1        |
-| Post-arrival tail                  | 10 min interval, in to in+120min: 12 | 30 min interval + final, in to in+120min: 5 | 1 h interval, in to in+120min: 2     | fixed slots, in to in+120min: 2      |
-| AeroAPI polls inside 48 h          | 181                                  | 83                                          | 72                                   | 5                                    |
-| AeroAPI alert deliveries (assumed) | 0                                    | 0                                           | 12                                   | 8                                    |
-| AeroDataBox alert items (assumed)  | 0                                    | 0                                           | 0                                    | 15                                   |
-| Poll-equivalents inside 48 h       | 181                                  | 83                                          | 120                                  | 37.75                                |
-| List cost inside 48 h              | $0.905                               | $0.415                                      | $0.60                                | $0.18875                             |
+| Window                             | Literal brief                        | A1 polls only                                                    | A2 polls + alerts                    | B ADB webhooks + AeroAPI OOOI alerts |
+| ---------------------------------- | ------------------------------------ | ---------------------------------------------------------------- | ------------------------------------ | ------------------------------------ |
+| Hourly window                      | 1 h interval, T-48h to T-3h: 45      | 1 h interval, T-48h to T-6h: 42                                  | 1 h interval, T-48h to T-6h: 42      | fixed slots T-48h: 1                 |
+| Pre-boarding window                | 10 min interval, T-3h to T-40min: 14 | 15 min interval, T-6h to T-40min: 21                             | 15 min interval, T-6h to T-40min: 21 | fixed slots T-3h: 1                  |
+| In flight                          | 2 min interval, T-40min to in: 110   | 15 min interval, T-40min to in: 15                               | 30 min interval, T-40min to in: 7    | fixed slots out+15min: 1             |
+| Post-arrival tail                  | 10 min interval, in to in+120min: 12 | fixed slots in+15min, in+30min, in+45min, in+60min, in+120min: 5 | 1 h interval, in to in+120min: 2     | fixed slots in+15min, in+120min: 2   |
+| AeroAPI polls inside 48 h          | 181                                  | 83                                                               | 72                                   | 5                                    |
+| AeroAPI alert deliveries (assumed) | 0                                    | 0                                                                | 12                                   | 8                                    |
+| AeroDataBox alert items (assumed)  | 0                                    | 0                                                                | 0                                    | 15                                   |
+| Poll-equivalents inside 48 h       | 181                                  | 83                                                               | 120                                  | 37.75                                |
+| List cost inside 48 h              | $0.905                               | $0.415                                                           | $0.60                                | $0.18875                             |
 
 ### Pre-48 h AeroDataBox calls and per-flight totals by lead time
 
@@ -62,15 +62,18 @@ AeroDataBox status calls are the same for every cadence; the per-cadence columns
 
 ### Where a cadence polls slower than the SLO
 
-| Cadence | Window              | Poll interval | Strictest poll SLO | Why it is accepted                               |
-| ------- | ------------------- | ------------- | ------------------ | ------------------------------------------------ |
-| A1      | Post-arrival tail   | 30 min        | 15 min             | plan choice, polls are the only source           |
-| A2      | In flight           | 30 min        | 15 min             | alerts carry OOOI and ETA; polls only need gates |
-| A2      | Post-arrival tail   | 1 h           | 15 min             | alerts carry OOOI and ETA; polls only need gates |
-| B       | Hourly window       | fixed slots   | 1 h                | webhooks and alerts carry the SLO (unverified)   |
-| B       | Pre-boarding window | fixed slots   | 15 min             | webhooks and alerts carry the SLO (unverified)   |
-| B       | In flight           | fixed slots   | 15 min             | webhooks and alerts carry the SLO (unverified)   |
-| B       | Post-arrival tail   | fixed slots   | 15 min             | webhooks and alerts carry the SLO (unverified)   |
+Computed from the resolved window bounds of the simulated flight: a cadence window is held to the strictest poll target of every SLO window it overlaps, and a fixed-slot window is measured by the widest gap between its start, its slots and its end.
+
+| Cadence | Window              | Poll interval                  | Strictest poll SLO | Why it is accepted                                                       |
+| ------- | ------------------- | ------------------------------ | ------------------ | ------------------------------------------------------------------------ |
+| literal | Hourly window       | 1 h                            | 15 min             | the brief as written, kept for comparison only                           |
+| A1      | Post-arrival tail   | fixed slots, gap up to 1 h     | 15 min             | polls are the only source; the SLO holds except on in+60min to in+120min |
+| A2      | In flight           | 30 min                         | 15 min             | alerts carry OOOI and ETA; polls only need gates                         |
+| A2      | Post-arrival tail   | 1 h                            | 15 min             | alerts carry OOOI and ETA; polls only need gates                         |
+| B       | Hourly window       | fixed slots, gap up to 42 h    | 1 h                | webhooks and alerts carry the SLO (unverified)                           |
+| B       | Pre-boarding window | fixed slots, gap up to 3 h     | 15 min             | webhooks and alerts carry the SLO (unverified)                           |
+| B       | In flight           | fixed slots, gap up to 165 min | 15 min             | webhooks and alerts carry the SLO (unverified)                           |
+| B       | Post-arrival tail   | fixed slots, gap up to 105 min | 15 min             | webhooks and alerts carry the SLO (unverified)                           |
 
 <!-- prettier-ignore-end -->
 <!-- cadence:end -->

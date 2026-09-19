@@ -4,6 +4,7 @@ import type {
   AircraftPosition,
   AlertEvent,
   BoardRow,
+  Exact,
   FlightStatus,
   ProviderCallRecord,
   ProviderCallTrigger,
@@ -17,12 +18,17 @@ export type { AlertEvent } from './flight-status';
 /**
  * Provider interfaces (plan section 7). Adapters live in `apps/api/src/providers`; this module
  * only fixes the shapes so the FlightTracker, the DesignatorResolver and the tests agree on
- * them. Two rules are encoded in the types rather than in prose:
+ * them. Three rules are encoded in the types rather than in prose:
  *
  * 1. Every call returns `ProviderResult<T>`, which carries the `ProviderCallRecord` for that
  *    call. A call whose cost is not recorded does not type-check.
  * 2. `ProviderCallContext.now` is the only clock an adapter may read. Nothing in this package
  *    reads the wall clock except the `uuidv7` default clock in `ids.ts`, so tests can drive time.
+ * 3. Adapters hand-map provider JSON into the shared shapes, so they return `Exact<...>` types:
+ *    a misspelled field is a compile error rather than a gate that never renders.
+ *
+ * Optional properties are declared `T | undefined` so a caller holding an optional value can
+ * pass it straight through under `exactOptionalPropertyTypes`.
  */
 
 export interface FlightLookup {
@@ -31,11 +37,11 @@ export interface FlightLookup {
   flightNumber: string;
   /** `YYYY-MM-DD` at the origin. */
   dateLocal: string;
-  originIcao?: string;
+  originIcao?: string | undefined;
   /** Provider-side id after the first fetch (AeroAPI `fa_flight_id`). */
-  providerRef?: { provider: ProviderId; id: string };
+  providerRef?: { provider: ProviderId; id: string } | undefined;
   /** Bracketed first fetch: `scheduled_out` plus or minus one day, ISO instants. */
-  window?: { start: string; end: string };
+  window?: { start: string; end: string } | undefined;
 }
 
 export interface ProviderCapabilities {
@@ -71,7 +77,7 @@ export interface BudgetRequest {
   operation: string;
   pollEquivalents: number;
   trigger: ProviderCallTrigger;
-  flightKey?: FlightKey;
+  flightKey?: FlightKey | undefined;
 }
 
 /**
@@ -95,8 +101,8 @@ export interface CostLogger {
 
 export interface ProviderCallContext {
   trigger: ProviderCallTrigger;
-  flightKey?: FlightKey;
-  airportIcao?: string;
+  flightKey?: FlightKey | undefined;
+  airportIcao?: string | undefined;
   requestId: string;
   budget: BudgetGuard;
   log: CostLogger;
@@ -121,13 +127,13 @@ export interface FlightDataProvider {
   getFlight(
     lookup: FlightLookup,
     ctx: ProviderCallContext,
-  ): Promise<ProviderResult<FlightStatus[]>>;
+  ): Promise<ProviderResult<Exact<FlightStatus>[]>>;
   getBoard?(
     airportIcao: string,
     direction: 'dep' | 'arr',
     window: { from: string; to: string },
     ctx: ProviderCallContext,
-  ): Promise<ProviderResult<BoardRow[]>>;
+  ): Promise<ProviderResult<Exact<BoardRow>[]>>;
   registerAlert?(
     key: FlightKey,
     options: AlertRegistrationOptions,
@@ -135,12 +141,12 @@ export interface FlightDataProvider {
   ): Promise<ProviderResult<{ alertId: string }>>;
   deleteAlert?(alertId: string, ctx: ProviderCallContext): Promise<ProviderResult<void>>;
   /** Verifies and normalises a webhook; enqueue only, never fetch. */
-  parseWebhook?(raw: Request): Promise<ProviderEvent[]>;
+  parseWebhook?(raw: Request): Promise<Exact<ProviderEvent>[]>;
 }
 
 export interface AircraftPositionQuery {
-  icaoHexes?: readonly string[];
-  callsigns?: readonly string[];
+  icaoHexes?: readonly string[] | undefined;
+  callsigns?: readonly string[] | undefined;
 }
 
 export interface AircraftPositionProvider {
@@ -150,5 +156,5 @@ export interface AircraftPositionProvider {
   getPositions(
     query: AircraftPositionQuery,
     ctx: ProviderCallContext,
-  ): Promise<ProviderResult<AircraftPosition[]>>;
+  ): Promise<ProviderResult<Exact<AircraftPosition>[]>>;
 }

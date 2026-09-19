@@ -81,7 +81,7 @@ export interface NormalizedFlightNumber {
   /** Digits without leading zeros, 1 to 4 of them. */
   number: string;
   /** Optional single upper-case letter, e.g. the `A` in `AA100A`. */
-  suffix?: string;
+  suffix?: string | undefined;
 }
 
 /**
@@ -113,7 +113,7 @@ export function flightNumberToken(value: NormalizedFlightNumber): string {
 export interface ParsedDesignator {
   carrier: CarrierRef;
   number: string;
-  suffix?: string;
+  suffix?: string | undefined;
 }
 
 const DESIGNATOR_RE = /^([A-Z]{3}|(?=[0-9]*[A-Z])[A-Z0-9]{2})[\s-]*([0-9]+)([A-Z])?$/;
@@ -142,7 +142,7 @@ export interface FlightKeyParts {
   flightNumber: string;
   scheduledDepartureDateLocal: string;
   originIcao: string;
-  legSeq?: number;
+  legSeq?: number | undefined;
 }
 
 export interface ParsedFlightKey extends FlightKeyParts {
@@ -226,11 +226,23 @@ function dateFormatterFor(tz: string): Intl.DateTimeFormat {
   return formatter;
 }
 
+/** An ISO-8601 date-time with an explicit zone designator (`Z` or an offset). */
+const INSTANT_STRING_RE =
+  /^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}(?::[0-9]{2}(?:\.[0-9]+)?)?(?:Z|[+-][0-9]{2}:?[0-9]{2})$/;
+
 /**
  * Calendar date of `instant` in the IANA zone `tz`, as `YYYY-MM-DD`. This is the only way a
- * local date is ever derived in the system; there is no UTC fallback.
+ * local date is ever derived in the system; there is no UTC fallback. A string must carry a
+ * time and a zone designator: `new Date` reads a bare `YYYY-MM-DD` as UTC midnight and a naive
+ * date-time in the host zone, either of which lands on the wrong day west of Greenwich.
  */
 export function originLocalDate(instant: Date | string, tz: string): string {
+  if (typeof instant === 'string' && !INSTANT_STRING_RE.test(instant)) {
+    throw new FlightKeyError(
+      'invalid_instant',
+      `"${instant}" is not an instant with an explicit zone (a bare date or a naive time is refused)`,
+    );
+  }
   const date = instant instanceof Date ? instant : new Date(instant);
   if (Number.isNaN(date.getTime())) {
     throw new FlightKeyError('invalid_instant', `"${String(instant)}" is not an instant`);

@@ -7,13 +7,45 @@ import { FlightKeySchema } from './flight-key';
  * Boundary schemas for everything a provider adapter, a Durable Object or the sync feed hands
  * across a boundary. Every object schema is `z.looseObject` on purpose: Durable Objects roll
  * out gradually, so a Worker one version ahead of a FlightTracker (or behind it) must be able
- * to parse a payload that carries fields it does not know yet. Unknown keys are kept, never
- * rejected. Adding a field is therefore always backwards compatible; renaming or retyping one
- * needs a new versioned schema (see `rpc.ts`).
+ * to parse a payload that carries fields it does not know yet. Unknown fields are kept, never
+ * rejected, at every level including the `providerRefs` and `fieldQuality` maps, so adding a
+ * field is always backwards compatible; renaming or retyping one needs a new versioned schema
+ * (see `rpc.ts`).
+ *
+ * Enumerations are the exception, because a value has to mean something to the consumer:
+ * - `status`, a provider event's `kind` and the tracker phase carry an `unknown` member and
+ *   parse a value this build does not know as `unknown` (`.catch`), so a newer producer degrades
+ *   an older consumer instead of failing it. The input type stays the closed union, so a
+ *   producer is still checked at compile time.
+ * - Every other vocabulary (`ProviderId`, `ProviderCallTrigger`, `ProviderCallResult`,
+ *   `AlertEvent`, `FieldQuality`, `SyncEntity`) is closed and append-only: a producer may emit
+ *   a new value only one release after every consumer accepts it.
+ *
+ * `z.infer` of a `looseObject` carries a string index signature, which switches off
+ * TypeScript's excess-property check, so a producer that misspells a field would compile.
+ * Producers (adapters, the tracker) declare what they build as `Exact<FlightStatus>` and so on
+ * to get the check back; consumers keep the loose inferred types.
  *
  * All instants are ISO-8601 UTC strings with a trailing `Z`; the only local date in the system
  * is the origin-local scheduled departure date inside the flight key.
  */
+
+/**
+ * `T` with the string index signature that `looseObject` infers removed, recursively, so an
+ * object literal typed `Exact<FlightStatus>` fails to compile on a misspelled field. `T` and
+ * `Exact<T>` are assignable to each other; only the compile-time check differs.
+ */
+export type Exact<T> = T extends string | number | boolean | bigint | symbol | null | undefined
+  ? T
+  : T extends Date | ((...args: never[]) => unknown)
+    ? T
+    : T extends readonly (infer U)[]
+      ? T extends U[]
+        ? Exact<U>[]
+        : readonly Exact<U>[]
+      : T extends object
+        ? { [K in keyof T as string extends K ? never : number extends K ? never : K]: Exact<T[K]> }
+        : T;
 
 export const PROVIDER_IDS = [
   'aeroapi',
@@ -42,7 +74,8 @@ export const FLIGHT_STATUS_VALUES = [
   'diverted',
   'unknown',
 ] as const;
-export const FlightStatusValueSchema = z.enum(FLIGHT_STATUS_VALUES);
+/** A status this build does not know parses as `unknown` (see the module comment). */
+export const FlightStatusValueSchema = z.enum(FLIGHT_STATUS_VALUES).catch('unknown');
 export type FlightStatusValue = z.infer<typeof FlightStatusValueSchema>;
 
 /** AeroAPI alert event codes. `filed` through `in` are the OOOI and ETA family. */
@@ -124,6 +157,10 @@ export type FlightTimes = z.infer<typeof FlightTimesSchema>;
 export const FIELD_QUALITY_VALUES = ['live', 'schedule', 'estimated'] as const;
 export const FieldQualitySchema = z.enum(FIELD_QUALITY_VALUES);
 export type FieldQuality = z.infer<typeof FieldQualitySchema>;
+/**
+ * The fields a producer on this build marks with a quality. The `fieldQuality` map itself is
+ * keyed by any string, so a marker for a field a newer producer added still parses.
+ */
 export const FieldQualityKeySchema = z.enum([...TIME_FIELDS, 'gate', 'baggage']);
 export type FieldQualityKey = z.infer<typeof FieldQualityKeySchema>;
 
@@ -174,10 +211,12 @@ export const FlightStatusSchema = z.looseObject({
   routeDistanceKm: z.number().nonnegative().optional(),
   progressPercent: z.number().min(0).max(100).optional(),
   inboundRef: ProviderRefSchema.optional(),
-  providerRefs: z.partialRecord(ProviderIdSchema, z.string()).default({}),
+  /** Provider-side ids keyed by `ProviderId`; open-keyed so an entry from a newer build parses. */
+  providerRefs: z.record(z.string(), z.string()).default({}),
   fetchedAt: IsoInstantSchema,
   source: ProviderIdSchema,
-  fieldQuality: z.partialRecord(FieldQualityKeySchema, FieldQualitySchema).default({}),
+  /** Quality per field, keyed by `FieldQualityKey`; open-keyed for the same reason. */
+  fieldQuality: z.record(z.string(), FieldQualitySchema).default({}),
 });
 export type FlightStatus = z.infer<typeof FlightStatusSchema>;
 export type FlightStatusInput = z.input<typeof FlightStatusSchema>;
@@ -219,17 +258,33 @@ export const AircraftPositionSchema = z.looseObject({
 });
 export type AircraftPosition = z.infer<typeof AircraftPositionSchema>;
 
-export const ProviderEventKindSchema = z.enum([...ALERT_EVENTS, 'update', 'unknown']);
+export const PROVIDER_EVENT_KINDS = [...ALERT_EVENTS, 'update', 'unknown'] as const;
+/** A kind this build does not know parses as `unknown` (see the module comment). */
+export const ProviderEventKindSchema = z.enum(PROVIDER_EVENT_KINDS).catch('unknown');
 export type ProviderEventKind = z.infer<typeof ProviderEventKindSchema>;
 
-/** How a webhook payload names the flight it is about; at least one of these is set. */
-export const FlightRefSchema = z.looseObject({
-  flightKey: FlightKeySchema.optional(),
-  providerRef: ProviderRefSchema.optional(),
-  /** Marketing designator plus origin-local date, e.g. `AA100` on `2026-09-19`. */
-  designator: z.string().optional(),
-  dateLocal: IsoDateSchema.optional(),
-});
+/**
+ * How a webhook payload names the flight it is about: a key, a provider ref, or a marketing
+ * designator plus its origin-local date. An event that names no flight cannot be routed, so
+ * the webhook route rejects it here instead of the queue consumer failing on it later.
+ */
+export const FlightRefSchema = z
+  .looseObject({
+    flightKey: FlightKeySchema.optional(),
+    providerRef: ProviderRefSchema.optional(),
+    /** Marketing designator plus origin-local date, e.g. `AA100` on `2026-09-19`. */
+    designator: z.string().optional(),
+    dateLocal: IsoDateSchema.optional(),
+  })
+  .refine(
+    (ref) =>
+      ref.flightKey !== undefined ||
+      ref.providerRef !== undefined ||
+      (ref.designator !== undefined && ref.dateLocal !== undefined),
+    {
+      message: 'a flight reference needs a key, a provider ref, or a designator plus a local date',
+    },
+  );
 export type FlightRef = z.infer<typeof FlightRefSchema>;
 
 export const ProviderEventSchema = z.looseObject({

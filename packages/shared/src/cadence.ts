@@ -12,13 +12,16 @@ import type { AlertEvent, FlightStatusValue } from './flight-status';
  *   pre-48 h windows are end-anchored (they count back from T-48 h so the daily grid lands on
  *   T-3 d, T-4 d, ...) and yield `floor(duration / interval)` slots, so no slot can precede
  *   the window start. The boundary instant between two windows belongs to the later window.
- * - Fixed-slot windows (cadence B) list explicit offsets.
- * - `finalPoll` adds one poll at the window's end; only the last window may use it.
+ * - Fixed-slot windows (the A1 post-arrival tail, every cadence B window) list explicit offsets
+ *   from the window's edges or from scheduled departure. A fixed-slot in-flight window names a
+ *   `lateIntervalMinutes` for a flight that passes its planned arrival without `in`
+ *   (see `resolveWindows`).
  *
  * `refreshIntervalFor` is the function the FlightTracker alarm calls; `expectedCalls`
  * simulates a flight by calling that same function in a loop, so the per-window counts in
  * `docs/architecture.md` and the constants the lifecycle test imports fall out of the
- * definitions instead of being typed by hand. Nothing here reads the wall clock.
+ * definitions instead of being typed by hand. `sloRelaxations` measures the same resolved
+ * windows against the SLO table. Nothing here reads the wall clock.
  */
 
 export const MINUTE_MS = 60_000;
@@ -56,7 +59,6 @@ interface CadenceWindowBase {
 export interface IntervalWindow extends CadenceWindowBase {
   intervalMinutes: number;
   anchor?: 'start' | 'end';
-  finalPoll?: boolean;
 }
 
 export interface FixedSlot {
@@ -66,6 +68,12 @@ export interface FixedSlot {
 
 export interface FixedSlotWindow extends CadenceWindowBase {
   slots: readonly FixedSlot[];
+  /**
+   * Required on an in-flight window (`to: 'arrival'`): once the planned arrival has passed
+   * without `in`, poll every this many minutes from the planned arrival until `in` is seen or
+   * the lifetime ends. Interval windows simply continue their grid instead.
+   */
+  lateIntervalMinutes?: number;
 }
 
 export type CadenceWindow = IntervalWindow | FixedSlotWindow;
@@ -157,14 +165,20 @@ export function strictestPollSlo(window: SloWindow): number | null {
   return strictest;
 }
 
-/** Which SLO windows a cadence tier overlaps, for the relaxation report in the docs. */
-export const TIER_SLO_WINDOWS: Readonly<Record<CadenceTier, readonly SloWindow[]>> = {
-  pre48h_far: ['beyond_7d'],
-  pre48h_near: ['7d_to_48h'],
-  hourly: ['48h_to_6h'],
-  pre_boarding: ['6h_to_3h', '3h_to_arrival'],
-  in_flight: ['3h_to_arrival'],
-  post_arrival: ['post_arrival'],
+/**
+ * The span of each SLO window as cadence edges. `sloRelaxations` intersects these with the
+ * resolved cadence windows, so a cadence window that spans two SLO windows (the literal brief's
+ * hourly window runs to T-3 h) is held to the stricter target rather than to its tier's name.
+ */
+export const SLO_WINDOW_BOUNDS: Readonly<
+  Record<SloWindow, { from: CadenceEdge; to: CadenceEdge }>
+> = {
+  beyond_7d: { from: Number.POSITIVE_INFINITY, to: days(7) },
+  '7d_to_48h': { from: days(7), to: hours(48) },
+  '48h_to_6h': { from: hours(48), to: hours(6) },
+  '6h_to_3h': { from: hours(6), to: hours(3) },
+  '3h_to_arrival': { from: hours(3), to: 'arrival' },
+  post_arrival: { from: 'arrival', to: 'stop' },
 };
 
 // ---------------------------------------------------------------------------------------------
@@ -267,7 +281,11 @@ export const CADENCE_LITERAL: CadenceDefinition = {
   aerodataboxAlerts: null,
 };
 
-/** Polls only, no alerts: the automatic fallback when alerts go silent. */
+/**
+ * Polls only, no alerts: the automatic fallback when alerts go silent. The tail is fixed slots
+ * at in+15, in+30, in+45, in+60 and a final poll at in+120 (ruling R2), so the 15-minute
+ * post-arrival SLO holds for the first hour and only the in+60 to in+120 leg is relaxed.
+ */
 export const CADENCE_A1: CadenceDefinition = {
   id: 'A1',
   label: 'A1 polls only',
@@ -301,8 +319,13 @@ export const CADENCE_A1: CadenceDefinition = {
       tier: 'post_arrival',
       from: 'arrival',
       to: 'stop',
-      intervalMinutes: 30,
-      finalPoll: true,
+      slots: [
+        { edge: 'from', offsetMinutes: 15 },
+        { edge: 'from', offsetMinutes: 30 },
+        { edge: 'from', offsetMinutes: 45 },
+        { edge: 'from', offsetMinutes: 60 },
+        { edge: 'to', offsetMinutes: 0 },
+      ],
       source: 'aeroapi',
       alerts: false,
     },
@@ -358,6 +381,9 @@ export const CADENCE_A2: CadenceDefinition = {
  * Phase 1 target, UNVERIFIED: AeroDataBox webhooks carry gates and times, AeroAPI alerts carry
  * OOOI. Five fixed polls: bracketed fetch at T-48 h, T-3 h, scheduled out + 15 (the plan says
  * scheduled off + 15; there is no taxi model, so out stands in for off), arrival + 15, final.
+ * A flight that passes its planned arrival without `in` is polled every 15 minutes (the
+ * post-arrival OOOI poll SLO) until `in` or the lifetime, since the alerts that should carry
+ * `in` are unverified.
  */
 export const CADENCE_B: CadenceDefinition = {
   id: 'B',
@@ -385,6 +411,7 @@ export const CADENCE_B: CadenceDefinition = {
       from: 'boarding',
       to: 'arrival',
       slots: [{ edge: 'scheduledOut', offsetMinutes: 15 }],
+      lateIntervalMinutes: 15,
       source: 'aeroapi',
       alerts: true,
     },
@@ -464,6 +491,8 @@ export interface ResolvedWindow {
   window: CadenceWindow;
   start: number;
   end: number;
+  /** True for the in-flight window of a flight past its planned arrival without `in`. */
+  extended: boolean;
 }
 
 function resolveEdge(edge: CadenceEdge, bounds: Bounds): number {
@@ -497,7 +526,9 @@ function boundsOf(ctx: CadenceContext, params: CadenceParams): Bounds {
  * The windows of a cadence resolved to absolute milliseconds for one tracker context. A
  * cancelled or finished flight has none. While arrival has not been observed and the planned
  * arrival has passed, the in-flight window is extended without end and the tail is dropped,
- * so a late flight keeps its in-flight cadence until `in` is seen or the lifetime ends.
+ * so a late flight keeps polling until `in` is seen or the lifetime ends: an interval window
+ * continues its grid, a fixed-slot window polls every `lateIntervalMinutes` from the planned
+ * arrival (ruling R6).
  */
 export function resolveWindows(
   cadence: CadenceDefinition,
@@ -514,16 +545,15 @@ export function resolveWindows(
   const extendInFlight = !arrivalObserved && now >= bounds.arrival;
   for (const window of cadence.windows) {
     const start = resolveEdge(window.from, bounds);
-    let end = resolveEdge(window.to, bounds);
+    const end = resolveEdge(window.to, bounds);
     if (extendInFlight && window.to === 'arrival') {
-      end = Number.POSITIVE_INFINITY;
-      windows.push({ window, start, end });
+      windows.push({ window, start, end: Number.POSITIVE_INFINITY, extended: true });
       break;
     }
     if (end <= start) {
       continue;
     }
-    windows.push({ window, start, end });
+    windows.push({ window, start, end, extended: false });
   }
   return { windows, bounds };
 }
@@ -544,17 +574,32 @@ function resolveFixedSlot(slot: FixedSlot, resolved: ResolvedWindow, bounds: Bou
   return base + slot.offsetMinutes * MINUTE_MS;
 }
 
+/** The finite slots of a fixed-slot window that fall inside it, in definition order. */
+function fixedSlotsOf(resolved: ResolvedWindow, bounds: Bounds): number[] {
+  const { window, start, end } = resolved;
+  if (isIntervalWindow(window)) {
+    return [];
+  }
+  return window.slots
+    .map((slot) => resolveFixedSlot(slot, resolved, bounds))
+    .filter((at) => Number.isFinite(at) && at >= start && at <= end);
+}
+
 function nextSlotInWindow(resolved: ResolvedWindow, bounds: Bounds, now: number): number | null {
   const { window, start, end } = resolved;
   if (!isIntervalWindow(window)) {
-    let best: number | null = null;
-    for (const slot of window.slots) {
-      const at = resolveFixedSlot(slot, resolved, bounds);
-      if (at > now && at >= start && at <= end && (best === null || at < best)) {
-        best = at;
+    const candidates = fixedSlotsOf(resolved, bounds).filter((at) => at > now);
+    if (resolved.extended) {
+      if (window.lateIntervalMinutes === undefined) {
+        throw new CadenceError(
+          `window ${window.tier} is extended past the planned arrival but has no lateIntervalMinutes`,
+        );
       }
+      const interval = window.lateIntervalMinutes * MINUTE_MS;
+      const k = Math.floor((now - bounds.arrival) / interval) + 1;
+      candidates.push(bounds.arrival + k * interval);
     }
-    return best;
+    return candidates.length === 0 ? null : Math.min(...candidates);
   }
   const interval = window.intervalMinutes * MINUTE_MS;
   const count = slotCount(window, start, end);
@@ -578,13 +623,7 @@ function nextSlotInWindow(resolved: ResolvedWindow, bounds: Bounds, now: number)
     throw new CadenceError(`window ${window.tier} is start-anchored but has no finite start`);
   }
   const k = now < start ? 0 : Math.floor((now - start) / interval) + 1;
-  if (k < count) {
-    return start + k * interval;
-  }
-  if (window.finalPoll === true && Number.isFinite(end) && end > now) {
-    return end;
-  }
-  return null;
+  return k < count ? start + k * interval : null;
 }
 
 export interface NextSlot {
@@ -689,12 +728,16 @@ export function refreshIntervalFor(
 // Simulation: the same function, driven through an on-time flight.
 // ---------------------------------------------------------------------------------------------
 
-export interface ExpectedCallsParams {
+/** The on-time flight every simulation walks; defaults are the plan's assumptions. */
+export interface SimulationParams {
+  blockMinutes?: number | undefined;
+  boardingMinutesBefore?: number | undefined;
+  postArrivalStopMinutes?: number | undefined;
+}
+
+export interface ExpectedCallsParams extends SimulationParams {
   /** Days before scheduled departure at which the tracker is created. */
   leadTimeDays: number;
-  blockMinutes?: number;
-  boardingMinutesBefore?: number;
-  postArrivalStopMinutes?: number;
 }
 
 export interface WindowCallCount {
@@ -721,7 +764,31 @@ export interface ExpectedCalls {
 }
 
 const SIMULATION_SCHEDULED_OUT_MS = Date.UTC(2026, 8, 19, 12, 0, 0);
+const SIMULATION_BLOCK_MINUTES = 180;
 const MAX_SIMULATED_POLLS = 100_000;
+
+interface Simulation {
+  scheduledOut: Date;
+  scheduledIn: Date;
+  boardingMs: number;
+  cadenceParams: CadenceParams;
+}
+
+function simulationOf(params: SimulationParams): Simulation {
+  const blockMinutes = params.blockMinutes ?? SIMULATION_BLOCK_MINUTES;
+  const cadenceParams: CadenceParams = {
+    boardingMinutesBefore:
+      params.boardingMinutesBefore ?? DEFAULT_CADENCE_PARAMS.boardingMinutesBefore,
+    postArrivalStopMinutes:
+      params.postArrivalStopMinutes ?? DEFAULT_CADENCE_PARAMS.postArrivalStopMinutes,
+  };
+  return {
+    scheduledOut: new Date(SIMULATION_SCHEDULED_OUT_MS),
+    scheduledIn: new Date(SIMULATION_SCHEDULED_OUT_MS + blockMinutes * MINUTE_MS),
+    boardingMs: SIMULATION_SCHEDULED_OUT_MS - cadenceParams.boardingMinutesBefore * MINUTE_MS,
+    cadenceParams,
+  };
+}
 
 function onTimeContext(
   t: number,
@@ -751,16 +818,7 @@ export function expectedCalls(
   cadence: CadenceDefinition,
   params: ExpectedCallsParams,
 ): ExpectedCalls {
-  const blockMinutes = params.blockMinutes ?? 180;
-  const cadenceParams: CadenceParams = {
-    boardingMinutesBefore:
-      params.boardingMinutesBefore ?? DEFAULT_CADENCE_PARAMS.boardingMinutesBefore,
-    postArrivalStopMinutes:
-      params.postArrivalStopMinutes ?? DEFAULT_CADENCE_PARAMS.postArrivalStopMinutes,
-  };
-  const scheduledOut = new Date(SIMULATION_SCHEDULED_OUT_MS);
-  const scheduledIn = new Date(SIMULATION_SCHEDULED_OUT_MS + blockMinutes * MINUTE_MS);
-  const boardingMs = SIMULATION_SCHEDULED_OUT_MS - cadenceParams.boardingMinutesBefore * MINUTE_MS;
+  const { scheduledOut, scheduledIn, boardingMs, cadenceParams } = simulationOf(params);
 
   const counts = new Map<CadenceWindow, number>();
   const bump = (window: CadenceWindow): void => {
@@ -837,6 +895,106 @@ export function expectedCalls(
     listCostUsdMicros,
     byWindow,
   };
+}
+
+// ---------------------------------------------------------------------------------------------
+// SLO relaxation report: the resolved windows of the simulated flight against the SLO table.
+// ---------------------------------------------------------------------------------------------
+
+export interface RelaxedLeg {
+  /** Minutes after scheduled departure; negative before it. */
+  fromMinutes: number;
+  toMinutes: number;
+}
+
+export interface SloRelaxation {
+  cadence: CadenceId;
+  tier: CadenceTier;
+  alerts: boolean;
+  /** The SLO windows the cadence window overlaps on the simulated flight. */
+  sloWindows: SloWindow[];
+  strictestSloMinutes: number;
+  /** The nominal interval of an interval window; `null` for fixed slots. */
+  intervalMinutes: number | null;
+  /**
+   * The longest stretch without a poll: the interval, or for fixed slots the widest gap between
+   * the window start, its slots and its end.
+   */
+  maxGapMinutes: number;
+  /** The fixed-slot legs longer than the SLO; empty for an interval window. */
+  relaxedLegs: RelaxedLeg[];
+}
+
+/**
+ * Where a cadence polls slower than the SLO table. Each resolved window is held to the
+ * strictest poll target of every SLO window it overlaps (`SLO_WINDOW_BOUNDS`), computed from
+ * the bounds rather than from the tier's name. Rendered into `docs/architecture.md`.
+ */
+export function sloRelaxations(
+  cadence: CadenceDefinition,
+  params: SimulationParams = {},
+): SloRelaxation[] {
+  const { scheduledOut, scheduledIn, boardingMs, cadenceParams } = simulationOf(params);
+  const creation = onTimeContext(
+    SIMULATION_SCHEDULED_OUT_MS - 30 * DAY_MS,
+    scheduledOut,
+    scheduledIn,
+    boardingMs,
+  );
+  const { windows, bounds } = resolveWindows(cadence, creation, cadenceParams);
+  const minutesAfterOut = (ms: number): number => (ms - bounds.scheduledOut) / MINUTE_MS;
+  const rows: SloRelaxation[] = [];
+  for (const resolved of windows) {
+    const { window, start, end } = resolved;
+    const sloWindows = SLO_WINDOWS.filter((slo) => {
+      const sloStart = resolveEdge(SLO_WINDOW_BOUNDS[slo].from, bounds);
+      const sloEnd = resolveEdge(SLO_WINDOW_BOUNDS[slo].to, bounds);
+      return Math.min(end, sloEnd) > Math.max(start, sloStart);
+    });
+    const targets = sloWindows
+      .map((slo) => strictestPollSlo(slo))
+      .filter((target): target is number => target !== null);
+    if (targets.length === 0) {
+      continue;
+    }
+    const strictestSloMinutes = Math.min(...targets);
+    let intervalMinutes: number | null = null;
+    let maxGapMinutes = 0;
+    const relaxedLegs: RelaxedLeg[] = [];
+    if (isIntervalWindow(window)) {
+      intervalMinutes = window.intervalMinutes;
+      maxGapMinutes = window.intervalMinutes;
+    } else {
+      const points = [...new Set([start, ...fixedSlotsOf(resolved, bounds), end])].sort(
+        (a, b) => a - b,
+      );
+      for (let i = 1; i < points.length; i += 1) {
+        const from = points[i - 1];
+        const to = points[i];
+        if (from === undefined || to === undefined) {
+          continue;
+        }
+        const gap = (to - from) / MINUTE_MS;
+        maxGapMinutes = Math.max(maxGapMinutes, gap);
+        if (gap > strictestSloMinutes) {
+          relaxedLegs.push({ fromMinutes: minutesAfterOut(from), toMinutes: minutesAfterOut(to) });
+        }
+      }
+    }
+    if (maxGapMinutes > strictestSloMinutes) {
+      rows.push({
+        cadence: cadence.id,
+        tier: window.tier,
+        alerts: window.alerts,
+        sloWindows,
+        strictestSloMinutes,
+        intervalMinutes,
+        maxGapMinutes,
+        relaxedLegs,
+      });
+    }
+  }
+  return rows;
 }
 
 // ---------------------------------------------------------------------------------------------

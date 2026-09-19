@@ -233,6 +233,19 @@ describe('originLocalDate', () => {
     expect(originLocalDate('2026-11-02T05:30:00Z', 'America/New_York')).toBe('2026-11-02');
   });
 
+  it('refuses a bare date or a naive time, which new Date would read in the wrong zone', () => {
+    // '2026-09-19' parses as UTC midnight, which is 2026-09-18 in New York.
+    expect(errorCode(() => originLocalDate('2026-09-19', 'America/New_York'))).toBe(
+      'invalid_instant',
+    );
+    expect(errorCode(() => originLocalDate('2026-09-19T23:50:00', 'America/New_York'))).toBe(
+      'invalid_instant',
+    );
+    expect(originLocalDate('2026-09-19T23:50:00-04:00', 'America/New_York')).toBe('2026-09-19');
+    expect(originLocalDate('2026-09-20T03:50:00.000Z', 'America/New_York')).toBe('2026-09-19');
+    expect(originLocalDate('2026-09-20T03:50Z', 'America/New_York')).toBe('2026-09-19');
+  });
+
   it('throws typed errors for a bad instant or an unknown zone', () => {
     expect(errorCode(() => originLocalDate('not-a-date', 'UTC'))).toBe('invalid_instant');
     expect(errorCode(() => originLocalDate(new Date(Number.NaN), 'UTC'))).toBe('invalid_instant');

@@ -21,10 +21,32 @@ describe('rpc schemas', () => {
     expect(RPC_SCHEMA_VERSION).toBe(1);
   });
 
-  it('tracker phases are the flight statuses plus finished', () => {
+  it('tracker phases are the flight statuses plus finished; an unknown phase degrades to unknown', () => {
     expect(TRACKER_PHASES).toEqual([...FLIGHT_STATUS_VALUES, 'finished']);
-    expect(TrackerPhaseSchema.safeParse('finished').success).toBe(true);
-    expect(TrackerPhaseSchema.safeParse('done').success).toBe(false);
+    expect(TrackerPhaseSchema.parse('finished')).toBe('finished');
+    expect(TrackerPhaseSchema.parse('merged')).toBe('unknown');
+  });
+
+  it('every request and response carries rpcVersion, defaulting to RPC_SCHEMA_VERSION', () => {
+    expect(
+      SubscribeRequestV1.parse({ subscriptionId: SUBSCRIPTION_ID, userId: 'u' }).rpcVersion,
+    ).toBe(RPC_SCHEMA_VERSION);
+    expect(UnsubscribeRequestV1.parse({ subscriptionId: SUBSCRIPTION_ID }).rpcVersion).toBe(1);
+    expect(SubscribeResponseV1.parse({ status: 'already', flightKey: KEY }).rpcVersion).toBe(1);
+    expect(ForceRefreshRequestV1.parse({ reason: 'manual', rpcVersion: 2 }).rpcVersion).toBe(2);
+    expect(ForceRefreshRequestV1.safeParse({ reason: 'manual', rpcVersion: 0 }).success).toBe(
+      false,
+    );
+    expect(
+      GetStateResponseV1.parse({
+        flightKey: KEY,
+        phase: 'finished',
+        snapshot: null,
+        nextRefreshAt: null,
+        doSchemaVersion: 3,
+        subscriberCount: 0,
+      }).rpcVersion,
+    ).toBe(1);
   });
 
   it('SubscribeRequestV1 needs a UUID subscription id and a user id', () => {
@@ -80,6 +102,8 @@ describe('rpc schemas', () => {
       subscriberCount: 2,
     });
     expect(full.snapshot?.legSeq).toBe(1);
+    // A tracker one release ahead may report a phase this build has no name for.
+    expect(GetStateResponseV1.parse({ ...empty, phase: 'merged' }).phase).toBe('unknown');
     expect(
       GetStateResponseV1.safeParse({
         flightKey: KEY,

@@ -67,8 +67,24 @@ export const LIST_PRICE_USD_MICROS = {
   mock: { flight_status: 0, fids: 0, alert_delivery: 0, alert_manage: 0, positions: 0 },
 } as const satisfies Record<ProviderId, Readonly<Record<string, number>>>;
 
-export type ProviderOperation<P extends ProviderId = ProviderId> =
-  keyof (typeof LIST_PRICE_USD_MICROS)[P] & string;
+/**
+ * The priced operations of provider `P`. Distributes over a union, so
+ * `ProviderOperation<'aeroapi' | 'adsb_lol'>` is both providers' operations and
+ * `ProviderOperation<ProviderId>` is every operation there is.
+ */
+export type ProviderOperation<P extends ProviderId> = P extends ProviderId
+  ? keyof (typeof LIST_PRICE_USD_MICROS)[P] & string
+  : never;
+export type AnyProviderOperation = ProviderOperation<ProviderId>;
+
+/**
+ * The `operation` argument of the cost helpers. When the provider is known at compile time the
+ * operation must be one of its priced operations; when it is a run-time `ProviderId` (a value
+ * off the wire) any string is accepted and the table check throws `UnknownOperationError`.
+ */
+export type OperationOf<P extends ProviderId> = ProviderId extends P
+  ? string
+  : ProviderOperation<P>;
 
 export class UnknownOperationError extends Error {
   override readonly name = 'UnknownOperationError';
@@ -78,27 +94,31 @@ export class UnknownOperationError extends Error {
   }
 }
 
-function priceTable(provider: ProviderId): Readonly<Record<string, number>> {
-  return LIST_PRICE_USD_MICROS[provider];
-}
-
-/** List price of one call in USD micros. Throws for an operation that is not in the table. */
-export function listPriceUsdMicros(provider: ProviderId, operation: string): number {
-  const table = priceTable(provider);
+function priceOf(provider: ProviderId, operation: string): number {
+  const table: Readonly<Record<string, number>> = LIST_PRICE_USD_MICROS[provider];
   if (!Object.prototype.hasOwnProperty.call(table, operation)) {
     throw new UnknownOperationError(provider, operation);
   }
   return table[operation] ?? 0;
 }
 
+/** List price of one call in USD micros. Throws for an operation that is not in the table. */
+export function listPriceUsdMicros<P extends ProviderId>(
+  provider: P,
+  operation: OperationOf<P>,
+): number {
+  return priceOf(provider, operation);
+}
+
 /** Provider-native units one call consumes: AeroAPI result sets, AeroDataBox units, else 0. */
-export function costUnits(provider: ProviderId, operation: string): number {
-  listPriceUsdMicros(provider, operation);
+export function costUnits<P extends ProviderId>(provider: P, operation: OperationOf<P>): number {
+  const op: string = operation;
+  priceOf(provider, op);
   if (provider === 'aeroapi') {
-    return operation === 'alert_manage' ? 0 : 1;
+    return op === 'alert_manage' ? 0 : 1;
   }
   if (provider === 'aerodatabox') {
-    return ADB_UNITS[operation as AeroDataBoxOperation];
+    return ADB_UNITS[op as AeroDataBoxOperation];
   }
   return 0;
 }
@@ -109,23 +129,25 @@ export function costUnits(provider: ProviderId, operation: string): number {
  * schedules 4, position 2, ADB status 0.1, ADB alert item 0.05, ADS-B 0) falls out of the
  * price table instead of being typed a second time.
  */
-export function pollEquivalents(provider: ProviderId, operation: string): number {
-  return listPriceUsdMicros(provider, operation) / AEROAPI_STATUS_PRICE_USD_MICROS;
+export function pollEquivalents<P extends ProviderId>(
+  provider: P,
+  operation: OperationOf<P>,
+): number {
+  return priceOf(provider, operation) / AEROAPI_STATUS_PRICE_USD_MICROS;
 }
 
 /** Estimated cost of a call in USD micros given the units it actually consumed. */
-export function estimateCostUsdMicros(
-  provider: ProviderId,
-  operation: string,
+export function estimateCostUsdMicros<P extends ProviderId>(
+  provider: P,
+  operation: OperationOf<P>,
   units: number = costUnits(provider, operation),
 ): number {
+  const price = priceOf(provider, operation);
   if (provider === 'aeroapi') {
-    return listPriceUsdMicros(provider, operation) * units;
+    return price * units;
   }
   if (provider === 'aerodatabox') {
-    listPriceUsdMicros(provider, operation);
     return units * ADB_UNIT_PRICE_USD_MICROS;
   }
-  listPriceUsdMicros(provider, operation);
   return 0;
 }

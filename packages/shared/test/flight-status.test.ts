@@ -1,18 +1,27 @@
 import { describe, expect, it } from 'vitest';
 import {
+  ALERT_EVENTS,
   AircraftPositionSchema,
+  AlertEventSchema,
   BoardRowSchema,
   FIELD_QUALITY_VALUES,
   FLIGHT_STATUS_VALUES,
   FieldQualityKeySchema,
+  FieldQualitySchema,
+  FlightRefSchema,
   FlightStatusSchema,
+  FlightStatusValueSchema,
   IsoDateSchema,
   IsoInstantSchema,
   PROVIDER_CALL_RESULTS,
+  PROVIDER_EVENT_KINDS,
   PROVIDER_IDS,
   ProviderCallRecordSchema,
+  ProviderCallResultSchema,
+  ProviderCallTriggerSchema,
   ProviderEventKindSchema,
   ProviderEventSchema,
+  ProviderIdSchema,
   TIME_FIELDS,
 } from '../src/flight-status';
 import type { FlightKey } from '../src/flight-key';
@@ -57,6 +66,21 @@ describe('enumerations', () => {
   it('keys field quality by every time field plus gate and baggage', () => {
     expect(FieldQualityKeySchema.options).toEqual([...TIME_FIELDS, 'gate', 'baggage']);
     expect(TIME_FIELDS).toHaveLength(12);
+  });
+
+  it('parses a status or an event kind this build does not know as unknown', () => {
+    expect(FlightStatusValueSchema.parse('taxiing')).toBe('unknown');
+    expect(FlightStatusValueSchema.parse('en_route')).toBe('en_route');
+    expect(ProviderEventKindSchema.parse('landed')).toBe('unknown');
+    expect(PROVIDER_EVENT_KINDS).toEqual([...ALERT_EVENTS, 'update', 'unknown']);
+  });
+
+  it('keeps every other vocabulary closed (append-only, consumers first)', () => {
+    expect(ProviderIdSchema.safeParse('flightradar').success).toBe(false);
+    expect(ProviderCallTriggerSchema.safeParse('timer').success).toBe(false);
+    expect(ProviderCallResultSchema.safeParse('meh').success).toBe(false);
+    expect(AlertEventSchema.safeParse('gate').success).toBe(false);
+    expect(FieldQualitySchema.safeParse('guessed').success).toBe(false);
   });
 });
 
@@ -117,6 +141,24 @@ describe('FlightStatusSchema', () => {
     expect(status.times).toHaveProperty('scheduledPushback', '2026-09-20T03:45:00Z');
   });
 
+  it('keeps providerRefs and fieldQuality entries it does not know (a newer producer added them)', () => {
+    const status = FlightStatusSchema.parse({
+      ...AA100_INPUT,
+      times: { ...AA100_INPUT.times, estimatedBoarding: '2026-09-20T03:20:00Z' },
+      fieldQuality: { scheduledOut: 'schedule', estimatedBoarding: 'estimated' },
+      providerRefs: { aerodatabox: 'adb-1', flightradar24: 'fr24-1' },
+    });
+    expect(status.fieldQuality).toEqual({
+      scheduledOut: 'schedule',
+      estimatedBoarding: 'estimated',
+    });
+    expect(status.providerRefs).toEqual({ aerodatabox: 'adb-1', flightradar24: 'fr24-1' });
+  });
+
+  it('degrades a status it does not know to unknown instead of failing the payload', () => {
+    expect(FlightStatusSchema.parse({ ...AA100_INPUT, status: 'taxiing' }).status).toBe('unknown');
+  });
+
   it('accepts a canonical key, a legSeq above 1 and a provider-local date', () => {
     const status = makeStatus({
       key: 'AAL-100-2026-09-19-KJFK-L2' as FlightKey,
@@ -132,7 +174,6 @@ describe('FlightStatusSchema', () => {
     ['IATA carrier', { operatingCarrierIcao: 'AA' }],
     ['leading zero in flight number', { flightNumber: '0100' }],
     ['five-digit flight number', { flightNumber: '10000' }],
-    ['unknown status', { status: 'taxiing' }],
     ['legSeq 0', { legSeq: 0 }],
     ['non-integer legSeq', { legSeq: 1.5 }],
     ['offset instant', { times: { scheduledOut: '2026-09-19T23:50:00-04:00' } }],
@@ -140,8 +181,8 @@ describe('FlightStatusSchema', () => {
     ['bad local date', { scheduledDepartureDateLocal: '2026-02-30' }],
     ['bad icao hex', { icaoHex: 'A0B1C' }],
     ['progress above 100', { progressPercent: 101 }],
-    ['unknown provider in providerRefs', { providerRefs: { flightradar: 'x' } }],
-    ['unknown field quality key', { fieldQuality: { registration: 'live' } }],
+    ['unknown field quality value', { fieldQuality: { scheduledOut: 'guessed' } }],
+    ['non-string provider ref', { providerRefs: { aeroapi: 42 } }],
     ['unknown source', { source: 'flightradar' }],
     ['missing origin', { origin: undefined }],
   ])('rejects %s', (_label, override) => {
@@ -217,10 +258,10 @@ describe('ProviderEventSchema', () => {
   });
 
   it('accepts alert event codes plus update and unknown as kinds', () => {
-    expect(ProviderEventKindSchema.options).toContain('filed');
-    expect(ProviderEventKindSchema.options).toContain('update');
-    expect(ProviderEventKindSchema.options).toContain('unknown');
-    expect(ProviderEventKindSchema.safeParse('landed').success).toBe(false);
+    expect(PROVIDER_EVENT_KINDS).toContain('filed');
+    expect(PROVIDER_EVENT_KINDS).toContain('update');
+    expect(PROVIDER_EVENT_KINDS).toContain('unknown');
+    expect(ProviderEventKindSchema.parse('landed')).toBe('unknown');
   });
 
   it('requires a non-empty external id', () => {
@@ -230,9 +271,40 @@ describe('ProviderEventSchema', () => {
         externalId: '',
         receivedAt: '2026-09-20T03:55:00Z',
         kind: 'out',
+        flightRef: { flightKey: 'AAL-100-2026-09-19-KJFK' },
+      }).success,
+    ).toBe(false);
+  });
+
+  it('rejects an event whose flight reference names no flight', () => {
+    expect(
+      ProviderEventSchema.safeParse({
+        provider: 'aeroapi',
+        externalId: 'evt-2',
+        receivedAt: '2026-09-20T03:55:00Z',
+        kind: 'out',
         flightRef: {},
       }).success,
     ).toBe(false);
+  });
+});
+
+describe('FlightRefSchema', () => {
+  it.each([
+    ['a flight key', { flightKey: 'AAL-100-2026-09-19-KJFK' }],
+    ['a provider ref', { providerRef: { provider: 'aeroapi', providerId: 'AAL100-1758253800' } }],
+    ['a designator plus a local date', { designator: 'AA100', dateLocal: '2026-09-19' }],
+  ])('accepts %s', (_label, ref) => {
+    expect(FlightRefSchema.safeParse(ref).success).toBe(true);
+  });
+
+  it.each([
+    ['nothing', {}],
+    ['a designator alone', { designator: 'AA100' }],
+    ['a local date alone', { dateLocal: '2026-09-19' }],
+    ['a malformed key alone', { flightKey: 'AA100' }],
+  ])('rejects %s', (_label, ref) => {
+    expect(FlightRefSchema.safeParse(ref).success).toBe(false);
   });
 });
 

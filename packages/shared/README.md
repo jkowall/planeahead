@@ -25,7 +25,16 @@ API beyond `crypto.getRandomValues`, `Date` and `Intl.DateTimeFormat`.
 
 Every object schema is `z.looseObject`: Durable Objects roll out gradually, so a payload from a
 newer producer must parse on an older consumer. Add fields freely; rename or retype through a new
-`V2` schema.
+`V2` schema. Two consequences worth knowing:
+
+- The loose inferred types carry a string index signature, which disables TypeScript's
+  excess-property check. Producers (adapters, the tracker) type what they build as
+  `Exact<FlightStatus>` and so on, so a misspelled field fails to compile; consumers keep the
+  loose types.
+- A `status`, a provider event `kind` or a tracker phase this build does not know parses as
+  `unknown`. Every other vocabulary (`ProviderId`, triggers, results, alert events, field
+  qualities, sync entities) is closed and append-only: emit a new value one release after every
+  consumer accepts it.
 
 ## Clocks and randomness
 

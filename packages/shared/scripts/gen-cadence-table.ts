@@ -23,16 +23,18 @@ import {
   SLO_EVENTS,
   SLO_TABLE,
   SLO_WINDOWS,
-  TIER_SLO_WINDOWS,
   expectedCalls,
   isIntervalWindow,
-  strictestPollSlo,
+  sloRelaxations,
   type CadenceDefinition,
   type CadenceEdge,
   type CadenceTier,
   type CadenceWindow,
   type ExpectedCalls,
+  type FixedSlot,
+  type FixedSlotWindow,
   type SloEvent,
+  type SloRelaxation,
   type SloWindow,
 } from '../src/cadence';
 
@@ -107,37 +109,69 @@ function formatInterval(minutes: number): string {
   return `${formatMinutes(minutes)} interval`;
 }
 
-function formatEdge(edge: CadenceEdge): string {
+/** `48h`, `40min`, `14d` for minutes before departure (days only from 3 d up, as the plan writes). */
+function formatBefore(minutes: number): string {
+  const text =
+    minutes >= 3 * 1_440
+      ? formatMinutes(minutes)
+      : minutes % 60 === 0
+        ? `${String(minutes / 60)} h`
+        : `${String(minutes)} min`;
+  return text.replace(' ', '');
+}
+
+/** `T-48h`, `T-40min`, `out`, `out+15min`, `in`, `in+60min` for a minute offset from departure. */
+function formatFromDeparture(minutesAfterOut: number): string {
+  if (minutesAfterOut < 0) {
+    return `T-${formatBefore(-minutesAfterOut)}`;
+  }
+  if (minutesAfterOut === 0) {
+    return 'out';
+  }
+  if (minutesAfterOut < BLOCK_MINUTES) {
+    return `out+${String(minutesAfterOut)}min`;
+  }
+  if (minutesAfterOut === BLOCK_MINUTES) {
+    return 'in';
+  }
+  return `in+${String(minutesAfterOut - BLOCK_MINUTES)}min`;
+}
+
+function edgeMinutesAfterOut(edge: CadenceEdge): number {
   if (typeof edge === 'number') {
-    if (edge === Number.POSITIVE_INFINITY) {
-      return 'creation';
-    }
-    // Days only from 3 d up, so the 48 h boundary reads as the plan writes it.
-    const text =
-      edge >= 3 * 1_440
-        ? formatMinutes(edge)
-        : edge % 60 === 0
-          ? `${String(edge / 60)} h`
-          : `${String(edge)} min`;
-    return `T-${text.replace(' ', '')}`;
+    return -edge;
   }
   switch (edge) {
     case 'boarding':
-      return `T-${String(DEFAULT_CADENCE_PARAMS.boardingMinutesBefore)}min`;
+      return -DEFAULT_CADENCE_PARAMS.boardingMinutesBefore;
     case 'arrival':
-      return 'in';
+      return BLOCK_MINUTES;
     case 'stop':
-      return `in+${String(DEFAULT_CADENCE_PARAMS.postArrivalStopMinutes)}min`;
+      return BLOCK_MINUTES + DEFAULT_CADENCE_PARAMS.postArrivalStopMinutes;
   }
 }
 
+function formatEdge(edge: CadenceEdge): string {
+  return edge === Number.POSITIVE_INFINITY
+    ? 'creation'
+    : formatFromDeparture(edgeMinutesAfterOut(edge));
+}
+
+function formatSlot(slot: FixedSlot, window: FixedSlotWindow): string {
+  const base =
+    slot.edge === 'scheduledOut'
+      ? 0
+      : edgeMinutesAfterOut(slot.edge === 'from' ? window.from : window.to);
+  return formatFromDeparture(base + slot.offsetMinutes);
+}
+
 function describeWindow(window: CadenceWindow, polls: number): string {
-  const range = `${formatEdge(window.from)} to ${formatEdge(window.to)}`;
   if (isIntervalWindow(window)) {
-    const final = window.finalPoll === true ? ' + final' : '';
-    return `${formatInterval(window.intervalMinutes)}${final}, ${range}: ${String(polls)}`;
+    const range = `${formatEdge(window.from)} to ${formatEdge(window.to)}`;
+    return `${formatInterval(window.intervalMinutes)}, ${range}: ${String(polls)}`;
   }
-  return `fixed slots, ${range}: ${String(polls)}`;
+  const slots = window.slots.map((slot) => formatSlot(slot, window)).join(', ');
+  return `fixed slots ${slots}: ${String(polls)}`;
 }
 
 function usd(micros: number): string {
@@ -280,40 +314,41 @@ function sloTable(): string {
   return markdownTable(header, rows);
 }
 
+function whyAccepted(cadence: CadenceDefinition, relaxation: SloRelaxation): string {
+  if (cadence.id === 'literal') {
+    return 'the brief as written, kept for comparison only';
+  }
+  if (relaxation.alerts) {
+    return relaxation.intervalMinutes === null
+      ? 'webhooks and alerts carry the SLO (unverified)'
+      : 'alerts carry OOOI and ETA; polls only need gates';
+  }
+  if (relaxation.relaxedLegs.length === 0) {
+    return 'plan choice, polls are the only source';
+  }
+  const legs = relaxation.relaxedLegs
+    .map(
+      (leg) => `${formatFromDeparture(leg.fromMinutes)} to ${formatFromDeparture(leg.toMinutes)}`,
+    )
+    .join(', ');
+  return `polls are the only source; the SLO holds except on ${legs}`;
+}
+
 function relaxationsTable(): string {
   const rows: string[][] = [];
   for (const cadence of CADENCES) {
-    for (const window of cadence.windows) {
-      const strictest = Math.min(
-        ...TIER_SLO_WINDOWS[window.tier]
-          .map((w) => strictestPollSlo(w))
-          .filter((v): v is number => v !== null),
-      );
-      if (!Number.isFinite(strictest)) {
-        continue;
-      }
-      if (!isIntervalWindow(window)) {
-        rows.push([
-          cadence.id,
-          TIER_LABELS[window.tier],
-          'fixed slots',
-          formatMinutes(strictest),
-          'webhooks and alerts carry the SLO (unverified)',
-        ]);
-        continue;
-      }
-      if (window.intervalMinutes > strictest) {
-        const why = window.alerts
-          ? 'alerts carry OOOI and ETA; polls only need gates'
-          : 'plan choice, polls are the only source';
-        rows.push([
-          cadence.id,
-          TIER_LABELS[window.tier],
-          formatMinutes(window.intervalMinutes),
-          formatMinutes(strictest),
-          why,
-        ]);
-      }
+    for (const relaxation of sloRelaxations(cadence, { blockMinutes: BLOCK_MINUTES })) {
+      const polling =
+        relaxation.intervalMinutes === null
+          ? `fixed slots, gap up to ${formatMinutes(relaxation.maxGapMinutes)}`
+          : formatMinutes(relaxation.intervalMinutes);
+      rows.push([
+        cadence.id,
+        TIER_LABELS[relaxation.tier],
+        polling,
+        formatMinutes(relaxation.strictestSloMinutes),
+        whyAccepted(cadence, relaxation),
+      ]);
     }
   }
   return markdownTable(
@@ -334,7 +369,7 @@ export function renderCadenceSection(): string {
     '',
     '_Generated from `packages/shared/src/cadence.ts` by `pnpm --filter @planeahead/shared gen:cadence-table`. Do not edit between the markers; `packages/shared/test/cadence-table.test.ts` fails when this block drifts from the code._',
     '',
-    `Assumptions: block ${String(BLOCK_MINUTES)} min, boarding at T-${String(params.boardingMinutesBefore)} min, tail stops at in+${String(params.postArrivalStopMinutes)} min, on-time flight, one creation fetch at the lead time. Slot rule: start-anchored windows yield \`round(duration / interval)\` polls, so a trailing partial slot of at least half an interval earns a poll; the pre-48 h AeroDataBox windows count back from T-48 h (daily inside 14 d, every 2 d beyond) and yield \`floor(duration / interval)\`; the instant on a boundary belongs to the later window; \`+ final\` adds one poll at the tail's end. Prices are list prices from \`cost.ts\` (AeroAPI status $0.005, alert delivery $0.020; AeroDataBox 2 units per status call at $0.00025 per unit on Growth).`,
+    `Assumptions: block ${String(BLOCK_MINUTES)} min, boarding at T-${String(params.boardingMinutesBefore)} min, tail stops at in+${String(params.postArrivalStopMinutes)} min, on-time flight, one creation fetch at the lead time. Slot rule: start-anchored windows yield \`round(duration / interval)\` polls, so a trailing partial slot of at least half an interval earns a poll; the pre-48 h AeroDataBox windows count back from T-48 h (daily inside 14 d, every 2 d beyond) and yield \`floor(duration / interval)\`; the instant on a boundary belongs to the later window; fixed-slot windows list their slots. A flight that passes its planned arrival without \`in\` keeps polling until \`in\` or \`MAX_LIFETIME\`: interval windows continue their grid, fixed-slot windows poll every \`lateIntervalMinutes\` from the planned arrival. Prices are list prices from \`cost.ts\` (AeroAPI status $0.005, alert delivery $0.020; AeroDataBox 2 units per status call at $0.00025 per unit on Growth).`,
     '',
     '### Windows inside 48 h (AeroAPI)',
     '',
@@ -355,6 +390,8 @@ export function renderCadenceSection(): string {
     sloTable(),
     '',
     '### Where a cadence polls slower than the SLO',
+    '',
+    'Computed from the resolved window bounds of the simulated flight: a cadence window is held to the strictest poll target of every SLO window it overlaps, and a fixed-slot window is measured by the widest gap between its start, its slots and its end.',
     '',
     relaxationsTable(),
     '',
