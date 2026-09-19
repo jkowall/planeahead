@@ -1,0 +1,46 @@
+import js from '@eslint/js';
+import prettier from 'eslint-config-prettier';
+import globals from 'globals';
+import tseslint from 'typescript-eslint';
+import planeahead from './tools/eslint/index.js';
+
+export default tseslint.config(
+  {
+    ignores: [
+      '**/node_modules/**',
+      '**/dist/**',
+      '**/.turbo/**',
+      '**/.wrangler/**',
+      // apps/mobile is a placeholder until increment 9 creates the Expo app.
+      'apps/mobile/**',
+    ],
+  },
+  js.configs.recommended,
+  {
+    files: ['**/*.js', '**/*.mjs', '**/*.cjs'],
+    languageOptions: {
+      ecmaVersion: 'latest',
+      sourceType: 'module',
+      globals: globals.node,
+    },
+  },
+  {
+    files: ['packages/*/**/*.ts', 'apps/api/**/*.ts'],
+    extends: [tseslint.configs.recommendedTypeChecked],
+    languageOptions: {
+      parserOptions: {
+        projectService: true,
+        tsconfigRootDir: import.meta.dirname,
+      },
+      globals: globals.node,
+    },
+  },
+  {
+    files: ['apps/api/src/**/*.ts'],
+    plugins: { planeahead },
+    rules: {
+      'planeahead/no-module-scope-drizzle': 'error',
+    },
+  },
+  prettier,
+);

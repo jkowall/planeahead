@@ -1,0 +1,455 @@
+[
+ {
+  "lens": "cost-and-provider",
+  "result": {
+   "verdict": "The pricing figures, tier limits, discount bands and the 2-day-forward window for /flights/{ident} all check out against FlightAware's pages, and the poll-count arithmetic in the literal-mandate and daily-7d-48h columns re-derives exactly. The cost model still fails on its central assumption: AeroAPI push alerts only fire for filed/departure/arrival/cancelled/diverted/out/off/on/in/hold_start/hold_end, so the \"$0.31 alerts active\" cadence (6-hourly polls outside 3h, 30-minute polls inside 3h) cannot detect gate changes or ETA creep for hours; the product promise this app is sold on is priced out of the model. The shared-flight invariant is structurally enforced inside the FlightTracker DO, but not at the two places that actually generate the first provider call (designator search in the Worker behind an eventually consistent KV, and codeshare canonicalisation that depends on which provider answered), so duplicate trackers and search stampedes are possible by design. The budget guard is per-flight sound but the global ladder is fed only on threshold crossings, \"alerts-only\" degrade still bills $0.020 per delivery, there is no per-user tracked-flight cap, and user refreshes drain the scheduled budget; none of these will stop a runaway bill within a day. AeroDataBox's direct plans have no paid overage (calls are rejected at quota), and ADB's new webhook Flight Alert API (1 unit per flight item, roughly 80x cheaper than an AeroAPI alert) is not evaluated at all. Phase 0 can proceed with the DO topology as designed, but the cadence table, cost table, budget guard and flight-key merge semantics need rework before the numbers go in docs/architecture.md and the lifecycle test constant.",
+   "critiques": [
+    {
+     "severity": "blocker",
+     "section": "7. Refresh cadence and query budget / 8. Cost model (lever 1) / 16. Open decision 1",
+     "issue": "The recommended 'alerts active' cadence ('every 6 h (8), every 30 min inside 3 h (5), every 15 min boarding to landing (15)') assumes AeroAPI alerts cover the events users care about. AeroAPI alert events are only filed, departure, arrival, cancelled, diverted, out, off, on, in, hold_start, hold_end. There is no gate-change or estimated-time/delay-change alert. Under this cadence a gate change at T-5h is detected up to 6 h late and a 40-minute delay posted at T-2h is detected up to 30 min late. The $0.31/flight figure, lever (1) '$0.905 -> $0.31', the 1k/10k/100k AeroAPI rows and open decision 1 all price a cadence that cannot meet a Flighty-class notification bar.",
+     "evidence": "Alert event list from the AeroAPI 4.28 spec mirror: https://wal.sh/research/ads-b/aeroapi-reference.html (events: 'filed, departure, arrival, cancelled, diverted, out, off, on, in, hold_start, hold_end'); FlightAware's own alert guide lists the same set: https://support.flightaware.com/hc/en-us/articles/33381502369175-How-Do-I-Create-A-Post-Alert-In-AeroAPI. Pricing basis verified at https://www.flightaware.com/commercial/aeroapi/ ($0.005 per /flights/{ident} set, $0.020 per push alert delivery).",
+     "suggested_fix": "Define a detection-latency SLO per event type (gate change <= 15 min inside 6 h, ETA change <= 15 min inside 3 h, OOOI <= 2 min via alerts) and re-price the cadence against it. A defensible AeroAPI-only schedule is hourly 48h-6h (42), 15-min 6h to boarding (~21), 15-min boarding to landing (15), 2 post-arrival = ~80 polls ($0.40) + 8 alerts ($0.16) = ~$0.56 list, roughly 1.8x the plan's number; rerun the discount bands and the Premium crossover (at ~80 polls/flight, 30k flights/month already averages ~0.9 sets/s with departure-bank peaks past 5/s). Alternatively source gate/ETA changes from the AeroDataBox Flight Alert webhook (see next critique) and keep AeroAPI for OOOI. Whichever is chosen, the lifecycle test constant must come from the SLO-derived table, not the current one."
+    },
+    {
+     "severity": "major",
+     "section": "6. Provider layer (AeroDataBox adapter) / 8. Cost model / 16. Open decision 4",
+     "issue": "AeroDataBox is scoped as 'secondary + dev' with only pull endpoints, and the cost model never considers its Flight Alert API. ADB now delivers webhook notifications 'whenever information about a certain flight or flights gets updated', priced at 1 credit per flight item with 1 credit = 1 API unit and free subscription creation. At Growth ($99 / 400k units) that is ~$0.00025 per notification versus $0.020 per AeroAPI alert delivery (80x). If ADB alerts carry gate and time revisions, they solve the blocker above at near-zero marginal cost and change the answer to open decisions 1 and 4.",
+     "evidence": "https://aerodatabox.com/flight-alert-api-2026/ ('1 credit per 1 flight item in the notification', '1 credit = 1 API unit', subscriptions free); pricing and unit tiers at https://aerodatabox.com/pricing/ (Growth $99 / 400,000 units / 10 req/s). Event granularity of ADB alerts (gate vs status vs time) is not stated on the page: unverified.",
+     "suggested_fix": "Add registerAlert/parseWebhook to the real AeroDataBox adapter in Phase 0 (fixtures from a Growth-plan trial), add 'adb_alert' as a ProviderCallContext trigger and a 0.1 PE weight, and add an explicit open decision: 'ADB webhooks as the primary change source, AeroAPI alerts for OOOI accuracy'. Instrument alert payload field coverage (gate present? revised times present?) from day one so Phase 1 can decide on data, not on the vendor page."
+    },
+    {
+     "severity": "major",
+     "section": "8. Cost model (AeroDataBox row) / 6. Budget guard",
+     "issue": "The model steps ADB from Starter ($19) to Growth ($99) to Scale ($499) as if overage were smooth, but direct plans list overage as 'Via ADS-B feeding (other options soon)' and the pricing page states that when units and credits are exhausted 'further API calls are rejected until your quota renews at the next billing cycle'. The budget guard treats ADB as a routing rule ('zero AeroAPI before T-48h'), not as a quota to protect. Per-flight ADB units are never modelled: a 30-day-ahead flight is 28 status calls x 2 units = 56 units, plus 2 units per uncached search, plus withFlightPlan doubling if ever set. At 1k flights/month that is ~30k+ of Starter's 40k units, so one busy month makes 'add flight' fail for the rest of the month.",
+     "evidence": "https://aerodatabox.com/pricing/ (Starter 40,000 units at 5 req/s; Growth 400,000 at 10 req/s; Scale 4,000,000 at 20 req/s; overage row; quota-exhaustion text). Flight status endpoint is TIER 2 (2 units) and 'billed as 2 requests' when withFlightPlan finds a plan, per https://api.market/store/aedbx/aerodatabox/openapi.yaml; tier costs Tier 1 = 1, Tier 2 = 2, Tier 3 = 6, Tier 4 = 60 at https://aerodatabox.com/pricing/.",
+     "suggested_fix": "Add an ADB units-per-flight line to section 7 (status 2 units, FIDS 2, airport 1) and an ADB monthly-quota guard in ProviderBudget with the same 70/90/100% ladder, degrade action = stretch pre-48h cadence to every 2 days then rely on AeroAPI schedule fetch inside 48h. Start on Growth, not Starter, in staging and production; keep Starter for CI fixture recording. Verify Scale's 4M units against 100k flights (~2.4M status units + searches, ~70% utilisation)."
+    },
+    {
+     "severity": "major",
+     "section": "4. Backend architecture (ProviderBudget DO) / 6. Budget guard",
+     "issue": "'FlightTracker calls it only when its local counter crosses tier thresholds' means the global daily counter is a sum of thresholds, not of calls. Two runaway shapes bypass it: (a) a cadence bug that over-polls every flight below its own per-flight threshold, and (b) tracker-count explosion (import bug, abusive account) where each tracker spends normally. The 1.5 x (monthly/30) daily cap therefore fires late or never. Separately, the DO name '${provider}:${utcDate}' is a per-provider-per-day singleton, contradicting 'sharded, never a global singleton'.",
+     "evidence": "Design as written in the plan; DO pricing and single-instance semantics at https://developers.cloudflare.com/durable-objects/platform/pricing/ (alarm invocations and RPC each count as requests at $0.15/M, so per-call reservation is cheap).",
+     "suggested_fix": "Use a lease model: FlightTracker reserves a small lease (e.g. 8 PE) from ProviderBudget, decrements locally, re-reserves when exhausted; worst-case overshoot = active trackers x lease size, which is computable and can be stated in docs. Shard the name as `${provider}:${utcDate}:${hash(flight_key) % 8}` with a per-minute rollup into KV `budget:day:*` for the ladder. Add a workers test that simulates 1,000 trackers each spending 1 PE below threshold and asserts the ladder trips."
+    },
+    {
+     "severity": "major",
+     "section": "6. Budget guard ('alerts-only' degrade) / 7",
+     "issue": "The 100% ladder step and the per-flight hard cap both degrade to 'alerts-only', but AeroAPI bills $0.020 per alert delivered (4 PE, the most expensive event in the model) and deliveries are initiated by FlightAware, not by a request the guard can refuse. 'Alerts-only' is therefore not a spend stop; it converts a $0.005 poll into a $0.020 push. The only true kill switches are DELETE /alerts (free) and the account-level max_weekly, neither of which appears in the guard.",
+     "evidence": "Push alert delivery $0.020/result set and alert configuration endpoints $0.000 at https://www.flightaware.com/commercial/aeroapi/; max_weekly defaults ('1,000 for Standard subscriptions and 4,000 for Premium') at https://support.flightaware.com/hc/en-us/articles/33381502369175-How-Do-I-Create-A-Post-Alert-In-AeroAPI.",
+     "suggested_fix": "Make the 100% action 'delete alert registrations for flights with no subscribers in the next 6 h, stop polling, keep max 1 reconciliation poll per flight at scheduled arrival'. Set max_weekly explicitly per alert (e.g. 20) as the external backstop and store it in provider_alert_registrations. Test: budget test asserts that at 100% the mocked adapter receives DELETE calls and zero further billable events."
+    },
+    {
+     "severity": "major",
+     "section": "7 (alerts per flight assumption) / 15 (what I need from you)",
+     "issue": "The AeroAPI account default max_weekly is 1,000 alert deliveries on Standard. At the plan's own 1k flights/month x 8 alerts = 8,000/month, roughly 1,850/week, alerts stop silently mid-week from the first month of real traffic. The plan neither mentions the cap nor asks the owner to have it raised.",
+     "evidence": "https://support.flightaware.com/hc/en-us/articles/33381502369175-How-Do-I-Create-A-Post-Alert-In-AeroAPI ('By default, the max weekly is set to 1,000 for Standard subscriptions and 4,000 for Premium subscriptions'). FlightAware also documents that failed deliveries are not retried: https://support.flightaware.com/hc/en-us/articles/32809242173591-Troubleshooting-Common-AeroAPI-Errors.",
+     "suggested_fix": "Add 'raise max_weekly with FlightAware' to section 15; add an 'alerts delivered vs alerts expected' Analytics Engine metric; treat any registered flight with zero deliveries by scheduled_off + 15 min as an alert outage and fall back to the poll-only cadence for that flight (the reconciliation polls already planned)."
+    },
+    {
+     "severity": "major",
+     "section": "4. Hono routes (GET /v1/flights/search) / 13 (invariant claim)",
+     "issue": "'AeroDataBox adapter fetches the flight once per FlightTracker refresh regardless of subscriber count' is only true after the tracker exists. Designator resolution runs in the Worker: Postgres flight_designators -> KV search cache (900 s TTL, eventually consistent) -> AeroDataBox. N users searching the same unresolved designator in the same minute (a delayed flight trending on social media, an airline app outage) produce N provider calls, and KV cannot serialise them. This is the first billable call for every flight and it is not under any DO.",
+     "evidence": "KV consistency and write limits as the plan itself states in section 4 ('1 write/s per key, 60 s eventual consistency'); ADB search is TIER 2 (2 units) per https://api.market/store/aedbx/aerodatabox/openapi.yaml and quota exhaustion rejects calls per https://aerodatabox.com/pricing/.",
+     "suggested_fix": "Route resolution through a DesignatorResolver DO named `${marketing_iata}${number}-${dateLocal}` (or through the FlightTracker itself using a provisional marketing key) that performs the single ADB call, writes flight_designators and flight_instances, and returns the canonical key. Add a workers test: 50 concurrent SELF.fetch searches for one unresolved designator -> exactly 1 provider call. Apply the same pattern to boards via AirportState before Phase 2; a KV-only `board:{IATA}` cache will stampede."
+    },
+    {
+     "severity": "major",
+     "section": "5. Data model (flight natural key, ADR 0003) / 12 Tests",
+     "issue": "The DO name is operating carrier ICAO + number + origin-local date + origin, but the operating carrier is whatever the resolving provider said at resolution time. ADB's live layer is 'typically up to tomorrow', so a codeshare added 10 days out is resolved from schedule data that may carry only the marketing carrier; AeroAPI's `operator` for regional flights (AA/DL/UA 3xxx-6xxx operated by Envoy, SkyWest, Republic, Endeavor) can differ from ADB's. Two marketing designators for one operated flight, or the same designator resolved on different days, yield two FlightTrackers and two provider streams. flight_designators' unique index only stops the same marketing designator mapping twice; it does not stop two keys for one flight.",
+     "evidence": "ADB coverage windows at https://aerodatabox.com/data-coverage/ ('Live feeds: typically up to tomorrow'; codeshare data described only as 'code-share marker (often)'); AeroAPI /flights/{ident} exposes fa_flight_id and inbound_fa_flight_id per https://www.flightaware.com/commercial/aeroapi/resources/aeroapi-openapi.yml, which is the only provider-stable identity inside the 2-day window.",
+     "suggested_fix": "Make the key normaliser provider-independent (OPTD IATA->ICAO table plus a regional-operator mapping owned in packages/shared) and add an explicit merge path: when a tracker's first AeroAPI fetch returns a fa_flight_id already present on another flight_instances row, or an operator that changes the canonical key, it migrates subscribers to the canonical DO, writes a `merged_into` tombstone and deletes alerts. Add two lifecycle tests: 'BA1512 and AA100 resolve to one FlightTracker' and 'operator change merges without a second provider stream'."
+    },
+    {
+     "severity": "major",
+     "section": "6. Mocked AeroAPI adapter / 7 (price per poll)",
+     "issue": "Every AeroAPI poll is priced at exactly one $0.005 result set, but a set is 15 records and /flights/{ident} without start/end returns the whole 10-day-back / 2-day-forward window. For numbers flown several times a day (shuttles, regionals reusing a number, multi-leg continuations) that exceeds 15 records, so either a second set is billed or, with the default max_pages=1, the wanted instance is not on page 1 and the poll is wasted. The plan stores aeroapi_fa_flight_id but never says polls use it.",
+     "evidence": "'One set equaling 15 records' and max_pages default 1 at https://www.flightaware.com/commercial/aeroapi/ and https://www.flightaware.com/commercial/aeroapi/resources/aeroapi-openapi.yml; start/end window text: 'Specified start date must be no further than 10 days in the past and 2 days in the future'.",
+     "suggested_fix": "Adapter rule: first fetch passes start/end bracketing scheduled_out by +/- 1 day; every subsequent poll uses ident_type=fa_flight_id (returns 1 record, 1 set). Unit test in the mocked adapter: 'never issues an unbounded ident query'. Document the 1-set assumption as a tested invariant in docs/architecture.md."
+    },
+    {
+     "severity": "major",
+     "section": "4 (POST /v1/flights/:id/refresh) / 6 Budget guard",
+     "issue": "User-triggered refresh 'coalesced to 1 per 60 s per flight' still permits 1,440 AeroAPI polls per flight per day on a widely watched flight; the per-flight-per-day hard cap of 120 PE ($0.60) then trips and the scheduled cadence, which shares that budget, is starved into 'alerts-only' for the rest of the day. Coalescing must also live in the DO (KV is excluded for rate limits by the plan's own rule), which section 4 does not state.",
+     "evidence": "Poll price $0.005 at https://www.flightaware.com/commercial/aeroapi/; plan section 4 KV rules.",
+     "suggested_fix": "Separate sub-budget in the FlightTracker: a user refresh is honoured only if the last fetch is older than half the current tier interval, capped at 10 per flight per day, and never debits the scheduled-cadence budget. Implement coalescing inside the DO via the outbox/alarm, and assert it in routes.test.ts ('500 refresh calls in 60 s -> 1 provider call')."
+    },
+    {
+     "severity": "major",
+     "section": "9. Security / 6 Budget guard / 16 Open decision 5",
+     "issue": "Nothing caps the number of FlightTrackers one account can create. USER_RL at 600/60 s allows 36,000 POST /v1/flights per hour; at $0.31 (or $0.56 corrected) per flight that is $11k-$20k of AeroAPI commitment from one credential in an hour, and Phase 3 CSV import makes it one request. Free-tier limits are deferred to open decision 5, and the incomplete global ladder is the only defence.",
+     "evidence": "Per-flight cost from section 7 as priced against https://www.flightaware.com/commercial/aeroapi/; rate-limit binding semantics as the plan cites.",
+     "suggested_fix": "Enforce in Phase 0 via usage_counters: max active flight_subscriptions per user (e.g. 5 free, 100 Pro), max new flight_instances created per user per day (e.g. 20), and max FlightTracker creations per IP per day on anonymous accounts. Alert registration only when a tracker has >= 1 non-muted subscriber; delete alerts when the last subscriber leaves."
+    },
+    {
+     "severity": "minor",
+     "section": "7. Table column 'Recommended, no alerts (ADB pre-48h, AeroAPI cadence C, 5-min cruise)'",
+     "issue": "'131 AeroAPI' cannot be derived from the stated windows. Hourly 45 + 10-min 14 + 5-min cruise over 220 min (44) + post-landing 12 = 115; with 2-min boarding-to-off (20) plus 5-min cruise (36) it is 127. 'Cadence C' is never defined. Since the lifecycle test imports this constant, an underivable number becomes a permanently wrong test oracle.",
+     "evidence": "Re-derivation from the plan's own assumptions (3 h block, boarding at D-40, stop at arrival+2 h). The other columns re-derive exactly: 205/182/308/193/324/209 polls and $1.39/$0.93/$3.45/$1.15/$3.77/$1.47 all check out against $0.005 and $0.020 per set at https://www.flightaware.com/commercial/aeroapi/.",
+     "suggested_fix": "Publish the per-window breakdown for every column in docs/architecture.md and generate the table from the same cadence function the test imports."
+    },
+    {
+     "severity": "minor",
+     "section": "7. Rate check / 8 (Premium crossover)",
+     "issue": "'100k flights/month at 38 events is ~1.5 sets/s' counts alert deliveries against the query rate limit; pushes are outbound from FlightAware and do not consume 'result sets/second'. Polls only: 30 x 100k / 2.592M s = 1.16/s. The conclusion (Premium near 50k) is directionally right but moves to ~30k flights/month once the corrected ~80-poll cadence from the blocker is used (3.1/s average, departure-bank peaks well above 5/s).",
+     "evidence": "Standard '5 result sets/second', Premium '100 result sets/second', $1,000 minimum, at https://www.flightaware.com/commercial/aeroapi/.",
+     "suggested_fix": "Recompute the rate check with polls only and with the SLO-derived cadence; state the peak-to-average factor used and back it with BTS departure-bank distribution in Phase 1."
+    },
+    {
+     "severity": "minor",
+     "section": "6. Positions (design only) / 16 Open decision 2",
+     "issue": "The paid position fallback is never priced. AeroAPI /flights/{id}/position is $0.010 per set; at the 30 s cadence proposed for the community feed that is 360 x $0.010 = $3.60 per 3 h flight, 12x the entire status budget; even 5-minute sampling is $0.36. adsb.lol's rate limit is 'dynamic based on environment load' and its docs say an API key obtained by feeding will be required in future; 'about 140 hexes per request' is unverified for adsb.lol (airplanes.live documents a 1000/8000-character request limit, and both airplanes.live and adsb.fi are non-commercial only, which the plan already notes).",
+     "evidence": "Position price at https://www.flightaware.com/commercial/aeroapi/; adsb.lol licence and API-key note at https://www.adsb.lol/docs/open-data/api/ and https://api.adsb.lol/docs; adsb.fi 1 req/s and 'personal, non-commercial use only' at https://github.com/adsbfi/opendata/blob/main/README.md; airplanes.live 'educational and non-commercial purposes only', 1 req/s, at https://airplanes.live/api-docs/.",
+     "suggested_fix": "Add a positions line to cost-estimate.md with three scenarios (community feed, AeroAPI position at 60 s only while a subscriber has the app foregrounded, FR24 API) and budget for operating an ADS-B feeder to keep adsb.lol access. Verify adsb.lol's multi-hex limit empirically before writing '140' into the PositionPoller design."
+    },
+    {
+     "severity": "minor",
+     "section": "6. Budget guard (per-flight caps)",
+     "issue": "Soft cap 75 PE is only 20% above the plan's own expected spend (30 polls + 8 alerts x 4 PE = 62 PE), and a normally disrupted flight (12 alerts) is 78 PE, so the soft cap trips on ordinary irregular operations; the action at soft cap is undefined. With the corrected cadence (~80 polls + 8 alerts = 112 PE) the hard cap of 150 is also too close.",
+     "evidence": "Arithmetic on the plan's PE weights and https://www.flightaware.com/commercial/aeroapi/ prices.",
+     "suggested_fix": "Set soft = 2x expected, hard = 4x expected, derived from the cadence function rather than hand-set; define soft-cap action (emit metric, stretch cadence one tier) and hard-cap action (delete alerts, one reconciliation poll)."
+    },
+    {
+     "severity": "minor",
+     "section": "6 / 7 (AeroDataBox pre-48h path)",
+     "issue": "The plan assumes ADB can serve daily refreshes 30 days ahead on Starter, but ADB states 'Maximum/minimum allowable date is determined by the current data coverage limitations and your pricing plan', and its live layer is 'typically up to tomorrow', so pre-48h refreshes return schedule data only (no gates, no revised times). The plan's ADB unit tier assumption (2) is now verified, but the lookahead per plan is not.",
+     "evidence": "https://api.market/store/aedbx/aerodatabox/openapi.yaml (date-range note; flight status TIER 2); https://aerodatabox.com/data-coverage/ (schedules up to 365 days, live feeds typically up to tomorrow).",
+     "suggested_fix": "Verify the Starter/Growth lookahead with a real call during increment 6 and record it as a capabilities.maxDaysAhead constant; make the daily pre-48h poll every 2 days beyond 14 days since only schedule changes can surface."
+    },
+    {
+     "severity": "minor",
+     "section": "4. FlightTracker lifecycle ('At arrival+2h: flush ... deleteAlarm()')",
+     "issue": "There is no hard lifetime cutoff for flights that never receive an 'in'/'arrived' state (cancellations without a cancelled event, data gaps, diversions to airports without coverage). The post-landing 10-minute cadence continues until the per-flight hard cap, silently burning up to 150 PE per such flight; the schedule slip across local midnight also makes the ADB date-keyed lookup miss without an adapter rule.",
+     "evidence": "Design as written; ADB flight status is keyed by dateLocal per https://api.market/store/aedbx/aerodatabox/openapi.yaml.",
+     "suggested_fix": "Add `max_lifetime = scheduled_in + 6 h` (or actual_off + 2x block time) as a terminal condition in the cadence function and test it; have the ADB adapter retry dateLocal +/- 1 on a miss and prefer fa_flight_id on AeroAPI."
+    }
+   ],
+   "missing": [
+    "A detection-latency SLO per event type (gate change, ETA change, cancellation, OOOI) that the cadence function is derived from; without it the query-count constant in docs/architecture.md is not falsifiable.",
+    "An AeroDataBox units-per-flight line and monthly-quota guard (direct plans reject calls at quota; no paid overage), plus an evaluation of ADB's webhook Flight Alert API (1 unit per flight item) as the change source for gate/time revisions.",
+    "An owner task to raise AeroAPI max_weekly above the 1,000/week Standard default, and an 'alerts delivered vs expected' metric with poll fallback on alert silence (FlightAware does not retry failed deliveries).",
+    "A budget kill switch that actually stops spend: mass DELETE /alerts (free) and per-alert max_weekly, since 'alerts-only' still bills $0.020 per delivery.",
+    "A lease-based ProviderBudget protocol with stated worst-case overshoot, and real sharding of the per-day counter.",
+    "Per-user caps on active subscriptions and on flight_instances created per day, enforced in Phase 0 against usage_counters; alert registration only while a tracker has a non-muted subscriber.",
+    "A single-flight resolver (DO) in front of designator search so the first provider call for a flight is serialised; the same for airport boards before Phase 2.",
+    "A canonical-key merge path (fa_flight_id collision or operator change) and lifecycle tests proving two marketing designators produce one FlightTracker.",
+    "The adapter rule that AeroAPI polls use fa_flight_id after the first fetch and that the first fetch is bracketed with start/end, with a unit test.",
+    "A priced position-fallback scenario (AeroAPI position $0.010/set, FR24) and a plan for adsb.lol's forthcoming feed-to-get-a-key requirement.",
+    "Provider-outage behaviour: 429/5xx backoff that does not consume PE, and whether FlightAware bills error responses (unverified; ask FlightAware).",
+    "Verification of AeroDataBox lookahead per plan tier (page says it depends on pricing plan) before committing to daily pre-48h refreshes 30 days out."
+   ]
+  }
+ },
+ {
+  "lens": "cloudflare-and-data",
+  "result": {
+   "verdict": "The Cloudflare topology is mostly correct and well-sourced (the `exports` DO declaration, `nodejs_compat` default at compat date 2026-08-04+, Hyperdrive included on Workers Paid, Neon PG18 availability, drizzle 0.45.2 / kit 0.31.10, Better Auth 1.7.5, @cloudflare/vitest-plugin 1.1.x on Vitest ^4.1 with the Vitest 5 breakage all verify). The holes are in the places the plan calls irreversible and in the FlightTracker lifecycle it says the integration test will prove. Concretely: the local and CI Postgres is pinned to 17 while every primary key defaults to PG18-only `uuidv7()`, so migrations cannot apply anywhere but Neon; the DO end-of-life sequence deletes the only alarm two hours after arrival and then expects a wake-up 22 hours later; the alarm handler as specified will replay provider calls on every retry and goes permanently dark after six failures with no reconciliation path; the vitest plugin now isolates storage per file, not per test, which invalidates the `beforeEach deleteAlarm()` design; Hyperdrive-from-inside-a-DO in vitest has an unresolved timeout report; two Hyperdrive configs at ~100 origin connections each can exhaust a 0.25 CU Neon compute (104 max_connections); the sequence-based sync cursor loses changes under concurrent commits; and the 90-day `flight_events` retention contradicts the status-timeline, logbook and ML-training features. Several \"full feature list\" tables (idempotency keys, instance supersession, weather history, LLM call ledger) and the DO-side schema migration story are missing. None of this changes the Neon-over-D1 or DO-per-flight decisions, which hold; it changes what Phase 0 must actually build and test.",
+   "critiques": [
+    {
+     "severity": "blocker",
+     "section": "4 Environments / 11 CI / 5 Conventions",
+     "issue": "Local dev and CI use `docker postgres:17` (`local (wrangler dev + docker postgres:17 ...)`, `test-workers ... with a postgres:17 service container`) while the schema convention is `uuid PK with default uuidv7() (PG18 native)`. `uuidv7()` does not exist in PostgreSQL 17, so every migration fails on the local container and in the `test-workers` and `db-migrations` CI jobs; only Neon (PG18) would apply them. The plan's own 'runnable' definition and the Hyperdrive integration test therefore cannot pass as written.",
+     "evidence": "PG17 UUID functions page lists only gen_random_uuid() (https://www.postgresql.org/docs/17/functions-uuid.html); uuidv7() is documented for PG18 (https://www.postgresql.org/docs/18/functions-uuid.html); Neon supports 18 (18.6 as of Aug 2026) (https://neon.com/docs/postgresql/postgres-version-policy).",
+     "suggested_fix": "Pin `postgres:18` for the docker-compose service, the CI service container and the Neon project's PG version, and add a CI assertion (`SHOW server_version_num >= 180000`) in globalSetup. Alternatively generate UUIDv7 in the application layer (packages/shared) for all rows, which you already need for offline and DO-born rows, and drop the DB default; then the PG18 dependency disappears entirely."
+    },
+    {
+     "severity": "major",
+     "section": "4 Durable Object classes (FlightTracker)",
+     "issue": "\"At arrival+2h: flush, write final snapshot, deleteAlarm(); +24h: deleteAll()\" is self-contradictory. A DO has exactly one alarm; after `deleteAlarm()` nothing wakes the object at +24h, so `deleteAll()` never runs, storage is billed indefinitely, and the lifecycle test's `finished -> deleteAll` step cannot be exercised. Separately, with compatibility_date 2026-09-01 `deleteAll()` itself deletes the alarm, so the explicit `deleteAlarm()` is redundant.",
+     "evidence": "\"Each Durable Object is able to schedule a single alarm at a time\" (https://developers.cloudflare.com/durable-objects/api/alarms/); \"For Workers with a compatibility date of 2026-02-24 or later, deleteAll() also deletes any active alarm\" (https://developers.cloudflare.com/durable-objects/api/storage-api/); \"Durable Objects will be billed for stored data until the data is removed\" (https://developers.cloudflare.com/durable-objects/platform/pricing/).",
+     "suggested_fix": "At arrival+2h: flush outbox, write final snapshot to Postgres/KV, set phase=finished and `setAlarm(now+22h)`. In the finished-phase alarm: verify outbox is empty and the Postgres registry row is marked finished, then `deleteAll()` (which clears the alarm). Make `subscribe()` on a finished DO return a 'flight archived' result rather than re-arming."
+    },
+    {
+     "severity": "major",
+     "section": "4 FlightTracker alarm handler / 6 Budget guard",
+     "issue": "\"write state and outbox in one transactionSync before any non-storage I/O\" plus \"no-op if a refresh happened within the tier interval\" does not make the handler idempotent for the case that matters: the provider fetch fails or throws (429, 5xx, timeout). The runtime then retries the alarm up to 6 times with backoff starting at 2 s, and because no refresh 'happened', each retry re-issues the provider call, multiplying cost and the per-day request rate exactly when the provider is degraded. After the 6th failure the alarm is dropped and never rescheduled, so the flight goes dark with no alarm set and no reconciliation path (the `(tracking_state, next_refresh_at)` index exists but nothing is specified to use it).",
+     "evidence": "\"Retries are performed using exponential backoff starting at a 2 second delay from the first failure with up to 6 retries allowed\" and \"guaranteed at-least-once execution\" (https://developers.cloudflare.com/durable-objects/api/alarms/); Rules of DOs: handlers must be idempotent, use `alarmInfo.retryCount`, \"Check state before performing the action\" (https://developers.cloudflare.com/durable-objects/best-practices/rules-of-durable-objects/).",
+     "suggested_fix": "(1) In the same `transactionSync` that runs before the fetch, record `attempt_started_at`, increment the `budget` counters and `setAlarm(next)` for the *next* tier slot; treat the fetch as fire-and-record. (2) Never let provider errors escape `alarm()`; catch, log the ProviderCallRecord with result=error, and schedule a bounded backoff via `setAlarm`. Only storage errors may throw. (3) Read `alarmInfo.retryCount` and skip provider I/O when >0 unless `attempt_started_at` is older than the tier interval. (4) Add a housekeeping cron (`*/15`) that scans `flight_instances where tracking_state in (...) and next_refresh_at < now() - interval '30 min'` and calls `forceRefresh('reconcile')`; add this case to the lifecycle test."
+    },
+    {
+     "severity": "major",
+     "section": "12 Tests (FlightTracker lifecycle) / 2 Lint and test tooling",
+     "issue": "The test design assumes per-test isolated storage: \"calls deleteAlarm() in beforeEach (alarms do not respect isolated storage)\". The current @cloudflare/vitest-plugin documentation states isolation is per test *file*, not per test, so all tests in `flight-tracker.lifecycle.test.ts` share DO storage and any alarm set by an earlier test remains scheduled for later tests. The `beforeEach deleteAlarm()` also only works if each test targets the same stub; with shared storage a test that asserts 'two subscribers -> one provider call' will see subscribers left over from the previous test.",
+     "evidence": "Known issues: \"Storage isolation is per test file. The test runner will undo any writes to storage at the end of each test file.\" (https://developers.cloudflare.com/workers/testing/vitest-integration/known-issues/). `runDurableObjectAlarm` \"immediately runs and removes the Durable Object pointed to by stub's alarm if one is scheduled\" (https://developers.cloudflare.com/workers/testing/vitest-integration/test-apis/).",
+     "suggested_fix": "Use a unique flight_key per test (`AAL-100-2026-09-19-JFK-${testId}`) so every test owns a fresh DO; keep the `beforeEach deleteAlarm()` only as belt-and-braces; drain remaining alarms in `afterEach` via `runDurableObjectAlarm` until it returns false; avoid `test.concurrent` in DO files. Document the per-file semantics in `docs/architecture.md` so the constraint survives plugin upgrades."
+    },
+    {
+     "severity": "major",
+     "section": "12 Tests / 4 FlightTracker (Postgres writes from the DO)",
+     "issue": "The plan has the FlightTracker write `provider_calls`, `flight_instances` and `flight_events` to Postgres through Hyperdrive from inside the alarm, and the integration test exercises \"Hyperdrive path against the Postgres service container\". There is an unresolved report that Hyperdrive access from inside a Durable Object under vitest-pool-workers times out while the same access from the Worker works; it was closed as needs-reproduction, not fixed. Coupling the DO's correctness to a Postgres round-trip also makes every alarm depend on Hyperdrive pool availability and Neon compute wake-ups.",
+     "evidence": "workers-sdk issue #10275 \"vitest-pool-workers - accessing Hyperdrive within a Durable Object times out\", closed awaiting-response/needs-reproduction with no fix or workaround (https://github.com/cloudflare/workers-sdk/issues/10275). Hyperdrive local mode: \"When using localConnectionString, Hyperdrive's connection pooling and query caching do not take effect\" (https://developers.cloudflare.com/hyperdrive/configuration/local-development/).",
+     "suggested_fix": "Make the DO Postgres-free: the DO owns state in its SQLite tables and an `outbox`; a Worker-side consumer (the existing `provider-events`/`notify` queue consumers or a `flush()` RPC invoked by the Worker) drains the outbox into Postgres. The lifecycle test then asserts on outbox rows and provider-call counts without Hyperdrive; a separate Worker-level test covers outbox->Postgres. If you insist on in-DO Hyperdrive, spike it in increment 4 with the exact plugin version and record the result in the architecture note before increment 7."
+    },
+    {
+     "severity": "major",
+     "section": "2 Database / 4 wrangler bindings / 8 Cost model (Neon 0.25 CU)",
+     "issue": "The plan declares two Hyperdrive configs (`DB` caching disabled, `DB_CACHED`) and models production Neon at 0.25 CU. Hyperdrive Paid opens up to ~100 origin connections *per configuration* and may establish additional pools per region; Neon 0.25 CU has max_connections 104 with 7 reserved. Two configs plus CI migrations plus a Neon branch job can exceed the origin's connection limit and surface as \"Failed to acquire a connection from the pool\" / connection_refused. The plan also never states which Neon endpoint Hyperdrive should point at.",
+     "evidence": "Hyperdrive limits: \"Max origin database connections per configuration: ~20 (Free) / ~100 (Paid)\" and \"a new pool is established with its own connection allocation\" (https://developers.cloudflare.com/hyperdrive/platform/limits/); Neon max_connections 104 at 0.25 CU, 209 at 0.5 CU, seven reserved (https://neon.com/docs/connect/connection-pooling); Cloudflare/Neon guidance is to use the direct (non `-pooler`) connection string with Hyperdrive (https://developers.cloudflare.com/hyperdrive/examples/connect-to-postgres/postgres-database-providers/neon/).",
+     "suggested_fix": "Phase 0: one Hyperdrive config (caching disabled) pointed at the Neon *direct* endpoint; move the reference-data cache to KV (`ref:*` keys already exist) instead of a second Hyperdrive config. Set Neon production minimum to 0.5 CU (≈$39/month always-on) in the cost model or accept the risk explicitly. Add a Sentry alert on Hyperdrive pool-acquire errors and note that Hyperdrive caching is set on the Hyperdrive resource (`--caching-disabled`), not in the wrangler binding."
+    },
+    {
+     "severity": "major",
+     "section": "5 Data model (user_sync_changes) / 10 Offline store",
+     "issue": "\"user_sync_changes (identity seq, entity, op; index (user_id, seq))\" served by `GET /v1/sync?since=` is a classic lost-update cursor: identity values are assigned at insert time, but a transaction holding seq=100 can commit after seq=101 is already visible. A client that synced `since=101` never receives 100. With multiple writers (API routes, queue consumers, GDPR jobs, anonymous-merge re-keying) this is guaranteed to occur.",
+     "evidence": "Standard Postgres sequence/commit-order semantics (sequences are non-transactional); the plan provides no watermarking or serialisation of writers per user.",
+     "suggested_fix": "Either (a) serialise all per-user writes through the UserInbox DO, which assigns `seq` from its own SQLite table and is the single writer of `user_sync_changes` for that user, or (b) keep Postgres but return the cursor as `(xmin-safe watermark)`: compute `pg_snapshot_xmin(pg_current_snapshot())` at read time and only expose rows with `xid < xmin`, or the simpler `now() - 5 s` on a `committed_at` column with `clock_timestamp()` set in an AFTER trigger. Add a concurrency test with two writers in `routes.test.ts`."
+    },
+    {
+     "severity": "major",
+     "section": "16 Open decision 16 Retention / 5 Data model",
+     "issue": "\"Recommend 90 days for flight_events, provider_calls, notifications\" conflicts with three features in the brief: the status timeline (\"every change logged\") on past flights in the logbook, year-in-review, and the delay-risk ML path, which needs per-flight event histories and `delay_outcomes` with features from the time of prediction. `logbook_entries` being materialised preserves summaries, not the timeline. `provider_calls` at 90 days is fine because `provider_call_daily` is the durable series, but the plan should say so explicitly.",
+     "evidence": "Brief: \"status timeline (every change logged)\", \"logbook and stats + year-in-review\", \"delay risk score ... ML later\". Plan section 5 lists `flight_tracks (... full_track_r2_key)` but no equivalent archive for events.",
+     "suggested_fix": "At FlightTracker finish, write the full event list to R2 `events/{YYYY}/{MM}/{flight_key}.jsonl.gz` (365 d or indefinite) and store `events_r2_key` on `flight_instances`; keep a compact `flight_timeline_summary` jsonb on `flight_instances` for the logbook UI; apply the 90-day purge only to the row-level table. State the `provider_calls` 90-day window as safe because of `provider_call_daily`."
+    },
+    {
+     "severity": "major",
+     "section": "5 Data model (missing tables for the full feature list)",
+     "issue": "The 52-table catalogue omits tables the feature list and the plan's own rules require: (1) an idempotency-key store for the client outbox (\"outbox table drained by a TanStack mutation with idempotency keys\") while KV is forbidden for idempotency, so there is nowhere to dedupe retried POST /v1/flights; (2) instance supersession/merge (`superseded_by_id`, `merged_into_id`) for flights rescheduled across the origin-local date, operating-carrier swaps and diversion continuation legs, which the 'immutable flight_key' rule makes unavoidable; (3) persisted METAR/TAF/NAS observation history for the delay model and 'when to leave' (KV TTLs of 120 to 1800 s discard it); (4) an LLM call ledger for email extraction cost attribution (the brief requires cost logging for every external call; `provider_calls` should accept provider='llm'); (5) `email_messages_processed` needs a unique `(email_account_id, provider_message_id)` to make Gmail/Graph re-syncs idempotent; (6) `push_tokens.device_id` FK so revoked/reinstalled devices can be pruned; (7) `meet_me_sessions`, `share_link_views` (abuse and rate-limit evidence for the threat model), `trip_members` if trips are ever shared, `currency_rates` for the currency preference.",
+     "evidence": "Plan section 5 table list; section 4 KV key TTLs; brief feature list.",
+     "suggested_fix": "Add `idempotency_keys(user_id, key, request_hash, response_json, expires_at, PK(user_id,key))` with a 24 h purge; add `superseded_by_id uuid null` and `supersede_reason text check` to `flight_instances` plus a `flight_instance_merges` audit table; add `airport_wx_observations(icao, observed_at, kind check metar|taf, raw text, parsed jsonb)` with BRIN and 90-day retention, and `airport_nas_events`; extend `provider_calls.provider` check to include `llm` with `tokens_in/out` doubles; add the unique constraint on processed messages; add `device_id` FK to `push_tokens`; add the remaining small tables to the schema-review catalogue with expected row counts."
+    },
+    {
+     "severity": "major",
+     "section": "5 Irreversible decision 3 / Reference tables (natural keys)",
+     "issue": "`airports (IATA PK, ICAO unique)` and `flight_key = ... + origin IATA` are the wrong immutable defaults. IATA codes are reassigned and some airports (notably in the AeroDataBox/AeroAPI catalogue) have ICAO but no IATA; weather (aviationweather.gov) and AeroAPI idents are ICAO-keyed, FAA NAS is IATA-keyed, so whichever you pick you need both, and the DO name must be derivable at subscribe time. `aircraft (registration PK, icao_hex unique)` is also unsafe: registrations are re-used across airframes and a re-registered airframe changes its hex mapping, so the unique constraint will reject valid future rows. Finally, some carriers fly the same flight number twice on the same day from the same origin, which collides in `flight_key`.",
+     "evidence": "AeroAPI OpenAPI uses ICAO idents (https://www.flightaware.com/commercial/aeroapi/resources/aeroapi-openapi.yml); aviationweather.gov data API is ICAO-based (https://aviationweather.gov/data/api/); OurAirports data has airports without IATA codes (https://ourairports.com/data/). Same-day flight-number reuse: unverified (from memory), but cheap to guard against.",
+     "suggested_fix": "Give `airports` a surrogate `id` plus `icao` (unique, not null where available) and `iata` (partial unique), and key `flight_key` on origin ICAO (fallback to a synthetic `ZZ<id>` when absent); keep IATA as display. Make `aircraft` PK surrogate with `(registration, valid_from)` and `(icao_hex, valid_from)` ranges, or at least drop the unique on `icao_hex`. Add a `leg_seq smallint default 1` to `flight_instances` and include it in the generated `flight_key` only when >1, and make the search route disambiguate by scheduled departure time. Record this in ADR 0003 before any row exists."
+    },
+    {
+     "severity": "major",
+     "section": "5 Irreversible decision 4 (hard delete via cascade)",
+     "issue": "\"Everything else hard-deletes via cascade; users hard-delete for GDPR\" will cascade-delete `audit_log` (which is supposed to prove the deletion happened), `revenuecat_events` and `subscriptions` (financial records you are obliged to keep for refunds/chargebacks/tax), and `notification_deliveries` evidence. `entitlements (user_id PK, rc_app_user_id = users.id)` means the RevenueCat app_user_id is the deleted user's id, so a re-registered user can never reuse it and RevenueCat webhooks for the old customer will insert orphans.",
+     "evidence": "Plan section 5 tables and decision 4; RevenueCat webhook docs retry deliveries and key on app_user_id (https://www.revenuecat.com/docs/integrations/webhooks).",
+     "suggested_fix": "Remove the FK (or use ON DELETE SET NULL with a pseudonymous `subject_id`) on `audit_log`, `revenuecat_events`, `subscriptions`, `notification_deliveries`; keep a `deleted_subjects(subject_id, deleted_at, rc_app_user_id_hash)` table with no PII. Generate `rc_app_user_id` as a separate random id stored on `entitlements`, not `users.id`."
+    },
+    {
+     "severity": "major",
+     "section": "5 Migration policy / 4 DO SQLite schemas",
+     "issue": "The migration policy only covers Postgres (\"expand/contract, drizzle-kit check\"). Every FlightTracker/UserInbox/AirportState instance carries its own SQLite schema; there are 100k+ of them at scale and they are upgraded lazily whenever an instance next wakes, while gradual deployments pin each DO to a version for the duration of a deployment. Without an in-object versioned migration mechanism, the first schema change after launch is a hand-rolled incident.",
+     "evidence": "\"For a given deployment, requests to each Durable Object will always use the same Worker version\" and \"Versions of Worker bundles that change Durable Object class lifecycle cannot be uploaded\" via gradual deployment (https://developers.cloudflare.com/workers/versions-and-deployments/gradual-deployments/with-durable-objects/); Rules of DOs reserve `blockConcurrencyWhile` for initialisation and migrations (https://developers.cloudflare.com/durable-objects/best-practices/rules-of-durable-objects/).",
+     "suggested_fix": "Add `apps/api/src/do/migrations/<class>/NNN.sql` with a `PRAGMA user_version`-driven runner executed in the constructor under `blockConcurrencyWhile` and wrapped in `transactionSync`; unit-test upgrade from every prior version; require additive-only changes for one release before contraction. Add a `do_schema_version` column to the DO `flight` row and emit it in `getState()` so the admin Worker can report version skew. Note in the deploy workflow that adding/renaming/deleting a DO class via `exports` must use a full `wrangler deploy`, never `versions upload`."
+    },
+    {
+     "severity": "major",
+     "section": "4 Durable Object classes (ProviderBudget) / 6 Budget guard",
+     "issue": "\"ProviderBudget, name = ${provider}:${utcDate} (sharded, never a global singleton)\" is a global singleton per provider per day by construction. It is acceptable on throughput (Cloudflare quotes ~500-1,000 req/s per object and the plan's 100k flights/month is ~1.5 events/s), but the wording misleads the owner, and the reserve() call sits in the alarm hot path of every FlightTracker at a single location, adding a cross-region RPC to every tier crossing.",
+     "evidence": "\"A single Durable Object handles approximately 500-1,000 requests/second\" and \"Always shard by natural coordination boundaries ... rather than using one global instance\" (https://developers.cloudflare.com/durable-objects/best-practices/rules-of-durable-objects/).",
+     "suggested_fix": "Rename the concept honestly (a daily singleton per provider) and document the headroom math; call it only on tier thresholds as planned, with a 250 ms timeout that fails open (allow) and emits a metric. If you want true sharding later, shard by `${provider}:${utcDate}:${hash(flight_key) % 8}` and have the cron aggregate."
+    },
+    {
+     "severity": "minor",
+     "section": "5 KV key design (flight:snapshot)",
+     "issue": "\"flight:snapshot:{flight_key} 180 s (written by the DO on every state change)\" will hit KV's 1 write per second per key limit during bursts (alert delivery + confirmation poll + position update within the same second) and throw 429 inside the alarm, which under the current design fails the alarm and triggers retries.",
+     "evidence": "\"Workers KV has a maximum of 1 write to the same key per second ... Writes made to the same key within 1 second will cause rate limiting (429) errors to be thrown\" (https://developers.cloudflare.com/kv/api/write-key-value-pairs/); minimum expirationTtl is 60 s (same page), so the 60 s share-page TTL is at the floor.",
+     "suggested_fix": "Debounce KV snapshot publishes in the DO (write at most once per 2 s via a short alarm or `ctx.waitUntil` timer), catch and log 429 without failing the alarm, and always fall back to `getState()` on KV miss as already planned."
+    },
+    {
+     "severity": "minor",
+     "section": "6 Cost logging (Analytics Engine)",
+     "issue": "The cost logger writes one Analytics Engine point per provider call and the outbox flush may emit many per invocation; the per-invocation cap is 250 data points (the plan does not mention it, and the unit test only checks the 20-blob/20-double shape).",
+     "evidence": "\"You can write a maximum of 250 data points per Worker invocation\" (https://developers.cloudflare.com/analytics/analytics-engine/limits/).",
+     "suggested_fix": "Chunk outbox flushes to ≤200 points per invocation and add that assertion to the cost-logger unit test; keep `provider_call_daily` in Postgres as the durable series because AE downsamples at volume (`_sample_interval`, https://developers.cloudflare.com/analytics/analytics-engine/sql-api/)."
+    },
+    {
+     "severity": "minor",
+     "section": "2 ORM / 4 Hyperdrive bindings (Drizzle on Workers pitfalls)",
+     "issue": "The plan does not state the two Workers-specific driver rules: a new `pg.Client` (or postgres.js instance) per request/alarm, closed with `ctx.waitUntil(client.end())`, and never held as a DO instance field across alarms (Hyperdrive idles origin connections after 10 minutes and the DO may be evicted). Better Auth is normally instantiated at module scope with a db handle, which conflicts with per-request clients; and `drizzle-kit` `generatedAlwaysAs` changes are emitted as drop/recreate, so `flight_key` cannot be altered in place once populated.",
+     "evidence": "\"Create a new client instance for each request. Hyperdrive maintains the underlying database connection pool\"; pg ≥ 8.13.0, postgres ≥ 3.4.4 (https://developers.cloudflare.com/hyperdrive/configuration/connect-to-postgres/); idle timeout 10 minutes (https://developers.cloudflare.com/hyperdrive/platform/limits/).",
+     "suggested_fix": "Add a `withDb(env, ctx, fn)` helper in packages/db that creates, uses and ends the client; build the Better Auth instance per request via a factory that receives that db; add an ESLint rule banning module-scope `drizzle(` calls in apps/api; document that `flight_key` generation expression is frozen in ADR 0003."
+    },
+    {
+     "severity": "minor",
+     "section": "11 CI/CD (gradual rollout) / 4 wrangler.jsonc",
+     "issue": "\"DO behaviour under gradual rollout unverified\" is now verifiable and mostly fine, but two consequences are missing: lifecycle changes (adding/renaming/deleting a DO class in `exports`) cannot go through `versions upload`/`versions deploy`, and each DO is pinned to one version per deployment while Worker traffic splits, so RPC signatures must be backward *and* forward compatible during rollout. Also, `exports` is a one-way door from `migrations` and deleting a class permanently drops its data.",
+     "evidence": "https://developers.cloudflare.com/workers/versions-and-deployments/gradual-deployments/with-durable-objects/ ; \"exports and migrations are mutually exclusive\" and deletion \"removes its namespace and all of its stored data permanently\" (https://developers.cloudflare.com/durable-objects/reference/durable-objects-migrations/).",
+     "suggested_fix": "Split `deploy-production.yml` into a `full-deploy` path (used automatically when `wrangler.jsonc` `exports` changed in the diff) and the gradual path otherwise; add a contract test that the RPC zod schemas in packages/shared are versioned and tolerant of unknown fields; add a CODEOWNERS rule requiring two reviewers for `exports` changes."
+    },
+    {
+     "severity": "minor",
+     "section": "5 Conventions (BRIN, $onUpdate)",
+     "issue": "BRIN on `flight_events.occurred_at` assumes insertion order correlates with `occurred_at`; outbox flushes arrive in batches with interleaved older timestamps from many flights, which degrades BRIN selectivity. `$onUpdate` for `updated_at` is ORM-side and is bypassed by any raw SQL or non-Drizzle writer (queue consumers with `sql`, future admin scripts).",
+     "evidence": "Drizzle `$onUpdate` is applied by the query builder, not a DB trigger (https://orm.drizzle.team/docs/generated-columns and column docs); BRIN effectiveness depends on physical/logical correlation (PostgreSQL BRIN docs).",
+     "suggested_fix": "BRIN on `created_at` (insertion time) and a btree on `(flight_instance_id, seq)`; if timeline queries filter by `occurred_at`, they are per-flight and served by the btree. Add a generic `set_updated_at()` trigger in the first migration and keep `$onUpdate` for type inference only."
+    },
+    {
+     "severity": "minor",
+     "section": "2 Database (D1 rejection rationale)",
+     "issue": "The D1 rejection rests partly on \"read replication has been in public beta since April 2025 with no GA\"; the D1 limits page now documents read replicas as an available feature and the GA status is not asserted either way. The rejection still stands on the 10 GB cap and SQLite dialect alone; do not lean on the beta claim.",
+     "evidence": "D1 limits: \"Maximum database size | 10 GB (Workers Paid)\" and read replication described as available (https://developers.cloudflare.com/d1/platform/limits/).",
+     "suggested_fix": "Drop the read-replication argument from ADR 0002 or mark it unverified; keep the 10 GB cap, dialect lock-in and blocking export as the stated reasons."
+    },
+    {
+     "severity": "minor",
+     "section": "3 Repository layout / 2 Lint and test tooling",
+     "issue": "@cloudflare/vitest-plugin 1.1.13 bundles its own `wrangler` (4.135.0) and a `miniflare` alpha; if the pnpm catalog pins a different wrangler for `apps/api`, you get two wrangler copies with different workerd builds, and `cloudflareTest({ wrangler: { configPath } })` may parse `exports` differently from the one used to deploy.",
+     "evidence": "npm metadata for @cloudflare/vitest-plugin@1.1.13: dependencies `wrangler: 4.135.0`, `miniflare: 5.20260918.0-alpha`, peer `vitest ^4.1.0` (https://registry.npmjs.org/@cloudflare/vitest-plugin/latest).",
+     "suggested_fix": "Pin the catalog `wrangler` to the version bundled by the plugin and bump both together via a Renovate group; add a CI check that `pnpm ls wrangler` shows one version."
+    },
+    {
+     "severity": "minor",
+     "section": "4 wrangler.jsonc bindings (Hyperdrive caching)",
+     "issue": "\"`hyperdrive` DB (caching disabled) and DB_CACHED (reference data only, max_age 60)\" describes caching as if it were a binding property; it is a property of the Hyperdrive configuration resource, and 60 s is already the default. Also `nodejs_compat` note is correct (default at 2026-08-04+), but the configuration page's Hyperdrive example still shows `nodejs_compat_v2` explicitly, so keep the flag explicit for readers.",
+     "evidence": "\"The default caching behavior for Hyperdrive is: max_age = 60 seconds\" and disable via `--caching-disabled` on create/update (https://developers.cloudflare.com/hyperdrive/configuration/query-caching/); \"For compatibility dates of 2026-08-04 or later, Workers enables both nodejs_compat and nodejs_compat_v2 by default\" (https://developers.cloudflare.com/workers/runtime-apis/nodejs/).",
+     "suggested_fix": "Move caching settings into the infra runbook (`wrangler hyperdrive create --caching-disabled`) and keep a single binding as recommended above; state `compatibility_flags: [\"nodejs_compat\"]` explicitly anyway for clarity."
+    }
+   ],
+   "missing": [
+    "A DO-side schema migration mechanism (PRAGMA user_version runner under blockConcurrencyWhile, versioned SQL files, upgrade tests) for FlightTracker, UserInbox, AirportState and ProviderBudget.",
+    "A stuck-flight reconciliation cron that re-arms FlightTrackers whose alarm was dropped after 6 failed retries, using the `flight_instances (tracking_state, next_refresh_at)` index, plus a lifecycle test case for it.",
+    "An `idempotency_keys` table (KV is forbidden for this by the plan) for the client outbox mutations and for provider webhook replays beyond `provider_webhook_events`.",
+    "Instance supersession/merge model (`superseded_by_id`, merge audit) for flights whose origin-local date or operating carrier changes after the key is minted, and the subscriber re-pointing RPC that goes with it.",
+    "Explicit Neon endpoint choice (direct, non -pooler) and a connection budget table: Hyperdrive configs × ~100 origin connections vs Neon max_connections per CU; production minimum CU decision.",
+    "Postgres 18 pinned across local docker, CI service container and Neon, or an application-side UUIDv7 generator that removes the PG18 dependency.",
+    "DO storage durability statement: what is lost if a FlightTracker is deleted or corrupted (positions, unflushed events), whether SQLite point-in-time recovery bookmarks are used, and how the Postgres outbox flush is the only durable path.",
+    "Per-file (not per-test) storage isolation strategy for @cloudflare/vitest-plugin: unique DO names per test, alarm draining in afterEach, no concurrent tests in DO files.",
+    "A spike or documented result on Hyperdrive access from inside a Durable Object under the vitest plugin (workers-sdk #10275), or the architectural decision that DOs never touch Postgres directly.",
+    "R2 archival of per-flight event timelines at DO finish (mirroring `flight_tracks.full_track_r2_key`) so the 90-day `flight_events` retention does not break the timeline, logbook and ML features.",
+    "Missing tables/columns for the full feature list: weather and NAS observation history, LLM call ledger (provider='llm' in provider_calls), unique (email_account_id, provider_message_id), push_tokens.device_id, meet_me_sessions, share_link_views, trip_members, currency_rates.",
+    "Missing indexes: flight_subscriptions(flight_instance_id) where deleted_at is null; flight_instances(icao_hex) where tracking_state='airborne'; flight_instances(origin_iata, scheduled_departure_date) and destination equivalent; provider_calls(flight_instance_id, created_at); notifications(user_id, created_at desc); share_links(user_id) where revoked_at is null; sessions(user_id).",
+    "Deploy-workflow branch for DO lifecycle changes (`exports` edits) that must bypass gradual rollout, and an RPC forward/backward compatibility contract test.",
+    "Analytics Engine per-invocation chunking (250-point cap) in the outbox flush and cost logger."
+   ]
+  }
+ },
+ {
+  "lens": "mobile-native-and-security",
+  "result": {
+   "verdict": "The backend and toolchain claims in this plan mostly survive verification (Cloudflare `exports` field for DOs, nodejs_compat implicit from compatibility_date 2026-08-04, `@cloudflare/vitest-plugin` 1.1.13 on Vitest ^4.1, rate-limit binding GA since 2025-09-19, AES-KW in Workers WebCrypto, Better Auth 1.7.5, Resend, Neon, AeroDataBox and Analytics Engine pricing all check out). The mobile-native and security sections do not hold up as well. The biggest problem is the native surface strategy: the plan scaffolds @bacons/apple-targets plus a hand-written Swift ActivityKit module and a Kotlin Glance module, and defers expo-widgets to a Phase 1 spike, while expo-widgets has been stable since SDK 56 with per-activity and push-to-start tokens, Dynamic Island regions, and (SDK 58 beta) Android widgets; the plan also cites an archived library (software-mansion-labs/expo-live-activity) as a source. Open decision 10 therefore presents the owner with a false premise. Second, the crypto-shredding claim is wrong under Neon PITR (Launch retains up to 7 days of history and the wrapped DEK sits in the same database as everything else). Third, the Sign in with Apple design assumes Better Auth performs an authorization-code exchange in the native idToken flow, which it does not, so the refresh token needed for revoke-on-delete will never be captured without custom code. Fourth, CASA dollar figures are presented as fact with a citation that contains no prices. Smaller issues: the sync feed design has an O(subscribers) fan-out hole for flight state changes, the EAS cost at 100k omits the plan base fee, the Secrets Store deferral reason is wrong, the privacy-label reasoning about Sentry and analytics is wrong, and the SDK 57 minimum patch for scene support is 57.0.23 not 57.0.17. No provider credentials reach the client, and I found no em dashes.",
+   "critiques": [
+    {
+     "severity": "blocker",
+     "section": "2 (Mobile framework), 10 (Native target shells), 16 item 10",
+     "issue": "The native-surface strategy is built on a stale premise. The plan states expo-widgets is \"stable since SDK 56\" yet scaffolds Phase 0 on \"@bacons/apple-targets 5.0.0 with a placeholder WidgetKit view\" plus a hand-written \"modules/activitykit local Expo Module (Swift): start/update/end, token streams\" and defers a \"2-day expo-widgets spike\" to Phase 1. Open decision 10 tells the owner expo-widgets \"depends on a three-month-old stable path with unverified coexistence\". It also cites software-mansion-labs/expo-live-activity as a source without noting it is archived and deprecated.",
+     "evidence": "Expo SDK 56 changelog: \"After introducing an alpha version of Expo Widgets for iOS in SDK 55 ... the library is now stable\" and \"Widgets and Live Activities have full access to the environment\" (https://expo.dev/changelog/sdk-56). expo-widgets docs expose `instance.getPushToken()`, `addPushTokenListener()`, `addPushToStartTokenListener()` (iOS 17.2+), and Dynamic Island regions `compactLeading/compactTrailing/minimal/expanded*` (https://docs.expo.dev/versions/latest/sdk/widgets/). Expo blog (2026-03-04): \"send push updates directly from your server via APNs or even start activities remotely ... using push-to-start tokens\" (https://expo.dev/blog/home-screen-widgets-and-live-activities-in-expo). SDK 58 beta: Android \"widgets run their own JS bundle on a dedicated Hermes runtime\" (https://expo.dev/changelog/sdk-58-beta). software-mansion-labs/expo-live-activity README: \"This library is deprecated. Consider other solutions like expo-widgets\"; repo archived Jun 1, 2026 (https://github.com/software-mansion-labs/expo-live-activity). apple-targets 5.0.0 has 48 open issues and its README caveat \"NOT PRODUCTION\" applies to custom prebuild templates (https://github.com/EvanBacon/expo-apple-targets). Community report that apple-targets 5.0 cannot host two widget-type targets (with-xcode-changes.js matches any target of the same type) is secondary: https://github.com/ragmha/gym/pull/62. Real constraints of expo-widgets: \"It can only render @expo/ui/swift-ui components and modifiers\" and \"Supported platforms: iOS\" (no watchOS).",
+     "suggested_fix": "Invert the default: expo-widgets for the iOS widget + Live Activity + Dynamic Island target (and Android widgets once SDK 58 is stable), with token plumbing via its listeners; delete `modules/activitykit`. Keep @bacons/apple-targets only for `targets/watch` and `targets/watch-widget` (watchOS is outside expo-widgets scope) and make \"expo-widgets widget extension coexists with an apple-targets watch target in one prebuild\" a Phase 0 increment-13 acceptance test, not a Phase 1 spike. Rewrite open decision 10 with the correct facts: stable since SDK 56 (six months), push tokens supported, constraint is Expo UI-only layouts and no watchOS. Remove the expo-live-activity citation or mark it archived."
+    },
+    {
+     "severity": "major",
+     "section": "9 (Envelope encryption module)",
+     "issue": "\"Per-user DEKs make ... GDPR deletion crypto-shredding (the DEK row goes, so Neon PITR copies are unrecoverable)\" is false. The wrapped DEK lives in `user_keys` inside the same Postgres that PITR covers, and the KEK (`TOKEN_KEK_V1`) is unchanged after deletion. A restore or branch from any point before the delete recovers the wrapped DEK, and the live KEK unwraps it. Crypto-shredding only works when the key material is outside the recovery domain of the data.",
+     "evidence": "Neon pricing: history retention \"Launch: Up to 7 days\", \"Scale: Up to 30 days\" (https://neon.com/pricing). AES-KW wrapping is supported in Workers WebCrypto (https://developers.cloudflare.com/workers/runtime-apis/web-crypto/), but that does not change where the wrapped key is stored.",
+     "suggested_fix": "Either (a) state the truth in the threat model: effective deletion latency equals the Neon history-retention window; set production retention to the minimum operationally acceptable and document it in the privacy policy; or (b) move DEK wrapping out of the PITR domain (a `UserKeys` Durable Object or a separate Neon project with minimal retention) so deleting the wrap record is not recoverable from the main database's history. Do not claim crypto-shredding until (b) is implemented."
+    },
+    {
+     "severity": "major",
+     "section": "9 (Sign in with Apple and Google ID-token verification), 5 (accounts table)",
+     "issue": "\"Apple `authorizationCode` exchanged server-side so the refresh token can be revoked on deletion\" and `accounts.refresh_token_enc for Apple revoke` assume Better Auth's native path performs a code exchange. It does not: the idToken path signs the user in directly with no redirect and no token exchange, so no refresh token is ever captured. Nonce is also optional in that API, and the plan lists `nonce` among the checks.",
+     "evidence": "Better Auth Apple docs: \"If ID token is provided no redirection will happen, and the user will be signed in directly\"; `nonce: // Nonce (optional)`; native iOS uses the bundle ID as client_id and requires `appBundleIdentifier` (https://better-auth.com/docs/authentication/apple). Better Auth Expo docs: \"only google, apple and facebook are supported for idToken signIn\" (https://better-auth.com/docs/integrations/expo). Hashed-nonce support for native Apple sign-in was only added in PR #8870, merged 2026-05-28, released in v1.6.12 (https://github.com/better-auth/better-auth/pull/8870). Apple revoke requires a refresh token or access token obtained via /auth/token (https://developer.apple.com/documentation/signinwithapplerestapi/revoke_tokens).",
+     "suggested_fix": "Add a custom route (`POST /api/auth/apple/native`) that takes `{identityToken, authorizationCode, rawNonce}`; verify the ID token with jose against Apple JWKS with `nonce` REQUIRED (compare SHA-256 of rawNonce); exchange `authorizationCode` at appleid.apple.com/auth/token with the ES256 client secret and `client_id = bundle id`; envelope-encrypt the refresh token into `accounts.refresh_token_enc`; then call Better Auth's idToken sign-in (or `auth.api` internals) to create the session. Add a unit test that a login without a nonce is rejected. Also verify Better Auth 1.7.5 no longer emits colon-separated SecureStore keys (issue #5426, https://github.com/better-auth/better-auth/issues/5426) or ship the storage adapter workaround."
+    },
+    {
+     "severity": "major",
+     "section": "9 (CASA timeline warning), 16 item 20",
+     "issue": "Prices are presented as facts with a citation that does not contain them: \"Restricted-scope verification is quoted at about 6 weeks plus a CASA assessment (AL1 $540 to $1,800 and 1 to 3 weeks; AL2 about $4,500 and 2 to 4 weeks; annual revalidation), and unverified apps are capped at 100 users ([support.google.com/cloud/answer/13465431])\".",
+     "evidence": "support.google.com/cloud/answer/13465431 contains no cost, no week counts, and no 100-user figure; it states AL1/AL2 and \"All applications must be revalidated every year\". Google's restricted-scope page says only \"can potentially take several weeks to complete\" (https://developers.google.com/identity/protocols/oauth2/production-readiness/restricted-scope-verification). The 100-user cap is documented at https://support.google.com/cloud/answer/7454865. Dollar ranges ($500 to $4,500) come from third-party lab marketing (e.g. https://www.leviathansecurity.com/programs/google-casa-cloud-application-security-assessment, https://deepstrike.io/blog/google-casa-security-assessment-2025).",
+     "suggested_fix": "Rewrite as: \"several weeks (Google) plus a CASA assessment; lab quotes seen publicly range $500 to $4,500 (unverified, third-party); annual revalidation (Google).\" Cite 7454865 for the cap and 13465431 only for AL1/AL2 and revalidation. Make \"obtain a written lab quote\" an owner task in section 15."
+    },
+    {
+     "severity": "major",
+     "section": "4 (GET /v1/sync), 5 (user_sync_changes), 10 (Offline store bootstrap)",
+     "issue": "The sync design covers user-owned entities but not the entity users actually watch. `user_sync_changes` is per user; flight state is written by one FlightTracker DO shared by up to 500 subscribers. Either the DO fans out one change row per subscriber into Postgres on every state change (O(subscribers) writes, defeating the one-entity economy) or flight state never reaches the offline store via `/v1/sync`. The plan does not say which, and the mobile section lists a `flight_instances projection` as a sync entity.",
+     "evidence": "Plan text: \"`GET /v1/sync?since=` pull-sync feed from `user_sync_changes`\" and \"write-path ownership matrix proving FlightTracker is the single writer of `flight_instances`\". No mechanism connects the two.",
+     "suggested_fix": "Split the feed: (1) user-owned rows via `user_sync_changes` cursor; (2) flight state via a join in `/v1/sync` on the caller's active `flight_subscriptions` where `flight_instances.updated_at > since` (single writer already updates that row) or via the existing KV `flight:snapshot:*` read with an ETag. Document conflict policy (server wins for flight state; last-writer-wins by `updated_at` for `notification_overrides` and `trips`) and add a route test for two devices editing the same subscription."
+    },
+    {
+     "severity": "major",
+     "section": "2 (Analytics), 9 (App Store and Play privacy label drafts)",
+     "issue": "\"the Worker writes with no user id, which keeps Usage Data 'not linked' on both store labels and removes privacy-manifest obligations\" is wrong on two counts. Privacy manifest obligations come from required-reason API use by Expo, React Native and Sentry packages, not from analytics. And Sentry crash and performance data must be declared under Diagnostics regardless. Separately, `POST /v1/events` sits behind the session cookie, so identifiers are present at collection; Apple's standard is stripping identifiers before collection and never tying the data to other datasets.",
+     "evidence": "Expo privacy guide: \"all Expo SDK packages that use 'required reason' APIs ... have a PrivacyInfo file included\" and apps declare via `expo.ios.privacyManifests` (https://docs.expo.dev/guides/apple-privacy/). Sentry RN privacy manifest guide for Expo (https://docs.sentry.io/platforms/react-native/guides/expo/data-management/apple-privacy-manifest/). Apple: Crash Data and Performance Data are declared data types; \"not linked\" requires \"Stripping data of any direct identifiers, such as user ID or name, before collection\" and \"You must not tie the data to other datasets that enable it to be linked\" (https://developer.apple.com/app-store/app-privacy-details/).",
+     "suggested_fix": "Make `/v1/events` unauthenticated with an install-scoped random id that is never joined to `users` (or no id at all), rate-limited by the binding; do not log request_id/IP into the PRODUCT_EVENTS dataset; declare Diagnostics (Crash, Performance) as collected-not-linked; aggregate the privacy manifest from Expo, RN and Sentry in `app.config.ts`. Change the sentence to \"keeps Usage Data not linked\" and drop the privacy-manifest clause."
+    },
+    {
+     "severity": "major",
+     "section": "8 (Cost model, EAS line)",
+     "issue": "\"EAS | $19 | $42 | $375 (or $19 without EAS Update)\" understates the 100k column. $375 is only the Production-plan overage (75,000 × $0.005) with the $199 base omitted. Using the plan's own MAU assumption (125,000): Production is $199 + $375 = $574; Starter would be $19 + 122,000 × $0.005 = $629.",
+     "evidence": "Expo pricing: Starter \"$19/month plus additional usage cost\", Production \"$199/month plus additional usage cost\", Starter overage from 3,001 MAU at $0.005, Production overage from 50,001 MAU at $0.005 (https://expo.dev/pricing). The 10k column ($19 + 4,500 × $0.005 = $41.50) is correct.",
+     "suggested_fix": "Set the 100k EAS line to ~$574 (Production) and note Starter at ~$629; keep the \"$19 without EAS Update\" alternative. Total moves by ~$200; the conclusion is unchanged but the number should be right."
+    },
+    {
+     "severity": "minor",
+     "section": "9 (Envelope encryption, Secrets Store deferral)",
+     "issue": "\"Secrets Store stays deferred: still Beta and unavailable in `wrangler dev`\" gives the wrong reason. Secrets Store works locally through `wrangler secrets-store secret` commands without `--remote`; what is unavailable locally is production secret values, which is equally true of `wrangler secret`. Beta status is unverified from the cited page.",
+     "evidence": "\"To use Secrets Store locally, you must use `secrets-store secret` Wrangler commands without the `--remote` flag\"; \"You cannot access production secrets ... from your local development setup\" (https://developers.cloudflare.com/secrets-store/integrations/workers/). No beta designation on that page.",
+     "suggested_fix": "Defer on a defensible basis (no need for account-level sharing in Phase 0; single Worker consumer) and note the real trade-off: a Workers Secret is readable by anyone who can deploy the Worker, i.e. the CI token with Workers Scripts Edit; Secrets Store adds audit and scoping later. Import the KEK as a non-extractable CryptoKey once per isolate."
+    },
+    {
+     "severity": "minor",
+     "section": "2 (Push strategy), 12 (APNs adapter test)",
+     "issue": "\"Workers fetch speaks HTTP/2 to APNs in production ([workerd#4841])\" cites an open user bug report, not a Cloudflare statement. The report says it works in production; community code also documents a redirect-mode gotcha. Phase 0 tests only a fake endpoint, so the production path is never exercised before Phase 1.",
+     "evidence": "Issue is open, titled \"APNS HTTP/2 Requests via fetch() Failing on macOS but Working in Workers\" (https://github.com/cloudflare/workerd/issues/4841). Redirect handling issue: https://github.com/wodsmith/thewodapp/pull/710. Existing Workers-compatible clients: https://github.com/FiveSheepCo/cloudflare-apns2.",
+     "suggested_fix": "Add a staging smoke job (manual dispatch) that sends one `apns-push-type: alert` and one `apns-push-type: liveactivity` request to api.sandbox.push.apple.com with a real device token and asserts a 200/400-with-reason, so the HTTP/2 path is verified from Cloudflare's edge in Phase 0. Set `redirect: 'manual'`."
+    },
+    {
+     "severity": "minor",
+     "section": "5 (push_tokens, live_activities), 10",
+     "issue": "Live Activity token lifecycle is underspecified. Per-activity update tokens rotate and are distinct from the device token and from the push-to-start token; push-to-start needs iOS 17.2+; APNs requires topic `<bundleId>.push-type.liveactivity` and `apns-push-type: liveactivity`; payloads are capped and frequent updates need the entitlement the plan already adds.",
+     "evidence": "expo-widgets: \"Remote start requires iOS 17.2+\"; per-activity tokens via `getPushToken()` / `addPushTokenListener()`, push-to-start via `addPushToStartTokenListener()` (https://docs.expo.dev/versions/latest/sdk/widgets/). Apple topic and push-type requirements: unverified (from memory; Apple doc page did not render).",
+     "suggested_fix": "Add to `live_activities`: `activity_id`, `push_token`, `push_token_updated_at`, `stale_at`, `ended_at`, `content_state_hash`; add `ios_version` to `devices` and gate push-to-start on 17.2. Have the APNs adapter unit test assert the topic suffix and push-type header for the liveactivity kind."
+    },
+    {
+     "severity": "minor",
+     "section": "9 (Hono middleware chain, Better Auth rate limiting)",
+     "issue": "Magic-link sending is bounded only per IP (`PUBLIC_RL 120/10s`, binding is per-colo and \"intentionally designed to not be used as an accurate accounting system\") and Better Auth's DB rate limit, which is also IP-keyed. Nothing limits sends per destination email, so a distributed client can bomb one inbox and burn the Resend daily cap (100/day on free).",
+     "evidence": "Rate-limit binding docs: \"local to the Cloudflare location\", \"permissive, eventually consistent\" (https://developers.cloudflare.com/workers/runtime-apis/bindings/rate-limit/). Better Auth rate limit is IP-based with `cf-connecting-ip` header option (https://better-auth.com/docs/concepts/rate-limit). Resend free: \"100 emails per day\" (https://resend.com/pricing).",
+     "suggested_fix": "Add a per-`lower(email)` limit (e.g. 3 per hour, 10 per day) in Postgres `usage_counters` or a Better Auth custom rule keyed on email, return the same 200 regardless (no enumeration), and alert when the mail sender's daily cap is within 20%."
+    },
+    {
+     "severity": "minor",
+     "section": "2 (Offline store)",
+     "issue": "\"WatermelonDB 0.28.0 grabs bridge internals removed in RN 0.82+ and is dead on SDK 55+\" could not be verified: the cited issue #1769 timed out, and WatermelonDB's own changelog documents 0.27.1 (Oct 2023) as the latest entry while npm shows 0.28.0. The recommendation (expo-sqlite + Drizzle) stands on its own; the assertion should be softened.",
+     "evidence": "npm latest: 0.28.0 (https://registry.npmjs.org/@nozbe/watermelondb/latest); changelog latest entry 0.27.1 (https://watermelondb.dev/docs/CHANGELOG); New Architecture-only RN from 0.82 (https://dev.to/surajb/react-native-082-ushering-in-a-new-era-3aic); Expo SDK 55: \"you will not be able to use the Legacy Architecture in SDK 55 projects and later\" (https://expo.dev/changelog/sdk-55).",
+     "suggested_fix": "Reword to \"WatermelonDB has no documented New Architecture support since 0.27.1 (2023) and RN 0.82+ is New Architecture only; treat as unsupported\" and cite the changelog rather than an issue number that cannot be confirmed."
+    },
+    {
+     "severity": "minor",
+     "section": "10 (Expo scaffold), 2 (Mobile framework)",
+     "issue": "\"pin ≥57.0.17 for the Hermes fixes\" and \"`ios.enableSceneSupport` opt-in ready for SDK 58\": the scene-support opt-in landed in expo@57.0.23, so the pin is too low for the stated purpose. Also \"TS 7 breaks app.config.ts loading\" (issue #47627) is closed with a fix PR; the durable reason to pin TS is that SDK 57 expects ~6.0.3.",
+     "evidence": "SDK 57 changelog: \"expo@57.0.23 adds opt-in scene support, enabled with the `ios.enableSceneSupport` property of `expo-build-properties`\" (https://expo.dev/changelog/sdk-57). Issue #47627 closed, linked PR #47759 (https://github.com/expo/expo/issues/47627).",
+     "suggested_fix": "Pin `expo@^57.0.23`. Keep the TS ~6.0.3 pin but cite the SDK's expected version, not the closed bug."
+    },
+    {
+     "severity": "minor",
+     "section": "2 (Database), 8",
+     "issue": "\"Hyperdrive holds idle origin connections for 10 minutes and Neon resets scale-to-zero on activity, so model production compute as always-on\" is unverified and mixes two things: Neon suspends on query inactivity, not on open TCP connections, so an idle Hyperdrive pool does not keep the compute awake. Always-on is a latency choice, not a forced consequence.",
+     "evidence": "Hyperdrive docs I fetched do not state an idle timeout (https://developers.cloudflare.com/hyperdrive/concepts/connection-pooling/). Neon: default scale-to-zero after 5 minutes of inactivity, configurable on paid plans (https://neon.com/docs/guides/scale-to-zero-guide); community notes that idle connections still lead to suspension.",
+     "suggested_fix": "Reword: \"Disable scale-to-zero on the production branch for p50 latency; keep it on staging.\" Mark the 10-minute figure as unverified or remove it."
+    },
+    {
+     "severity": "minor",
+     "section": "9 (Threat model outline), 5 (Schema review document outline)",
+     "issue": "Both outlines are heading lists with no content (\"scope and assets; trust boundaries; actors ...; STRIDE per boundary; ...\"). The brief asks for explicit threat models for share links and the MCP endpoint; a table of contents does not move the owner's understanding.",
+     "evidence": "Section 9 text is the outline verbatim; the share-link and MCP threats are compressed into one \"Documented only\" paragraph.",
+     "suggested_fix": "Replace the outline with the five highest-value threats and mitigations for share links (token guessing, cache poisoning via KV key, OG image enumeration, revoked-link caching, scraping) and MCP (token theft, confused-deputy via unbound audience, prompt-injection in tool output, write actions without confirmation, rate abuse). Keep the outline in docs/, not in the plan."
+    },
+    {
+     "severity": "minor",
+     "section": "4 (secrets list), 2 (Push strategy)",
+     "issue": "The `fcm-v1` adapter needs a Google service-account key (RS256 JWT to obtain an OAuth2 token) and no such secret appears in the wrangler secrets list (`APNS_P8` is present, nothing for FCM).",
+     "evidence": "Secrets list in section 4 wrangler.jsonc paragraph.",
+     "suggested_fix": "Add `FCM_SERVICE_ACCOUNT_JSON` (or split `FCM_CLIENT_EMAIL` and `FCM_PRIVATE_KEY`) with the same envelope-encryption-free, Workers Secret handling as `APNS_P8`, and add it to the CI bundle-grep denylist."
+    },
+    {
+     "severity": "minor",
+     "section": "5 (Identity and auth: sessions)",
+     "issue": "Better Auth's `sessions` table stores `ipAddress` and `userAgent` by default; the plan's PII inventory, retention matrix and GDPR export path do not mention them.",
+     "evidence": "Better Auth session schema includes ipAddress and userAgent fields (unverified from memory; consistent with the rate-limit docs' IP handling at https://better-auth.com/docs/concepts/rate-limit).",
+     "suggested_fix": "List `sessions.ipAddress/userAgent` as PII class 2 in the schema review, include them in export, and expire sessions rows within the 30-day sliding window so no dangling IP history remains."
+    }
+   ],
+   "missing": [
+    "A Phase 0 (not Phase 1) decision and prebuild test that expo-widgets' generated widget extension coexists with an @bacons/apple-targets watch target; without it increment 13 scaffolds the wrong iOS shells.",
+    "Custom native Apple sign-in route that captures and encrypts the Apple refresh token (authorizationCode exchange) and requires a nonce; Better Auth's idToken path does not do this.",
+    "Honest deletion-latency statement tied to Neon history retention (or a key store outside PITR); the crypto-shredding claim as written is false.",
+    "A staging APNs sandbox smoke test with a real device token to prove Workers-to-APNs HTTP/2 from the edge before any Live Activity work depends on it.",
+    "Live Activity token lifecycle columns (`activity_id`, `push_token`, `push_token_updated_at`, `stale_at`, `ended_at`) and an iOS version gate for push-to-start (17.2+).",
+    "Sync feed design for shared flight state (join on subscriptions by `flight_instances.updated_at` or KV snapshot with ETag) plus a stated conflict policy for user-editable sync entities.",
+    "Per-destination-email limit on magic-link sends and a mail-quota alert.",
+    "FCM service-account secret in the wrangler secrets list and CI denylist.",
+    "Privacy-label draft that declares Diagnostics (Sentry crash and performance data) and an aggregated `expo.ios.privacyManifests` entry from Expo, React Native and Sentry packages.",
+    "Correct citations for the CASA/100-user claims (support.google.com/cloud/answer/7454865 for the cap; lab quotes marked unverified) and a written lab quote as an owner task.",
+    "Expo pin at ^57.0.23 (scene support opt-in) and a Renovate rule that blocks SDK major bumps until the expo-widgets/apple-targets coexistence test passes.",
+    "Sessions PII (ipAddress, userAgent) in the retention and export matrices."
+   ]
+  }
+ }
+]

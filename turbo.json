@@ -1,0 +1,33 @@
+{
+  "$schema": "https://turborepo.com/schema.json",
+  "ui": "stream",
+  "tasks": {
+    "dev": {
+      "cache": false,
+      "persistent": true
+    },
+    "typecheck": {
+      "dependsOn": ["^typecheck"],
+      "inputs": ["src/**", "test/**", "*.ts", "tsconfig.json", "../../tsconfig.base.json"],
+      "outputs": ["dist/**"]
+    },
+    "lint": {
+      "dependsOn": ["//#lint:root"],
+      "inputs": ["src/**", "test/**", "*.ts", "../../eslint.config.js", "../../tools/eslint/**"]
+    },
+    "test": {
+      "dependsOn": ["//#test:eslint-rules"],
+      "inputs": ["src/**", "test/**", "vitest.config.ts"],
+      "outputs": []
+    },
+    "//#lint:root": {
+      "inputs": ["eslint.config.js", "scripts/**", "tools/**"]
+    },
+    "//#test:eslint-rules": {
+      "inputs": ["tools/eslint/**"]
+    },
+    "//#format:check": {
+      "cache": false
+    }
+  }
+}

@@ -1,0 +1,26 @@
+node_modules/
+.turbo/
+dist/
+*.tsbuildinfo
+
+# Cloudflare
+.wrangler/
+
+# Expo / React Native continuous native generation
+.expo/
+/apps/mobile/ios/
+/apps/mobile/android/
+
+# Secrets and local environment (the committed *.example templates are the exception)
+.env
+.env.*
+!.env.example
+.dev.vars
+.dev.vars.*
+!.dev.vars.example
+
+# Editors and OS
+.DS_Store
+.idea/
+.vscode/*
+!.vscode/extensions.json
