@@ -27,6 +27,23 @@ describe('rpc schemas', () => {
     expect(TrackerPhaseSchema.parse('merged')).toBe('unknown');
   });
 
+  it('the phase stays required: absent, null and a number are rejected (R11)', () => {
+    expect(TrackerPhaseSchema.safeParse(undefined).success).toBe(false);
+    expect(TrackerPhaseSchema.safeParse(null).success).toBe(false);
+    expect(TrackerPhaseSchema.safeParse(2).success).toBe(false);
+    const state = {
+      flightKey: KEY,
+      snapshot: null,
+      nextRefreshAt: null,
+      doSchemaVersion: 3,
+      subscriberCount: 0,
+    };
+    expect(GetStateResponseV1.safeParse(state).success).toBe(false);
+    expect(GetStateResponseV1.safeParse({ ...state, phase: null }).success).toBe(false);
+    expect(GetStateResponseV1.safeParse({ ...state, phase: 2 }).success).toBe(false);
+    expect(GetStateResponseV1.parse({ ...state, phase: 'merged' }).phase).toBe('unknown');
+  });
+
   it('every request and response carries rpcVersion, defaulting to RPC_SCHEMA_VERSION', () => {
     expect(
       SubscribeRequestV1.parse({ subscriptionId: SUBSCRIPTION_ID, userId: 'u' }).rpcVersion,
@@ -131,7 +148,26 @@ describe('rpc schemas', () => {
     expect(ForceRefreshRequestV1.safeParse({ reason: 'bored' }).success).toBe(false);
   });
 
-  it('ProviderEventV1 is the shared provider event schema', () => {
-    expect(ProviderEventV1).toBe(ProviderEventSchema);
+  it('ProviderEventV1 is the shared provider event plus rpcVersion (R13)', () => {
+    const event = {
+      provider: 'aeroapi',
+      externalId: 'evt-1',
+      receivedAt: '2026-09-20T03:55:00Z',
+      kind: 'out',
+      flightRef: { flightKey: KEY },
+      payload: { anything: true },
+      futureField: 1,
+    };
+    const parsed = ProviderEventV1.parse(event);
+    expect(parsed.rpcVersion).toBe(RPC_SCHEMA_VERSION);
+    expect(parsed).toEqual({ ...ProviderEventSchema.parse(event), rpcVersion: 1 });
+    expect(parsed).toHaveProperty('futureField', 1);
+    expect(ProviderEventV1.parse({ ...event, rpcVersion: 2 }).rpcVersion).toBe(2);
+    expect(ProviderEventV1.safeParse({ ...event, rpcVersion: 0 }).success).toBe(false);
+    expect(Object.keys(ProviderEventV1.shape)).toEqual([
+      ...Object.keys(ProviderEventSchema.shape),
+      'rpcVersion',
+    ]);
+    expect(ProviderEventV1.safeParse({ ...event, kind: undefined }).success).toBe(false);
   });
 });

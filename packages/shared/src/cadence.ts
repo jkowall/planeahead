@@ -20,8 +20,8 @@ import type { AlertEvent, FlightStatusValue } from './flight-status';
  * `refreshIntervalFor` is the function the FlightTracker alarm calls; `expectedCalls`
  * simulates a flight by calling that same function in a loop, so the per-window counts in
  * `docs/architecture.md` and the constants the lifecycle test imports fall out of the
- * definitions instead of being typed by hand. `sloRelaxations` measures the same resolved
- * windows against the SLO table. Nothing here reads the wall clock.
+ * definitions instead of being typed by hand. `sloRelaxations` measures the poll sequence of
+ * that same simulation against the SLO table. Nothing here reads the wall clock.
  */
 
 export const MINUTE_MS = 60_000;
@@ -166,9 +166,10 @@ export function strictestPollSlo(window: SloWindow): number | null {
 }
 
 /**
- * The span of each SLO window as cadence edges. `sloRelaxations` intersects these with the
- * resolved cadence windows, so a cadence window that spans two SLO windows (the literal brief's
- * hourly window runs to T-3 h) is held to the stricter target rather than to its tier's name.
+ * The span of each SLO window as cadence edges. `sloRelaxations` measures the simulated polls
+ * inside each of these spans, so a poll grid that runs across two SLO windows (the literal
+ * brief's hourly window runs to T-3 h) is held to the stricter target rather than to its tier's
+ * name, and a gap that crosses a boundary is charged to both sides.
  */
 export const SLO_WINDOW_BOUNDS: Readonly<
   Record<SloWindow, { from: CadenceEdge; to: CadenceEdge }>
@@ -283,8 +284,10 @@ export const CADENCE_LITERAL: CadenceDefinition = {
 
 /**
  * Polls only, no alerts: the automatic fallback when alerts go silent. The tail is fixed slots
- * at in+15, in+30, in+45, in+60 and a final poll at in+120 (ruling R2), so the 15-minute
- * post-arrival SLO holds for the first hour and only the in+60 to in+120 leg is relaxed.
+ * at in+0, in+15, in+30 and in+45 and a final poll at in+120 (ruling R2, revised). The in-flight
+ * grid's last slot lands at in-10, so the poll at in+0 keeps the hole across the landing
+ * instant to 10 minutes; the 15-minute post-arrival SLO then holds for the first 45 minutes and
+ * only the in+45 to in+120 leg is relaxed.
  */
 export const CADENCE_A1: CadenceDefinition = {
   id: 'A1',
@@ -320,10 +323,10 @@ export const CADENCE_A1: CadenceDefinition = {
       from: 'arrival',
       to: 'stop',
       slots: [
+        { edge: 'from', offsetMinutes: 0 },
         { edge: 'from', offsetMinutes: 15 },
         { edge: 'from', offsetMinutes: 30 },
         { edge: 'from', offsetMinutes: 45 },
-        { edge: 'from', offsetMinutes: 60 },
         { edge: 'to', offsetMinutes: 0 },
       ],
       source: 'aeroapi',
@@ -761,6 +764,11 @@ export interface ExpectedCalls {
   pollEquivalents: number;
   listCostUsdMicros: number;
   byWindow: WindowCallCount[];
+  /**
+   * Every simulated poll in order, the creation fetch first, as minutes after scheduled
+   * departure (negative before it). `sloRelaxations` measures the gaps of this sequence.
+   */
+  pollInstants: number[];
 }
 
 const SIMULATION_SCHEDULED_OUT_MS = Date.UTC(2026, 8, 19, 12, 0, 0);
@@ -821,8 +829,10 @@ export function expectedCalls(
   const { scheduledOut, scheduledIn, boardingMs, cadenceParams } = simulationOf(params);
 
   const counts = new Map<CadenceWindow, number>();
-  const bump = (window: CadenceWindow): void => {
+  const pollInstants: number[] = [];
+  const bump = (window: CadenceWindow, at: number): void => {
     counts.set(window, (counts.get(window) ?? 0) + 1);
+    pollInstants.push((at - SIMULATION_SCHEDULED_OUT_MS) / MINUTE_MS);
   };
 
   let t = SIMULATION_SCHEDULED_OUT_MS - params.leadTimeDays * DAY_MS;
@@ -832,7 +842,7 @@ export function expectedCalls(
     cadenceParams,
   );
   if (creation !== null) {
-    bump(creation);
+    bump(creation, t);
   }
   for (let i = 0; i < MAX_SIMULATED_POLLS; i += 1) {
     const ctx = onTimeContext(t, scheduledOut, scheduledIn, boardingMs);
@@ -849,7 +859,7 @@ export function expectedCalls(
     if (window === null) {
       throw new CadenceError(`slot at ${new Date(t).toISOString()} belongs to no window`);
     }
-    bump(window);
+    bump(window, t);
     if (i === MAX_SIMULATED_POLLS - 1) {
       throw new CadenceError('simulation did not terminate');
     }
@@ -894,105 +904,132 @@ export function expectedCalls(
     pollEquivalents: pe,
     listCostUsdMicros,
     byWindow,
+    pollInstants,
   };
 }
 
 // ---------------------------------------------------------------------------------------------
-// SLO relaxation report: the resolved windows of the simulated flight against the SLO table.
+// SLO relaxation report: the simulated poll sequence measured against the SLO table.
 // ---------------------------------------------------------------------------------------------
 
+/** A stretch between two consecutive simulated polls, as minutes after scheduled departure. */
 export interface RelaxedLeg {
   /** Minutes after scheduled departure; negative before it. */
   fromMinutes: number;
   toMinutes: number;
 }
 
-export interface SloRelaxation {
-  cadence: CadenceId;
-  tier: CadenceTier;
-  alerts: boolean;
-  /** The SLO windows the cadence window overlaps on the simulated flight. */
-  sloWindows: SloWindow[];
-  strictestSloMinutes: number;
-  /** The nominal interval of an interval window; `null` for fixed slots. */
-  intervalMinutes: number | null;
-  /**
-   * The longest stretch without a poll: the interval, or for fixed slots the widest gap between
-   * the window start, its slots and its end.
-   */
-  maxGapMinutes: number;
-  /** The fixed-slot legs longer than the SLO; empty for an interval window. */
-  relaxedLegs: RelaxedLeg[];
+/** The gaps between consecutive instants of an ordered poll sequence. */
+export function pollGaps(pollInstants: readonly number[]): RelaxedLeg[] {
+  const gaps: RelaxedLeg[] = [];
+  for (let i = 1; i < pollInstants.length; i += 1) {
+    const fromMinutes = pollInstants[i - 1];
+    const toMinutes = pollInstants[i];
+    if (fromMinutes !== undefined && toMinutes !== undefined) {
+      gaps.push({ fromMinutes, toMinutes });
+    }
+  }
+  return gaps;
 }
 
 /**
- * Where a cadence polls slower than the SLO table. Each resolved window is held to the
- * strictest poll target of every SLO window it overlaps (`SLO_WINDOW_BOUNDS`), computed from
- * the bounds rather than from the tier's name. Rendered into `docs/architecture.md`.
+ * The gap of a poll sequence that spans `minutesAfterOut`: from the last poll before that
+ * instant to the first poll at or after it, `null` when no poll lies on one of the sides. Asked
+ * at the planned arrival it is the hole across the landing instant that ruling R2 closes.
+ */
+export function gapAcross(
+  pollInstants: readonly number[],
+  minutesAfterOut: number,
+): RelaxedLeg | null {
+  return (
+    pollGaps(pollInstants).find(
+      (gap) => gap.fromMinutes < minutesAfterOut && gap.toMinutes >= minutesAfterOut,
+    ) ?? null
+  );
+}
+
+export interface SloRelaxation {
+  cadence: CadenceId;
+  sloWindow: SloWindow;
+  /** The cadence windows that overlap the SLO window on the simulated flight. */
+  tiers: CadenceTier[];
+  /** True when alert registrations are active in every overlapping cadence window. */
+  alerts: boolean;
+  strictestSloMinutes: number;
+  /** The widest gap between consecutive polls that lies inside or crosses the SLO window. */
+  maxGapMinutes: number;
+  /** Every gap longer than the SLO, in poll order. */
+  relaxedLegs: RelaxedLeg[];
+}
+
+export interface SloRelaxationParams extends SimulationParams {
+  /** Days before scheduled departure at which the simulated tracker is created. */
+  leadTimeDays?: number | undefined;
+}
+
+/** Lead time of the report's simulated flight: long enough to walk every pre-48 h window. */
+export const SLO_REPORT_LEAD_TIME_DAYS = 30;
+
+/**
+ * Where a cadence polls slower than the SLO table, measured from the simulated poll sequence
+ * (ruling R10): `expectedCalls` walks the flight, and every SLO window is charged the widest gap
+ * between consecutive polls that lies inside it or crosses one of its edges. A gap that crosses
+ * a boundary therefore counts against both windows, which is how the hole across the landing
+ * instant reaches the post-arrival row; a gap that ends on the boundary belongs to the earlier
+ * window only, since the poll on the boundary sees every event from that instant on. The tail
+ * stop closes the last gap: nothing after it is polled. A row appears when the widest gap
+ * exceeds the strictest poll target of the window. Rendered into `docs/architecture.md`.
  */
 export function sloRelaxations(
   cadence: CadenceDefinition,
-  params: SimulationParams = {},
+  params: SloRelaxationParams = {},
 ): SloRelaxation[] {
+  const leadTimeDays = params.leadTimeDays ?? SLO_REPORT_LEAD_TIME_DAYS;
   const { scheduledOut, scheduledIn, boardingMs, cadenceParams } = simulationOf(params);
   const creation = onTimeContext(
-    SIMULATION_SCHEDULED_OUT_MS - 30 * DAY_MS,
+    SIMULATION_SCHEDULED_OUT_MS - leadTimeDays * DAY_MS,
     scheduledOut,
     scheduledIn,
     boardingMs,
   );
   const { windows, bounds } = resolveWindows(cadence, creation, cadenceParams);
   const minutesAfterOut = (ms: number): number => (ms - bounds.scheduledOut) / MINUTE_MS;
+  const { pollInstants } = expectedCalls(cadence, { ...params, leadTimeDays });
+  const stop = minutesAfterOut(bounds.stop);
+  const last = pollInstants[pollInstants.length - 1];
+  const gaps = pollGaps(last !== undefined && last < stop ? [...pollInstants, stop] : pollInstants);
   const rows: SloRelaxation[] = [];
-  for (const resolved of windows) {
-    const { window, start, end } = resolved;
-    const sloWindows = SLO_WINDOWS.filter((slo) => {
-      const sloStart = resolveEdge(SLO_WINDOW_BOUNDS[slo].from, bounds);
-      const sloEnd = resolveEdge(SLO_WINDOW_BOUNDS[slo].to, bounds);
-      return Math.min(end, sloEnd) > Math.max(start, sloStart);
-    });
-    const targets = sloWindows
-      .map((slo) => strictestPollSlo(slo))
-      .filter((target): target is number => target !== null);
-    if (targets.length === 0) {
+  for (const sloWindow of SLO_WINDOWS) {
+    const strictestSloMinutes = strictestPollSlo(sloWindow);
+    if (strictestSloMinutes === null) {
       continue;
     }
-    const strictestSloMinutes = Math.min(...targets);
-    let intervalMinutes: number | null = null;
-    let maxGapMinutes = 0;
-    const relaxedLegs: RelaxedLeg[] = [];
-    if (isIntervalWindow(window)) {
-      intervalMinutes = window.intervalMinutes;
-      maxGapMinutes = window.intervalMinutes;
-    } else {
-      const points = [...new Set([start, ...fixedSlotsOf(resolved, bounds), end])].sort(
-        (a, b) => a - b,
-      );
-      for (let i = 1; i < points.length; i += 1) {
-        const from = points[i - 1];
-        const to = points[i];
-        if (from === undefined || to === undefined) {
-          continue;
-        }
-        const gap = (to - from) / MINUTE_MS;
-        maxGapMinutes = Math.max(maxGapMinutes, gap);
-        if (gap > strictestSloMinutes) {
-          relaxedLegs.push({ fromMinutes: minutesAfterOut(from), toMinutes: minutesAfterOut(to) });
-        }
-      }
+    const sloStart = resolveEdge(SLO_WINDOW_BOUNDS[sloWindow].from, bounds);
+    const sloEnd = resolveEdge(SLO_WINDOW_BOUNDS[sloWindow].to, bounds);
+    const startMinutes = minutesAfterOut(sloStart);
+    const endMinutes = minutesAfterOut(sloEnd);
+    const inside = gaps.filter(
+      (gap) => gap.fromMinutes < endMinutes && gap.toMinutes > startMinutes,
+    );
+    const maxGapMinutes = inside.reduce(
+      (max, gap) => Math.max(max, gap.toMinutes - gap.fromMinutes),
+      0,
+    );
+    if (maxGapMinutes <= strictestSloMinutes) {
+      continue;
     }
-    if (maxGapMinutes > strictestSloMinutes) {
-      rows.push({
-        cadence: cadence.id,
-        tier: window.tier,
-        alerts: window.alerts,
-        sloWindows,
-        strictestSloMinutes,
-        intervalMinutes,
-        maxGapMinutes,
-        relaxedLegs,
-      });
-    }
+    const overlapping = windows.filter(
+      (resolved) => Math.min(resolved.end, sloEnd) > Math.max(resolved.start, sloStart),
+    );
+    rows.push({
+      cadence: cadence.id,
+      sloWindow,
+      tiers: overlapping.map((resolved) => resolved.window.tier),
+      alerts: overlapping.every((resolved) => resolved.window.alerts),
+      strictestSloMinutes,
+      maxGapMinutes,
+      relaxedLegs: inside.filter((gap) => gap.toMinutes - gap.fromMinutes > strictestSloMinutes),
+    });
   }
   return rows;
 }

@@ -22,15 +22,18 @@ import {
   MINUTE_MS,
   PRE_48H_WINDOWS,
   SLO_EVENTS,
+  SLO_REPORT_LEAD_TIME_DAYS,
   SLO_TABLE,
   SLO_WINDOWS,
   SLO_WINDOW_BOUNDS,
   days,
   expectedCalls,
+  gapAcross,
   hours,
   isIntervalWindow,
   maxLifetime,
   nextSlot,
+  pollGaps,
   refreshIntervalFor,
   resolveWindows,
   sloRelaxations,
@@ -41,6 +44,7 @@ import {
   type CadenceDefinition,
   type CadenceTier,
   type RefreshDecision,
+  type SloWindow,
   type TrackerPhase,
 } from '../src/cadence';
 import { pollEquivalents } from '../src/cost';
@@ -182,13 +186,13 @@ describe('cadence definitions', () => {
     expect(CADENCE_A2.windows[2]?.to).toBe(hours(6));
   });
 
-  it('A1 tail is fixed slots at in+15, in+30, in+45, in+60 and a final poll at in+120 (R2)', () => {
+  it('A1 tail is fixed slots at in+0, in+15, in+30, in+45 and a final poll at in+120 (R2, revised)', () => {
     const tail = CADENCE_A1.windows[5];
     expect(tail !== undefined && !isIntervalWindow(tail) ? tail.slots : null).toEqual([
+      { edge: 'from', offsetMinutes: 0 },
       { edge: 'from', offsetMinutes: 15 },
       { edge: 'from', offsetMinutes: 30 },
       { edge: 'from', offsetMinutes: 45 },
-      { edge: 'from', offsetMinutes: 60 },
       { edge: 'to', offsetMinutes: 0 },
     ]);
     expect(tail).toMatchObject({ from: 'arrival', to: 'stop', source: 'aeroapi', alerts: false });
@@ -248,47 +252,149 @@ describe('SLO table', () => {
     ]);
   });
 
-  it('documents exactly the relaxations the plan accepts, measured against overlapping windows', () => {
-    const summary = (c: CadenceDefinition): [CadenceTier, number, number][] =>
-      sloRelaxations(c).map((r) => [r.tier, r.maxGapMinutes, r.strictestSloMinutes]);
-    expect(summary(CADENCE_LITERAL)).toEqual([['hourly', 60, 15]]);
-    expect(summary(CADENCE_A1)).toEqual([['post_arrival', 60, 15]]);
+  it('documents exactly the relaxations the plan accepts, measured from the simulated polls (R10)', () => {
+    const summary = (c: CadenceDefinition): [SloWindow, number, number][] =>
+      sloRelaxations(c).map((r) => [r.sloWindow, r.maxGapMinutes, r.strictestSloMinutes]);
+    expect(summary(CADENCE_LITERAL)).toEqual([['6h_to_3h', 60, 15]]);
+    expect(summary(CADENCE_A1)).toEqual([
+      ['3h_to_arrival', 20, 15],
+      ['post_arrival', 75, 15],
+    ]);
     expect(summary(CADENCE_A2)).toEqual([
-      ['in_flight', 30, 15],
+      ['3h_to_arrival', 40, 15],
       ['post_arrival', 60, 15],
     ]);
     expect(summary(CADENCE_B)).toEqual([
-      ['hourly', hours(42), 60],
-      ['pre_boarding', hours(3), 15],
-      ['in_flight', 165, 15],
-      ['post_arrival', 105, 15],
+      ['48h_to_6h', hours(45), 60],
+      ['6h_to_3h', hours(45), 15],
+      ['3h_to_arrival', 195, 15],
+      ['post_arrival', 180, 15],
     ]);
   });
 
-  it('holds the literal hourly window to the 6 h to 3 h target it runs into', () => {
+  it('holds the literal hourly polls to the 6 h to 3 h target they run into', () => {
     // A lookup by tier name mapped `hourly` to `48h_to_6h` only and reported no relaxation.
     const [hourly] = sloRelaxations(CADENCE_LITERAL);
-    expect(hourly?.sloWindows).toEqual(['48h_to_6h', '6h_to_3h']);
-    expect(hourly?.intervalMinutes).toBe(60);
-    expect(hourly?.relaxedLegs).toEqual([]);
-    expect(sloRelaxations(CADENCE_A2).map((r) => r.sloWindows)).toEqual([
-      ['3h_to_arrival'],
-      ['post_arrival'],
+    expect(hourly).toMatchObject({ sloWindow: '6h_to_3h', tiers: ['hourly'], alerts: false });
+    expect(hourly?.relaxedLegs).toEqual([
+      { fromMinutes: -hours(6), toMinutes: -hours(5) },
+      { fromMinutes: -hours(5), toMinutes: -hours(4) },
+      { fromMinutes: -hours(4), toMinutes: -hours(3) },
+    ]);
+    expect(sloRelaxations(CADENCE_A2).map((r) => [r.tiers, r.alerts])).toEqual([
+      [['pre_boarding', 'in_flight'], true],
+      [['post_arrival'], true],
     ]);
   });
 
-  it('A1 tail meets the 15-minute post-arrival SLO for the first hour; only in+60 to in+120 is relaxed', () => {
-    const [tail] = sloRelaxations(CADENCE_A1);
-    expect(tail).toMatchObject({
-      tier: 'post_arrival',
-      alerts: false,
-      intervalMinutes: null,
-      sloWindows: ['post_arrival'],
+  it('charges a gap that crosses an SLO boundary to both windows (R10)', () => {
+    // B polls at T-48 h and then at T-3 h: the 45 h between them cross T-6 h, so the 48 h to
+    // 6 h and the 6 h to 3 h windows both carry that gap. Measuring each cadence window from
+    // its own start edge reported 42 h and 3 h instead.
+    const [hourly, preBoarding, inFlight, tail] = sloRelaxations(CADENCE_B);
+    const leg = { fromMinutes: -hours(48), toMinutes: -hours(3) };
+    expect(hourly).toMatchObject({
+      sloWindow: '48h_to_6h',
+      maxGapMinutes: hours(45),
+      relaxedLegs: [leg],
     });
-    expect(tail?.relaxedLegs).toEqual([{ fromMinutes: BLOCK + 60, toMinutes: BLOCK + 120 }]);
-    expect(sloRelaxations(CADENCE_B)[0]?.relaxedLegs).toEqual([
-      { fromMinutes: -hours(48), toMinutes: -hours(6) },
+    expect(preBoarding).toMatchObject({
+      sloWindow: '6h_to_3h',
+      maxGapMinutes: hours(45),
+      relaxedLegs: [leg],
+    });
+    // B's out+15 to in+15 poll pair crosses the landing instant and reaches both rows.
+    const acrossLanding = { fromMinutes: 15, toMinutes: BLOCK + 15 };
+    expect(inFlight?.relaxedLegs).toEqual([
+      { fromMinutes: -hours(3), toMinutes: 15 },
+      acrossLanding,
     ]);
+    expect(tail?.relaxedLegs).toEqual([
+      acrossLanding,
+      { fromMinutes: BLOCK + 15, toMinutes: BLOCK + 120 },
+    ]);
+  });
+
+  it('charges a gap that ends on an SLO boundary to the earlier window only', () => {
+    // The literal brief's T-7 h to T-6 h poll pair ends on T-6 h: the 48 h to 6 h window sees
+    // a 60-minute gap that meets its 60-minute target, and the 6 h to 3 h window never sees it.
+    expect(sloRelaxations(CADENCE_LITERAL).map((r) => r.sloWindow)).toEqual(['6h_to_3h']);
+    // A1's in-10 to in poll pair ends on the landing instant, so the post-arrival row starts at
+    // in and holds the 15-minute target until in+45.
+    const tail = sloRelaxations(CADENCE_A1).find((r) => r.sloWindow === 'post_arrival');
+    expect(tail?.relaxedLegs).toEqual([{ fromMinutes: BLOCK + 45, toMinutes: BLOCK + 120 }]);
+  });
+
+  it('A1 tail meets the 15-minute post-arrival SLO for the first 45 minutes; only in+45 to in+120 is relaxed (R2)', () => {
+    const tail = sloRelaxations(CADENCE_A1).find((r) => r.sloWindow === 'post_arrival');
+    expect(tail).toMatchObject({
+      cadence: 'A1',
+      tiers: ['post_arrival'],
+      alerts: false,
+      strictestSloMinutes: 15,
+      maxGapMinutes: 75,
+    });
+    expect(tail?.relaxedLegs).toEqual([{ fromMinutes: BLOCK + 45, toMinutes: BLOCK + 120 }]);
+  });
+
+  it('surfaces the 20-minute hole the round() slot rule leaves before boarding on A1', () => {
+    // 320 minutes of 15-minute slots round to 21, so the last pre-boarding poll is at T-60 and
+    // the in-flight grid opens at T-40. Alerts cover it on A2; on A1 it is a real relaxation.
+    const [preBoarding] = sloRelaxations(CADENCE_A1);
+    expect(preBoarding).toMatchObject({
+      sloWindow: '3h_to_arrival',
+      tiers: ['pre_boarding', 'in_flight'],
+      alerts: false,
+      maxGapMinutes: 20,
+    });
+    expect(preBoarding?.relaxedLegs).toEqual([{ fromMinutes: -60, toMinutes: -40 }]);
+  });
+
+  it('measures the hole across the landing instant from the simulated polls (R2, R10)', () => {
+    const across = (c: CadenceDefinition): [number, number] | null => {
+      const gap = gapAcross(expectedCalls(c, { leadTimeDays: 2 }).pollInstants, BLOCK);
+      return gap === null ? null : [gap.fromMinutes, gap.toMinutes];
+    };
+    // Before R2 was revised, A1's first tail slot at in+15 left 25 minutes from the in-10 poll.
+    expect(across(CADENCE_A1)).toEqual([BLOCK - 10, BLOCK]);
+    expect(across(CADENCE_A2)).toEqual([BLOCK - 40, BLOCK]);
+    expect(across(CADENCE_LITERAL)).toEqual([BLOCK - 2, BLOCK]);
+    expect(across(CADENCE_B)).toEqual([15, BLOCK + 15]);
+    expect(gapAcross([10, 20], 30)).toBeNull();
+    expect(gapAcross([10, 20], 5)).toBeNull();
+    expect(gapAcross([10, 20, 30], 20)).toEqual({ fromMinutes: 10, toMinutes: 20 });
+    expect(pollGaps([1, 4, 9])).toEqual([
+      { fromMinutes: 1, toMinutes: 4 },
+      { fromMinutes: 4, toMinutes: 9 },
+    ]);
+    expect(pollGaps([7])).toEqual([]);
+  });
+
+  it('charges the silence between the last poll and the tail stop', () => {
+    // A2 polls at in and in+60 and stops at in+120: the last hour is unpolled and counts.
+    const tail = sloRelaxations(CADENCE_A2).find((r) => r.sloWindow === 'post_arrival');
+    expect(tail?.relaxedLegs).toEqual([
+      { fromMinutes: BLOCK, toMinutes: BLOCK + 60 },
+      { fromMinutes: BLOCK + 60, toMinutes: BLOCK + 120 },
+    ]);
+    // Stopping at in+30 leaves A2 one tail poll at in and 30 silent minutes to the stop.
+    const short = sloRelaxations(CADENCE_A2, { postArrivalStopMinutes: 30 });
+    expect(short.find((r) => r.sloWindow === 'post_arrival')).toMatchObject({
+      maxGapMinutes: 30,
+      relaxedLegs: [{ fromMinutes: BLOCK, toMinutes: BLOCK + 30 }],
+    });
+  });
+
+  it('never flags the pre-48 h grids: the daily and 2-day polls sit exactly on their targets', () => {
+    expect(SLO_REPORT_LEAD_TIME_DAYS).toBe(30);
+    for (const cadence of CADENCES) {
+      const flagged = sloRelaxations(cadence, { leadTimeDays: SLO_REPORT_LEAD_TIME_DAYS }).map(
+        (r) => r.sloWindow,
+      );
+      expect(flagged).not.toContain('beyond_7d');
+      expect(flagged).not.toContain('7d_to_48h');
+      expect(sloRelaxations(cadence, { leadTimeDays: 2 })).toEqual(sloRelaxations(cadence));
+    }
   });
 });
 
@@ -375,7 +481,7 @@ describe('refreshIntervalFor (A2 unless stated)', () => {
     expect(refreshIntervalFor(CADENCE_A2, ctx(300))).toBeNull();
   });
 
-  it('A1 tail fires at in+15, in+30, in+45, in+60 and in+120, then stops', () => {
+  it('A1 tail fires at in, in+15, in+30, in+45 and in+120, then stops (R2, revised)', () => {
     const slots: number[] = [];
     let t = 170;
     for (let i = 0; i < 10; i += 1) {
@@ -386,10 +492,13 @@ describe('refreshIntervalFor (A2 unless stated)', () => {
       t = nextMinutes(d);
       slots.push(t);
     }
-    expect(slots).toEqual([195, 210, 225, 240, 300]);
-    const first = decide(CADENCE_A1, 180);
-    expect(first.tier).toBe('post_arrival');
-    expect(first.nominalIntervalMinutes).toBeNull();
+    expect(slots).toEqual([180, 195, 210, 225, 300]);
+    // The last in-flight poll at in-10 hands over to the tail's in+0 slot: 10 minutes, not 25.
+    const landing = decide(CADENCE_A1, 170);
+    expect(landing.tier).toBe('post_arrival');
+    expect(landing.intervalMs).toBe(10 * MINUTE_MS);
+    expect(landing.nominalIntervalMinutes).toBeNull();
+    expect(decide(CADENCE_A1, 180).tier).toBe('post_arrival');
     expect(refreshIntervalFor(CADENCE_A1, ctx(300))).toBeNull();
   });
 
@@ -522,6 +631,26 @@ describe('expectedCalls', () => {
     expect(polls(CADENCE_A1)).toEqual([0, 0, 42, 21, 15, 5]);
     expect(polls(CADENCE_A2)).toEqual([0, 0, 42, 21, 7, 2]);
     expect(polls(CADENCE_B)).toEqual([0, 0, 1, 1, 1, 2]);
+  });
+
+  it('exposes the poll instants the counts are made of, the creation fetch first', () => {
+    const a1 = expectedCalls(CADENCE_A1, { leadTimeDays: 2 });
+    expect(a1.pollInstants).toHaveLength(a1.polls + a1.adbCalls);
+    expect(a1.pollInstants[0]).toBe(-hours(48));
+    expect(a1.pollInstants.filter((m) => m >= BLOCK)).toEqual([
+      BLOCK,
+      BLOCK + 15,
+      BLOCK + 30,
+      BLOCK + 45,
+      BLOCK + 120,
+    ]);
+    const lead30 = expectedCalls(CADENCE_A2, { leadTimeDays: 30 });
+    expect(lead30.pollInstants.slice(0, 3)).toEqual([-days(30), -days(28), -days(26)]);
+    expect(lead30.pollInstants).toHaveLength(lead30.polls + lead30.adbCalls);
+    for (const cadence of CADENCES) {
+      const { pollInstants } = expectedCalls(cadence, { leadTimeDays: 14 });
+      expect(pollGaps(pollInstants).every((g) => g.toMinutes > g.fromMinutes)).toBe(true);
+    }
   });
 
   it('totals, poll-equivalents and list cost per cadence inside 48 h', () => {

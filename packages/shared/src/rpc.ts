@@ -5,6 +5,7 @@ import {
   FlightStatusSchema,
   IsoInstantSchema,
   ProviderEventSchema,
+  tolerantEnum,
 } from './flight-status';
 
 /**
@@ -12,20 +13,20 @@ import {
  * `getState`, `forceRefresh`, and provider events pushed into a tracker). Every schema is a
  * `looseObject` so a Worker and a DO on different deploy versions can still talk: unknown
  * fields pass through, missing new fields must be optional, and a tracker phase this build
- * does not know parses as `unknown`. A breaking change gets a `V2` schema next to the `V1`,
- * never an edit of `V1`.
+ * does not know parses as `unknown` (the phase itself stays required). A breaking change gets
+ * a `V2` schema next to the `V1`, never an edit of `V1`.
  *
- * Every request and response carries `rpcVersion`, defaulting to `RPC_SCHEMA_VERSION` so a peer
- * that never set it parses as V1. A DO answers in the dialect the request names and a Worker
- * reads the version off a response before it interprets the rest; a `V2` schema sets its own
- * default. The constant is therefore on the wire, not only in logs.
+ * Every request, response and pushed event carries `rpcVersion`, defaulting to
+ * `RPC_SCHEMA_VERSION` so a peer that never set it parses as V1. A DO answers in the dialect the
+ * request names and a Worker reads the version off a response before it interprets the rest; a
+ * `V2` schema sets its own default. The constant is therefore on the wire, not only in logs.
  */
 
 export const RPC_SCHEMA_VERSION = 1;
 const rpcVersion = z.int().min(1).default(RPC_SCHEMA_VERSION);
 
 export const TRACKER_PHASES = [...FLIGHT_STATUS_VALUES, 'finished'] as const;
-export const TrackerPhaseSchema = z.enum(TRACKER_PHASES).catch('unknown');
+export const TrackerPhaseSchema = tolerantEnum(TRACKER_PHASES, 'unknown');
 
 /** Per-subscription notification overrides; the shape is owned by the notification domain. */
 export const NotificationOverridesSchema = z.looseObject({
@@ -74,5 +75,6 @@ export const ForceRefreshRequestV1 = z.looseObject({
 });
 export type ForceRefreshRequestV1 = z.infer<typeof ForceRefreshRequestV1>;
 
-export const ProviderEventV1 = ProviderEventSchema;
+/** The shared provider event as pushed into a tracker, versioned like every other payload. */
+export const ProviderEventV1 = ProviderEventSchema.extend({ rpcVersion });
 export type ProviderEventV1 = z.infer<typeof ProviderEventV1>;

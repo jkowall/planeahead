@@ -35,9 +35,16 @@ describe('docs/architecture.md cadence block', () => {
     expect(rendered).toContain(`| ${String(A2_EXPECTED_POLLS)} `);
     expect(rendered).toContain(`| ${String(A1_EXPECTED_POLLS)} `);
     expect(rendered).toContain(`| ${String(LITERAL_EXPECTED_POLLS)} `);
-    expect(rendered).toContain('fixed slots in+15min, in+30min, in+45min, in+60min, in+120min: 5');
-    expect(rendered).toMatch(/\| literal +\| Hourly window +\| 1 h +\| 15 min/);
-    expect(rendered).toContain('the SLO holds except on in+60min to in+120min');
+    expect(rendered).toContain('fixed slots in, in+15min, in+30min, in+45min, in+120min: 5');
+    expect(rendered).toMatch(/\| literal +\| 6 h to 3 h +\| Hourly window +\| 1 h +\| 15 min/);
+    expect(rendered).toMatch(/\| A1 +\| Post-arrival +\| Post-arrival tail +\| 75 min +\| 15 min/);
+    expect(rendered).toContain('the SLO holds except on in+45min to in+120min');
+    // A gap that crosses T-6 h is charged to both SLO windows (R10).
+    expect(rendered).toMatch(/\| B +\| 48 h to 6 h +\| Hourly window +\| 45 h +\| 1 h/);
+    expect(rendered).toMatch(/\| B +\| 6 h to 3 h +\| Pre-boarding window +\| 45 h +\| 15 min/);
+    expect(rendered).toContain(
+      'literal 2 min (out+178min to in); A1 10 min (out+170min to in); A2 40 min (out+140min to in); B 3 h (out+15min to in+15min)',
+    );
     expect(rendered).toContain('Do not edit between the markers');
     expect(rendered).toContain('<!-- prettier-ignore-start -->');
     expect(rendered).toContain('<!-- prettier-ignore-end -->');

@@ -14,9 +14,10 @@ import { FlightKeySchema } from './flight-key';
  *
  * Enumerations are the exception, because a value has to mean something to the consumer:
  * - `status`, a provider event's `kind` and the tracker phase carry an `unknown` member and
- *   parse a value this build does not know as `unknown` (`.catch`), so a newer producer degrades
- *   an older consumer instead of failing it. The input type stays the closed union, so a
- *   producer is still checked at compile time.
+ *   parse a string this build does not know as `unknown` (`tolerantEnum`), so a newer producer
+ *   degrades an older consumer instead of failing it. The field stays required: an absent key,
+ *   `null` or a number is still rejected. The input type stays the closed union, so a producer
+ *   is still checked at compile time.
  * - Every other vocabulary (`ProviderId`, `ProviderCallTrigger`, `ProviderCallResult`,
  *   `AlertEvent`, `FieldQuality`, `SyncEntity`) is closed and append-only: a producer may emit
  *   a new value only one release after every consumer accepts it.
@@ -24,15 +25,24 @@ import { FlightKeySchema } from './flight-key';
  * `z.infer` of a `looseObject` carries a string index signature, which switches off
  * TypeScript's excess-property check, so a producer that misspells a field would compile.
  * Producers (adapters, the tracker) declare what they build as `Exact<FlightStatus>` and so on
- * to get the check back; consumers keep the loose inferred types.
+ * to get the check back; consumers keep the loose inferred types. Open-keyed records such as
+ * `providerRefs` and `fieldQuality` are nothing but an index signature, so `Exact` leaves them
+ * readable and writable by any string key.
  *
  * All instants are ISO-8601 UTC strings with a trailing `Z`; the only local date in the system
  * is the origin-local scheduled departure date inside the flight key.
  */
 
+/** The keys of `T` that are not an index signature. */
+type NamedKeys<T> = keyof {
+  [K in keyof T as string extends K ? never : number extends K ? never : K]: never;
+};
+
 /**
  * `T` with the string index signature that `looseObject` infers removed, recursively, so an
- * object literal typed `Exact<FlightStatus>` fails to compile on a misspelled field. `T` and
+ * object literal typed `Exact<FlightStatus>` fails to compile on a misspelled field. A pure
+ * record (`providerRefs`, `fieldQuality`), which has no named keys at all, keeps its index
+ * signature, so a consumer can still read and write it by any string key (ruling R12). `T` and
  * `Exact<T>` are assignable to each other; only the compile-time check differs.
  */
 export type Exact<T> = T extends string | number | boolean | bigint | symbol | null | undefined
@@ -44,8 +54,30 @@ export type Exact<T> = T extends string | number | boolean | bigint | symbol | n
         ? Exact<U>[]
         : readonly Exact<U>[]
       : T extends object
-        ? { [K in keyof T as string extends K ? never : number extends K ? never : K]: Exact<T[K]> }
+        ? [NamedKeys<T>] extends [never]
+          ? { [K in keyof T]: Exact<T[K]> }
+          : {
+              [K in keyof T as string extends K ? never : number extends K ? never : K]: Exact<
+                T[K]
+              >;
+            }
         : T;
+
+/**
+ * A closed vocabulary with a member that absorbs what this build does not know: a string outside
+ * `values` parses as `fallback`, while an absent key, `null` or a non-string is still rejected,
+ * so the field stays required (ruling R11). The head of the pipe accepts any string at run time
+ * but is typed as the closed union, so `z.input` stays closed and a producer on this build is
+ * still checked at compile time; `z.string().pipe(...)` would widen the input type to `string`.
+ */
+export function tolerantEnum<const T extends readonly [string, ...string[]]>(
+  values: T,
+  fallback: T[number],
+): z.ZodType<T[number], T[number]> {
+  return z
+    .custom<T[number]>((value) => typeof value === 'string', { error: 'expected a string' })
+    .pipe(z.enum(values).catch(fallback));
+}
 
 export const PROVIDER_IDS = [
   'aeroapi',
@@ -74,8 +106,8 @@ export const FLIGHT_STATUS_VALUES = [
   'diverted',
   'unknown',
 ] as const;
-/** A status this build does not know parses as `unknown` (see the module comment). */
-export const FlightStatusValueSchema = z.enum(FLIGHT_STATUS_VALUES).catch('unknown');
+/** A status this build does not know parses as `unknown`; the field stays required. */
+export const FlightStatusValueSchema = tolerantEnum(FLIGHT_STATUS_VALUES, 'unknown');
 export type FlightStatusValue = z.infer<typeof FlightStatusValueSchema>;
 
 /** AeroAPI alert event codes. `filed` through `in` are the OOOI and ETA family. */
@@ -259,8 +291,8 @@ export const AircraftPositionSchema = z.looseObject({
 export type AircraftPosition = z.infer<typeof AircraftPositionSchema>;
 
 export const PROVIDER_EVENT_KINDS = [...ALERT_EVENTS, 'update', 'unknown'] as const;
-/** A kind this build does not know parses as `unknown` (see the module comment). */
-export const ProviderEventKindSchema = z.enum(PROVIDER_EVENT_KINDS).catch('unknown');
+/** A kind this build does not know parses as `unknown`; the field stays required. */
+export const ProviderEventKindSchema = tolerantEnum(PROVIDER_EVENT_KINDS, 'unknown');
 export type ProviderEventKind = z.infer<typeof ProviderEventKindSchema>;
 
 /**

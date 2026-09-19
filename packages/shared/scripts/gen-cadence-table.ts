@@ -21,9 +21,11 @@ import {
   DEFAULT_CADENCE_PARAMS,
   LITERAL_EXPECTED_POLLS,
   SLO_EVENTS,
+  SLO_REPORT_LEAD_TIME_DAYS,
   SLO_TABLE,
   SLO_WINDOWS,
   expectedCalls,
+  gapAcross,
   isIntervalWindow,
   sloRelaxations,
   type CadenceDefinition,
@@ -33,6 +35,7 @@ import {
   type ExpectedCalls,
   type FixedSlot,
   type FixedSlotWindow,
+  type RelaxedLeg,
   type SloEvent,
   type SloRelaxation,
   type SloWindow,
@@ -314,23 +317,20 @@ function sloTable(): string {
   return markdownTable(header, rows);
 }
 
+function formatLeg(leg: RelaxedLeg): string {
+  return `${formatFromDeparture(leg.fromMinutes)} to ${formatFromDeparture(leg.toMinutes)}`;
+}
+
 function whyAccepted(cadence: CadenceDefinition, relaxation: SloRelaxation): string {
   if (cadence.id === 'literal') {
     return 'the brief as written, kept for comparison only';
   }
   if (relaxation.alerts) {
-    return relaxation.intervalMinutes === null
-      ? 'webhooks and alerts carry the SLO (unverified)'
-      : 'alerts carry OOOI and ETA; polls only need gates';
+    return cadence.aerodataboxAlerts === null
+      ? 'alerts carry OOOI and ETA; polls only need gates'
+      : 'webhooks and alerts carry the SLO (unverified)';
   }
-  if (relaxation.relaxedLegs.length === 0) {
-    return 'plan choice, polls are the only source';
-  }
-  const legs = relaxation.relaxedLegs
-    .map(
-      (leg) => `${formatFromDeparture(leg.fromMinutes)} to ${formatFromDeparture(leg.toMinutes)}`,
-    )
-    .join(', ');
+  const legs = relaxation.relaxedLegs.map(formatLeg).join(', ');
   return `polls are the only source; the SLO holds except on ${legs}`;
 }
 
@@ -338,23 +338,42 @@ function relaxationsTable(): string {
   const rows: string[][] = [];
   for (const cadence of CADENCES) {
     for (const relaxation of sloRelaxations(cadence, { blockMinutes: BLOCK_MINUTES })) {
-      const polling =
-        relaxation.intervalMinutes === null
-          ? `fixed slots, gap up to ${formatMinutes(relaxation.maxGapMinutes)}`
-          : formatMinutes(relaxation.intervalMinutes);
       rows.push([
         cadence.id,
-        TIER_LABELS[relaxation.tier],
-        polling,
+        SLO_WINDOW_LABELS[relaxation.sloWindow],
+        relaxation.tiers.map((tier) => TIER_LABELS[tier]).join(', '),
+        formatMinutes(relaxation.maxGapMinutes),
         formatMinutes(relaxation.strictestSloMinutes),
         whyAccepted(cadence, relaxation),
       ]);
     }
   }
   return markdownTable(
-    ['Cadence', 'Window', 'Poll interval', 'Strictest poll SLO', 'Why it is accepted'],
+    [
+      'Cadence',
+      'SLO window',
+      'Cadence windows',
+      'Widest poll gap',
+      'Strictest poll SLO',
+      'Why it is accepted',
+    ],
     rows,
   );
+}
+
+/** The hole across the landing instant per cadence, from the same simulated poll sequence. */
+function landingGapLine(): string {
+  const parts = CADENCES.map((cadence) => {
+    const { pollInstants } = expectedCalls(cadence, {
+      leadTimeDays: 2,
+      blockMinutes: BLOCK_MINUTES,
+    });
+    const gap = gapAcross(pollInstants, BLOCK_MINUTES);
+    return gap === null
+      ? `${cadence.id} none`
+      : `${cadence.id} ${formatMinutes(gap.toMinutes - gap.fromMinutes)} (${formatLeg(gap)})`;
+  });
+  return `Gap across the landing instant, from the last poll before \`in\` to the first at or after it: ${parts.join('; ')}.`;
 }
 
 export function renderCadenceSection(): string {
@@ -391,9 +410,11 @@ export function renderCadenceSection(): string {
     '',
     '### Where a cadence polls slower than the SLO',
     '',
-    'Computed from the resolved window bounds of the simulated flight: a cadence window is held to the strictest poll target of every SLO window it overlaps, and a fixed-slot window is measured by the widest gap between its start, its slots and its end.',
+    `Measured from the simulated poll sequence (one creation fetch ${String(SLO_REPORT_LEAD_TIME_DAYS)} days out, then every slot \`refreshIntervalFor\` schedules, with the tail stop closing the last gap): each SLO window is charged the widest gap between consecutive polls that lies inside it or crosses one of its edges. A gap that crosses a window boundary counts against both windows; a gap that ends on the boundary counts against the earlier window only. A row appears when the widest gap exceeds the strictest poll SLO of the window.`,
     '',
     relaxationsTable(),
+    '',
+    landingGapLine(),
     '',
     '<!-- prettier-ignore-end -->',
     CADENCE_END_MARKER,

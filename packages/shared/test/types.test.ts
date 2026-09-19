@@ -1,8 +1,11 @@
 import { describe, expect, expectTypeOf, it } from 'vitest';
+import type { z } from 'zod';
 import {
   A2_EXPECTED_POLLS,
   CADENCE_A2,
   FlightStatusSchema,
+  GetStateResponseV1,
+  ProviderEventSchema,
   UnknownOperationError,
   buildFlightKey,
   expectedCalls,
@@ -55,7 +58,6 @@ import {
   type FlightTimeField,
   type FlightTimes,
   type ForceRefreshRequestV1,
-  type GetStateResponseV1,
   type IntervalWindow,
   type KeyDrift,
   type KeyReconciliation,
@@ -84,6 +86,7 @@ import {
   type SimulationParams,
   type SloEvent,
   type SloRelaxation,
+  type SloRelaxationParams,
   type SloTarget,
   type SloWindow,
   type SubscribeRequestV1,
@@ -145,6 +148,7 @@ interface TypeSurface {
   expectedCalls: ExpectedCalls;
   relaxedLeg: RelaxedLeg;
   sloRelaxation: SloRelaxation;
+  sloRelaxationParams: SloRelaxationParams;
   // flight-key
   flightKey: FlightKey;
   flightKeyErrorCode: FlightKeyErrorCode;
@@ -214,6 +218,20 @@ function maybe<T>(value: T | undefined): T | undefined {
   return value;
 }
 
+const CALL: ProviderCallRecord = {
+  id: '019968a7-4e00-7000-8000-000000000000',
+  provider: 'aeroapi',
+  operation: 'flight_by_id',
+  trigger: 'alarm',
+  requestId: 'req-1',
+  startedAt: '2026-09-19T12:00:00Z',
+  latencyMs: 210,
+  result: 'ok',
+  costUnits: 1,
+  pollEquivalents: 1,
+  estCostUsdMicros: 5_000,
+};
+
 const EXACT_STATUS: Exact<FlightStatus> = {
   operatingCarrierIcao: 'AAL',
   flightNumber: '100',
@@ -259,6 +277,31 @@ describe('Exact producer types', () => {
     expect(exact.originGate).toBe('B12');
     expectTypeOf<Exact<FlightStatus>['status']>().toEqualTypeOf<FlightStatusValue>();
     expectTypeOf<Exact<FlightStatus>['key']>().toEqualTypeOf<FlightKey | undefined>();
+  });
+
+  it('leave open-keyed records readable and writable by any string key (R12)', () => {
+    const status: Exact<FlightStatus> = {
+      ...EXACT_STATUS,
+      providerRefs: { aeroapi: 'AAL100-1758253800-airline-0' },
+      fieldQuality: { originGate: 'live' },
+    };
+    status.providerRefs['aerodatabox'] = 'adb-aa100-20260919';
+    status.fieldQuality.scheduledOut = 'schedule';
+    // Adapters return Exact<FlightStatus>[]; the tracker reads the refs and qualities back.
+    const result: ProviderResult<Exact<FlightStatus>[]> = { data: [status], call: CALL };
+    expect(result.data[0]?.providerRefs['aeroapi']).toBe('AAL100-1758253800-airline-0');
+    expect(result.data[0]?.providerRefs.aerodatabox).toBe('adb-aa100-20260919');
+    expect(result.data[0]?.fieldQuality['originGate']).toBe('live');
+    expect(result.data[0]?.fieldQuality.scheduledOut).toBe('schedule');
+    expectTypeOf<Exact<FlightStatus>['providerRefs']>().toEqualTypeOf<Record<string, string>>();
+    expectTypeOf<Exact<FlightStatus>['fieldQuality']>().toEqualTypeOf<
+      Record<string, FieldQuality>
+    >();
+    expectTypeOf<Exact<Record<string, string>>>().toEqualTypeOf<Record<string, string>>();
+    // A looseObject shape still loses its index signature.
+    expectTypeOf<keyof Exact<FlightTimes>>().toEqualTypeOf<FlightTimeField>();
+    expectTypeOf<keyof Exact<FlightStatus>>().toExtend<keyof FlightStatus>();
+    expectTypeOf<string>().not.toExtend<keyof Exact<FlightStatus>>();
   });
 
   it('cover BoardRow, AircraftPosition and ProviderEvent, which adapters also hand-map', () => {
@@ -392,5 +435,10 @@ describe('tolerant enums', () => {
     expect(FlightStatusSchema.parse(input).status).toBe('unknown');
     expectTypeOf<FlightStatusInput['status']>().toEqualTypeOf<FlightStatusValue>();
     expectTypeOf<TrackerPhase>().toEqualTypeOf<GetStateResponseV1['phase']>();
+    // The runtime accepts any string (R11) but the declared input stays the closed union.
+    expectTypeOf<z.input<typeof ProviderEventSchema>['kind']>().toEqualTypeOf<ProviderEventKind>();
+    expectTypeOf<z.input<typeof GetStateResponseV1>['phase']>().toEqualTypeOf<TrackerPhase>();
+    expectTypeOf<ProviderEventV1['rpcVersion']>().toEqualTypeOf<number>();
+    expectTypeOf<ProviderEventV1>().toExtend<ProviderEvent>();
   });
 });

@@ -30,11 +30,13 @@ newer producer must parse on an older consumer. Add fields freely; rename or ret
 - The loose inferred types carry a string index signature, which disables TypeScript's
   excess-property check. Producers (adapters, the tracker) type what they build as
   `Exact<FlightStatus>` and so on, so a misspelled field fails to compile; consumers keep the
-  loose types.
+  loose types. Open-keyed records (`providerRefs`, `fieldQuality`) keep their index signature
+  under `Exact`, so they stay readable and writable by any string key.
 - A `status`, a provider event `kind` or a tracker phase this build does not know parses as
-  `unknown`. Every other vocabulary (`ProviderId`, triggers, results, alert events, field
-  qualities, sync entities) is closed and append-only: emit a new value one release after every
-  consumer accepts it.
+  `unknown` (`tolerantEnum`); the field itself stays required, so an absent key, `null` or a
+  number is still rejected. Every other vocabulary (`ProviderId`, triggers, results, alert
+  events, field qualities, sync entities) is closed and append-only: emit a new value one
+  release after every consumer accepts it.
 
 ## Clocks and randomness
 

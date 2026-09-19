@@ -23,6 +23,7 @@ import {
   ProviderEventSchema,
   ProviderIdSchema,
   TIME_FIELDS,
+  tolerantEnum,
 } from '../src/flight-status';
 import type { FlightKey } from '../src/flight-key';
 import { AA100_INPUT, makeStatus } from './fixtures';
@@ -73,6 +74,22 @@ describe('enumerations', () => {
     expect(FlightStatusValueSchema.parse('en_route')).toBe('en_route');
     expect(ProviderEventKindSchema.parse('landed')).toBe('unknown');
     expect(PROVIDER_EVENT_KINDS).toEqual([...ALERT_EVENTS, 'update', 'unknown']);
+  });
+
+  it('still requires a string for status and kind: absent, null and a number are rejected (R11)', () => {
+    for (const schema of [FlightStatusValueSchema, ProviderEventKindSchema]) {
+      expect(schema.safeParse(undefined).success).toBe(false);
+      expect(schema.safeParse(null).success).toBe(false);
+      expect(schema.safeParse(3).success).toBe(false);
+      expect(schema.safeParse({}).success).toBe(false);
+      expect(schema.parse('never-heard-of-it')).toBe('unknown');
+      expect(schema.parse('unknown')).toBe('unknown');
+    }
+    const custom = tolerantEnum(['a', 'b', 'other'], 'other');
+    expect(custom.parse('a')).toBe('a');
+    expect(custom.parse('zzz')).toBe('other');
+    expect(custom.safeParse(1).success).toBe(false);
+    expect(custom.safeParse(undefined).success).toBe(false);
   });
 
   it('keeps every other vocabulary closed (append-only, consumers first)', () => {
@@ -159,6 +176,18 @@ describe('FlightStatusSchema', () => {
     expect(FlightStatusSchema.parse({ ...AA100_INPUT, status: 'taxiing' }).status).toBe('unknown');
   });
 
+  it('rejects a payload with no status at all (R11)', () => {
+    const withoutStatus = Object.fromEntries(
+      Object.entries(AA100_INPUT).filter(([field]) => field !== 'status'),
+    );
+    expect(FlightStatusSchema.safeParse(withoutStatus).success).toBe(false);
+    expect(FlightStatusSchema.safeParse({ ...withoutStatus, status: null }).success).toBe(false);
+    expect(FlightStatusSchema.safeParse({ ...withoutStatus, status: 4 }).success).toBe(false);
+    expect(FlightStatusSchema.safeParse({ ...withoutStatus, status: 'taxiing' }).success).toBe(
+      true,
+    );
+  });
+
   it('accepts a canonical key, a legSeq above 1 and a provider-local date', () => {
     const status = makeStatus({
       key: 'AAL-100-2026-09-19-KJFK-L2' as FlightKey,
@@ -185,6 +214,9 @@ describe('FlightStatusSchema', () => {
     ['non-string provider ref', { providerRefs: { aeroapi: 42 } }],
     ['unknown source', { source: 'flightradar' }],
     ['missing origin', { origin: undefined }],
+    ['missing status', { status: undefined }],
+    ['null status', { status: null }],
+    ['numeric status', { status: 4 }],
   ])('rejects %s', (_label, override) => {
     expect(FlightStatusSchema.safeParse({ ...AA100_INPUT, ...override }).success).toBe(false);
   });
@@ -207,9 +239,12 @@ describe('BoardRowSchema', () => {
     expect(parsed.flightKey).toBeUndefined();
   });
 
-  it('rejects an unknown direction or a bad counterpart', () => {
+  it('rejects an unknown direction, a bad counterpart or a missing status', () => {
     expect(BoardRowSchema.safeParse({ ...row, direction: 'in' }).success).toBe(false);
     expect(BoardRowSchema.safeParse({ ...row, counterpart: { iata: 'LHR' } }).success).toBe(false);
+    expect(BoardRowSchema.safeParse({ ...row, status: undefined }).success).toBe(false);
+    expect(BoardRowSchema.safeParse({ ...row, status: null }).success).toBe(false);
+    expect(BoardRowSchema.parse({ ...row, status: 'taxiing' }).status).toBe('unknown');
   });
 });
 
@@ -262,6 +297,20 @@ describe('ProviderEventSchema', () => {
     expect(PROVIDER_EVENT_KINDS).toContain('update');
     expect(PROVIDER_EVENT_KINDS).toContain('unknown');
     expect(ProviderEventKindSchema.parse('landed')).toBe('unknown');
+  });
+
+  it('requires a kind: absent, null and a number are rejected, an unknown string degrades (R11)', () => {
+    const event = {
+      provider: 'aeroapi',
+      externalId: 'evt-3',
+      receivedAt: '2026-09-20T03:55:00Z',
+      flightRef: { flightKey: 'AAL-100-2026-09-19-KJFK' },
+      payload: null,
+    };
+    expect(ProviderEventSchema.safeParse(event).success).toBe(false);
+    expect(ProviderEventSchema.safeParse({ ...event, kind: null }).success).toBe(false);
+    expect(ProviderEventSchema.safeParse({ ...event, kind: 7 }).success).toBe(false);
+    expect(ProviderEventSchema.parse({ ...event, kind: 'taxi_start' }).kind).toBe('unknown');
   });
 
   it('requires a non-empty external id', () => {
