@@ -1,12 +1,178 @@
 import { describe, expect, it } from 'vitest';
-import { PLANEAHEAD, flightKeyPlaceholder } from '../src/index';
+import * as shared from '../src/index';
+import { PLANEAHEAD } from '../src/index';
+
+/**
+ * The public surface. Removing or renaming an export is a breaking change for apps/api and
+ * apps/mobile, so the list is explicit: adding an export means adding it here.
+ */
+const EXPECTED_EXPORTS = [
+  // index
+  'PLANEAHEAD',
+  // airports
+  'AirportRefSchema',
+  'IATA_AIRPORT_RE',
+  'ICAO_AIRPORT_RE',
+  'SYNTHETIC_ICAO_RE',
+  'isSyntheticIcao',
+  'isValidTimeZone',
+  // cadence
+  'A1_EXPECTED_POLLS',
+  'A2_ALERT_EVENTS',
+  'A2_EXPECTED_ALERTS',
+  'A2_EXPECTED_PE',
+  'A2_EXPECTED_POLLS',
+  'A2_HARD_CAP_PE',
+  'A2_SOFT_CAP_PE',
+  'ASSUMED_ALERTS_PER_FLIGHT',
+  'ASSUMED_B_ADB_ALERT_ITEMS_PER_FLIGHT',
+  'ASSUMED_B_AEROAPI_ALERTS_PER_FLIGHT',
+  'B_ALERT_EVENTS',
+  'B_EXPECTED_POLLS',
+  'CADENCES',
+  'CADENCE_A1',
+  'CADENCE_A2',
+  'CADENCE_B',
+  'CADENCE_LITERAL',
+  'CadenceError',
+  'DAY_MS',
+  'DEFAULT_CADENCE_PARAMS',
+  'LIFETIME_AFTER_SCHEDULED_IN_MINUTES',
+  'LITERAL_EXPECTED_POLLS',
+  'MAX_LIFETIME',
+  'MINUTE_MS',
+  'PRE_48H_WINDOWS',
+  'SLO_EVENTS',
+  'SLO_TABLE',
+  'SLO_WINDOWS',
+  'TIER_SLO_WINDOWS',
+  'days',
+  'expectedCalls',
+  'hours',
+  'isIntervalWindow',
+  'maxLifetime',
+  'nextSlot',
+  'refreshIntervalFor',
+  'resolveWindows',
+  'slotCount',
+  'strictestPollSlo',
+  'windowAt',
+  // carriers
+  'CARRIER_IATA_TO_ICAO_FALLBACK',
+  'CarrierRefSchema',
+  'IATA_CARRIER_RE',
+  'ICAO_CARRIER_RE',
+  'carrierIcaoFromIata',
+  'resolveCarrierIcao',
+  // cost
+  'ADB_UNITS',
+  'ADB_UNIT_PRICE_USD_MICROS',
+  'AERODATABOX_OPERATIONS',
+  'AEROAPI_OPERATIONS',
+  'AEROAPI_STATUS_PRICE_USD_MICROS',
+  'LIST_PRICE_USD_MICROS',
+  'UnknownOperationError',
+  'costUnits',
+  'estimateCostUsdMicros',
+  'listPriceUsdMicros',
+  'pollEquivalents',
+  // flight-key
+  'FLIGHT_KEY_RE',
+  'FlightKeyError',
+  'FlightKeySchema',
+  'REGIONAL_OPERATOR_CONFIDENCES',
+  'REGIONAL_OPERATOR_SEED',
+  'RegionalOperatorRuleSchema',
+  'RegionalOperatorSeedSchema',
+  'buildFlightKey',
+  'canonicalizeFromProvider',
+  'classifyKeyDrift',
+  'flightNumberToken',
+  'isFlightKey',
+  'isValidIsoDate',
+  'normalizeFlightNumber',
+  'originLocalDate',
+  'parseDesignator',
+  'parseFlightKey',
+  'reconcileFlightKey',
+  'regionalOperatorHint',
+  'scheduledDepartureDateLocalOf',
+  // flight-status
+  'ALERT_EVENTS',
+  'AircraftPositionSchema',
+  'AlertEventSchema',
+  'BoardRowSchema',
+  'CodeshareSchema',
+  'FIELD_QUALITY_VALUES',
+  'FLIGHT_NUMBER_RE',
+  'FLIGHT_STATUS_VALUES',
+  'FieldQualityKeySchema',
+  'FieldQualitySchema',
+  'FlightRefSchema',
+  'FlightStatusSchema',
+  'FlightStatusValueSchema',
+  'FlightTimesSchema',
+  'ICAO_HEX_RE',
+  'IsoDateSchema',
+  'IsoInstantSchema',
+  'PROVIDER_CALL_RESULTS',
+  'PROVIDER_CALL_TRIGGERS',
+  'PROVIDER_IDS',
+  'ProviderCallRecordSchema',
+  'ProviderCallResultSchema',
+  'ProviderCallTriggerSchema',
+  'ProviderEventKindSchema',
+  'ProviderEventSchema',
+  'ProviderIdSchema',
+  'ProviderRefSchema',
+  'TIME_FIELDS',
+  // ids
+  'MissingCryptoError',
+  'UUID_V7_RE',
+  'createUuidv7Generator',
+  'isUuidv7',
+  'uuidv7',
+  'uuidv7Timestamp',
+  // live-activity
+  'LIVE_ACTIVITY_PAYLOAD_LIMIT_BYTES',
+  'LiveActivityContentStateV1',
+  // rpc
+  'ForceRefreshRequestV1',
+  'GetStateResponseV1',
+  'NotificationOverridesSchema',
+  'ProviderEventV1',
+  'RPC_SCHEMA_VERSION',
+  'SubscribeRequestV1',
+  'SubscribeResponseV1',
+  'TRACKER_PHASES',
+  'TrackerPhaseSchema',
+  'UnsubscribeRequestV1',
+  // secrets
+  'SECRET_PATTERNS',
+  'findSecretPatterns',
+  // sync
+  'SYNC_CURSOR_ORIGIN',
+  'SYNC_ENTITIES',
+  'SyncCursorError',
+  'SyncCursorSchema',
+  'SyncEntitySchema',
+  'SyncEnvelopeV1',
+  'SyncTombstoneV1',
+  'SyncUpsertV1',
+  'encodeSyncCursor',
+  'parseSyncCursor',
+].sort();
 
 describe('@planeahead/shared', () => {
   it('exports the project name constant', () => {
     expect(PLANEAHEAD).toBe('planeahead');
   });
 
-  it('builds a placeholder flight key', () => {
-    expect(flightKeyPlaceholder('aal', 100, '2026-09-19')).toBe('AAL-100-2026-09-19');
+  it('has no default export', () => {
+    expect('default' in shared).toBe(false);
+  });
+
+  it('exports exactly the documented public surface', () => {
+    expect(Object.keys(shared).sort()).toEqual(EXPECTED_EXPORTS);
   });
 });

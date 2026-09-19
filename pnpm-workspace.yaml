@@ -19,6 +19,9 @@ catalog:
   # Vitest is held at 4.1.x on purpose. @cloudflare/vitest-plugin 1.1.x peers on ^4.1,
   # and Vitest 5 breaks the Workers pool.
   vitest: ~4.1.11
+  zod: ^4.6.5
+  # tsx runs packages/shared/scripts/gen-cadence-table.ts; nothing else should need it.
+  tsx: ^4.23.13
 
   # Not installed yet. Versions verified 2026-09-19 and recorded here so the
   # increment that adds them does not have to rediscover the pin.
@@ -26,7 +29,6 @@ catalog:
   # '@cloudflare/vitest-plugin': ^1.1.13   increment 4
   # wrangler: ^4.135.0                     increment 4
   # hono: ^4.13.8                          increment 4
-  # zod: ^4.6.5                            increment 2
   # expo: ~57.0.24                         increment 9
   # drizzle-orm: 0.45.2                    increment 3
   # drizzle-kit: 0.31.10                   increment 3
@@ -42,5 +44,7 @@ minimumReleaseAgeExclude:
   - '@types/node@24.13.6'
   - turbo@2.11.2
 
-onlyBuiltDependencies:
-  - esbuild
+# pnpm 12 asks for an explicit allow list before running a dependency's install script.
+# esbuild's postinstall only verifies the platform binary that tsx (and later wrangler) need.
+allowBuilds:
+  esbuild: true
