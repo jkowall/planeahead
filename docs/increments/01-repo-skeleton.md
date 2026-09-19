@@ -1,6 +1,6 @@
 # Increment 1: repo skeleton
 
-Status: built and verified locally (2026-09-19); first push opens CI. Builder: Opus 5 (build agent; the review stage of its workflow never ran because the session hit its usage limit). Reviewer: orchestrator read only (see docs/build-log.md).
+Status: complete (2026-09-19). CI green on main at 71e3e25 (GitHub Actions run 35460411333: typecheck, lint, test, toolchain-guard). Builder: Opus 5 (build agent; the review stage of its workflow never ran because the session hit its usage limit). Reviewer: orchestrator read only (see docs/build-log.md).
 
 ## Goal
 
