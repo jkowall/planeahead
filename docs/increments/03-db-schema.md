@@ -68,7 +68,7 @@ pnpm: add `@embedded-postgres/darwin-arm64` and `@embedded-postgres/linux-x64` t
 ## Docs
 
 - `docs/schema-review.md` per the outline in the plan section 6, plus: the Better Auth ownership notes above; the connection budget with the corrected arithmetic (Neon reserves 7 connections: 0.25 CU gives 97 usable, 0.5 CU 202; Hyperdrive's ~100 is a soft ceiling; production at 0.5 CU; `origin_connection_limit` set explicitly per environment in increment 4, 80 for dev and staging); the `statement_timeout` rule (Hyperdrive pools in transaction mode, so per-request `SET` does not stick; the timeout is set with `ALTER ROLE ... SET statement_timeout` as an environment setup step, verified on the dev branch, never inside a migration); migrations only ever run over `DATABASE_URL` against the Neon direct endpoint, never through Hyperdrive; the check-constraint change behaviour found in the spike; the driver choice (postgres.js kept over node-postgres: single dependency shared with tests, tagged-template SQL, Cloudflare lists it as supported; revisit only if Hyperdrive caching shows a measurable gap).
-- `docs/adr/0002-neon-not-d1.md`, `docs/adr/0007-do-postgres-free.md` (the rule that DOs never open Postgres; the persist queue is the only writer of flight_instances and flight_events), and a short `docs/adr/0009-postgres-js-driver.md`.
+- `docs/adr/0002-neon-not-d1.md`, `docs/adr/0007-do-postgres-free.md` (the rule that DOs never open Postgres; the persist queue is the only writer of flight_instances and flight_events; justify it on alarm at-least-once retries and Hyperdrive connection counts, and do NOT cite workers-sdk#10275, which was closed as a test-side fake-timers problem), and a short `docs/adr/0009-postgres-js-driver.md`.
 
 ## Constraints
 
