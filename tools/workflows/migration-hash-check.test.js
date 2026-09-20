@@ -40,6 +40,11 @@ function regenerates(line) {
     // `--filter=!@planeahead/api` runs every package EXCEPT the one with the generator.
     return !line.includes('--filter=!@planeahead/api');
   }
+  // The root scripts (`pnpm typecheck`, `pnpm run test`) fan out through turbo to every package,
+  // including the api package whose scripts regenerate the constant.
+  if (!/turbo/.test(line) && /(^|\s)pnpm\s+(run\s+)?(typecheck|test)(\s|$)/.test(line)) {
+    return true;
+  }
   return /@planeahead\/api\b.*\b(typecheck|test|dev)\b/.test(line);
 }
 

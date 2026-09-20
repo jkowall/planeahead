@@ -63,6 +63,11 @@ export interface ChainOptions {
 /**
  * The chain's registration order, as data.
  *
+ * Building the slot list before the first `app.use()` means the Sentry middleware's `app.use`
+ * patch is installed ahead of every registration, so request-id and the Sentry middleware itself
+ * appear as `middleware.hono` spans too. Accepted: the extra spans are harmless and the trace
+ * reads the same for every slot.
+ *
  * Documentation with a check behind it, not the source of truth: `registerChain` below is the
  * source of truth, and it returns the names of the slots it registered in the order it registered
  * them. test/workers/chain.test.ts asserts that return value equals this list, so the two cannot
