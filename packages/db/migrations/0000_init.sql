@@ -93,6 +93,7 @@ CREATE TABLE "airports" (
 	"created_at" timestamp with time zone DEFAULT now() NOT NULL,
 	"updated_at" timestamp with time zone DEFAULT now() NOT NULL,
 	CONSTRAINT "airports_id_icao_key" UNIQUE("id","icao"),
+	CONSTRAINT "airports_id_icao_tz_key" UNIQUE("id","icao","tz"),
 	CONSTRAINT "airports_type_check" CHECK ("airports"."type" in ('balloonport', 'closed', 'heliport', 'large_airport', 'medium_airport', 'seaplane_base', 'small_airport')),
 	CONSTRAINT "airports_icao_source_check" CHECK ("airports"."icao_source" in ('icao_code', 'ident')),
 	CONSTRAINT "airports_tz_source_check" CHECK ("airports"."tz_source" in ('mwgg', 'override')),
@@ -386,6 +387,8 @@ CREATE TABLE "flight_instances" (
 	"provider_cost_units" integer DEFAULT 0 NOT NULL,
 	"subscriber_count" integer DEFAULT 0 NOT NULL,
 	"do_schema_version" smallint,
+	"version" integer DEFAULT 0 NOT NULL,
+	"operator_source" text,
 	"superseded_by_id" uuid,
 	"supersede_reason" text,
 	"finished_at" timestamp with time zone,
@@ -407,7 +410,9 @@ CREATE TABLE "flight_instances" (
 	CONSTRAINT "flight_instances_tracking_state_check" CHECK ("flight_instances"."tracking_state" in ('pending', 'tracking', 'airborne', 'landed', 'finished', 'archived', 'superseded')),
 	CONSTRAINT "flight_instances_refresh_cadence_check" CHECK ("flight_instances"."refresh_cadence" is null or "flight_instances"."refresh_cadence" in ('literal', 'A1', 'A2', 'B')),
 	CONSTRAINT "flight_instances_supersede_reason_check" CHECK ("flight_instances"."supersede_reason" is null or "flight_instances"."supersede_reason" in ('key_drift', 'provider_merge', 'manual')),
-	CONSTRAINT "flight_instances_superseded_consistency_check" CHECK (("flight_instances"."superseded_by_id" is null) = ("flight_instances"."supersede_reason" is null))
+	CONSTRAINT "flight_instances_superseded_consistency_check" CHECK (("flight_instances"."superseded_by_id" is null) = ("flight_instances"."supersede_reason" is null)),
+	CONSTRAINT "flight_instances_version_check" CHECK ("flight_instances"."version" >= 0),
+	CONSTRAINT "flight_instances_operator_source_check" CHECK ("flight_instances"."operator_source" is null or "flight_instances"."operator_source" in ('provider', 'callsign', 'hint', 'marketing'))
 );
 --> statement-breakpoint
 CREATE TABLE "flight_tracks" (
@@ -1194,7 +1199,7 @@ ALTER TABLE "flight_designators" ADD CONSTRAINT "flight_designators_flight_insta
 ALTER TABLE "flight_events" ADD CONSTRAINT "flight_events_flight_instance_id_flight_instances_id_fk" FOREIGN KEY ("flight_instance_id") REFERENCES "public"."flight_instances"("id") ON DELETE cascade ON UPDATE no action;--> statement-breakpoint
 ALTER TABLE "flight_instance_merges" ADD CONSTRAINT "flight_instance_merges_survivor_fk" FOREIGN KEY ("survivor_flight_instance_id") REFERENCES "public"."flight_instances"("id") ON DELETE cascade ON UPDATE no action;--> statement-breakpoint
 ALTER TABLE "flight_instance_merges" ADD CONSTRAINT "flight_instance_merges_merged_fk" FOREIGN KEY ("merged_flight_instance_id") REFERENCES "public"."flight_instances"("id") ON DELETE cascade ON UPDATE no action;--> statement-breakpoint
-ALTER TABLE "flight_instances" ADD CONSTRAINT "flight_instances_origin_airport_fk" FOREIGN KEY ("origin_airport_id","origin_icao") REFERENCES "public"."airports"("id","icao") ON DELETE restrict ON UPDATE no action;--> statement-breakpoint
+ALTER TABLE "flight_instances" ADD CONSTRAINT "flight_instances_origin_airport_fk" FOREIGN KEY ("origin_airport_id","origin_icao","origin_tz") REFERENCES "public"."airports"("id","icao","tz") ON DELETE restrict ON UPDATE no action;--> statement-breakpoint
 ALTER TABLE "flight_instances" ADD CONSTRAINT "flight_instances_destination_airport_fk" FOREIGN KEY ("destination_airport_id","destination_icao") REFERENCES "public"."airports"("id","icao") ON DELETE restrict ON UPDATE no action;--> statement-breakpoint
 ALTER TABLE "flight_tracks" ADD CONSTRAINT "flight_tracks_flight_instance_id_flight_instances_id_fk" FOREIGN KEY ("flight_instance_id") REFERENCES "public"."flight_instances"("id") ON DELETE cascade ON UPDATE no action;--> statement-breakpoint
 ALTER TABLE "flight_subscriptions" ADD CONSTRAINT "flight_subscriptions_user_id_users_id_fk" FOREIGN KEY ("user_id") REFERENCES "public"."users"("id") ON DELETE cascade ON UPDATE no action;--> statement-breakpoint

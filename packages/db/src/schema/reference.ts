@@ -85,6 +85,7 @@ export const airports = pgTable(
     // A unique constraint (not an index) because flight_instances' composite foreign keys
     // reference it and drizzle-kit emits foreign keys before indexes.
     unique('airports_id_icao_key').on(t.id, t.icao),
+    unique('airports_id_icao_tz_key').on(t.id, t.icao, t.tz),
     uniqueIndex('airports_ident_key').on(t.ident),
     uniqueIndex('airports_ourairports_id_key').on(t.ourairportsId),
     uniqueIndex('airports_iata_key')

@@ -1,6 +1,6 @@
 {
-  "id": "8aa84d6a-e82a-482a-b91e-feba63e060ab",
-  "prevId": "54aa7d18-68c8-441b-9001-11eda42b4d51",
+  "id": "152cdebe-b2d3-4de9-b5cf-2cf3fb32b917",
+  "prevId": "fcd38b4f-0c58-4677-8b59-34bf20db4c8b",
   "version": "7",
   "dialect": "postgresql",
   "tables": {
@@ -763,6 +763,11 @@
         "airports_id_icao_key": {
           "name": "airports_id_icao_key",
           "columns": ["id", "icao"],
+          "nullsNotDistinct": false
+        },
+        "airports_id_icao_tz_key": {
+          "name": "airports_id_icao_tz_key",
+          "columns": ["id", "icao", "tz"],
           "nullsNotDistinct": false
         }
       },
@@ -3117,6 +3122,19 @@
           "primaryKey": false,
           "notNull": false
         },
+        "version": {
+          "name": "version",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": true,
+          "default": 0
+        },
+        "operator_source": {
+          "name": "operator_source",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false
+        },
         "superseded_by_id": {
           "name": "superseded_by_id",
           "type": "uuid",
@@ -3295,9 +3313,9 @@
         "flight_instances_origin_airport_fk": {
           "name": "flight_instances_origin_airport_fk",
           "tableFrom": "flight_instances",
-          "columnsFrom": ["origin_airport_id", "origin_icao"],
+          "columnsFrom": ["origin_airport_id", "origin_icao", "origin_tz"],
           "tableTo": "airports",
-          "columnsTo": ["id", "icao"],
+          "columnsTo": ["id", "icao", "tz"],
           "onUpdate": "no action",
           "onDelete": "restrict"
         },
@@ -3374,6 +3392,14 @@
         "flight_instances_superseded_consistency_check": {
           "name": "flight_instances_superseded_consistency_check",
           "value": "(\"flight_instances\".\"superseded_by_id\" is null) = (\"flight_instances\".\"supersede_reason\" is null)"
+        },
+        "flight_instances_version_check": {
+          "name": "flight_instances_version_check",
+          "value": "\"flight_instances\".\"version\" >= 0"
+        },
+        "flight_instances_operator_source_check": {
+          "name": "flight_instances_operator_source_check",
+          "value": "\"flight_instances\".\"operator_source\" is null or \"flight_instances\".\"operator_source\" in ('provider', 'callsign', 'hint', 'marketing')"
         }
       },
       "isRLSEnabled": false

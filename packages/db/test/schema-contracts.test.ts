@@ -356,17 +356,26 @@ describe('column conventions', () => {
     expect(missing).toEqual([]);
   });
 
-  it('ties a flight instance to its airports with composite foreign keys on (id, icao)', () => {
+  it('ties a flight instance to its airports with composite foreign keys (origin also carries the zone)', () => {
     const flights = byName.get('flight_instances')!;
     const fks = Object.values(flights.foreignKeys).filter((fk) => fk.tableTo === 'airports');
     expect(fks.map((fk) => [fk.columnsFrom, fk.columnsTo, fk.onDelete]).sort()).toEqual([
       [['destination_airport_id', 'destination_icao'], ['id', 'icao'], 'restrict'],
-      [['origin_airport_id', 'origin_icao'], ['id', 'icao'], 'restrict'],
+      [['origin_airport_id', 'origin_icao', 'origin_tz'], ['id', 'icao', 'tz'], 'restrict'],
     ]);
-    expect(byName.get('airports')!.uniqueConstraints['airports_id_icao_key']?.columns).toEqual([
+    const airports = byName.get('airports')!;
+    expect(airports.uniqueConstraints['airports_id_icao_key']?.columns).toEqual(['id', 'icao']);
+    expect(airports.uniqueConstraints['airports_id_icao_tz_key']?.columns).toEqual([
       'id',
       'icao',
+      'tz',
     ]);
+    // A known origin must carry its zone, or a null would let the MATCH SIMPLE FK skip the row.
+    expect(Object.keys(flights.checkConstraints)).toContain('flight_instances_origin_tz_check');
+    expect(flights.columns['version']?.default).toBe(0);
+    expect(Object.keys(flights.checkConstraints)).toContain(
+      'flight_instances_operator_source_check',
+    );
   });
 
   it('dedupes notifications per user and gives rate_limits a purge index', () => {

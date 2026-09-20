@@ -76,6 +76,7 @@ export async function seedAirports(db: Db, options: SeedOptions = {}): Promise<S
   const uniqueIcao = new UniqueTracker('airports', 'icao');
   const uniqueIdent = new UniqueTracker('airports', 'ident');
   const uniqueOurairportsId = new UniqueTracker('airports', 'ourairports_id');
+  const uniqueIata = new UniqueTracker('airports', 'iata');
   const airportCode = new RegExp(AIRPORT_CODE_SQL_RE);
   const realIcao = new RegExp(ICAO_AIRPORT_SQL_RE);
   const rows: (typeof airports.$inferInsert)[] = [];
@@ -87,6 +88,10 @@ export async function seedAirports(db: Db, options: SeedOptions = {}): Promise<S
     uniqueIcao.claim(icao, sourceRow);
     uniqueIdent.claim(ident, sourceRow);
     uniqueOurairportsId.claim(column(record, 'id'), sourceRow);
+    const iataCode = column(record, 'iata_code');
+    if (iataCode !== '') {
+      uniqueIata.claim(iataCode, sourceRow);
+    }
 
     const tzMwgg = column(record, 'tz_mwgg');
     const override = overrides[icao];

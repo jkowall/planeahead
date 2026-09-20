@@ -101,7 +101,8 @@ export async function assertUtcServer(url: string, source: string): Promise<void
     const [row] = await sql<{ tz: string; offset: string }[]>`
       select current_setting('TimeZone') as tz, extract(timezone from now())::text as offset
     `;
-    if (row === undefined || Number(row.offset) !== 0) {
+    const utcZones = new Set(['UTC', 'Etc/UTC', 'GMT', 'Etc/GMT']);
+    if (row === undefined || Number(row.offset) !== 0 || !utcZones.has(row.tz)) {
       throw new ServerTimeZoneError(
         `the ${source} database session TimeZone is ${row?.tz ?? 'unknown'} (offset ${row?.offset ?? '?'} s). ` +
           'The suite and the environment rule need UTC: run ' +

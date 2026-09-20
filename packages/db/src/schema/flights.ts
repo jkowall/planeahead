@@ -73,6 +73,8 @@ export const TRACKING_STATES = [
 export const ACTIVE_TRACKING_STATES = ['pending', 'tracking', 'airborne', 'landed'] as const;
 export const REFRESH_CADENCES = ['literal', 'A1', 'A2', 'B'] as const;
 export const SUPERSEDE_REASONS = ['key_drift', 'provider_merge', 'manual'] as const;
+/** Mirrors FlightStatus.operatorSource in @planeahead/shared (increment 6). */
+export const OPERATOR_SOURCES = ['provider', 'callsign', 'hint', 'marketing'] as const;
 
 /**
  * The frozen flight_key expression. Equivalent to
@@ -134,6 +136,14 @@ export const flightInstances = pgTable(
     providerCostUnits: integer('provider_cost_units').notNull().default(0),
     subscriberCount: integer('subscriber_count').notNull().default(0),
     doSchemaVersion: smallint('do_schema_version'),
+    /**
+     * Monotonic snapshot version set by the FlightTracker; the persist consumer's upsert only
+     * applies a row whose version is greater than the stored one (Queues deliver at least once
+     * and out of order, increment 7).
+     */
+    version: integer('version').notNull().default(0),
+    /** How the operating carrier in the key was determined (increment 6, ADR 0010). */
+    operatorSource: text('operator_source'),
     // merge and archive
     supersededById: uuid('superseded_by_id'),
     supersedeReason: text('supersede_reason'),
@@ -148,8 +158,8 @@ export const flightInstances = pgTable(
     // names cannot be deleted from under it.
     foreignKey({
       name: 'flight_instances_origin_airport_fk',
-      columns: [t.originAirportId, t.originIcao],
-      foreignColumns: [airports.id, airports.icao],
+      columns: [t.originAirportId, t.originIcao, t.originTz],
+      foreignColumns: [airports.id, airports.icao, airports.tz],
     }).onDelete('restrict'),
     foreignKey({
       name: 'flight_instances_destination_airport_fk',
@@ -198,7 +208,9 @@ export const flightInstances = pgTable(
     ),
     formatCheck('flight_instances_icao_hex_check', t.icaoHex, ICAO_HEX_SQL_RE),
     // Knowing the airport row implies knowing its code and its zone (the zone decides the
-    // origin-local date in the frozen key).
+    // origin-local date in the frozen key). The composite FK above ties all three together once
+    // present; this check makes the zone mandatory whenever the airport is known, because a
+    // MATCH SIMPLE foreign key skips rows with a null in any referencing column.
     check(
       'flight_instances_origin_tz_check',
       sql`${t.originAirportId} is null or ${t.originTz} is not null`,
@@ -224,6 +236,11 @@ export const flightInstances = pgTable(
     check(
       'flight_instances_superseded_consistency_check',
       sql`(${t.supersededById} is null) = (${t.supersedeReason} is null)`,
+    ),
+    check('flight_instances_version_check', sql`${t.version} >= 0`),
+    check(
+      'flight_instances_operator_source_check',
+      sql`${t.operatorSource} is null or ${t.operatorSource} in (${inList(OPERATOR_SOURCES)})`,
     ),
   ],
 );

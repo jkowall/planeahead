@@ -298,6 +298,16 @@ by design, pseudonymous). Rows: order of magnitude twelve months in, after reten
 Natural keys used for idempotent upserts by the seed loaders: `airports.icao`, `airlines.icao`,
 `aircraft_types.icao`, `regional_operators (marketing_iata, number_from, number_to)`.
 
+- `flight_instances.version` is the monotonic snapshot version the FlightTracker sets; the persist
+  consumer applies an upsert only when the incoming version is greater than the stored one, so
+  at-least-once and out-of-order queue delivery can never move a row backwards (increment 7).
+- `flight_instances.operator_source` records how the operating carrier in the key was decided
+  (`provider`, `callsign`, `hint`, `marketing`); AeroDataBox never returns an operator, so the key
+  carries the best-known operator at creation and the Phase 1 merge path reconciles (ADR 0010).
+- `flight_instances (origin_airport_id, origin_icao, origin_tz)` references
+  `airports (id, icao, tz)`, so a resolved origin cannot disagree with the airport row on code or
+  zone; the zone is what decides the origin-local date inside the frozen key.
+
 ## 7. Write-path ownership
 
 | Table group                                                                                                                      | Only writer                                                                                  | Everyone else                                                                                                                            |

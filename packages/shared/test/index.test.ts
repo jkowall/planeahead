@@ -118,6 +118,7 @@ const EXPECTED_EXPORTS = [
   'FlightStatusValueSchema',
   'FlightTimesSchema',
   'ICAO_HEX_RE',
+  'normalizeIcaoHex',
   'IsoDateSchema',
   'IsoInstantSchema',
   'PROVIDER_CALL_RESULTS',
