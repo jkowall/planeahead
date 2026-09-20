@@ -13,14 +13,17 @@ else belongs in a code comment.
 
 ## Index
 
-| ADR                        | Title                                                 | Status   |
-| -------------------------- | ----------------------------------------------------- | -------- |
-| [0000](0000-template.md)   | Template                                              | n/a      |
-| [0003](0003-flight-key.md) | Flight identity: the canonical flight key             | Accepted |
-| [0006](0006-uuidv7.md)     | UUIDv7 primary keys generated in `@planeahead/shared` | Accepted |
+| ADR                                | Title                                                  | Status   |
+| ---------------------------------- | ------------------------------------------------------ | -------- |
+| [0000](0000-template.md)           | Template                                               | n/a      |
+| [0002](0002-neon-not-d1.md)        | Neon Postgres 18 through Hyperdrive, not Cloudflare D1 | Accepted |
+| [0003](0003-flight-key.md)         | Flight identity: the canonical flight key              | Accepted |
+| [0006](0006-uuidv7.md)             | UUIDv7 primary keys generated in `@planeahead/shared`  | Accepted |
+| [0007](0007-do-postgres-free.md)   | Durable Objects never open Postgres                    | Accepted |
+| [0009](0009-postgres-js-driver.md) | postgres.js as the single Postgres driver              | Accepted |
 
-0003 (flight key) and 0006 (uuidv7) were written in increment 2. The Phase 0 plan lists the ADRs
-due in later increments: 0001 Expo, 0002 Neon not D1, 0004 Hono RPC, 0005 identifiers, 0007 Durable
-Objects never open Postgres (every DO write goes through the persist queue), 0008 expo-widgets.
-Their rationale is already written up in [docs/plans/phase0-plan.md](../plans/phase0-plan.md)
-section 3; each increment lifts the relevant row into its own ADR.
+0003 (flight key) and 0006 (uuidv7) were written in increment 2; 0002, 0007 and 0009 in
+increment 3. The Phase 0 plan lists the ADRs due in later increments: 0001 Expo, 0004 Hono RPC,
+0005 identifiers, 0008 expo-widgets. Their rationale is already written up in
+[docs/plans/phase0-plan.md](../plans/phase0-plan.md) section 3; each increment lifts the relevant
+row into its own ADR.

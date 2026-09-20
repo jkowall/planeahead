@@ -22,3 +22,8 @@ apps/mobile/android/
 docs/plans/
 docs/research/
 docs/increments/
+
+# Generated seed data and its manifest: written byte-for-byte by packages/db/scripts, hashed in
+# MANIFEST.json, never reformatted (LICENSES.md is hand-written and stays formatted)
+packages/db/seed/data/*.csv
+packages/db/seed/data/*.json

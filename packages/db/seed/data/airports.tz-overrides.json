@@ -1,0 +1,4478 @@
+{
+  "$comment": "Curated on 2026-09-20 by scripts/curate-tz-overrides.mjs: each geo-tz candidate from airports.tz-review.json was checked against the airport's ISO country using IANA zone1970.tab and accepted only when the zone lists that country. This file is committed as reviewed data (the geo-tz boundary data is ODbL and is never used at build or run time). Rejected candidates are in airports.tz-rejected.json.",
+  "curated_on": "2026-09-20",
+  "accepted": 739,
+  "entries": {
+    "03N": {
+      "tz": "Pacific/Majuro",
+      "canonical": "Pacific/Tarawa",
+      "iso_country": "MH",
+      "name": "Utirik Airport",
+      "source": "geo-tz candidate, accepted because zone1970.tab lists the airport country for the zone"
+    },
+    "19P": {
+      "tz": "America/Sitka",
+      "iso_country": "US",
+      "name": "Port Protection Seaplane Base",
+      "source": "geo-tz candidate, accepted because zone1970.tab lists the airport country for the zone"
+    },
+    "1RL": {
+      "tz": "America/Los_Angeles",
+      "iso_country": "US",
+      "name": "Point Roberts Airpark",
+      "source": "geo-tz candidate, accepted because zone1970.tab lists the airport country for the zone"
+    },
+    "2U7": {
+      "tz": "America/Boise",
+      "iso_country": "US",
+      "name": "Stanley Airport",
+      "source": "geo-tz candidate, accepted because zone1970.tab lists the airport country for the zone"
+    },
+    "4A2": {
+      "tz": "America/Nome",
+      "iso_country": "US",
+      "name": "Atmautluak Airport",
+      "source": "geo-tz candidate, accepted because zone1970.tab lists the airport country for the zone"
+    },
+    "4K0": {
+      "tz": "America/Anchorage",
+      "iso_country": "US",
+      "name": "Pedro Bay Airport",
+      "source": "geo-tz candidate, accepted because zone1970.tab lists the airport country for the zone"
+    },
+    "4K5": {
+      "tz": "America/Anchorage",
+      "iso_country": "US",
+      "name": "Ouzinkie Airport",
+      "source": "geo-tz candidate, accepted because zone1970.tab lists the airport country for the zone"
+    },
+    "4KA": {
+      "tz": "America/Nome",
+      "iso_country": "US",
+      "name": "Tununak Airport",
+      "source": "geo-tz candidate, accepted because zone1970.tab lists the airport country for the zone"
+    },
+    "4Z7": {
+      "tz": "America/Sitka",
+      "iso_country": "US",
+      "name": "Hyder Seaplane Base",
+      "source": "geo-tz candidate, accepted because zone1970.tab lists the airport country for the zone"
+    },
+    "51Z": {
+      "tz": "America/Anchorage",
+      "iso_country": "US",
+      "name": "Minto Al Wright Airport",
+      "source": "geo-tz candidate, accepted because zone1970.tab lists the airport country for the zone"
+    },
+    "5A8": {
+      "tz": "America/Anchorage",
+      "iso_country": "US",
+      "name": "Aleknagik / New Airport",
+      "source": "geo-tz candidate, accepted because zone1970.tab lists the airport country for the zone"
+    },
+    "5KE": {
+      "tz": "America/Sitka",
+      "iso_country": "US",
+      "name": "Ketchikan Harbor Seaplane Base",
+      "source": "geo-tz candidate, accepted because zone1970.tab lists the airport country for the zone"
+    },
+    "5Z9": {
+      "tz": "America/Anchorage",
+      "iso_country": "US",
+      "name": "Lake Brooks Seaplane Base",
+      "source": "geo-tz candidate, accepted because zone1970.tab lists the airport country for the zone"
+    },
+    "6N5": {
+      "tz": "America/New_York",
+      "iso_country": "US",
+      "name": "East 34th Street Heliport",
+      "source": "geo-tz candidate, accepted because zone1970.tab lists the airport country for the zone"
+    },
+    "6Y8": {
+      "tz": "America/Detroit",
+      "iso_country": "US",
+      "name": "Welke Airport",
+      "source": "geo-tz candidate, accepted because zone1970.tab lists the airport country for the zone"
+    },
+    "89D": {
+      "tz": "America/New_York",
+      "iso_country": "US",
+      "name": "Kelleys Island Land Field",
+      "source": "geo-tz candidate, accepted because zone1970.tab lists the airport country for the zone"
+    },
+    "96Z": {
+      "tz": "America/Sitka",
+      "iso_country": "US",
+      "name": "Whale Pass Seaplane Float Harbor Facility",
+      "source": "geo-tz candidate, accepted because zone1970.tab lists the airport country for the zone"
+    },
+    "A29": {
+      "tz": "America/Sitka",
+      "iso_country": "US",
+      "name": "Sitka Seaplane Base",
+      "source": "geo-tz candidate, accepted because zone1970.tab lists the airport country for the zone"
+    },
+    "A61": {
+      "tz": "America/Nome",
+      "iso_country": "US",
+      "name": "Tuntutuliak Airport",
+      "source": "geo-tz candidate, accepted because zone1970.tab lists the airport country for the zone"
+    },
+    "A63": {
+      "tz": "America/Anchorage",
+      "iso_country": "US",
+      "name": "Twin Hills Airport",
+      "source": "geo-tz candidate, accepted because zone1970.tab lists the airport country for the zone"
+    },
+    "A79": {
+      "tz": "America/Anchorage",
+      "iso_country": "US",
+      "name": "Chignik Lake Airport",
+      "source": "geo-tz candidate, accepted because zone1970.tab lists the airport country for the zone"
+    },
+    "AF-0017": {
+      "tz": "Asia/Kabul",
+      "iso_country": "AF",
+      "name": "Salerno South Airport",
+      "source": "geo-tz candidate, accepted because zone1970.tab lists the airport country for the zone"
+    },
+    "AF15": {
+      "tz": "Asia/Kabul",
+      "iso_country": "AF",
+      "name": "Qara Tepa Heliport",
+      "source": "geo-tz candidate, accepted because zone1970.tab lists the airport country for the zone"
+    },
+    "AGOB": {
+      "tz": "Pacific/Guadalcanal",
+      "iso_country": "SB",
+      "name": "Manaoba Airport",
+      "source": "geo-tz candidate, accepted because zone1970.tab lists the airport country for the zone"
+    },
+    "AK62": {
+      "tz": "America/Sitka",
+      "iso_country": "US",
+      "name": "Naukati Bay Seaplane Base",
+      "source": "geo-tz candidate, accepted because zone1970.tab lists the airport country for the zone"
+    },
+    "AK81": {
+      "tz": "America/Anchorage",
+      "iso_country": "US",
+      "name": "Amook Bay Seaplane Base",
+      "source": "geo-tz candidate, accepted because zone1970.tab lists the airport country for the zone"
+    },
+    "ALZ": {
+      "tz": "America/Anchorage",
+      "iso_country": "US",
+      "name": "Alitak Seaplane Base",
+      "source": "geo-tz candidate, accepted because zone1970.tab lists the airport country for the zone"
+    },
+    "AQ-0016": {
+      "tz": "Antarctica/Rothera",
+      "iso_country": "AQ",
+      "name": "Grandfather Skiway",
+      "source": "geo-tz candidate, accepted because zone1970.tab lists the airport country for the zone"
+    },
+    "AQBC": {
+      "tz": "Antarctica/McMurdo",
+      "canonical": "Pacific/Auckland",
+      "iso_country": "AQ",
+      "name": "Boulder Clay Runway",
+      "source": "geo-tz candidate, accepted because zone1970.tab lists the airport country for the zone"
+    },
+    "AR-0503": {
+      "tz": "America/Argentina/Catamarca",
+      "iso_country": "AR",
+      "name": "Gan Gan Field",
+      "source": "geo-tz candidate, accepted because zone1970.tab lists the airport country for the zone"
+    },
+    "AR-0767": {
+      "tz": "America/Argentina/Cordoba",
+      "iso_country": "AR",
+      "name": "Aeroestación Yabotí",
+      "source": "geo-tz candidate, accepted because zone1970.tab lists the airport country for the zone"
+    },
+    "AR-0768": {
+      "tz": "America/Argentina/Buenos_Aires",
+      "iso_country": "AR",
+      "name": "[Duplicate] Aeropuerto Pergamino",
+      "source": "geo-tz candidate, accepted because zone1970.tab lists the airport country for the zone"
+    },
+    "AT28": {
+      "tz": "Antarctica/Vostok",
+      "iso_country": "AQ",
+      "name": "Vostok Skiway",
+      "source": "geo-tz candidate, accepted because zone1970.tab lists the airport country for the zone"
+    },
+    "AU-HIS": {
+      "tz": "Australia/Lindeman",
+      "iso_country": "AU",
+      "name": "Hayman Island Resort Seaplane Base",
+      "source": "geo-tz candidate, accepted because zone1970.tab lists the airport country for the zone"
+    },
+    "AYET": {
+      "tz": "Pacific/Port_Moresby",
+      "iso_country": "PG",
+      "name": "Bosset Airport",
+      "source": "geo-tz candidate, accepted because zone1970.tab lists the airport country for the zone"
+    },
+    "AYOB": {
+      "tz": "Pacific/Port_Moresby",
+      "iso_country": "PG",
+      "name": "Obo Airport",
+      "source": "geo-tz candidate, accepted because zone1970.tab lists the airport country for the zone"
+    },
+    "AZ-0013": {
+      "tz": "Asia/Baku",
+      "iso_country": "AZ",
+      "name": "Sitalchay Airbase",
+      "source": "geo-tz candidate, accepted because zone1970.tab lists the airport country for the zone"
+    },
+    "AZ-0021": {
+      "tz": "Asia/Baku",
+      "iso_country": "AZ",
+      "name": "Qizilagach Air Base",
+      "source": "geo-tz candidate, accepted because zone1970.tab lists the airport country for the zone"
+    },
+    "BCW": {
+      "tz": "Africa/Maputo",
+      "iso_country": "MZ",
+      "name": "Benguera Island Airport",
+      "source": "geo-tz candidate, accepted because zone1970.tab lists the airport country for the zone"
+    },
+    "BGAG": {
+      "tz": "America/Nuuk",
+      "iso_country": "GL",
+      "name": "Aappilattoq Heliport",
+      "source": "geo-tz candidate, accepted because zone1970.tab lists the airport country for the zone"
+    },
+    "BGAM": {
+      "tz": "America/Nuuk",
+      "iso_country": "GL",
+      "name": "Tasiilaq Heliport",
+      "source": "geo-tz candidate, accepted because zone1970.tab lists the airport country for the zone"
+    },
+    "BGAP": {
+      "tz": "America/Nuuk",
+      "iso_country": "GL",
+      "name": "Alluitsup Paa Heliport",
+      "source": "geo-tz candidate, accepted because zone1970.tab lists the airport country for the zone"
+    },
+    "BGAQ": {
+      "tz": "America/Nuuk",
+      "iso_country": "GL",
+      "name": "Aappilattoq Heliport",
+      "source": "geo-tz candidate, accepted because zone1970.tab lists the airport country for the zone"
+    },
+    "BGAS": {
+      "tz": "America/Nuuk",
+      "iso_country": "GL",
+      "name": "Ammassivik Heliport",
+      "source": "geo-tz candidate, accepted because zone1970.tab lists the airport country for the zone"
+    },
+    "BGAT": {
+      "tz": "America/Nuuk",
+      "iso_country": "GL",
+      "name": "Attu Heliport",
+      "source": "geo-tz candidate, accepted because zone1970.tab lists the airport country for the zone"
+    },
+    "BGCH": {
+      "tz": "America/Nuuk",
+      "iso_country": "GL",
+      "name": "Qasigiannguit Heliport",
+      "source": "geo-tz candidate, accepted because zone1970.tab lists the airport country for the zone"
+    },
+    "BGET": {
+      "tz": "America/Nuuk",
+      "iso_country": "GL",
+      "name": "Eqalugaarsuit Heliport",
+      "source": "geo-tz candidate, accepted because zone1970.tab lists the airport country for the zone"
+    },
+    "BGFD": {
+      "tz": "America/Nuuk",
+      "iso_country": "GL",
+      "name": "Narsarmijit Heliport",
+      "source": "geo-tz candidate, accepted because zone1970.tab lists the airport country for the zone"
+    },
+    "BGGD": {
+      "tz": "America/Nuuk",
+      "iso_country": "GL",
+      "name": "Kangilinnguit Heliport",
+      "source": "geo-tz candidate, accepted because zone1970.tab lists the airport country for the zone"
+    },
+    "BGGN": {
+      "tz": "America/Nuuk",
+      "iso_country": "GL",
+      "name": "Qeqertarsuaq Heliport",
+      "source": "geo-tz candidate, accepted because zone1970.tab lists the airport country for the zone"
+    },
+    "BGIA": {
+      "tz": "America/Nuuk",
+      "iso_country": "GL",
+      "name": "Ikerasak Heliport",
+      "source": "geo-tz candidate, accepted because zone1970.tab lists the airport country for the zone"
+    },
+    "BGIG": {
+      "tz": "America/Nuuk",
+      "iso_country": "GL",
+      "name": "Iginniarfik Heliport",
+      "source": "geo-tz candidate, accepted because zone1970.tab lists the airport country for the zone"
+    },
+    "BGIK": {
+      "tz": "America/Nuuk",
+      "iso_country": "GL",
+      "name": "Ikerassaarsuk Heliport",
+      "source": "geo-tz candidate, accepted because zone1970.tab lists the airport country for the zone"
+    },
+    "BGIL": {
+      "tz": "America/Nuuk",
+      "iso_country": "GL",
+      "name": "Ilimanaq Heliport",
+      "source": "geo-tz candidate, accepted because zone1970.tab lists the airport country for the zone"
+    },
+    "BGIN": {
+      "tz": "America/Nuuk",
+      "iso_country": "GL",
+      "name": "Innarsuit Heliport",
+      "source": "geo-tz candidate, accepted because zone1970.tab lists the airport country for the zone"
+    },
+    "BGIS": {
+      "tz": "America/Nuuk",
+      "iso_country": "GL",
+      "name": "Isortoq Heliport",
+      "source": "geo-tz candidate, accepted because zone1970.tab lists the airport country for the zone"
+    },
+    "BGIT": {
+      "tz": "America/Nuuk",
+      "iso_country": "GL",
+      "name": "Ikamiut Heliport",
+      "source": "geo-tz candidate, accepted because zone1970.tab lists the airport country for the zone"
+    },
+    "BGJH": {
+      "tz": "America/Nuuk",
+      "iso_country": "GL",
+      "name": "Qaqortoq Heliport",
+      "source": "geo-tz candidate, accepted because zone1970.tab lists the airport country for the zone"
+    },
+    "BGKA": {
+      "tz": "America/Nuuk",
+      "iso_country": "GL",
+      "name": "Kangaatsiaq Heliport",
+      "source": "geo-tz candidate, accepted because zone1970.tab lists the airport country for the zone"
+    },
+    "BGKL": {
+      "tz": "America/Nuuk",
+      "iso_country": "GL",
+      "name": "Upernavik Kujalleq Heliport",
+      "source": "geo-tz candidate, accepted because zone1970.tab lists the airport country for the zone"
+    },
+    "BGKM": {
+      "tz": "America/Nuuk",
+      "iso_country": "GL",
+      "name": "Kuummiut Heliport",
+      "source": "geo-tz candidate, accepted because zone1970.tab lists the airport country for the zone"
+    },
+    "BGKS": {
+      "tz": "America/Nuuk",
+      "iso_country": "GL",
+      "name": "Kangersuatsiaq Heliport",
+      "source": "geo-tz candidate, accepted because zone1970.tab lists the airport country for the zone"
+    },
+    "BGKT": {
+      "tz": "America/Nuuk",
+      "iso_country": "GL",
+      "name": "Kitsissuarsuit Heliport",
+      "source": "geo-tz candidate, accepted because zone1970.tab lists the airport country for the zone"
+    },
+    "BGLL": {
+      "tz": "America/Nuuk",
+      "iso_country": "GL",
+      "name": "Illorsuit Heliport",
+      "source": "geo-tz candidate, accepted because zone1970.tab lists the airport country for the zone"
+    },
+    "BGNK": {
+      "tz": "America/Nuuk",
+      "iso_country": "GL",
+      "name": "Niaqornaarsuk Heliport",
+      "source": "geo-tz candidate, accepted because zone1970.tab lists the airport country for the zone"
+    },
+    "BGNN": {
+      "tz": "America/Nuuk",
+      "iso_country": "GL",
+      "name": "Nanortalik Heliport",
+      "source": "geo-tz candidate, accepted because zone1970.tab lists the airport country for the zone"
+    },
+    "BGNQ": {
+      "tz": "America/Nuuk",
+      "iso_country": "GL",
+      "name": "Nuugaatsiaq Heliport",
+      "source": "geo-tz candidate, accepted because zone1970.tab lists the airport country for the zone"
+    },
+    "BGNS": {
+      "tz": "America/Nuuk",
+      "iso_country": "GL",
+      "name": "Narsaq Heliport",
+      "source": "geo-tz candidate, accepted because zone1970.tab lists the airport country for the zone"
+    },
+    "BGNT": {
+      "tz": "America/Nuuk",
+      "iso_country": "GL",
+      "name": "Niaqornat Heliport",
+      "source": "geo-tz candidate, accepted because zone1970.tab lists the airport country for the zone"
+    },
+    "BGQE": {
+      "tz": "America/Nuuk",
+      "iso_country": "GL",
+      "name": "Qeqertaq Heliport",
+      "source": "geo-tz candidate, accepted because zone1970.tab lists the airport country for the zone"
+    },
+    "BGQO": {
+      "tz": "America/Nuuk",
+      "iso_country": "GL",
+      "name": "Qaqortoq Airport",
+      "source": "geo-tz candidate, accepted because zone1970.tab lists the airport country for the zone"
+    },
+    "BGQT": {
+      "tz": "America/Nuuk",
+      "iso_country": "GL",
+      "name": "Qassimiut Heliport",
+      "source": "geo-tz candidate, accepted because zone1970.tab lists the airport country for the zone"
+    },
+    "BGSC": {
+      "tz": "America/Scoresbysund",
+      "iso_country": "GL",
+      "name": "Ittoqqortoormiit Heliport",
+      "source": "geo-tz candidate, accepted because zone1970.tab lists the airport country for the zone"
+    },
+    "BGSI": {
+      "tz": "America/Thule",
+      "iso_country": "GL",
+      "name": "Siorapaluk Heliport",
+      "source": "geo-tz candidate, accepted because zone1970.tab lists the airport country for the zone"
+    },
+    "BGSO": {
+      "tz": "America/Nuuk",
+      "iso_country": "GL",
+      "name": "Saarloq Heliport",
+      "source": "geo-tz candidate, accepted because zone1970.tab lists the airport country for the zone"
+    },
+    "BGSQ": {
+      "tz": "America/Nuuk",
+      "iso_country": "GL",
+      "name": "Saqqaq Heliport",
+      "source": "geo-tz candidate, accepted because zone1970.tab lists the airport country for the zone"
+    },
+    "BGST": {
+      "tz": "America/Nuuk",
+      "iso_country": "GL",
+      "name": "Saattut Heliport",
+      "source": "geo-tz candidate, accepted because zone1970.tab lists the airport country for the zone"
+    },
+    "BGSV": {
+      "tz": "America/Thule",
+      "iso_country": "GL",
+      "name": "Savissivik Heliport",
+      "source": "geo-tz candidate, accepted because zone1970.tab lists the airport country for the zone"
+    },
+    "BGTA": {
+      "tz": "America/Nuuk",
+      "iso_country": "GL",
+      "name": "Tasiusaq Heliport",
+      "source": "geo-tz candidate, accepted because zone1970.tab lists the airport country for the zone"
+    },
+    "BGTN": {
+      "tz": "America/Nuuk",
+      "iso_country": "GL",
+      "name": "Tiniteqilaaq Heliport",
+      "source": "geo-tz candidate, accepted because zone1970.tab lists the airport country for the zone"
+    },
+    "BGTQ": {
+      "tz": "America/Nuuk",
+      "iso_country": "GL",
+      "name": "Tasiusaq Heliport",
+      "source": "geo-tz candidate, accepted because zone1970.tab lists the airport country for the zone"
+    },
+    "BGUM": {
+      "tz": "America/Nuuk",
+      "iso_country": "GL",
+      "name": "Uummannaq Heliport",
+      "source": "geo-tz candidate, accepted because zone1970.tab lists the airport country for the zone"
+    },
+    "BGUT": {
+      "tz": "America/Nuuk",
+      "iso_country": "GL",
+      "name": "Ukkusissat Heliport",
+      "source": "geo-tz candidate, accepted because zone1970.tab lists the airport country for the zone"
+    },
+    "BJT": {
+      "tz": "Asia/Colombo",
+      "iso_country": "LK",
+      "name": "Bentota River Waterdrome",
+      "source": "geo-tz candidate, accepted because zone1970.tab lists the airport country for the zone"
+    },
+    "BR-0352": {
+      "tz": "America/Sao_Paulo",
+      "iso_country": "BR",
+      "name": "N. S. A. Heliport",
+      "source": "geo-tz candidate, accepted because zone1970.tab lists the airport country for the zone"
+    },
+    "BR-2182": {
+      "tz": "America/Fortaleza",
+      "iso_country": "BR",
+      "name": "Russas - João de Deus Regional Airport",
+      "source": "geo-tz candidate, accepted because zone1970.tab lists the airport country for the zone"
+    },
+    "BR-3221": {
+      "tz": "America/Sao_Paulo",
+      "iso_country": "BR",
+      "name": "Eletrocity Heliport",
+      "source": "geo-tz candidate, accepted because zone1970.tab lists the airport country for the zone"
+    },
+    "BS-NSB": {
+      "tz": "America/Nassau",
+      "canonical": "America/Toronto",
+      "iso_country": "BS",
+      "name": "Bimini North Seaplane Base",
+      "source": "geo-tz candidate, accepted because zone1970.tab lists the airport country for the zone"
+    },
+    "BY-0001": {
+      "tz": "Europe/Minsk",
+      "iso_country": "BY",
+      "name": "Orsha Airport - Balbasovo Air Base",
+      "source": "geo-tz candidate, accepted because zone1970.tab lists the airport country for the zone"
+    },
+    "BZ-SJX": {
+      "tz": "America/Belize",
+      "iso_country": "BZ",
+      "name": "Sartaneja Airport",
+      "source": "geo-tz candidate, accepted because zone1970.tab lists the airport country for the zone"
+    },
+    "BZB": {
+      "tz": "Africa/Maputo",
+      "iso_country": "MZ",
+      "name": "Bazaruto Island Airport",
+      "source": "geo-tz candidate, accepted because zone1970.tab lists the airport country for the zone"
+    },
+    "CA-0732": {
+      "tz": "America/Vancouver",
+      "iso_country": "CA",
+      "name": "Poise Cove Waterdrome",
+      "source": "geo-tz candidate, accepted because zone1970.tab lists the airport country for the zone"
+    },
+    "CA-0923": {
+      "tz": "America/Vancouver",
+      "iso_country": "CA",
+      "name": "Montague Harbour Seaplane Base",
+      "source": "geo-tz candidate, accepted because zone1970.tab lists the airport country for the zone"
+    },
+    "CA-1291": {
+      "tz": "America/Edmonton",
+      "iso_country": "CA",
+      "name": "(Duplicate)YEG",
+      "source": "geo-tz candidate, accepted because zone1970.tab lists the airport country for the zone"
+    },
+    "CA-1292": {
+      "tz": "America/Regina",
+      "iso_country": "CA",
+      "name": "YEG",
+      "source": "geo-tz candidate, accepted because zone1970.tab lists the airport country for the zone"
+    },
+    "CAA7": {
+      "tz": "America/Vancouver",
+      "iso_country": "CA",
+      "name": "Gilford Island/Echo Bay Seaplane Base",
+      "source": "geo-tz candidate, accepted because zone1970.tab lists the airport country for the zone"
+    },
+    "CAB4": {
+      "tz": "America/Vancouver",
+      "iso_country": "CA",
+      "name": "Tofino Harbour Seaplane Base",
+      "source": "geo-tz candidate, accepted because zone1970.tab lists the airport country for the zone"
+    },
+    "CAC8": {
+      "tz": "America/Vancouver",
+      "iso_country": "CA",
+      "name": "Nanaimo Harbour Water Aerodrome",
+      "source": "geo-tz candidate, accepted because zone1970.tab lists the airport country for the zone"
+    },
+    "CAE3": {
+      "tz": "America/Vancouver",
+      "iso_country": "CA",
+      "name": "Campbell River Seaplane Base",
+      "source": "geo-tz candidate, accepted because zone1970.tab lists the airport country for the zone"
+    },
+    "CAE5": {
+      "tz": "America/Vancouver",
+      "iso_country": "CA",
+      "name": "Whistler/Green Lake Water Aerodrome",
+      "source": "geo-tz candidate, accepted because zone1970.tab lists the airport country for the zone"
+    },
+    "CAE9": {
+      "tz": "America/Vancouver",
+      "iso_country": "CA",
+      "name": "Bamfield Seaplane Base",
+      "source": "geo-tz candidate, accepted because zone1970.tab lists the airport country for the zone"
+    },
+    "CAF6": {
+      "tz": "America/Vancouver",
+      "iso_country": "CA",
+      "name": "Big Bay Seaplane Base",
+      "source": "geo-tz candidate, accepted because zone1970.tab lists the airport country for the zone"
+    },
+    "CAJ8": {
+      "tz": "America/Vancouver",
+      "iso_country": "CA",
+      "name": "Pitt Meadows Seaplane Base",
+      "source": "geo-tz candidate, accepted because zone1970.tab lists the airport country for the zone"
+    },
+    "CAM9": {
+      "tz": "America/Vancouver",
+      "iso_country": "CA",
+      "name": "Vancouver International Seaplane Base",
+      "source": "geo-tz candidate, accepted because zone1970.tab lists the airport country for the zone"
+    },
+    "CAN3": {
+      "tz": "America/Vancouver",
+      "iso_country": "CA",
+      "name": "Ucluelet Seaplane Base",
+      "source": "geo-tz candidate, accepted because zone1970.tab lists the airport country for the zone"
+    },
+    "CAP5": {
+      "tz": "America/Vancouver",
+      "iso_country": "CA",
+      "name": "Victoria Airport Water Aerodrome",
+      "source": "geo-tz candidate, accepted because zone1970.tab lists the airport country for the zone"
+    },
+    "CAP8": {
+      "tz": "America/Vancouver",
+      "iso_country": "CA",
+      "name": "Port Washington Seaplane Base",
+      "source": "geo-tz candidate, accepted because zone1970.tab lists the airport country for the zone"
+    },
+    "CAQ8": {
+      "tz": "America/Vancouver",
+      "iso_country": "CA",
+      "name": "Powell Lake Seaplane Base",
+      "source": "geo-tz candidate, accepted because zone1970.tab lists the airport country for the zone"
+    },
+    "CAV5": {
+      "tz": "America/Vancouver",
+      "iso_country": "CA",
+      "name": "Sullivan Bay Seaplane Base",
+      "source": "geo-tz candidate, accepted because zone1970.tab lists the airport country for the zone"
+    },
+    "CAX3": {
+      "tz": "America/Vancouver",
+      "iso_country": "CA",
+      "name": "Sechelt/Porpoise Bay Water Aerodrome",
+      "source": "geo-tz candidate, accepted because zone1970.tab lists the airport country for the zone"
+    },
+    "CAX6": {
+      "tz": "America/Vancouver",
+      "iso_country": "CA",
+      "name": "Ganges Seaplane Base",
+      "source": "geo-tz candidate, accepted because zone1970.tab lists the airport country for the zone"
+    },
+    "CAX7": {
+      "tz": "America/Vancouver",
+      "iso_country": "CA",
+      "name": "Minstrel Island Seaplane Base",
+      "source": "geo-tz candidate, accepted because zone1970.tab lists the airport country for the zone"
+    },
+    "CBC7": {
+      "tz": "America/Vancouver",
+      "iso_country": "CA",
+      "name": "Harbour (Public) Heliport",
+      "source": "geo-tz candidate, accepted because zone1970.tab lists the airport country for the zone"
+    },
+    "CBF7": {
+      "tz": "America/Vancouver",
+      "iso_country": "CA",
+      "name": "Victoria Harbour (Camel Point) Heliport",
+      "source": "geo-tz candidate, accepted because zone1970.tab lists the airport country for the zone"
+    },
+    "CCR6": {
+      "tz": "America/Vancouver",
+      "iso_country": "CA",
+      "name": "Campbell River (E & B Heli) Heliport",
+      "source": "geo-tz candidate, accepted because zone1970.tab lists the airport country for the zone"
+    },
+    "CCX6": {
+      "tz": "America/Vancouver",
+      "iso_country": "CA",
+      "name": "Comox Seaplane Base",
+      "source": "geo-tz candidate, accepted because zone1970.tab lists the airport country for the zone"
+    },
+    "CDH5": {
+      "tz": "America/Vancouver",
+      "iso_country": "CA",
+      "name": "Nanaimo Harbour Heliport",
+      "source": "geo-tz candidate, accepted because zone1970.tab lists the airport country for the zone"
+    },
+    "CGA": {
+      "tz": "America/Sitka",
+      "iso_country": "US",
+      "name": "Craig Seaplane Base",
+      "source": "geo-tz candidate, accepted because zone1970.tab lists the airport country for the zone"
+    },
+    "CKX": {
+      "tz": "America/Anchorage",
+      "iso_country": "US",
+      "name": "Chicken Airport",
+      "source": "geo-tz candidate, accepted because zone1970.tab lists the airport country for the zone"
+    },
+    "CN-0003": {
+      "tz": "Asia/Shanghai",
+      "iso_country": "CN",
+      "name": "Laohutun Air Base",
+      "source": "geo-tz candidate, accepted because zone1970.tab lists the airport country for the zone"
+    },
+    "CN-0004": {
+      "tz": "Asia/Shanghai",
+      "iso_country": "CN",
+      "name": "Pulandian Air Base",
+      "source": "geo-tz candidate, accepted because zone1970.tab lists the airport country for the zone"
+    },
+    "CN-0006": {
+      "tz": "Asia/Shanghai",
+      "iso_country": "CN",
+      "name": "Beijing Shahezhen Air Base",
+      "source": "geo-tz candidate, accepted because zone1970.tab lists the airport country for the zone"
+    },
+    "CN-0007": {
+      "tz": "Asia/Shanghai",
+      "iso_country": "CN",
+      "name": "Beijing Tongxian Air Base",
+      "source": "geo-tz candidate, accepted because zone1970.tab lists the airport country for the zone"
+    },
+    "CN-0013": {
+      "tz": "Asia/Shanghai",
+      "iso_country": "CN",
+      "name": "Fengning Air Base",
+      "source": "geo-tz candidate, accepted because zone1970.tab lists the airport country for the zone"
+    },
+    "CN-0014": {
+      "tz": "Asia/Shanghai",
+      "iso_country": "CN",
+      "name": "Hohhot Bikeqi Air Base",
+      "source": "geo-tz candidate, accepted because zone1970.tab lists the airport country for the zone"
+    },
+    "CN-0015": {
+      "tz": "Asia/Shanghai",
+      "iso_country": "CN",
+      "name": "Huairen Air Base",
+      "source": "geo-tz candidate, accepted because zone1970.tab lists the airport country for the zone"
+    },
+    "CN-0016": {
+      "tz": "Asia/Shanghai",
+      "iso_country": "CN",
+      "name": "Liangxiangzhen Air Base",
+      "source": "geo-tz candidate, accepted because zone1970.tab lists the airport country for the zone"
+    },
+    "CN-0018": {
+      "tz": "Asia/Shanghai",
+      "iso_country": "CN",
+      "name": "Tangguantun Air Base",
+      "source": "geo-tz candidate, accepted because zone1970.tab lists the airport country for the zone"
+    },
+    "CN-0020": {
+      "tz": "Asia/Shanghai",
+      "iso_country": "CN",
+      "name": "Wenshui Air Base",
+      "source": "geo-tz candidate, accepted because zone1970.tab lists the airport country for the zone"
+    },
+    "CN-0021": {
+      "tz": "Asia/Shanghai",
+      "iso_country": "CN",
+      "name": "Yangcun Air Base",
+      "source": "geo-tz candidate, accepted because zone1970.tab lists the airport country for the zone"
+    },
+    "CN-0022": {
+      "tz": "Asia/Shanghai",
+      "iso_country": "CN",
+      "name": "Yongning Air Base",
+      "source": "geo-tz candidate, accepted because zone1970.tab lists the airport country for the zone"
+    },
+    "CN-0025": {
+      "tz": "Asia/Shanghai",
+      "iso_country": "CN",
+      "name": "Tangshan Zunhua Air Base",
+      "source": "geo-tz candidate, accepted because zone1970.tab lists the airport country for the zone"
+    },
+    "CN-0026": {
+      "tz": "Asia/Shanghai",
+      "iso_country": "CN",
+      "name": "Chengdu Huangtianba Air Base",
+      "source": "geo-tz candidate, accepted because zone1970.tab lists the airport country for the zone"
+    },
+    "CN-0030": {
+      "tz": "Asia/Shanghai",
+      "iso_country": "CN",
+      "name": "Chongqing Baishiyi Air Base",
+      "source": "geo-tz candidate, accepted because zone1970.tab lists the airport country for the zone"
+    },
+    "CN-0041": {
+      "tz": "Asia/Shanghai",
+      "iso_country": "CN",
+      "name": "Luliang Air Base",
+      "source": "geo-tz candidate, accepted because zone1970.tab lists the airport country for the zone"
+    },
+    "CN-0043": {
+      "tz": "Asia/Shanghai",
+      "iso_country": "CN",
+      "name": "Honghe Mengzi Airport / Mengzi Air Base",
+      "source": "geo-tz candidate, accepted because zone1970.tab lists the airport country for the zone"
+    },
+    "CN-0045": {
+      "tz": "Asia/Shanghai",
+      "iso_country": "CN",
+      "name": "Qionglai Air Base",
+      "source": "geo-tz candidate, accepted because zone1970.tab lists the airport country for the zone"
+    },
+    "CN-0048": {
+      "tz": "Asia/Shanghai",
+      "iso_country": "CN",
+      "name": "Wenshan Air Base",
+      "source": "geo-tz candidate, accepted because zone1970.tab lists the airport country for the zone"
+    },
+    "CN-0049": {
+      "tz": "Asia/Shanghai",
+      "iso_country": "CN",
+      "name": "Xiangyun Midu Air Base",
+      "source": "geo-tz candidate, accepted because zone1970.tab lists the airport country for the zone"
+    },
+    "CN-0053": {
+      "tz": "Asia/Shanghai",
+      "iso_country": "CN",
+      "name": "Baihe Ningming Air Base",
+      "source": "geo-tz candidate, accepted because zone1970.tab lists the airport country for the zone"
+    },
+    "CN-0055": {
+      "tz": "Asia/Shanghai",
+      "iso_country": "CN",
+      "name": "Changsha Datuopu Airport / Changsha Air Base",
+      "source": "geo-tz candidate, accepted because zone1970.tab lists the airport country for the zone"
+    },
+    "CN-0056": {
+      "tz": "Asia/Shanghai",
+      "iso_country": "CN",
+      "name": "Dangyang Air Base",
+      "source": "geo-tz candidate, accepted because zone1970.tab lists the airport country for the zone"
+    },
+    "CN-0057": {
+      "tz": "Asia/Shanghai",
+      "iso_country": "CN",
+      "name": "Foluo Northeast Air Base",
+      "source": "geo-tz candidate, accepted because zone1970.tab lists the airport country for the zone"
+    },
+    "CN-0063": {
+      "tz": "Asia/Shanghai",
+      "iso_country": "CN",
+      "name": "Guiping Mengxu Air Base",
+      "source": "geo-tz candidate, accepted because zone1970.tab lists the airport country for the zone"
+    },
+    "CN-0069": {
+      "tz": "Asia/Shanghai",
+      "iso_country": "CN",
+      "name": "Jialaishi Air Base",
+      "source": "geo-tz candidate, accepted because zone1970.tab lists the airport country for the zone"
+    },
+    "CN-0071": {
+      "tz": "Asia/Shanghai",
+      "iso_country": "CN",
+      "name": "Leiyang Air Base",
+      "source": "geo-tz candidate, accepted because zone1970.tab lists the airport country for the zone"
+    },
+    "CN-0072": {
+      "tz": "Asia/Shanghai",
+      "iso_country": "CN",
+      "name": "Lingshui Air Base",
+      "source": "geo-tz candidate, accepted because zone1970.tab lists the airport country for the zone"
+    },
+    "CN-0074": {
+      "tz": "Asia/Shanghai",
+      "iso_country": "CN",
+      "name": "Shangqiu Air Base",
+      "source": "geo-tz candidate, accepted because zone1970.tab lists the airport country for the zone"
+    },
+    "CN-0076": {
+      "tz": "Asia/Shanghai",
+      "iso_country": "CN",
+      "name": "Zhengzhou Air Base",
+      "source": "geo-tz candidate, accepted because zone1970.tab lists the airport country for the zone"
+    },
+    "CN-0080": {
+      "tz": "Asia/Shanghai",
+      "iso_country": "CN",
+      "name": "Suixi Air Base",
+      "source": "geo-tz candidate, accepted because zone1970.tab lists the airport country for the zone"
+    },
+    "CN-0083": {
+      "tz": "Asia/Shanghai",
+      "iso_country": "CN",
+      "name": "Guodu Air Base",
+      "source": "geo-tz candidate, accepted because zone1970.tab lists the airport country for the zone"
+    },
+    "CN-0085": {
+      "tz": "Asia/Shanghai",
+      "iso_country": "CN",
+      "name": "Xiaogan Air Base",
+      "source": "geo-tz candidate, accepted because zone1970.tab lists the airport country for the zone"
+    },
+    "CN-0090": {
+      "tz": "Asia/Shanghai",
+      "iso_country": "CN",
+      "name": "Cangxian Air Base",
+      "source": "geo-tz candidate, accepted because zone1970.tab lists the airport country for the zone"
+    },
+    "CN-0092": {
+      "tz": "Asia/Shanghai",
+      "iso_country": "CN",
+      "name": "Jiaozhou Jiaocheng Air Base",
+      "source": "geo-tz candidate, accepted because zone1970.tab lists the airport country for the zone"
+    },
+    "CN-0094": {
+      "tz": "Asia/Shanghai",
+      "iso_country": "CN",
+      "name": "Jiugucheng Air Base",
+      "source": "geo-tz candidate, accepted because zone1970.tab lists the airport country for the zone"
+    },
+    "CN-0095": {
+      "tz": "Asia/Shanghai",
+      "iso_country": "CN",
+      "name": "Kaifeng Air Base",
+      "source": "geo-tz candidate, accepted because zone1970.tab lists the airport country for the zone"
+    },
+    "CN-0096": {
+      "tz": "Asia/Shanghai",
+      "iso_country": "CN",
+      "name": "Laiyang Air Base",
+      "source": "geo-tz candidate, accepted because zone1970.tab lists the airport country for the zone"
+    },
+    "CN-0097": {
+      "tz": "Asia/Shanghai",
+      "iso_country": "CN",
+      "name": "Luyang Air Base",
+      "source": "geo-tz candidate, accepted because zone1970.tab lists the airport country for the zone"
+    },
+    "CN-0106": {
+      "tz": "Asia/Shanghai",
+      "iso_country": "CN",
+      "name": "Xuzhou Daguozhang Air Base",
+      "source": "geo-tz candidate, accepted because zone1970.tab lists the airport country for the zone"
+    },
+    "CN-0111": {
+      "tz": "Asia/Shanghai",
+      "iso_country": "CN",
+      "name": "Zhucheng Air Base",
+      "source": "geo-tz candidate, accepted because zone1970.tab lists the airport country for the zone"
+    },
+    "CN-0114": {
+      "tz": "Asia/Shanghai",
+      "iso_country": "CN",
+      "name": "Baoji Air Base",
+      "source": "geo-tz candidate, accepted because zone1970.tab lists the airport country for the zone"
+    },
+    "CN-0121": {
+      "tz": "Asia/Shanghai",
+      "iso_country": "CN",
+      "name": "Huangdicun Naval Air Base",
+      "source": "geo-tz candidate, accepted because zone1970.tab lists the airport country for the zone"
+    },
+    "CN-0122": {
+      "tz": "Asia/Shanghai",
+      "iso_country": "CN",
+      "name": "Fuzhou Zhuqi Heliport",
+      "source": "geo-tz candidate, accepted because zone1970.tab lists the airport country for the zone"
+    },
+    "CN-0123": {
+      "tz": "Asia/Shanghai",
+      "iso_country": "CN",
+      "name": "Lanzhou Air Base",
+      "source": "geo-tz candidate, accepted because zone1970.tab lists the airport country for the zone"
+    },
+    "CN-0125": {
+      "tz": "Asia/Shanghai",
+      "iso_country": "CN",
+      "name": "Lintao Air Base",
+      "source": "geo-tz candidate, accepted because zone1970.tab lists the airport country for the zone"
+    },
+    "CN-0127": {
+      "tz": "Asia/Shanghai",
+      "iso_country": "CN",
+      "name": "Qingshui Air Base",
+      "source": "geo-tz candidate, accepted because zone1970.tab lists the airport country for the zone"
+    },
+    "CN-0132": {
+      "tz": "Asia/Urumqi",
+      "iso_country": "CN",
+      "name": "Ürümqi South Air Base",
+      "source": "geo-tz candidate, accepted because zone1970.tab lists the airport country for the zone"
+    },
+    "CN-0133": {
+      "tz": "Asia/Urumqi",
+      "iso_country": "CN",
+      "name": "Malan Air Base",
+      "source": "geo-tz candidate, accepted because zone1970.tab lists the airport country for the zone"
+    },
+    "CN-0134": {
+      "tz": "Asia/Shanghai",
+      "iso_country": "CN",
+      "name": "Wugong Air Base",
+      "source": "geo-tz candidate, accepted because zone1970.tab lists the airport country for the zone"
+    },
+    "CN-0135": {
+      "tz": "Asia/Urumqi",
+      "iso_country": "CN",
+      "name": "Ürümqi Changji Air Base",
+      "source": "geo-tz candidate, accepted because zone1970.tab lists the airport country for the zone"
+    },
+    "CN-0136": {
+      "tz": "Asia/Shanghai",
+      "iso_country": "CN",
+      "name": "Wuwei Air Base",
+      "source": "geo-tz candidate, accepted because zone1970.tab lists the airport country for the zone"
+    },
+    "CN-0137": {
+      "tz": "Asia/Shanghai",
+      "iso_country": "CN",
+      "name": "Xi'an Air Base",
+      "source": "geo-tz candidate, accepted because zone1970.tab lists the airport country for the zone"
+    },
+    "CN-0138": {
+      "tz": "Asia/Shanghai",
+      "iso_country": "CN",
+      "name": "Xincheng Air Base",
+      "source": "geo-tz candidate, accepted because zone1970.tab lists the airport country for the zone"
+    },
+    "CN-0139": {
+      "tz": "Asia/Shanghai",
+      "iso_country": "CN",
+      "name": "Yaerbashi Test Range",
+      "source": "geo-tz candidate, accepted because zone1970.tab lists the airport country for the zone"
+    },
+    "CN-0140": {
+      "tz": "Asia/Shanghai",
+      "iso_country": "CN",
+      "name": "Yanliang Air Base",
+      "source": "geo-tz candidate, accepted because zone1970.tab lists the airport country for the zone"
+    },
+    "CN-0146": {
+      "tz": "Asia/Shanghai",
+      "iso_country": "CN",
+      "name": "Daishan Air Base",
+      "source": "geo-tz candidate, accepted because zone1970.tab lists the airport country for the zone"
+    },
+    "CN-0147": {
+      "tz": "Asia/Shanghai",
+      "iso_country": "CN",
+      "name": "Feidong Air Base",
+      "source": "geo-tz candidate, accepted because zone1970.tab lists the airport country for the zone"
+    },
+    "CN-0149": {
+      "tz": "Asia/Shanghai",
+      "iso_country": "CN",
+      "name": "Fuzhou Air Base",
+      "source": "geo-tz candidate, accepted because zone1970.tab lists the airport country for the zone"
+    },
+    "CN-0152": {
+      "tz": "Asia/Shanghai",
+      "iso_country": "CN",
+      "name": "Huian Air Base",
+      "source": "geo-tz candidate, accepted because zone1970.tab lists the airport country for the zone"
+    },
+    "CN-0153": {
+      "tz": "Asia/Shanghai",
+      "iso_country": "CN",
+      "name": "Hangzhou Jianqiao Airport",
+      "source": "geo-tz candidate, accepted because zone1970.tab lists the airport country for the zone"
+    },
+    "CN-0158": {
+      "tz": "Asia/Shanghai",
+      "iso_country": "CN",
+      "name": "Longtian Air Base",
+      "source": "geo-tz candidate, accepted because zone1970.tab lists the airport country for the zone"
+    },
+    "CN-0163": {
+      "tz": "Asia/Shanghai",
+      "iso_country": "CN",
+      "name": "Nanchang Xiangtang Air Base",
+      "source": "geo-tz candidate, accepted because zone1970.tab lists the airport country for the zone"
+    },
+    "CN-0165": {
+      "tz": "Asia/Shanghai",
+      "iso_country": "CN",
+      "name": "Ningbo Zhuangqiao Air Base",
+      "source": "geo-tz candidate, accepted because zone1970.tab lists the airport country for the zone"
+    },
+    "CN-0169": {
+      "tz": "Asia/Shanghai",
+      "iso_country": "CN",
+      "name": "Shanghai Dachang Air Base",
+      "source": "geo-tz candidate, accepted because zone1970.tab lists the airport country for the zone"
+    },
+    "CN-0178": {
+      "tz": "Asia/Shanghai",
+      "iso_country": "CN",
+      "name": "Wuhan Hannan Municipal Airport",
+      "source": "geo-tz candidate, accepted because zone1970.tab lists the airport country for the zone"
+    },
+    "CN-0182": {
+      "tz": "Asia/Shanghai",
+      "iso_country": "CN",
+      "name": "Zhangshu Air Base",
+      "source": "geo-tz candidate, accepted because zone1970.tab lists the airport country for the zone"
+    },
+    "CN-0185": {
+      "tz": "Asia/Shanghai",
+      "iso_country": "CN",
+      "name": "Changchun Air Base",
+      "source": "geo-tz candidate, accepted because zone1970.tab lists the airport country for the zone"
+    },
+    "CN-0190": {
+      "tz": "Asia/Shanghai",
+      "iso_country": "CN",
+      "name": "Dingxin-Shuangchengzi Air Base",
+      "source": "geo-tz candidate, accepted because zone1970.tab lists the airport country for the zone"
+    },
+    "CN-0191": {
+      "tz": "Asia/Shanghai",
+      "iso_country": "CN",
+      "name": "Fuxin Air Base",
+      "source": "geo-tz candidate, accepted because zone1970.tab lists the airport country for the zone"
+    },
+    "CN-0192": {
+      "tz": "Asia/Shanghai",
+      "iso_country": "CN",
+      "name": "Gongzhuling Air Base",
+      "source": "geo-tz candidate, accepted because zone1970.tab lists the airport country for the zone"
+    },
+    "CN-0197": {
+      "tz": "Asia/Shanghai",
+      "iso_country": "CN",
+      "name": "Kaiyuan Air Base",
+      "source": "geo-tz candidate, accepted because zone1970.tab lists the airport country for the zone"
+    },
+    "CN-0198": {
+      "tz": "Asia/Shanghai",
+      "iso_country": "CN",
+      "name": "Lalin Air Base",
+      "source": "geo-tz candidate, accepted because zone1970.tab lists the airport country for the zone"
+    },
+    "CN-0201": {
+      "tz": "Asia/Shanghai",
+      "iso_country": "CN",
+      "name": "Pingquan Air Base",
+      "source": "geo-tz candidate, accepted because zone1970.tab lists the airport country for the zone"
+    },
+    "CN-0204": {
+      "tz": "Asia/Shanghai",
+      "iso_country": "CN",
+      "name": "Shenyang Beiling Air Base",
+      "source": "geo-tz candidate, accepted because zone1970.tab lists the airport country for the zone"
+    },
+    "CN-0206": {
+      "tz": "Asia/Shanghai",
+      "iso_country": "CN",
+      "name": "Shenyang Yuhong Quansheng Airport",
+      "source": "geo-tz candidate, accepted because zone1970.tab lists the airport country for the zone"
+    },
+    "CN-0208": {
+      "tz": "Asia/Shanghai",
+      "iso_country": "CN",
+      "name": "Siping Air Base",
+      "source": "geo-tz candidate, accepted because zone1970.tab lists the airport country for the zone"
+    },
+    "CN-0209": {
+      "tz": "Asia/Shanghai",
+      "iso_country": "CN",
+      "name": "Suizhong Air Base",
+      "source": "geo-tz candidate, accepted because zone1970.tab lists the airport country for the zone"
+    },
+    "CN-0210": {
+      "tz": "Asia/Shanghai",
+      "iso_country": "CN",
+      "name": "Tuchengzi Air Base",
+      "source": "geo-tz candidate, accepted because zone1970.tab lists the airport country for the zone"
+    },
+    "CN-0249": {
+      "tz": "Asia/Shanghai",
+      "iso_country": "CN",
+      "name": "Leshan Airport",
+      "source": "geo-tz candidate, accepted because zone1970.tab lists the airport country for the zone"
+    },
+    "CN-0253": {
+      "tz": "Asia/Shanghai",
+      "iso_country": "CN",
+      "name": "Jiande Qiandaohu General Airport",
+      "source": "geo-tz candidate, accepted because zone1970.tab lists the airport country for the zone"
+    },
+    "CN-0290": {
+      "tz": "Asia/Shanghai",
+      "iso_country": "CN",
+      "name": "Sanya Air Base",
+      "source": "geo-tz candidate, accepted because zone1970.tab lists the airport country for the zone"
+    },
+    "CN-0316": {
+      "tz": "Asia/Shanghai",
+      "iso_country": "CN",
+      "name": "Chenghu General Airport",
+      "source": "geo-tz candidate, accepted because zone1970.tab lists the airport country for the zone"
+    },
+    "CN-0321": {
+      "tz": "Asia/Shanghai",
+      "iso_country": "CN",
+      "name": "Anji Tianzihu General Airport",
+      "source": "geo-tz candidate, accepted because zone1970.tab lists the airport country for the zone"
+    },
+    "CN-0331": {
+      "tz": "Asia/Shanghai",
+      "iso_country": "CN",
+      "name": "Jiuzhou Airport",
+      "source": "geo-tz candidate, accepted because zone1970.tab lists the airport country for the zone"
+    },
+    "CN-0344": {
+      "tz": "Asia/Shanghai",
+      "iso_country": "CN",
+      "name": "Paozhuwan Air Base",
+      "source": "geo-tz candidate, accepted because zone1970.tab lists the airport country for the zone"
+    },
+    "CN-0345": {
+      "tz": "Asia/Shanghai",
+      "iso_country": "CN",
+      "name": "Shanpo Air Base",
+      "source": "geo-tz candidate, accepted because zone1970.tab lists the airport country for the zone"
+    },
+    "CN-0396": {
+      "tz": "Asia/Shanghai",
+      "iso_country": "CN",
+      "name": "Shaodong Airport",
+      "source": "geo-tz candidate, accepted because zone1970.tab lists the airport country for the zone"
+    },
+    "CN-0401": {
+      "tz": "Asia/Shanghai",
+      "iso_country": "CN",
+      "name": "Ningxiang Airport",
+      "source": "geo-tz candidate, accepted because zone1970.tab lists the airport country for the zone"
+    },
+    "CN-0418": {
+      "tz": "Asia/Shanghai",
+      "iso_country": "CN",
+      "name": "Hohhot Shengle International Airport (under construction)",
+      "source": "geo-tz candidate, accepted because zone1970.tab lists the airport country for the zone"
+    },
+    "CN-0446": {
+      "tz": "Asia/Shanghai",
+      "iso_country": "CN",
+      "name": "Jining Qufu Airport",
+      "source": "geo-tz candidate, accepted because zone1970.tab lists the airport country for the zone"
+    },
+    "CN-0501": {
+      "tz": "Asia/Shanghai",
+      "iso_country": "CN",
+      "name": "Hancheng Heyang Airport",
+      "source": "geo-tz candidate, accepted because zone1970.tab lists the airport country for the zone"
+    },
+    "CN-0506": {
+      "tz": "Asia/Shanghai",
+      "iso_country": "CN",
+      "name": "金鸭子国际机场",
+      "source": "geo-tz candidate, accepted because zone1970.tab lists the airport country for the zone"
+    },
+    "CN-JNZ": {
+      "tz": "Asia/Shanghai",
+      "iso_country": "CN",
+      "name": "Sanshilipu Air Base",
+      "source": "geo-tz candidate, accepted because zone1970.tab lists the airport country for the zone"
+    },
+    "CO-LCR": {
+      "tz": "America/Bogota",
+      "iso_country": "CO",
+      "name": "Virgilio Barco Vargas (La Chorrera) Airport",
+      "source": "geo-tz candidate, accepted because zone1970.tab lists the airport country for the zone"
+    },
+    "CPW9": {
+      "tz": "America/Vancouver",
+      "iso_country": "CA",
+      "name": "Port Alberni Seaplane Base",
+      "source": "geo-tz candidate, accepted because zone1970.tab lists the airport country for the zone"
+    },
+    "CRHA": {
+      "tz": "America/Vancouver",
+      "iso_country": "CA",
+      "name": "Streatham Reef Hueston Airfield",
+      "source": "geo-tz candidate, accepted because zone1970.tab lists the airport country for the zone"
+    },
+    "CU-0115": {
+      "tz": "America/Havana",
+      "iso_country": "CU",
+      "name": "[Duplicate] Holguín Air Base",
+      "source": "geo-tz candidate, accepted because zone1970.tab lists the airport country for the zone"
+    },
+    "CYKM": {
+      "tz": "America/Toronto",
+      "iso_country": "CA",
+      "name": "Kincardine Municipal Airport",
+      "source": "geo-tz candidate, accepted because zone1970.tab lists the airport country for the zone"
+    },
+    "CYM": {
+      "tz": "America/Sitka",
+      "iso_country": "US",
+      "name": "Chatham Seaplane Base",
+      "source": "geo-tz candidate, accepted because zone1970.tab lists the airport country for the zone"
+    },
+    "CZ-0244": {
+      "tz": "Europe/Prague",
+      "iso_country": "CZ",
+      "name": "Kostomlaty Airstrip",
+      "source": "geo-tz candidate, accepted because zone1970.tab lists the airport country for the zone"
+    },
+    "DGAH": {
+      "tz": "Africa/Accra",
+      "canonical": "Africa/Abidjan",
+      "iso_country": "GH",
+      "name": "Ho Airport",
+      "source": "geo-tz candidate, accepted because zone1970.tab lists the airport country for the zone"
+    },
+    "DHB": {
+      "tz": "America/Los_Angeles",
+      "iso_country": "US",
+      "name": "Deer Harbor SPB",
+      "source": "geo-tz candidate, accepted because zone1970.tab lists the airport country for the zone"
+    },
+    "DLR": {
+      "tz": "Asia/Vladivostok",
+      "iso_country": "RU",
+      "name": "Dalnerechensk Airport",
+      "source": "geo-tz candidate, accepted because zone1970.tab lists the airport country for the zone"
+    },
+    "DM2": {
+      "tz": "America/Nome",
+      "iso_country": "US",
+      "name": "Diomede Heliport",
+      "source": "geo-tz candidate, accepted because zone1970.tab lists the airport country for the zone"
+    },
+    "DNAI": {
+      "tz": "Africa/Lagos",
+      "iso_country": "NG",
+      "name": "Akwa Ibom International Airport",
+      "source": "geo-tz candidate, accepted because zone1970.tab lists the airport country for the zone"
+    },
+    "DNAN": {
+      "tz": "Africa/Lagos",
+      "iso_country": "NG",
+      "name": "Chinua Achebe International Airport",
+      "source": "geo-tz candidate, accepted because zone1970.tab lists the airport country for the zone"
+    },
+    "DNBC": {
+      "tz": "Africa/Lagos",
+      "iso_country": "NG",
+      "name": "Sir Abubakar Tafawa Balewa Bauchi State International Airport",
+      "source": "geo-tz candidate, accepted because zone1970.tab lists the airport country for the zone"
+    },
+    "DNBK": {
+      "tz": "Africa/Lagos",
+      "iso_country": "NG",
+      "name": "Sir Ahmadu Bello International Airport",
+      "source": "geo-tz candidate, accepted because zone1970.tab lists the airport country for the zone"
+    },
+    "DNBY": {
+      "tz": "Africa/Lagos",
+      "iso_country": "NG",
+      "name": "Bayelsa International Airport",
+      "source": "geo-tz candidate, accepted because zone1970.tab lists the airport country for the zone"
+    },
+    "DNKT": {
+      "tz": "Africa/Lagos",
+      "iso_country": "NG",
+      "name": "Umaru Musa Yar'adua Airport",
+      "source": "geo-tz candidate, accepted because zone1970.tab lists the airport country for the zone"
+    },
+    "DNPM": {
+      "tz": "Africa/Lagos",
+      "iso_country": "NG",
+      "name": "Port Harcourt City Airport / Port Harcourt Air Force Base",
+      "source": "geo-tz candidate, accepted because zone1970.tab lists the airport country for the zone"
+    },
+    "DNSU": {
+      "tz": "Africa/Lagos",
+      "iso_country": "NG",
+      "name": "Warri Airport",
+      "source": "geo-tz candidate, accepted because zone1970.tab lists the airport country for the zone"
+    },
+    "DPT": {
+      "tz": "Asia/Vladivostok",
+      "iso_country": "RU",
+      "name": "Deputatskiy Airport",
+      "source": "geo-tz candidate, accepted because zone1970.tab lists the airport country for the zone"
+    },
+    "DWO": {
+      "tz": "Asia/Colombo",
+      "iso_country": "LK",
+      "name": "Diyawanna Oya Seaplane Base",
+      "source": "geo-tz candidate, accepted because zone1970.tab lists the airport country for the zone"
+    },
+    "DZ-0016": {
+      "tz": "Africa/Algiers",
+      "iso_country": "DZ",
+      "name": "Amguid Regional Airport",
+      "source": "geo-tz candidate, accepted because zone1970.tab lists the airport country for the zone"
+    },
+    "EDA": {
+      "tz": "America/Sitka",
+      "iso_country": "US",
+      "name": "Edna Bay Seaplane Base",
+      "source": "geo-tz candidate, accepted because zone1970.tab lists the airport country for the zone"
+    },
+    "EECL": {
+      "tz": "Europe/Tallinn",
+      "iso_country": "EE",
+      "name": "Tallinn Linnahall Heliport",
+      "source": "geo-tz candidate, accepted because zone1970.tab lists the airport country for the zone"
+    },
+    "EFPR": {
+      "tz": "Europe/Helsinki",
+      "iso_country": "FI",
+      "name": "Helsinki East-Redstone Aerodrome",
+      "source": "geo-tz candidate, accepted because zone1970.tab lists the airport country for the zone"
+    },
+    "EG-0003": {
+      "tz": "Africa/Cairo",
+      "iso_country": "EG",
+      "name": "Bilbeis 2 Airfield",
+      "source": "geo-tz candidate, accepted because zone1970.tab lists the airport country for the zone"
+    },
+    "EGHK": {
+      "tz": "Europe/London",
+      "iso_country": "GB",
+      "name": "Penzance Heliport",
+      "source": "geo-tz candidate, accepted because zone1970.tab lists the airport country for the zone"
+    },
+    "EGHT": {
+      "tz": "Europe/London",
+      "iso_country": "GB",
+      "name": "Tresco Heliport",
+      "source": "geo-tz candidate, accepted because zone1970.tab lists the airport country for the zone"
+    },
+    "EJT": {
+      "tz": "Pacific/Majuro",
+      "canonical": "Pacific/Tarawa",
+      "iso_country": "MH",
+      "name": "Enejit Airport",
+      "source": "geo-tz candidate, accepted because zone1970.tab lists the airport country for the zone"
+    },
+    "EKAC": {
+      "tz": "Europe/Copenhagen",
+      "canonical": "Europe/Berlin",
+      "iso_country": "DK",
+      "name": "Aarhus Seaplane Terminal",
+      "source": "geo-tz candidate, accepted because zone1970.tab lists the airport country for the zone"
+    },
+    "EKCC": {
+      "tz": "Europe/Copenhagen",
+      "canonical": "Europe/Berlin",
+      "iso_country": "DK",
+      "name": "København Vandflyveplads",
+      "source": "geo-tz candidate, accepted because zone1970.tab lists the airport country for the zone"
+    },
+    "EKFA": {
+      "tz": "Atlantic/Faroe",
+      "iso_country": "FO",
+      "name": "Froðba Heliport",
+      "source": "geo-tz candidate, accepted because zone1970.tab lists the airport country for the zone"
+    },
+    "EKKU": {
+      "tz": "Atlantic/Faroe",
+      "iso_country": "FO",
+      "name": "Kirkja Heliport",
+      "source": "geo-tz candidate, accepted because zone1970.tab lists the airport country for the zone"
+    },
+    "EKKV": {
+      "tz": "Atlantic/Faroe",
+      "iso_country": "FO",
+      "name": "Klaksvík Heliport",
+      "source": "geo-tz candidate, accepted because zone1970.tab lists the airport country for the zone"
+    },
+    "EKMS": {
+      "tz": "Atlantic/Faroe",
+      "iso_country": "FO",
+      "name": "Mykines Heliport",
+      "source": "geo-tz candidate, accepted because zone1970.tab lists the airport country for the zone"
+    },
+    "EKSO": {
+      "tz": "Atlantic/Faroe",
+      "iso_country": "FO",
+      "name": "Svínoy Heliport",
+      "source": "geo-tz candidate, accepted because zone1970.tab lists the airport country for the zone"
+    },
+    "EKSR": {
+      "tz": "Atlantic/Faroe",
+      "iso_country": "FO",
+      "name": "Stóra Dímun Heliport",
+      "source": "geo-tz candidate, accepted because zone1970.tab lists the airport country for the zone"
+    },
+    "EKSY": {
+      "tz": "Atlantic/Faroe",
+      "iso_country": "FO",
+      "name": "Skúvoy Heliport",
+      "source": "geo-tz candidate, accepted because zone1970.tab lists the airport country for the zone"
+    },
+    "EKTB": {
+      "tz": "Atlantic/Faroe",
+      "iso_country": "FO",
+      "name": "Boðanes Heliport",
+      "source": "geo-tz candidate, accepted because zone1970.tab lists the airport country for the zone"
+    },
+    "ENVR": {
+      "tz": "Europe/Oslo",
+      "canonical": "Europe/Berlin",
+      "iso_country": "NO",
+      "name": "Værøy Heliport",
+      "source": "geo-tz candidate, accepted because zone1970.tab lists the airport country for the zone"
+    },
+    "ES-0109": {
+      "tz": "Europe/Madrid",
+      "iso_country": "ES",
+      "name": "Folgueroles Airfield",
+      "source": "geo-tz candidate, accepted because zone1970.tab lists the airport country for the zone"
+    },
+    "ES-0353": {
+      "tz": "Europe/Madrid",
+      "iso_country": "ES",
+      "name": "Madroñalejos Forest Fire fighting Heliport",
+      "source": "geo-tz candidate, accepted because zone1970.tab lists the airport country for the zone"
+    },
+    "EXI": {
+      "tz": "America/Juneau",
+      "iso_country": "US",
+      "name": "Excursion Inlet Seaplane Base",
+      "source": "geo-tz candidate, accepted because zone1970.tab lists the airport country for the zone"
+    },
+    "FCOD": {
+      "tz": "Africa/Brazzaville",
+      "canonical": "Africa/Lagos",
+      "iso_country": "CG",
+      "name": "Oyo Ollombo Airport",
+      "source": "geo-tz candidate, accepted because zone1970.tab lists the airport country for the zone"
+    },
+    "FGAN": {
+      "tz": "Africa/Malabo",
+      "canonical": "Africa/Lagos",
+      "iso_country": "GQ",
+      "name": "Annobón Airport",
+      "source": "geo-tz candidate, accepted because zone1970.tab lists the airport country for the zone"
+    },
+    "FGCO": {
+      "tz": "Africa/Malabo",
+      "canonical": "Africa/Lagos",
+      "iso_country": "GQ",
+      "name": "Corisco International Airport",
+      "source": "geo-tz candidate, accepted because zone1970.tab lists the airport country for the zone"
+    },
+    "FGMY": {
+      "tz": "Africa/Malabo",
+      "canonical": "Africa/Lagos",
+      "iso_country": "GQ",
+      "name": "President Obiang Nguema International Airport",
+      "source": "geo-tz candidate, accepted because zone1970.tab lists the airport country for the zone"
+    },
+    "FO-0001": {
+      "tz": "Atlantic/Faroe",
+      "iso_country": "FO",
+      "name": "Hattarvík Heliport",
+      "source": "geo-tz candidate, accepted because zone1970.tab lists the airport country for the zone"
+    },
+    "FO-0002": {
+      "tz": "Atlantic/Faroe",
+      "iso_country": "FO",
+      "name": "Koltur Heliport",
+      "source": "geo-tz candidate, accepted because zone1970.tab lists the airport country for the zone"
+    },
+    "FOGX": {
+      "tz": "Africa/Libreville",
+      "canonical": "Africa/Lagos",
+      "iso_country": "GA",
+      "name": "Gamba Airport",
+      "source": "geo-tz candidate, accepted because zone1970.tab lists the airport country for the zone"
+    },
+    "FR-0165": {
+      "tz": "Europe/Paris",
+      "iso_country": "FR",
+      "name": "Ile D'Yeu Port Joinville Heliport",
+      "source": "geo-tz candidate, accepted because zone1970.tab lists the airport country for the zone"
+    },
+    "FR-JCA": {
+      "tz": "Europe/Paris",
+      "iso_country": "FR",
+      "name": "Cannes Croisette Heliport",
+      "source": "geo-tz candidate, accepted because zone1970.tab lists the airport country for the zone"
+    },
+    "FTFY": {
+      "tz": "Africa/Ndjamena",
+      "iso_country": "TD",
+      "name": "Ouadi Doum Air Base",
+      "source": "geo-tz candidate, accepted because zone1970.tab lists the airport country for the zone"
+    },
+    "FYHI": {
+      "tz": "Africa/Windhoek",
+      "iso_country": "NA",
+      "name": "Halali Airport",
+      "source": "geo-tz candidate, accepted because zone1970.tab lists the airport country for the zone"
+    },
+    "FYNG": {
+      "tz": "Africa/Windhoek",
+      "iso_country": "NA",
+      "name": "Ongava Lodge Airstrip",
+      "source": "geo-tz candidate, accepted because zone1970.tab lists the airport country for the zone"
+    },
+    "FYTF": {
+      "tz": "Africa/Windhoek",
+      "iso_country": "NA",
+      "name": "Twyfelfontein Airport",
+      "source": "geo-tz candidate, accepted because zone1970.tab lists the airport country for the zone"
+    },
+    "GB-0347": {
+      "tz": "Europe/London",
+      "iso_country": "GB",
+      "name": "Lundy Island Helipad",
+      "source": "geo-tz candidate, accepted because zone1970.tab lists the airport country for the zone"
+    },
+    "GB-1313": {
+      "tz": "Europe/London",
+      "iso_country": "GB",
+      "name": "Hartland Point Heliport",
+      "source": "geo-tz candidate, accepted because zone1970.tab lists the airport country for the zone"
+    },
+    "GB-FOA": {
+      "tz": "Europe/London",
+      "iso_country": "GB",
+      "name": "Foula Airfield",
+      "source": "geo-tz candidate, accepted because zone1970.tab lists the airport country for the zone"
+    },
+    "GE-0007": {
+      "tz": "Asia/Tbilisi",
+      "iso_country": "GE",
+      "name": "Ozurgeti Air Base",
+      "source": "geo-tz candidate, accepted because zone1970.tab lists the airport country for the zone"
+    },
+    "GE-0010": {
+      "tz": "Asia/Tbilisi",
+      "iso_country": "GE",
+      "name": "Senaki Air Base",
+      "source": "geo-tz candidate, accepted because zone1970.tab lists the airport country for the zone"
+    },
+    "GECE": {
+      "tz": "Africa/Ceuta",
+      "iso_country": "ES",
+      "name": "Ceuta Heliport",
+      "source": "geo-tz candidate, accepted because zone1970.tab lists the airport country for the zone"
+    },
+    "GL-QCU": {
+      "tz": "America/Nuuk",
+      "iso_country": "GL",
+      "name": "Akunnaaq Heliport",
+      "source": "geo-tz candidate, accepted because zone1970.tab lists the airport country for the zone"
+    },
+    "GNU": {
+      "tz": "America/Anchorage",
+      "iso_country": "US",
+      "name": "Goodnews Airport",
+      "source": "geo-tz candidate, accepted because zone1970.tab lists the airport country for the zone"
+    },
+    "HASL": {
+      "tz": "Africa/Addis_Ababa",
+      "canonical": "Africa/Nairobi",
+      "iso_country": "ET",
+      "name": "Shilavo Airport",
+      "source": "geo-tz candidate, accepted because zone1970.tab lists the airport country for the zone"
+    },
+    "HCGR": {
+      "tz": "Africa/Mogadishu",
+      "canonical": "Africa/Nairobi",
+      "iso_country": "SO",
+      "name": "Garowe Airport",
+      "source": "geo-tz candidate, accepted because zone1970.tab lists the airport country for the zone"
+    },
+    "HE28": {
+      "tz": "Africa/Cairo",
+      "iso_country": "EG",
+      "name": "Gebel El Basur Air Base",
+      "source": "geo-tz candidate, accepted because zone1970.tab lists the airport country for the zone"
+    },
+    "HE32": {
+      "tz": "Africa/Cairo",
+      "iso_country": "EG",
+      "name": "Al Mansurah Airbase",
+      "source": "geo-tz candidate, accepted because zone1970.tab lists the airport country for the zone"
+    },
+    "HE35": {
+      "tz": "Africa/Cairo",
+      "iso_country": "EG",
+      "name": "Abu Suwayr Air Base",
+      "source": "geo-tz candidate, accepted because zone1970.tab lists the airport country for the zone"
+    },
+    "HE36": {
+      "tz": "Africa/Cairo",
+      "iso_country": "EG",
+      "name": "Bardawil International Airport",
+      "source": "geo-tz candidate, accepted because zone1970.tab lists the airport country for the zone"
+    },
+    "HE37": {
+      "tz": "Africa/Cairo",
+      "iso_country": "EG",
+      "name": "Bilbeis Air Base",
+      "source": "geo-tz candidate, accepted because zone1970.tab lists the airport country for the zone"
+    },
+    "HE42": {
+      "tz": "Africa/Cairo",
+      "iso_country": "EG",
+      "name": "Quesna Airport",
+      "source": "geo-tz candidate, accepted because zone1970.tab lists the airport country for the zone"
+    },
+    "HEBR": {
+      "tz": "Africa/Cairo",
+      "iso_country": "EG",
+      "name": "Berenice International Airport / Banas Cape Air Base",
+      "source": "geo-tz candidate, accepted because zone1970.tab lists the airport country for the zone"
+    },
+    "HEIS": {
+      "tz": "Africa/Cairo",
+      "iso_country": "EG",
+      "name": "Al Ismailiyya Air Base",
+      "source": "geo-tz candidate, accepted because zone1970.tab lists the airport country for the zone"
+    },
+    "HKWY": {
+      "tz": "Africa/Nairobi",
+      "iso_country": "KE",
+      "name": "Kiwayu Airport",
+      "source": "geo-tz candidate, accepted because zone1970.tab lists the airport country for the zone"
+    },
+    "HL68": {
+      "tz": "Africa/Tripoli",
+      "iso_country": "LY",
+      "name": "Bombah Airport",
+      "source": "geo-tz candidate, accepted because zone1970.tab lists the airport country for the zone"
+    },
+    "HL77": {
+      "tz": "Africa/Tripoli",
+      "iso_country": "LY",
+      "name": "Okba Ibn Nafa Air Base",
+      "source": "geo-tz candidate, accepted because zone1970.tab lists the airport country for the zone"
+    },
+    "HLMS": {
+      "tz": "Africa/Tripoli",
+      "iso_country": "LY",
+      "name": "Misrata International Airport",
+      "source": "geo-tz candidate, accepted because zone1970.tab lists the airport country for the zone"
+    },
+    "HR-0034": {
+      "tz": "Europe/Zagreb",
+      "canonical": "Europe/Belgrade",
+      "iso_country": "HR",
+      "name": "Udbina Airfield",
+      "source": "geo-tz candidate, accepted because zone1970.tab lists the airport country for the zone"
+    },
+    "HSFA": {
+      "tz": "Africa/Juba",
+      "iso_country": "SS",
+      "name": "Paloich Airport",
+      "source": "geo-tz candidate, accepted because zone1970.tab lists the airport country for the zone"
+    },
+    "HSSG": {
+      "tz": "Africa/Khartoum",
+      "iso_country": "SD",
+      "name": "Sabera Geneina Airport",
+      "source": "geo-tz candidate, accepted because zone1970.tab lists the airport country for the zone"
+    },
+    "HUKI": {
+      "tz": "Africa/Kampala",
+      "canonical": "Africa/Nairobi",
+      "iso_country": "UG",
+      "name": "Kisoro Airport",
+      "source": "geo-tz candidate, accepted because zone1970.tab lists the airport country for the zone"
+    },
+    "HYL": {
+      "tz": "America/Sitka",
+      "iso_country": "US",
+      "name": "Hollis Clark Bay Seaplane Base",
+      "source": "geo-tz candidate, accepted because zone1970.tab lists the airport country for the zone"
+    },
+    "HZU": {
+      "tz": "Asia/Shanghai",
+      "iso_country": "CN",
+      "name": "Chengdu Huaizhou Airport",
+      "source": "geo-tz candidate, accepted because zone1970.tab lists the airport country for the zone"
+    },
+    "IBL": {
+      "tz": "Africa/Maputo",
+      "iso_country": "MZ",
+      "name": "Indigo Bay Lodge Airport",
+      "source": "geo-tz candidate, accepted because zone1970.tab lists the airport country for the zone"
+    },
+    "ID-0004": {
+      "tz": "Asia/Jayapura",
+      "iso_country": "ID",
+      "name": "Okpahik Airstrip",
+      "source": "geo-tz candidate, accepted because zone1970.tab lists the airport country for the zone"
+    },
+    "ID-0015": {
+      "tz": "Asia/Makassar",
+      "iso_country": "ID",
+      "name": "Discovery Kartika Plaza Heliport",
+      "source": "geo-tz candidate, accepted because zone1970.tab lists the airport country for the zone"
+    },
+    "ID-0031": {
+      "tz": "Asia/Jayapura",
+      "iso_country": "ID",
+      "name": "Diphikin Airstrip",
+      "source": "geo-tz candidate, accepted because zone1970.tab lists the airport country for the zone"
+    },
+    "ID-0080": {
+      "tz": "Asia/Jayapura",
+      "iso_country": "ID",
+      "name": "Kiwi Airstrip",
+      "source": "geo-tz candidate, accepted because zone1970.tab lists the airport country for the zone"
+    },
+    "ID-0100": {
+      "tz": "Asia/Jayapura",
+      "iso_country": "ID",
+      "name": "Oklip Airstrip",
+      "source": "geo-tz candidate, accepted because zone1970.tab lists the airport country for the zone"
+    },
+    "ID-0131": {
+      "tz": "Asia/Jayapura",
+      "iso_country": "ID",
+      "name": "Sape Airstrip",
+      "source": "geo-tz candidate, accepted because zone1970.tab lists the airport country for the zone"
+    },
+    "ID-0144": {
+      "tz": "Asia/Jayapura",
+      "iso_country": "ID",
+      "name": "Suntamon Airport",
+      "source": "geo-tz candidate, accepted because zone1970.tab lists the airport country for the zone"
+    },
+    "ID-0165": {
+      "tz": "Asia/Jayapura",
+      "iso_country": "ID",
+      "name": "Yapil Airstrip",
+      "source": "geo-tz candidate, accepted because zone1970.tab lists the airport country for the zone"
+    },
+    "ID-0178": {
+      "tz": "Asia/Jayapura",
+      "iso_country": "ID",
+      "name": "Awimbon Airstrip",
+      "source": "geo-tz candidate, accepted because zone1970.tab lists the airport country for the zone"
+    },
+    "ID-0193": {
+      "tz": "Asia/Jayapura",
+      "iso_country": "ID",
+      "name": "Kubibkop Airport",
+      "source": "geo-tz candidate, accepted because zone1970.tab lists the airport country for the zone"
+    },
+    "ID-0195": {
+      "tz": "Asia/Jayapura",
+      "iso_country": "ID",
+      "name": "Molding Airstrip",
+      "source": "geo-tz candidate, accepted because zone1970.tab lists the airport country for the zone"
+    },
+    "ID-0196": {
+      "tz": "Asia/Jayapura",
+      "iso_country": "ID",
+      "name": "Tarup Airstrip",
+      "source": "geo-tz candidate, accepted because zone1970.tab lists the airport country for the zone"
+    },
+    "ID-0197": {
+      "tz": "Asia/Jayapura",
+      "iso_country": "ID",
+      "name": "Tinibil Airstrip",
+      "source": "geo-tz candidate, accepted because zone1970.tab lists the airport country for the zone"
+    },
+    "ID-0199": {
+      "tz": "Asia/Jayapura",
+      "iso_country": "ID",
+      "name": "Okbab Airstrip",
+      "source": "geo-tz candidate, accepted because zone1970.tab lists the airport country for the zone"
+    },
+    "ID-0200": {
+      "tz": "Asia/Jayapura",
+      "iso_country": "ID",
+      "name": "Alemson Airstrip",
+      "source": "geo-tz candidate, accepted because zone1970.tab lists the airport country for the zone"
+    },
+    "ID-0201": {
+      "tz": "Asia/Jayapura",
+      "iso_country": "ID",
+      "name": "Kotyobakon Airstrip",
+      "source": "geo-tz candidate, accepted because zone1970.tab lists the airport country for the zone"
+    },
+    "ID-0202": {
+      "tz": "Asia/Jayapura",
+      "iso_country": "ID",
+      "name": "Mipol Airstrip",
+      "source": "geo-tz candidate, accepted because zone1970.tab lists the airport country for the zone"
+    },
+    "ID-0203": {
+      "tz": "Asia/Jayapura",
+      "iso_country": "ID",
+      "name": "Binban Airstrip",
+      "source": "geo-tz candidate, accepted because zone1970.tab lists the airport country for the zone"
+    },
+    "ID-0204": {
+      "tz": "Asia/Jayapura",
+      "iso_country": "ID",
+      "name": "Kaklup Airstrip",
+      "source": "geo-tz candidate, accepted because zone1970.tab lists the airport country for the zone"
+    },
+    "ID-0205": {
+      "tz": "Asia/Jayapura",
+      "iso_country": "ID",
+      "name": "Maksum Airstrip",
+      "source": "geo-tz candidate, accepted because zone1970.tab lists the airport country for the zone"
+    },
+    "ID-0207": {
+      "tz": "Asia/Jayapura",
+      "iso_country": "ID",
+      "name": "Pedam Airstrip",
+      "source": "geo-tz candidate, accepted because zone1970.tab lists the airport country for the zone"
+    },
+    "ID-0208": {
+      "tz": "Asia/Jayapura",
+      "iso_country": "ID",
+      "name": "Dumpasik Airstrip",
+      "source": "geo-tz candidate, accepted because zone1970.tab lists the airport country for the zone"
+    },
+    "ID-0209": {
+      "tz": "Asia/Jayapura",
+      "iso_country": "ID",
+      "name": "Bordamban Airport",
+      "source": "geo-tz candidate, accepted because zone1970.tab lists the airport country for the zone"
+    },
+    "ID-0210": {
+      "tz": "Asia/Jayapura",
+      "iso_country": "ID",
+      "name": "Kirimu Airstrip",
+      "source": "geo-tz candidate, accepted because zone1970.tab lists the airport country for the zone"
+    },
+    "ID-0211": {
+      "tz": "Asia/Jayapura",
+      "iso_country": "ID",
+      "name": "Hangmata Airstrip",
+      "source": "geo-tz candidate, accepted because zone1970.tab lists the airport country for the zone"
+    },
+    "ID-0339": {
+      "tz": "Asia/Jayapura",
+      "iso_country": "ID",
+      "name": "Old Nabire Airport",
+      "source": "geo-tz candidate, accepted because zone1970.tab lists the airport country for the zone"
+    },
+    "ID-0340": {
+      "tz": "Asia/Jakarta",
+      "iso_country": "ID",
+      "name": "Tabing Airport",
+      "source": "geo-tz candidate, accepted because zone1970.tab lists the airport country for the zone"
+    },
+    "ID-0341": {
+      "tz": "Asia/Pontianak",
+      "iso_country": "ID",
+      "name": "Susilo Airport",
+      "source": "geo-tz candidate, accepted because zone1970.tab lists the airport country for the zone"
+    },
+    "ID-ZGP": {
+      "tz": "Asia/Jayapura",
+      "iso_country": "ID",
+      "name": "Bilorai Airport",
+      "source": "geo-tz candidate, accepted because zone1970.tab lists the airport country for the zone"
+    },
+    "IN-0015": {
+      "tz": "Asia/Kolkata",
+      "iso_country": "IN",
+      "name": "Baljek Airport",
+      "source": "geo-tz candidate, accepted because zone1970.tab lists the airport country for the zone"
+    },
+    "IN-0024": {
+      "tz": "Asia/Kolkata",
+      "iso_country": "IN",
+      "name": "Baramati Airport",
+      "source": "geo-tz candidate, accepted because zone1970.tab lists the airport country for the zone"
+    },
+    "IN-0032": {
+      "tz": "Asia/Kolkata",
+      "iso_country": "IN",
+      "name": "Saiha Helipad",
+      "source": "geo-tz candidate, accepted because zone1970.tab lists the airport country for the zone"
+    },
+    "IN-0369": {
+      "tz": "Asia/Kolkata",
+      "iso_country": "IN",
+      "name": "Sant Gadge Baba Yavatmal Airport",
+      "source": "geo-tz candidate, accepted because zone1970.tab lists the airport country for the zone"
+    },
+    "IQ-0016": {
+      "tz": "Asia/Baghdad",
+      "iso_country": "IQ",
+      "name": "H1 New Air Base",
+      "source": "geo-tz candidate, accepted because zone1970.tab lists the airport country for the zone"
+    },
+    "IQ-0017": {
+      "tz": "Asia/Baghdad",
+      "iso_country": "IQ",
+      "name": "H2 Air Base",
+      "source": "geo-tz candidate, accepted because zone1970.tab lists the airport country for the zone"
+    },
+    "IQ-0018": {
+      "tz": "Asia/Baghdad",
+      "iso_country": "IQ",
+      "name": "H3 Air Base",
+      "source": "geo-tz candidate, accepted because zone1970.tab lists the airport country for the zone"
+    },
+    "IQ-0020": {
+      "tz": "Asia/Baghdad",
+      "iso_country": "IQ",
+      "name": "H3 Northwest AFB",
+      "source": "geo-tz candidate, accepted because zone1970.tab lists the airport country for the zone"
+    },
+    "IQ-0021": {
+      "tz": "Asia/Baghdad",
+      "iso_country": "IQ",
+      "name": "H3 Southwest Air Base",
+      "source": "geo-tz candidate, accepted because zone1970.tab lists the airport country for the zone"
+    },
+    "IQ-0024": {
+      "tz": "Asia/Baghdad",
+      "iso_country": "IQ",
+      "name": "Jalibah Southeast Air Base",
+      "source": "geo-tz candidate, accepted because zone1970.tab lists the airport country for the zone"
+    },
+    "IQ-0030": {
+      "tz": "Asia/Baghdad",
+      "iso_country": "IQ",
+      "name": "Kut Al Hayy East Air Base",
+      "source": "geo-tz candidate, accepted because zone1970.tab lists the airport country for the zone"
+    },
+    "IQ-0034": {
+      "tz": "Asia/Baghdad",
+      "iso_country": "IQ",
+      "name": "Qalat Salih Air Base",
+      "source": "geo-tz candidate, accepted because zone1970.tab lists the airport country for the zone"
+    },
+    "IQ-0039": {
+      "tz": "Asia/Baghdad",
+      "iso_country": "IQ",
+      "name": "Rasheed Air Base",
+      "source": "geo-tz candidate, accepted because zone1970.tab lists the airport country for the zone"
+    },
+    "IQ-0040": {
+      "tz": "Asia/Baghdad",
+      "iso_country": "IQ",
+      "name": "Ruwayshid Air Base",
+      "source": "geo-tz candidate, accepted because zone1970.tab lists the airport country for the zone"
+    },
+    "IQ-0042": {
+      "tz": "Asia/Baghdad",
+      "iso_country": "IQ",
+      "name": "Sahl Sinjar Air Base",
+      "source": "geo-tz candidate, accepted because zone1970.tab lists the airport country for the zone"
+    },
+    "IQ-0045": {
+      "tz": "Asia/Baghdad",
+      "iso_country": "IQ",
+      "name": "Samarra East Air Base / Dhuluiya Airport",
+      "source": "geo-tz candidate, accepted because zone1970.tab lists the airport country for the zone"
+    },
+    "IQ-0051": {
+      "tz": "Asia/Baghdad",
+      "iso_country": "IQ",
+      "name": "Tal Ashtah New Air Base",
+      "source": "geo-tz candidate, accepted because zone1970.tab lists the airport country for the zone"
+    },
+    "IQ-0054": {
+      "tz": "Asia/Baghdad",
+      "iso_country": "IQ",
+      "name": "Tuz Khurmatu Air Base",
+      "source": "geo-tz candidate, accepted because zone1970.tab lists the airport country for the zone"
+    },
+    "IR-0161": {
+      "tz": "Asia/Tehran",
+      "iso_country": "IR",
+      "name": "Oghab 44 Airbase",
+      "source": "geo-tz candidate, accepted because zone1970.tab lists the airport country for the zone"
+    },
+    "IT-0574": {
+      "tz": "Europe/Rome",
+      "iso_country": "IT",
+      "name": "Eliporto Peschici",
+      "source": "geo-tz candidate, accepted because zone1970.tab lists the airport country for the zone"
+    },
+    "IT-0831": {
+      "tz": "Europe/Rome",
+      "iso_country": "IT",
+      "name": "Cervinia Heliport",
+      "source": "geo-tz candidate, accepted because zone1970.tab lists the airport country for the zone"
+    },
+    "JRA": {
+      "tz": "America/New_York",
+      "iso_country": "US",
+      "name": "West 30th Street Heliport",
+      "source": "geo-tz candidate, accepted because zone1970.tab lists the airport country for the zone"
+    },
+    "KAE": {
+      "tz": "America/Sitka",
+      "iso_country": "US",
+      "name": "Kake Seaplane Base",
+      "source": "geo-tz candidate, accepted because zone1970.tab lists the airport country for the zone"
+    },
+    "KDZ": {
+      "tz": "Asia/Colombo",
+      "iso_country": "LK",
+      "name": "Polgolla Reservoir Seaplane Base",
+      "source": "geo-tz candidate, accepted because zone1970.tab lists the airport country for the zone"
+    },
+    "KEB": {
+      "tz": "America/Anchorage",
+      "iso_country": "US",
+      "name": "Nanwalek Airport",
+      "source": "geo-tz candidate, accepted because zone1970.tab lists the airport country for the zone"
+    },
+    "KKB": {
+      "tz": "America/Anchorage",
+      "iso_country": "US",
+      "name": "Kitoi Bay Seaplane Base",
+      "source": "geo-tz candidate, accepted because zone1970.tab lists the airport country for the zone"
+    },
+    "KMY": {
+      "tz": "America/Anchorage",
+      "iso_country": "US",
+      "name": "Moser Bay Seaplane Base",
+      "source": "geo-tz candidate, accepted because zone1970.tab lists the airport country for the zone"
+    },
+    "KOY": {
+      "tz": "America/Anchorage",
+      "iso_country": "US",
+      "name": "Olga Bay Seaplane Base",
+      "source": "geo-tz candidate, accepted because zone1970.tab lists the airport country for the zone"
+    },
+    "KP-0002": {
+      "tz": "Asia/Pyongyang",
+      "iso_country": "KP",
+      "name": "Haeju Airfield",
+      "source": "geo-tz candidate, accepted because zone1970.tab lists the airport country for the zone"
+    },
+    "KP-0012": {
+      "tz": "Asia/Pyongyang",
+      "iso_country": "KP",
+      "name": "Kwaksan Air Base",
+      "source": "geo-tz candidate, accepted because zone1970.tab lists the airport country for the zone"
+    },
+    "KP-0015": {
+      "tz": "Asia/Pyongyang",
+      "iso_country": "KP",
+      "name": "Koksan Air Base",
+      "source": "geo-tz candidate, accepted because zone1970.tab lists the airport country for the zone"
+    },
+    "KP-0020": {
+      "tz": "Asia/Pyongyang",
+      "iso_country": "KP",
+      "name": "Hwangju Airbase",
+      "source": "geo-tz candidate, accepted because zone1970.tab lists the airport country for the zone"
+    },
+    "KP-0022": {
+      "tz": "Asia/Pyongyang",
+      "iso_country": "KP",
+      "name": "Pukchang Air Base",
+      "source": "geo-tz candidate, accepted because zone1970.tab lists the airport country for the zone"
+    },
+    "KP-0025": {
+      "tz": "Asia/Pyongyang",
+      "iso_country": "KP",
+      "name": "Toksan Air Base",
+      "source": "geo-tz candidate, accepted because zone1970.tab lists the airport country for the zone"
+    },
+    "KP-0035": {
+      "tz": "Asia/Pyongyang",
+      "iso_country": "KP",
+      "name": "Hwangsuwon Airbase",
+      "source": "geo-tz candidate, accepted because zone1970.tab lists the airport country for the zone"
+    },
+    "KP-0036": {
+      "tz": "Asia/Pyongyang",
+      "iso_country": "KP",
+      "name": "Changjin Air Force Base",
+      "source": "geo-tz candidate, accepted because zone1970.tab lists the airport country for the zone"
+    },
+    "KP-0038": {
+      "tz": "Asia/Pyongyang",
+      "iso_country": "KP",
+      "name": "Riwon Airbase",
+      "source": "geo-tz candidate, accepted because zone1970.tab lists the airport country for the zone"
+    },
+    "KP-0039": {
+      "tz": "Asia/Pyongyang",
+      "iso_country": "KP",
+      "name": "Kwail Air Base",
+      "source": "geo-tz candidate, accepted because zone1970.tab lists the airport country for the zone"
+    },
+    "KP-0041": {
+      "tz": "Asia/Pyongyang",
+      "iso_country": "KP",
+      "name": "Uthachi Highway Strip Airport",
+      "source": "geo-tz candidate, accepted because zone1970.tab lists the airport country for the zone"
+    },
+    "KP-0068": {
+      "tz": "Asia/Pyongyang",
+      "iso_country": "KP",
+      "name": "Koksan 2 Highway Strip",
+      "source": "geo-tz candidate, accepted because zone1970.tab lists the airport country for the zone"
+    },
+    "KPB": {
+      "tz": "America/Sitka",
+      "iso_country": "US",
+      "name": "Point Baker Seaplane Base",
+      "source": "geo-tz candidate, accepted because zone1970.tab lists the airport country for the zone"
+    },
+    "KPR": {
+      "tz": "America/Anchorage",
+      "iso_country": "US",
+      "name": "Port Williams Seaplane Base",
+      "source": "geo-tz candidate, accepted because zone1970.tab lists the airport country for the zone"
+    },
+    "KPY": {
+      "tz": "America/Anchorage",
+      "iso_country": "US",
+      "name": "Port Bailey Seaplane Base",
+      "source": "geo-tz candidate, accepted because zone1970.tab lists the airport country for the zone"
+    },
+    "KR-1109": {
+      "tz": "Asia/Seoul",
+      "iso_country": "KR",
+      "name": "Naju Juksanbo Airfield",
+      "source": "geo-tz candidate, accepted because zone1970.tab lists the airport country for the zone"
+    },
+    "KR-1114": {
+      "tz": "Asia/Seoul",
+      "iso_country": "KR",
+      "name": "Ulleung Airport",
+      "source": "geo-tz candidate, accepted because zone1970.tab lists the airport country for the zone"
+    },
+    "KR-1115": {
+      "tz": "Asia/Seoul",
+      "iso_country": "KR",
+      "name": "Andong Airfield",
+      "source": "geo-tz candidate, accepted because zone1970.tab lists the airport country for the zone"
+    },
+    "KR-1124": {
+      "tz": "Asia/Seoul",
+      "iso_country": "KR",
+      "name": "Samcheok Airport",
+      "source": "geo-tz candidate, accepted because zone1970.tab lists the airport country for the zone"
+    },
+    "KR-1125": {
+      "tz": "Asia/Seoul",
+      "iso_country": "KR",
+      "name": "Gochang Airport",
+      "source": "geo-tz candidate, accepted because zone1970.tab lists the airport country for the zone"
+    },
+    "KTB": {
+      "tz": "America/Sitka",
+      "iso_country": "US",
+      "name": "Thorne Bay Seaplane Base",
+      "source": "geo-tz candidate, accepted because zone1970.tab lists the airport country for the zone"
+    },
+    "KWP": {
+      "tz": "America/Anchorage",
+      "iso_country": "US",
+      "name": "West Point Village Seaplane Base",
+      "source": "geo-tz candidate, accepted because zone1970.tab lists the airport country for the zone"
+    },
+    "KXA": {
+      "tz": "America/Sitka",
+      "iso_country": "US",
+      "name": "Kasaan Seaplane Base",
+      "source": "geo-tz candidate, accepted because zone1970.tab lists the airport country for the zone"
+    },
+    "KZ-0068": {
+      "tz": "Asia/Almaty",
+      "iso_country": "KZ",
+      "name": "Kurchatov Airfield",
+      "source": "geo-tz candidate, accepted because zone1970.tab lists the airport country for the zone"
+    },
+    "KZ-0069": {
+      "tz": "Asia/Almaty",
+      "iso_country": "KZ",
+      "name": "Zhangiztobe Air Base",
+      "source": "geo-tz candidate, accepted because zone1970.tab lists the airport country for the zone"
+    },
+    "KZ-7470": {
+      "tz": "Asia/Almaty",
+      "iso_country": "KZ",
+      "name": "Dolon Air Base",
+      "source": "geo-tz candidate, accepted because zone1970.tab lists the airport country for the zone"
+    },
+    "KZB": {
+      "tz": "America/Anchorage",
+      "iso_country": "US",
+      "name": "Zachar Bay Seaplane Base",
+      "source": "geo-tz candidate, accepted because zone1970.tab lists the airport country for the zone"
+    },
+    "LBH": {
+      "tz": "Australia/Sydney",
+      "iso_country": "AU",
+      "name": "Palm Beach Seaplane Base",
+      "source": "geo-tz candidate, accepted because zone1970.tab lists the airport country for the zone"
+    },
+    "LCGK": {
+      "tz": "Asia/Famagusta",
+      "iso_country": "CY",
+      "name": "Geçitkale Airbase",
+      "source": "geo-tz candidate, accepted because zone1970.tab lists the airport country for the zone"
+    },
+    "LEAG": {
+      "tz": "Europe/Madrid",
+      "iso_country": "ES",
+      "name": "Algeciras Heliport",
+      "source": "geo-tz candidate, accepted because zone1970.tab lists the airport country for the zone"
+    },
+    "LHKA": {
+      "tz": "Europe/Budapest",
+      "iso_country": "HU",
+      "name": "Kalocsa-Foktő Airfield",
+      "source": "geo-tz candidate, accepted because zone1970.tab lists the airport country for the zone"
+    },
+    "LINI": {
+      "tz": "Europe/Rome",
+      "iso_country": "IT",
+      "name": "San Domino Island Heliport",
+      "source": "geo-tz candidate, accepted because zone1970.tab lists the airport country for the zone"
+    },
+    "LK-0001": {
+      "tz": "Asia/Colombo",
+      "iso_country": "LK",
+      "name": "Iranamadu Airport",
+      "source": "geo-tz candidate, accepted because zone1970.tab lists the airport country for the zone"
+    },
+    "LMMG": {
+      "tz": "Europe/Malta",
+      "iso_country": "MT",
+      "name": "Xewkija Heliport",
+      "source": "geo-tz candidate, accepted because zone1970.tab lists the airport country for the zone"
+    },
+    "LNMC": {
+      "tz": "Europe/Monaco",
+      "canonical": "Europe/Paris",
+      "iso_country": "MC",
+      "name": "Monaco Heliport",
+      "source": "geo-tz candidate, accepted because zone1970.tab lists the airport country for the zone"
+    },
+    "LTCV": {
+      "tz": "Europe/Istanbul",
+      "iso_country": "TR",
+      "name": "Şırnak Şerafettin Elçi Airport",
+      "source": "geo-tz candidate, accepted because zone1970.tab lists the airport country for the zone"
+    },
+    "LY-BCQ": {
+      "tz": "Africa/Tripoli",
+      "iso_country": "LY",
+      "name": "Brak Airport",
+      "source": "geo-tz candidate, accepted because zone1970.tab lists the airport country for the zone"
+    },
+    "MH-AUL": {
+      "tz": "Pacific/Majuro",
+      "canonical": "Pacific/Tarawa",
+      "iso_country": "MH",
+      "name": "Aur Island Airport",
+      "source": "geo-tz candidate, accepted because zone1970.tab lists the airport country for the zone"
+    },
+    "MH-JEJ": {
+      "tz": "Pacific/Majuro",
+      "canonical": "Pacific/Tarawa",
+      "iso_country": "MH",
+      "name": "Jeh Airport",
+      "source": "geo-tz candidate, accepted because zone1970.tab lists the airport country for the zone"
+    },
+    "MH-LIK": {
+      "tz": "Pacific/Majuro",
+      "canonical": "Pacific/Tarawa",
+      "iso_country": "MH",
+      "name": "Likiep Airport",
+      "source": "geo-tz candidate, accepted because zone1970.tab lists the airport country for the zone"
+    },
+    "MH-MJE": {
+      "tz": "Pacific/Majuro",
+      "canonical": "Pacific/Tarawa",
+      "iso_country": "MH",
+      "name": "Majkin Airport",
+      "source": "geo-tz candidate, accepted because zone1970.tab lists the airport country for the zone"
+    },
+    "MH-RNP": {
+      "tz": "Pacific/Majuro",
+      "canonical": "Pacific/Tarawa",
+      "iso_country": "MH",
+      "name": "Rongelap Island Airport",
+      "source": "geo-tz candidate, accepted because zone1970.tab lists the airport country for the zone"
+    },
+    "MH-UIT": {
+      "tz": "Pacific/Majuro",
+      "canonical": "Pacific/Tarawa",
+      "iso_country": "MH",
+      "name": "Jaluit Airport",
+      "source": "geo-tz candidate, accepted because zone1970.tab lists the airport country for the zone"
+    },
+    "MH-WTE": {
+      "tz": "Pacific/Majuro",
+      "canonical": "Pacific/Tarawa",
+      "iso_country": "MH",
+      "name": "Wotje Airport",
+      "source": "geo-tz candidate, accepted because zone1970.tab lists the airport country for the zone"
+    },
+    "MH-WTO": {
+      "tz": "Pacific/Majuro",
+      "canonical": "Pacific/Tarawa",
+      "iso_country": "MH",
+      "name": "Wotho Island Airport",
+      "source": "geo-tz candidate, accepted because zone1970.tab lists the airport country for the zone"
+    },
+    "MM52": {
+      "tz": "America/Mazatlan",
+      "iso_country": "MX",
+      "name": "Camaguey-Campo Cuatro Milpas Airport",
+      "source": "geo-tz candidate, accepted because zone1970.tab lists the airport country for the zone"
+    },
+    "MN-0005": {
+      "tz": "Asia/Ulaanbaatar",
+      "iso_country": "MN",
+      "name": "Shine Bulagin Hural Air Base",
+      "source": "geo-tz candidate, accepted because zone1970.tab lists the airport country for the zone"
+    },
+    "MNLP": {
+      "tz": "America/Managua",
+      "iso_country": "NI",
+      "name": "Omtepe Airport",
+      "source": "geo-tz candidate, accepted because zone1970.tab lists the airport country for the zone"
+    },
+    "MPPD": {
+      "tz": "America/Panama",
+      "iso_country": "PA",
+      "name": "Capt. J. Montenegro Airport",
+      "source": "geo-tz candidate, accepted because zone1970.tab lists the airport country for the zone"
+    },
+    "MPPI": {
+      "tz": "America/Panama",
+      "iso_country": "PA",
+      "name": "Bahia Piña Airport",
+      "source": "geo-tz candidate, accepted because zone1970.tab lists the airport country for the zone"
+    },
+    "MPRA": {
+      "tz": "America/Panama",
+      "iso_country": "PA",
+      "name": "Raul Arias Espinoza Airport",
+      "source": "geo-tz candidate, accepted because zone1970.tab lists the airport country for the zone"
+    },
+    "MU-0004": {
+      "tz": "Indian/Mauritius",
+      "iso_country": "MU",
+      "name": "IAF Agalega",
+      "source": "geo-tz candidate, accepted because zone1970.tab lists the airport country for the zone"
+    },
+    "MX-0203": {
+      "tz": "America/Mexico_City",
+      "iso_country": "MX",
+      "name": "Cedros Airport",
+      "source": "geo-tz candidate, accepted because zone1970.tab lists the airport country for the zone"
+    },
+    "MX-0424": {
+      "tz": "America/Chihuahua",
+      "iso_country": "MX",
+      "name": "Creel International Airport / Barrancas del Cobre Regional Airport",
+      "source": "geo-tz candidate, accepted because zone1970.tab lists the airport country for the zone"
+    },
+    "MX-0685": {
+      "tz": "America/Mexico_City",
+      "iso_country": "MX",
+      "name": "Cantarell II Platform Helipad",
+      "source": "geo-tz candidate, accepted because zone1970.tab lists the airport country for the zone"
+    },
+    "MX-0687": {
+      "tz": "America/Mexico_City",
+      "iso_country": "MX",
+      "name": "Agricola La Tuxcana Airport",
+      "source": "geo-tz candidate, accepted because zone1970.tab lists the airport country for the zone"
+    },
+    "MX-0779": {
+      "tz": "America/Mexico_City",
+      "iso_country": "MX",
+      "name": "Helipuerto El Universal",
+      "source": "geo-tz candidate, accepted because zone1970.tab lists the airport country for the zone"
+    },
+    "MX-1167": {
+      "tz": "America/Mexico_City",
+      "iso_country": "MX",
+      "name": "Helipuerto VZ Flights",
+      "source": "geo-tz candidate, accepted because zone1970.tab lists the airport country for the zone"
+    },
+    "MX-1745": {
+      "tz": "America/Mexico_City",
+      "iso_country": "MX",
+      "name": "Unitec Guadalajara Helipad",
+      "source": "geo-tz candidate, accepted because zone1970.tab lists the airport country for the zone"
+    },
+    "MX-2020": {
+      "tz": "America/Mexico_City",
+      "iso_country": "MX",
+      "name": "Helipuerto Ciudad de México",
+      "source": "geo-tz candidate, accepted because zone1970.tab lists the airport country for the zone"
+    },
+    "MX-2118": {
+      "tz": "America/Mexico_City",
+      "iso_country": "MX",
+      "name": "Base N°1 de la Fuerza Aérea Mexicana (General Alfredo Lezama Álvarez)",
+      "source": "geo-tz candidate, accepted because zone1970.tab lists the airport country for the zone"
+    },
+    "MY-LBP": {
+      "tz": "Asia/Kuching",
+      "iso_country": "MY",
+      "name": "Long Banga Airport",
+      "source": "geo-tz candidate, accepted because zone1970.tab lists the airport country for the zone"
+    },
+    "MYK": {
+      "tz": "America/Anchorage",
+      "iso_country": "US",
+      "name": "May Creek Airport",
+      "source": "geo-tz candidate, accepted because zone1970.tab lists the airport country for the zone"
+    },
+    "MYLR": {
+      "tz": "America/Nassau",
+      "canonical": "America/Toronto",
+      "iso_country": "BS",
+      "name": "Hard Bargain Airport",
+      "source": "geo-tz candidate, accepted because zone1970.tab lists the airport country for the zone"
+    },
+    "MZBE": {
+      "tz": "America/Belize",
+      "iso_country": "BZ",
+      "name": "Sir Barry Bowen Municipal Airport",
+      "source": "geo-tz candidate, accepted because zone1970.tab lists the airport country for the zone"
+    },
+    "MZBG": {
+      "tz": "America/Belize",
+      "iso_country": "BZ",
+      "name": "Big Creek Airport",
+      "source": "geo-tz candidate, accepted because zone1970.tab lists the airport country for the zone"
+    },
+    "MZCK": {
+      "tz": "America/Belize",
+      "iso_country": "BZ",
+      "name": "Caye Caulker Airport",
+      "source": "geo-tz candidate, accepted because zone1970.tab lists the airport country for the zone"
+    },
+    "MZCP": {
+      "tz": "America/Belize",
+      "iso_country": "BZ",
+      "name": "Caye Chapel Airport",
+      "source": "geo-tz candidate, accepted because zone1970.tab lists the airport country for the zone"
+    },
+    "MZCZ": {
+      "tz": "America/Belize",
+      "iso_country": "BZ",
+      "name": "Corozal Airport",
+      "source": "geo-tz candidate, accepted because zone1970.tab lists the airport country for the zone"
+    },
+    "MZPG": {
+      "tz": "America/Belize",
+      "iso_country": "BZ",
+      "name": "Punta Gorda Airport",
+      "source": "geo-tz candidate, accepted because zone1970.tab lists the airport country for the zone"
+    },
+    "MZPL": {
+      "tz": "America/Belize",
+      "iso_country": "BZ",
+      "name": "Placencia Airport",
+      "source": "geo-tz candidate, accepted because zone1970.tab lists the airport country for the zone"
+    },
+    "MZSP": {
+      "tz": "America/Belize",
+      "iso_country": "BZ",
+      "name": "John Greif II Airport",
+      "source": "geo-tz candidate, accepted because zone1970.tab lists the airport country for the zone"
+    },
+    "MZSV": {
+      "tz": "America/Belize",
+      "iso_country": "BZ",
+      "name": "Independence Airport",
+      "source": "geo-tz candidate, accepted because zone1970.tab lists the airport country for the zone"
+    },
+    "MZTH": {
+      "tz": "America/Belize",
+      "iso_country": "BZ",
+      "name": "H.E Alfredo Martinez (Tower Hill) Airstrip",
+      "source": "geo-tz candidate, accepted because zone1970.tab lists the airport country for the zone"
+    },
+    "NE-0001": {
+      "tz": "Africa/Niamey",
+      "canonical": "Africa/Lagos",
+      "iso_country": "NE",
+      "name": "Niger Air Base 201",
+      "source": "geo-tz candidate, accepted because zone1970.tab lists the airport country for the zone"
+    },
+    "NTAM": {
+      "tz": "Pacific/Tahiti",
+      "iso_country": "PF",
+      "name": "Rimatara Airport",
+      "source": "geo-tz candidate, accepted because zone1970.tab lists the airport country for the zone"
+    },
+    "NTHB": {
+      "tz": "Pacific/Tahiti",
+      "iso_country": "PF",
+      "name": "PAGO HELIPAD",
+      "source": "geo-tz candidate, accepted because zone1970.tab lists the airport country for the zone"
+    },
+    "NTKN": {
+      "tz": "Pacific/Tahiti",
+      "iso_country": "PF",
+      "name": "Naiu Airport",
+      "source": "geo-tz candidate, accepted because zone1970.tab lists the airport country for the zone"
+    },
+    "NZOT": {
+      "tz": "Pacific/Auckland",
+      "iso_country": "NZ",
+      "name": "Otaki Airport",
+      "source": "geo-tz candidate, accepted because zone1970.tab lists the airport country for the zone"
+    },
+    "NZPT": {
+      "tz": "Pacific/Chatham",
+      "iso_country": "NZ",
+      "name": "Pitt Island Aerodrome",
+      "source": "geo-tz candidate, accepted because zone1970.tab lists the airport country for the zone"
+    },
+    "OEBT": {
+      "tz": "Asia/Riyadh",
+      "iso_country": "SA",
+      "name": "Batha Airport",
+      "source": "geo-tz candidate, accepted because zone1970.tab lists the airport country for the zone"
+    },
+    "OESN": {
+      "tz": "Asia/Riyadh",
+      "iso_country": "SA",
+      "name": "King Salman Air Base",
+      "source": "geo-tz candidate, accepted because zone1970.tab lists the airport country for the zone"
+    },
+    "OJKF": {
+      "tz": "Asia/Amman",
+      "iso_country": "JO",
+      "name": "King Feisal Air Base",
+      "source": "geo-tz candidate, accepted because zone1970.tab lists the airport country for the zone"
+    },
+    "OJMS": {
+      "tz": "Asia/Amman",
+      "iso_country": "JO",
+      "name": "Muwaffaq Salti Air Base",
+      "source": "geo-tz candidate, accepted because zone1970.tab lists the airport country for the zone"
+    },
+    "OLH": {
+      "tz": "America/Anchorage",
+      "iso_country": "US",
+      "name": "Old Harbor Airport",
+      "source": "geo-tz candidate, accepted because zone1970.tab lists the airport country for the zone"
+    },
+    "OM-0007": {
+      "tz": "Asia/Muscat",
+      "canonical": "Asia/Dubai",
+      "iso_country": "OM",
+      "name": "Ras al Hadd Airport",
+      "source": "geo-tz candidate, accepted because zone1970.tab lists the airport country for the zone"
+    },
+    "OMDL": {
+      "tz": "Asia/Dubai",
+      "iso_country": "AE",
+      "name": "Delma Airport",
+      "source": "geo-tz candidate, accepted because zone1970.tab lists the airport country for the zone"
+    },
+    "OMNK": {
+      "tz": "Asia/Dubai",
+      "iso_country": "AE",
+      "name": "Sas Al Nakheel Air Base",
+      "source": "geo-tz candidate, accepted because zone1970.tab lists the airport country for the zone"
+    },
+    "OP12": {
+      "tz": "Asia/Karachi",
+      "iso_country": "PK",
+      "name": "Shamsi Airfield",
+      "source": "geo-tz candidate, accepted because zone1970.tab lists the airport country for the zone"
+    },
+    "ORI": {
+      "tz": "America/Anchorage",
+      "iso_country": "US",
+      "name": "Port Lions Airport",
+      "source": "geo-tz candidate, accepted because zone1970.tab lists the airport country for the zone"
+    },
+    "OS57": {
+      "tz": "Asia/Damascus",
+      "iso_country": "SY",
+      "name": "Abu ad Duhur Air Base",
+      "source": "geo-tz candidate, accepted because zone1970.tab lists the airport country for the zone"
+    },
+    "OS64": {
+      "tz": "Asia/Damascus",
+      "iso_country": "SY",
+      "name": "An Nasiriyah Air Base",
+      "source": "geo-tz candidate, accepted because zone1970.tab lists the airport country for the zone"
+    },
+    "OS69": {
+      "tz": "Asia/Damascus",
+      "iso_country": "SY",
+      "name": "Khalkhalah Air Base",
+      "source": "geo-tz candidate, accepted because zone1970.tab lists the airport country for the zone"
+    },
+    "OS70": {
+      "tz": "Asia/Damascus",
+      "iso_country": "SY",
+      "name": "Al Qusayr Air Base",
+      "source": "geo-tz candidate, accepted because zone1970.tab lists the airport country for the zone"
+    },
+    "OY74": {
+      "tz": "Asia/Aden",
+      "canonical": "Asia/Riyadh",
+      "iso_country": "YE",
+      "name": "Al Anad Air Base",
+      "source": "geo-tz candidate, accepted because zone1970.tab lists the airport country for the zone"
+    },
+    "PA-0038": {
+      "tz": "America/Panama",
+      "iso_country": "PA",
+      "name": "Pixvae Airstrip",
+      "source": "geo-tz candidate, accepted because zone1970.tab lists the airport country for the zone"
+    },
+    "PAAP": {
+      "tz": "America/Sitka",
+      "iso_country": "US",
+      "name": "Port Alexander Seaplane Base",
+      "source": "geo-tz candidate, accepted because zone1970.tab lists the airport country for the zone"
+    },
+    "PACJ": {
+      "tz": "America/Anchorage",
+      "iso_country": "US",
+      "name": "Crooked Creek Airport",
+      "source": "geo-tz candidate, accepted because zone1970.tab lists the airport country for the zone"
+    },
+    "PAEL": {
+      "tz": "America/Juneau",
+      "iso_country": "US",
+      "name": "Elfin Cove Seaplane Base",
+      "source": "geo-tz candidate, accepted because zone1970.tab lists the airport country for the zone"
+    },
+    "PAGX": {
+      "tz": "America/Anchorage",
+      "iso_country": "US",
+      "name": "Grayling Airport",
+      "source": "geo-tz candidate, accepted because zone1970.tab lists the airport country for the zone"
+    },
+    "PAHY": {
+      "tz": "America/Sitka",
+      "iso_country": "US",
+      "name": "Hydaburg Seaplane Base",
+      "source": "geo-tz candidate, accepted because zone1970.tab lists the airport country for the zone"
+    },
+    "PAKA": {
+      "tz": "America/Anchorage",
+      "iso_country": "US",
+      "name": "Tatitlek Airport",
+      "source": "geo-tz candidate, accepted because zone1970.tab lists the airport country for the zone"
+    },
+    "PAKC": {
+      "tz": "America/Sitka",
+      "iso_country": "US",
+      "name": "Coffman Cove Seaplane Base",
+      "source": "geo-tz candidate, accepted because zone1970.tab lists the airport country for the zone"
+    },
+    "PAMM": {
+      "tz": "America/Metlakatla",
+      "iso_country": "US",
+      "name": "Metlakatla Seaplane Base",
+      "source": "geo-tz candidate, accepted because zone1970.tab lists the airport country for the zone"
+    },
+    "PANR": {
+      "tz": "America/Juneau",
+      "iso_country": "US",
+      "name": "Funter Bay Seaplane Base",
+      "source": "geo-tz candidate, accepted because zone1970.tab lists the airport country for the zone"
+    },
+    "PEC": {
+      "tz": "America/Juneau",
+      "iso_country": "US",
+      "name": "Pelican Seaplane Base",
+      "source": "geo-tz candidate, accepted because zone1970.tab lists the airport country for the zone"
+    },
+    "PFMP": {
+      "tz": "America/Anchorage",
+      "iso_country": "US",
+      "name": "Rampart Airport",
+      "source": "geo-tz candidate, accepted because zone1970.tab lists the airport country for the zone"
+    },
+    "PFZK": {
+      "tz": "America/Anchorage",
+      "iso_country": "US",
+      "name": "Akiachak Airport",
+      "source": "geo-tz candidate, accepted because zone1970.tab lists the airport country for the zone"
+    },
+    "PGM": {
+      "tz": "America/Anchorage",
+      "iso_country": "US",
+      "name": "Port Graham Airport",
+      "source": "geo-tz candidate, accepted because zone1970.tab lists the airport country for the zone"
+    },
+    "PH-0462": {
+      "tz": "Asia/Manila",
+      "iso_country": "PH",
+      "name": "Central Mindanao Airport",
+      "source": "geo-tz candidate, accepted because zone1970.tab lists the airport country for the zone"
+    },
+    "PHIK": {
+      "tz": "Pacific/Honolulu",
+      "iso_country": "US",
+      "name": "Hickam Air Force Base",
+      "source": "geo-tz candidate, accepted because zone1970.tab lists the airport country for the zone"
+    },
+    "PK-0083": {
+      "tz": "Asia/Karachi",
+      "iso_country": "PK",
+      "name": "Jiwani Airport",
+      "source": "geo-tz candidate, accepted because zone1970.tab lists the airport country for the zone"
+    },
+    "PK-0092": {
+      "tz": "Asia/Karachi",
+      "iso_country": "PK",
+      "name": "Mai Bakhtawar International Airport",
+      "source": "geo-tz candidate, accepted because zone1970.tab lists the airport country for the zone"
+    },
+    "PPCT": {
+      "tz": "America/Anchorage",
+      "iso_country": "US",
+      "name": "Takotna Airport",
+      "source": "geo-tz candidate, accepted because zone1970.tab lists the airport country for the zone"
+    },
+    "PPIT": {
+      "tz": "America/Nome",
+      "iso_country": "US",
+      "name": "Nunapitchuk Airport",
+      "source": "geo-tz candidate, accepted because zone1970.tab lists the airport country for the zone"
+    },
+    "PR34": {
+      "tz": "America/Puerto_Rico",
+      "iso_country": "PR",
+      "name": "San Juan Seaplane Base",
+      "source": "geo-tz candidate, accepted because zone1970.tab lists the airport country for the zone"
+    },
+    "PT-0156": {
+      "tz": "Europe/Lisbon",
+      "iso_country": "PT",
+      "name": "Estremoz Municipal Heliport",
+      "source": "geo-tz candidate, accepted because zone1970.tab lists the airport country for the zone"
+    },
+    "PY-0043": {
+      "tz": "America/Asuncion",
+      "iso_country": "PY",
+      "name": "Base de la Fuerza Aérea Paraguaya \"Mayor Infante Rivarola\"",
+      "source": "geo-tz candidate, accepted because zone1970.tab lists the airport country for the zone"
+    },
+    "Q51": {
+      "tz": "Pacific/Majuro",
+      "canonical": "Pacific/Tarawa",
+      "iso_country": "MH",
+      "name": "Kili Airport",
+      "source": "geo-tz candidate, accepted because zone1970.tab lists the airport country for the zone"
+    },
+    "QFX": {
+      "tz": "America/Nuuk",
+      "iso_country": "GL",
+      "name": "Igaliku Heliport",
+      "source": "geo-tz candidate, accepted because zone1970.tab lists the airport country for the zone"
+    },
+    "RDV": {
+      "tz": "America/Anchorage",
+      "iso_country": "US",
+      "name": "Red Devil Airport",
+      "source": "geo-tz candidate, accepted because zone1970.tab lists the airport country for the zone"
+    },
+    "RJCS": {
+      "tz": "Asia/Tokyo",
+      "iso_country": "JP",
+      "name": "JASDF Kenebetsu Airfield",
+      "source": "geo-tz candidate, accepted because zone1970.tab lists the airport country for the zone"
+    },
+    "RKDD": {
+      "tz": "Asia/Seoul",
+      "iso_country": "KR",
+      "name": "N 105 Helipad",
+      "source": "geo-tz candidate, accepted because zone1970.tab lists the airport country for the zone"
+    },
+    "RPLH": {
+      "tz": "Asia/Manila",
+      "iso_country": "PH",
+      "name": "Cagayan North International Airport",
+      "source": "geo-tz candidate, accepted because zone1970.tab lists the airport country for the zone"
+    },
+    "RPSV": {
+      "tz": "Asia/Manila",
+      "iso_country": "PH",
+      "name": "San Vicente Airport",
+      "source": "geo-tz candidate, accepted because zone1970.tab lists the airport country for the zone"
+    },
+    "RU-0001": {
+      "tz": "Europe/Moscow",
+      "iso_country": "RU",
+      "name": "Levashovo Air Base",
+      "source": "geo-tz candidate, accepted because zone1970.tab lists the airport country for the zone"
+    },
+    "RU-0008": {
+      "tz": "Asia/Chita",
+      "iso_country": "RU",
+      "name": "Bada Air Base",
+      "source": "geo-tz candidate, accepted because zone1970.tab lists the airport country for the zone"
+    },
+    "RU-0010": {
+      "tz": "Europe/Saratov",
+      "iso_country": "RU",
+      "name": "Balashov Air Base",
+      "source": "geo-tz candidate, accepted because zone1970.tab lists the airport country for the zone"
+    },
+    "RU-0014": {
+      "tz": "Europe/Moscow",
+      "iso_country": "RU",
+      "name": "Borisoglebsk Air Base",
+      "source": "geo-tz candidate, accepted because zone1970.tab lists the airport country for the zone"
+    },
+    "RU-0015": {
+      "tz": "Europe/Moscow",
+      "iso_country": "RU",
+      "name": "Khotilovo Air Base",
+      "source": "geo-tz candidate, accepted because zone1970.tab lists the airport country for the zone"
+    },
+    "RU-0016": {
+      "tz": "Europe/Moscow",
+      "iso_country": "RU",
+      "name": "Lipetsk Air Base",
+      "source": "geo-tz candidate, accepted because zone1970.tab lists the airport country for the zone"
+    },
+    "RU-0018": {
+      "tz": "Europe/Moscow",
+      "iso_country": "RU",
+      "name": "Buturlinovka Air Base",
+      "source": "geo-tz candidate, accepted because zone1970.tab lists the airport country for the zone"
+    },
+    "RU-0023": {
+      "tz": "Asia/Chita",
+      "iso_country": "RU",
+      "name": "Chindant Air Base",
+      "source": "geo-tz candidate, accepted because zone1970.tab lists the airport country for the zone"
+    },
+    "RU-0028": {
+      "tz": "Europe/Kaliningrad",
+      "iso_country": "RU",
+      "name": "Kaliningrad Chkalovsk Naval Air Base",
+      "source": "geo-tz candidate, accepted because zone1970.tab lists the airport country for the zone"
+    },
+    "RU-0043": {
+      "tz": "Europe/Moscow",
+      "iso_country": "RU",
+      "name": "Mius Airport",
+      "source": "geo-tz candidate, accepted because zone1970.tab lists the airport country for the zone"
+    },
+    "RU-0056": {
+      "tz": "Asia/Irkutsk",
+      "iso_country": "RU",
+      "name": "Taksimo Airport",
+      "source": "geo-tz candidate, accepted because zone1970.tab lists the airport country for the zone"
+    },
+    "RU-0060": {
+      "tz": "Europe/Kaliningrad",
+      "iso_country": "RU",
+      "name": "Chernyakhovsk Naval Air Base",
+      "source": "geo-tz candidate, accepted because zone1970.tab lists the airport country for the zone"
+    },
+    "RU-0064": {
+      "tz": "Europe/Moscow",
+      "iso_country": "RU",
+      "name": "Ostrov Naval Air Base",
+      "source": "geo-tz candidate, accepted because zone1970.tab lists the airport country for the zone"
+    },
+    "RU-0065": {
+      "tz": "Europe/Moscow",
+      "iso_country": "RU",
+      "name": "Pribylovo Naval Air Base",
+      "source": "geo-tz candidate, accepted because zone1970.tab lists the airport country for the zone"
+    },
+    "RU-0089": {
+      "tz": "Europe/Moscow",
+      "iso_country": "RU",
+      "name": "Krymsk Air Base",
+      "source": "geo-tz candidate, accepted because zone1970.tab lists the airport country for the zone"
+    },
+    "RU-0090": {
+      "tz": "Europe/Moscow",
+      "iso_country": "RU",
+      "name": "Krasnodar Central Air Base",
+      "source": "geo-tz candidate, accepted because zone1970.tab lists the airport country for the zone"
+    },
+    "RU-0125": {
+      "tz": "Europe/Samara",
+      "iso_country": "RU",
+      "name": "Bobrovka Air Base",
+      "source": "geo-tz candidate, accepted because zone1970.tab lists the airport country for the zone"
+    },
+    "RU-0128": {
+      "tz": "Europe/Moscow",
+      "iso_country": "RU",
+      "name": "Budyonnovsk Air Base",
+      "source": "geo-tz candidate, accepted because zone1970.tab lists the airport country for the zone"
+    },
+    "RU-0132": {
+      "tz": "Asia/Vladivostok",
+      "iso_country": "RU",
+      "name": "Chernigovka Air Base",
+      "source": "geo-tz candidate, accepted because zone1970.tab lists the airport country for the zone"
+    },
+    "RU-0143": {
+      "tz": "Asia/Kamchatka",
+      "iso_country": "RU",
+      "name": "Avachinskiy Heliport",
+      "source": "geo-tz candidate, accepted because zone1970.tab lists the airport country for the zone"
+    },
+    "RU-0152": {
+      "tz": "Europe/Moscow",
+      "iso_country": "RU",
+      "name": "Mozdok Air Base",
+      "source": "geo-tz candidate, accepted because zone1970.tab lists the airport country for the zone"
+    },
+    "RU-0211": {
+      "tz": "Europe/Moscow",
+      "iso_country": "RU",
+      "name": "Taganrog Tsentralny Air Base",
+      "source": "geo-tz candidate, accepted because zone1970.tab lists the airport country for the zone"
+    },
+    "RU-0217": {
+      "tz": "Europe/Moscow",
+      "iso_country": "RU",
+      "name": "Sormovo Airfield",
+      "source": "geo-tz candidate, accepted because zone1970.tab lists the airport country for the zone"
+    },
+    "RU-0240": {
+      "tz": "Europe/Moscow",
+      "iso_country": "RU",
+      "name": "Seshcha Air Base",
+      "source": "geo-tz candidate, accepted because zone1970.tab lists the airport country for the zone"
+    },
+    "RU-0282": {
+      "tz": "Europe/Moscow",
+      "iso_country": "RU",
+      "name": "Millerovo Air Base",
+      "source": "geo-tz candidate, accepted because zone1970.tab lists the airport country for the zone"
+    },
+    "RU-0303": {
+      "tz": "Europe/Astrakhan",
+      "iso_country": "RU",
+      "name": "Privolzhskiy Air Base",
+      "source": "geo-tz candidate, accepted because zone1970.tab lists the airport country for the zone"
+    },
+    "RU-0304": {
+      "tz": "Europe/Astrakhan",
+      "iso_country": "RU",
+      "name": "Kapustin Yar Airfield",
+      "source": "geo-tz candidate, accepted because zone1970.tab lists the airport country for the zone"
+    },
+    "RU-0327": {
+      "tz": "Asia/Vladivostok",
+      "iso_country": "RU",
+      "name": "Vozdvizhenka Air Base",
+      "source": "geo-tz candidate, accepted because zone1970.tab lists the airport country for the zone"
+    },
+    "RU-0372": {
+      "tz": "Europe/Moscow",
+      "iso_country": "RU",
+      "name": "Rostov-on-Don Central Air Base",
+      "source": "geo-tz candidate, accepted because zone1970.tab lists the airport country for the zone"
+    },
+    "RU-0380": {
+      "tz": "Europe/Astrakhan",
+      "iso_country": "RU",
+      "name": "Akhtubinsk Air Base",
+      "source": "geo-tz candidate, accepted because zone1970.tab lists the airport country for the zone"
+    },
+    "RU-0470": {
+      "tz": "Asia/Krasnoyarsk",
+      "iso_country": "RU",
+      "name": "Motygino Airport",
+      "source": "geo-tz candidate, accepted because zone1970.tab lists the airport country for the zone"
+    },
+    "RU-0716": {
+      "tz": "Europe/Moscow",
+      "iso_country": "RU",
+      "name": "Kizhi helipad",
+      "source": "geo-tz candidate, accepted because zone1970.tab lists the airport country for the zone"
+    },
+    "RU-10047": {
+      "tz": "Europe/Saratov",
+      "iso_country": "RU",
+      "name": "Rtishchevo Air Base",
+      "source": "geo-tz candidate, accepted because zone1970.tab lists the airport country for the zone"
+    },
+    "RU-10056": {
+      "tz": "Europe/Moscow",
+      "iso_country": "RU",
+      "name": "Fedotovo Naval Air Base",
+      "source": "geo-tz candidate, accepted because zone1970.tab lists the airport country for the zone"
+    },
+    "RU-10057": {
+      "tz": "Europe/Moscow",
+      "iso_country": "RU",
+      "name": "Severomorsk-1 Naval Air Base",
+      "source": "geo-tz candidate, accepted because zone1970.tab lists the airport country for the zone"
+    },
+    "RU-10058": {
+      "tz": "Europe/Moscow",
+      "iso_country": "RU",
+      "name": "Severomorsk-3 Naval Air Base",
+      "source": "geo-tz candidate, accepted because zone1970.tab lists the airport country for the zone"
+    },
+    "RU-10062": {
+      "tz": "Europe/Moscow",
+      "iso_country": "RU",
+      "name": "Khanskaya Air Base",
+      "source": "geo-tz candidate, accepted because zone1970.tab lists the airport country for the zone"
+    },
+    "RU-1071": {
+      "tz": "Asia/Yekaterinburg",
+      "iso_country": "RU",
+      "name": "Kamensk-Uralskiy Air Base",
+      "source": "geo-tz candidate, accepted because zone1970.tab lists the airport country for the zone"
+    },
+    "RU-1892": {
+      "tz": "Asia/Sakhalin",
+      "iso_country": "RU",
+      "name": "Dolinsk-Sokol Air Base",
+      "source": "geo-tz candidate, accepted because zone1970.tab lists the airport country for the zone"
+    },
+    "RU-2344": {
+      "tz": "Europe/Samara",
+      "iso_country": "RU",
+      "name": "Samara Kryazh Air Base",
+      "source": "geo-tz candidate, accepted because zone1970.tab lists the airport country for the zone"
+    },
+    "RU-2844": {
+      "tz": "Asia/Irkutsk",
+      "iso_country": "RU",
+      "name": "Dzhida Air Base",
+      "source": "geo-tz candidate, accepted because zone1970.tab lists the airport country for the zone"
+    },
+    "RU-3686": {
+      "tz": "Europe/Moscow",
+      "iso_country": "RU",
+      "name": "Oreshkovo Airfield",
+      "source": "geo-tz candidate, accepted because zone1970.tab lists the airport country for the zone"
+    },
+    "RU-3709": {
+      "tz": "Europe/Saratov",
+      "iso_country": "RU",
+      "name": "Bagay-Baranovka Air Base",
+      "source": "geo-tz candidate, accepted because zone1970.tab lists the airport country for the zone"
+    },
+    "RU-3880": {
+      "tz": "Asia/Krasnoyarsk",
+      "iso_country": "RU",
+      "name": "Kansk Air Base",
+      "source": "geo-tz candidate, accepted because zone1970.tab lists the airport country for the zone"
+    },
+    "RU-4339": {
+      "tz": "Europe/Moscow",
+      "iso_country": "RU",
+      "name": "Tambov Air Base",
+      "source": "geo-tz candidate, accepted because zone1970.tab lists the airport country for the zone"
+    },
+    "RU-4421": {
+      "tz": "Europe/Moscow",
+      "iso_country": "RU",
+      "name": "Danilovo Air Base",
+      "source": "geo-tz candidate, accepted because zone1970.tab lists the airport country for the zone"
+    },
+    "RU-4464": {
+      "tz": "Europe/Moscow",
+      "iso_country": "RU",
+      "name": "Olenya Air Base",
+      "source": "geo-tz candidate, accepted because zone1970.tab lists the airport country for the zone"
+    },
+    "RU-4609": {
+      "tz": "Europe/Moscow",
+      "iso_country": "RU",
+      "name": "Shatalovo Air Base",
+      "source": "geo-tz candidate, accepted because zone1970.tab lists the airport country for the zone"
+    },
+    "RU-4827": {
+      "tz": "Asia/Chita",
+      "iso_country": "RU",
+      "name": "Cheryomushki Air Base",
+      "source": "geo-tz candidate, accepted because zone1970.tab lists the airport country for the zone"
+    },
+    "RU-5105": {
+      "tz": "Asia/Vladivostok",
+      "iso_country": "RU",
+      "name": "Chuguyevka Air Base",
+      "source": "geo-tz candidate, accepted because zone1970.tab lists the airport country for the zone"
+    },
+    "RU-5376": {
+      "tz": "Europe/Moscow",
+      "iso_country": "RU",
+      "name": "Smuravyovo Air Base",
+      "source": "geo-tz candidate, accepted because zone1970.tab lists the airport country for the zone"
+    },
+    "RU-5672": {
+      "tz": "Europe/Moscow",
+      "iso_country": "RU",
+      "name": "Ivanovo North Air Base",
+      "source": "geo-tz candidate, accepted because zone1970.tab lists the airport country for the zone"
+    },
+    "RU-6558": {
+      "tz": "Europe/Moscow",
+      "iso_country": "RU",
+      "name": "Lyambir Air Base",
+      "source": "geo-tz candidate, accepted because zone1970.tab lists the airport country for the zone"
+    },
+    "RU-6687": {
+      "tz": "Europe/Moscow",
+      "iso_country": "RU",
+      "name": "Michurinsk Air Base",
+      "source": "geo-tz candidate, accepted because zone1970.tab lists the airport country for the zone"
+    },
+    "RU-7576": {
+      "tz": "Asia/Chita",
+      "iso_country": "RU",
+      "name": "Step Air Base",
+      "source": "geo-tz candidate, accepted because zone1970.tab lists the airport country for the zone"
+    },
+    "RU-7911": {
+      "tz": "Asia/Yekaterinburg",
+      "iso_country": "RU",
+      "name": "Yugorsk Sovetsky Air Base",
+      "source": "geo-tz candidate, accepted because zone1970.tab lists the airport country for the zone"
+    },
+    "RU-7978": {
+      "tz": "Asia/Yekaterinburg",
+      "iso_country": "RU",
+      "name": "Uprun Air Base",
+      "source": "geo-tz candidate, accepted because zone1970.tab lists the airport country for the zone"
+    },
+    "RU-8363": {
+      "tz": "Europe/Moscow",
+      "iso_country": "RU",
+      "name": "Voronezh Baltimore Air Base",
+      "source": "geo-tz candidate, accepted because zone1970.tab lists the airport country for the zone"
+    },
+    "RU-8499": {
+      "tz": "Asia/Kamchatka",
+      "iso_country": "RU",
+      "name": "Sharomy Air Base",
+      "source": "geo-tz candidate, accepted because zone1970.tab lists the airport country for the zone"
+    },
+    "RU-8602": {
+      "tz": "Europe/Saratov",
+      "iso_country": "RU",
+      "name": "Engels Air Base",
+      "source": "geo-tz candidate, accepted because zone1970.tab lists the airport country for the zone"
+    },
+    "RU-9129": {
+      "tz": "Europe/Moscow",
+      "iso_country": "RU",
+      "name": "Vorkuta Sovetskiy Air Base",
+      "source": "geo-tz candidate, accepted because zone1970.tab lists the airport country for the zone"
+    },
+    "RU-9937": {
+      "tz": "Europe/Moscow",
+      "iso_country": "RU",
+      "name": "Rzhev Air Base",
+      "source": "geo-tz candidate, accepted because zone1970.tab lists the airport country for the zone"
+    },
+    "RU-9942": {
+      "tz": "Europe/Moscow",
+      "iso_country": "RU",
+      "name": "Shaykovka Air Base",
+      "source": "geo-tz candidate, accepted because zone1970.tab lists the airport country for the zone"
+    },
+    "S31": {
+      "tz": "America/Los_Angeles",
+      "iso_country": "US",
+      "name": "Lopez Island Airport",
+      "source": "geo-tz candidate, accepted because zone1970.tab lists the airport country for the zone"
+    },
+    "S60": {
+      "tz": "America/Los_Angeles",
+      "iso_country": "US",
+      "name": "Kenmore Air Harbor LLC Seaplane Base",
+      "source": "geo-tz candidate, accepted because zone1970.tab lists the airport country for the zone"
+    },
+    "SAOV": {
+      "tz": "America/Argentina/Cordoba",
+      "iso_country": "AR",
+      "name": "Presidente Néstor Kirchner Regional Airport",
+      "source": "geo-tz candidate, accepted because zone1970.tab lists the airport country for the zone"
+    },
+    "SBAC": {
+      "tz": "America/Fortaleza",
+      "iso_country": "BR",
+      "name": "Aracati Dragão do Mar Regional Airport",
+      "source": "geo-tz candidate, accepted because zone1970.tab lists the airport country for the zone"
+    },
+    "SBSO": {
+      "tz": "America/Cuiaba",
+      "iso_country": "BR",
+      "name": "Adolino Bedin Regional Airport",
+      "source": "geo-tz candidate, accepted because zone1970.tab lists the airport country for the zone"
+    },
+    "SD-0001": {
+      "tz": "Africa/Khartoum",
+      "iso_country": "SD",
+      "name": "Wadi Seidna Air Base",
+      "source": "geo-tz candidate, accepted because zone1970.tab lists the airport country for the zone"
+    },
+    "SDBW": {
+      "tz": "America/Sao_Paulo",
+      "iso_country": "BR",
+      "name": "Banespa República Heliport",
+      "source": "geo-tz candidate, accepted because zone1970.tab lists the airport country for the zone"
+    },
+    "SDYG": {
+      "tz": "America/Bahia",
+      "iso_country": "BR",
+      "name": "Fazenda Rosa do Deserto Airstrip",
+      "source": "geo-tz candidate, accepted because zone1970.tab lists the airport country for the zone"
+    },
+    "SEJD": {
+      "tz": "America/Guayaquil",
+      "iso_country": "EC",
+      "name": "Jumandy Airport",
+      "source": "geo-tz candidate, accepted because zone1970.tab lists the airport country for the zone"
+    },
+    "SKNA": {
+      "tz": "America/Bogota",
+      "iso_country": "CO",
+      "name": "La Macarena Airport",
+      "source": "geo-tz candidate, accepted because zone1970.tab lists the airport country for the zone"
+    },
+    "SKRA": {
+      "tz": "America/Bogota",
+      "iso_country": "CO",
+      "name": "Tarapacá Airport",
+      "source": "geo-tz candidate, accepted because zone1970.tab lists the airport country for the zone"
+    },
+    "SLHI": {
+      "tz": "America/La_Paz",
+      "iso_country": "BO",
+      "name": "Chimore Airport",
+      "source": "geo-tz candidate, accepted because zone1970.tab lists the airport country for the zone"
+    },
+    "SLSV": {
+      "tz": "America/La_Paz",
+      "iso_country": "BO",
+      "name": "San Ignacio de Velasco Airport",
+      "source": "geo-tz candidate, accepted because zone1970.tab lists the airport country for the zone"
+    },
+    "SMEG": {
+      "tz": "America/Paramaribo",
+      "iso_country": "SR",
+      "name": "Eduard Alexander Gummels Airport",
+      "source": "geo-tz candidate, accepted because zone1970.tab lists the airport country for the zone"
+    },
+    "SN6L": {
+      "tz": "America/Fortaleza",
+      "iso_country": "BR",
+      "name": "Dr. Luciano de Arruda Coelho Regional Airport",
+      "source": "geo-tz candidate, accepted because zone1970.tab lists the airport country for the zone"
+    },
+    "SNL3": {
+      "tz": "America/Campo_Grande",
+      "iso_country": "BR",
+      "name": "Fazenda Riozinho Airport",
+      "source": "geo-tz candidate, accepted because zone1970.tab lists the airport country for the zone"
+    },
+    "SNM6": {
+      "tz": "America/Campo_Grande",
+      "iso_country": "BR",
+      "name": "Fazenda Mimosa Airport",
+      "source": "geo-tz candidate, accepted because zone1970.tab lists the airport country for the zone"
+    },
+    "SO-0001": {
+      "tz": "Africa/Mogadishu",
+      "canonical": "Africa/Nairobi",
+      "iso_country": "SO",
+      "name": "K50 Airstrip",
+      "source": "geo-tz candidate, accepted because zone1970.tab lists the airport country for the zone"
+    },
+    "SRL": {
+      "tz": "America/Mazatlan",
+      "iso_country": "MX",
+      "name": "Palo Verde Airport",
+      "source": "geo-tz candidate, accepted because zone1970.tab lists the airport country for the zone"
+    },
+    "SRV": {
+      "tz": "America/Anchorage",
+      "iso_country": "US",
+      "name": "Stony River 2 Airport",
+      "source": "geo-tz candidate, accepted because zone1970.tab lists the airport country for the zone"
+    },
+    "SSCY": {
+      "tz": "America/Sao_Paulo",
+      "iso_country": "BR",
+      "name": "Sikorski Heliport",
+      "source": "geo-tz candidate, accepted because zone1970.tab lists the airport country for the zone"
+    },
+    "SVS": {
+      "tz": "America/Anchorage",
+      "iso_country": "US",
+      "name": "Stevens Village Airport",
+      "source": "geo-tz candidate, accepted because zone1970.tab lists the airport country for the zone"
+    },
+    "SXP": {
+      "tz": "America/Nome",
+      "iso_country": "US",
+      "name": "Nunam Iqua Airport",
+      "source": "geo-tz candidate, accepted because zone1970.tab lists the airport country for the zone"
+    },
+    "SYB": {
+      "tz": "America/Anchorage",
+      "iso_country": "US",
+      "name": "Seal Bay Seaplane Base",
+      "source": "geo-tz candidate, accepted because zone1970.tab lists the airport country for the zone"
+    },
+    "SYF": {
+      "tz": "America/Vancouver",
+      "iso_country": "CA",
+      "name": "Silva Bay Seaplane Base",
+      "source": "geo-tz candidate, accepted because zone1970.tab lists the airport country for the zone"
+    },
+    "SYKA": {
+      "tz": "America/Guyana",
+      "iso_country": "GY",
+      "name": "Kaieteur Airport",
+      "source": "geo-tz candidate, accepted because zone1970.tab lists the airport country for the zone"
+    },
+    "TJ-0011": {
+      "tz": "Asia/Dushanbe",
+      "iso_country": "TJ",
+      "name": "Khovaling Airport",
+      "source": "geo-tz candidate, accepted because zone1970.tab lists the airport country for the zone"
+    },
+    "TJ-UT45": {
+      "tz": "Asia/Dushanbe",
+      "iso_country": "TJ",
+      "name": "Gissar Air Base",
+      "source": "geo-tz candidate, accepted because zone1970.tab lists the airport country for the zone"
+    },
+    "TJ-UT46": {
+      "tz": "Asia/Dushanbe",
+      "iso_country": "TJ",
+      "name": "Farkhor Air Base",
+      "source": "geo-tz candidate, accepted because zone1970.tab lists the airport country for the zone"
+    },
+    "TKE": {
+      "tz": "America/Juneau",
+      "iso_country": "US",
+      "name": "Tenakee Seaplane Base",
+      "source": "geo-tz candidate, accepted because zone1970.tab lists the airport country for the zone"
+    },
+    "TLT": {
+      "tz": "America/Anchorage",
+      "iso_country": "US",
+      "name": "Tuluksak Airport",
+      "source": "geo-tz candidate, accepted because zone1970.tab lists the airport country for the zone"
+    },
+    "TM-UT52": {
+      "tz": "Asia/Ashgabat",
+      "iso_country": "TM",
+      "name": "Mary North Airport",
+      "source": "geo-tz candidate, accepted because zone1970.tab lists the airport country for the zone"
+    },
+    "TR-0004": {
+      "tz": "Europe/Istanbul",
+      "iso_country": "TR",
+      "name": "Temelli Air Base",
+      "source": "geo-tz candidate, accepted because zone1970.tab lists the airport country for the zone"
+    },
+    "TR-0028": {
+      "tz": "Europe/Istanbul",
+      "iso_country": "TR",
+      "name": "Keşan Air Base",
+      "source": "geo-tz candidate, accepted because zone1970.tab lists the airport country for the zone"
+    },
+    "TTW": {
+      "tz": "Asia/Colombo",
+      "iso_country": "LK",
+      "name": "Tissa Tank Waterdrome",
+      "source": "geo-tz candidate, accepted because zone1970.tab lists the airport country for the zone"
+    },
+    "TW-0004": {
+      "tz": "Asia/Taipei",
+      "iso_country": "TW",
+      "name": "Zuoying Naval Airfield",
+      "source": "geo-tz candidate, accepted because zone1970.tab lists the airport country for the zone"
+    },
+    "UA-0005": {
+      "tz": "Europe/Kyiv",
+      "iso_country": "UA",
+      "name": "Nizhyn Air Base",
+      "source": "geo-tz candidate, accepted because zone1970.tab lists the airport country for the zone"
+    },
+    "UA-0010": {
+      "tz": "Europe/Simferopol",
+      "iso_country": "UA",
+      "name": "Oktyabrskoe Air Base",
+      "source": "geo-tz candidate, accepted because zone1970.tab lists the airport country for the zone"
+    },
+    "UA-0012": {
+      "tz": "Europe/Simferopol",
+      "iso_country": "UA",
+      "name": "Kirovskoe Air Base",
+      "source": "geo-tz candidate, accepted because zone1970.tab lists the airport country for the zone"
+    },
+    "UA-0020": {
+      "tz": "Europe/Kyiv",
+      "iso_country": "UA",
+      "name": "Melitopol Air Base",
+      "source": "geo-tz candidate, accepted because zone1970.tab lists the airport country for the zone"
+    },
+    "UA-0025": {
+      "tz": "Europe/Kyiv",
+      "iso_country": "UA",
+      "name": "Bila Tserkva Air Base",
+      "source": "geo-tz candidate, accepted because zone1970.tab lists the airport country for the zone"
+    },
+    "UA-0028": {
+      "tz": "Europe/Kyiv",
+      "iso_country": "UA",
+      "name": "Zhovtneve Air Base",
+      "source": "geo-tz candidate, accepted because zone1970.tab lists the airport country for the zone"
+    },
+    "UA-0047": {
+      "tz": "Europe/Kyiv",
+      "iso_country": "UA",
+      "name": "Dolgintsevo Air Base",
+      "source": "geo-tz candidate, accepted because zone1970.tab lists the airport country for the zone"
+    },
+    "UASU": {
+      "tz": "Asia/Almaty",
+      "iso_country": "KZ",
+      "name": "Urzhar Airport",
+      "source": "geo-tz candidate, accepted because zone1970.tab lists the airport country for the zone"
+    },
+    "UASZ": {
+      "tz": "Asia/Almaty",
+      "iso_country": "KZ",
+      "name": "Zaysan Airport",
+      "source": "geo-tz candidate, accepted because zone1970.tab lists the airport country for the zone"
+    },
+    "UB14": {
+      "tz": "Asia/Baku",
+      "iso_country": "AZ",
+      "name": "Kyurdamir Air Base",
+      "source": "geo-tz candidate, accepted because zone1970.tab lists the airport country for the zone"
+    },
+    "UB18": {
+      "tz": "Asia/Baku",
+      "iso_country": "AZ",
+      "name": "Baku Kala Air Base",
+      "source": "geo-tz candidate, accepted because zone1970.tab lists the airport country for the zone"
+    },
+    "UBBI": {
+      "tz": "Asia/Baku",
+      "iso_country": "AZ",
+      "name": "Nasosnaya Air Base",
+      "source": "geo-tz candidate, accepted because zone1970.tab lists the airport country for the zone"
+    },
+    "UBBS": {
+      "tz": "Asia/Baku",
+      "iso_country": "AZ",
+      "name": "Khojaly Airport",
+      "source": "geo-tz candidate, accepted because zone1970.tab lists the airport country for the zone"
+    },
+    "UBLC": {
+      "tz": "Asia/Baku",
+      "iso_country": "AZ",
+      "name": "Lachin International Airport",
+      "source": "geo-tz candidate, accepted because zone1970.tab lists the airport country for the zone"
+    },
+    "UBTT": {
+      "tz": "Asia/Baku",
+      "iso_country": "AZ",
+      "name": "Zabrat Airport",
+      "source": "geo-tz candidate, accepted because zone1970.tab lists the airport country for the zone"
+    },
+    "UCFB": {
+      "tz": "Asia/Bishkek",
+      "iso_country": "KG",
+      "name": "Batken Airport",
+      "source": "geo-tz candidate, accepted because zone1970.tab lists the airport country for the zone"
+    },
+    "UCFD": {
+      "tz": "Asia/Bishkek",
+      "iso_country": "KG",
+      "name": "Jalal-Abad Airport",
+      "source": "geo-tz candidate, accepted because zone1970.tab lists the airport country for the zone"
+    },
+    "UCFK": {
+      "tz": "Asia/Bishkek",
+      "iso_country": "KG",
+      "name": "Karakol International Airport",
+      "source": "geo-tz candidate, accepted because zone1970.tab lists the airport country for the zone"
+    },
+    "UEBS": {
+      "tz": "Asia/Yakutsk",
+      "iso_country": "RU",
+      "name": "Sakkyryr Airport",
+      "source": "geo-tz candidate, accepted because zone1970.tab lists the airport country for the zone"
+    },
+    "UESK": {
+      "tz": "Asia/Srednekolymsk",
+      "iso_country": "RU",
+      "name": "Srednekolymsk Airport",
+      "source": "geo-tz candidate, accepted because zone1970.tab lists the airport country for the zone"
+    },
+    "UG-0002": {
+      "tz": "Africa/Kampala",
+      "canonical": "Africa/Nairobi",
+      "iso_country": "UG",
+      "name": "Savannah Airstrip",
+      "source": "geo-tz candidate, accepted because zone1970.tab lists the airport country for the zone"
+    },
+    "UG11": {
+      "tz": "Asia/Baku",
+      "iso_country": "AZ",
+      "name": "Dollyar Air Base",
+      "source": "geo-tz candidate, accepted because zone1970.tab lists the airport country for the zone"
+    },
+    "UG22": {
+      "tz": "Asia/Tbilisi",
+      "iso_country": "GE",
+      "name": "Tbilisi Marneuli Air Base",
+      "source": "geo-tz candidate, accepted because zone1970.tab lists the airport country for the zone"
+    },
+    "UG24": {
+      "tz": "Asia/Tbilisi",
+      "iso_country": "GE",
+      "name": "Tbilisi Soganlug Air Base",
+      "source": "geo-tz candidate, accepted because zone1970.tab lists the airport country for the zone"
+    },
+    "UG27": {
+      "tz": "Asia/Tbilisi",
+      "iso_country": "GE",
+      "name": "Vaziani Air Base",
+      "source": "geo-tz candidate, accepted because zone1970.tab lists the airport country for the zone"
+    },
+    "UG28": {
+      "tz": "Asia/Tbilisi",
+      "iso_country": "GE",
+      "name": "Bolshiye Shiraki Air Base",
+      "source": "geo-tz candidate, accepted because zone1970.tab lists the airport country for the zone"
+    },
+    "UGAM": {
+      "tz": "Asia/Tbilisi",
+      "iso_country": "GE",
+      "name": "Ambrolauri Airport",
+      "source": "geo-tz candidate, accepted because zone1970.tab lists the airport country for the zone"
+    },
+    "UGMS": {
+      "tz": "Asia/Tbilisi",
+      "iso_country": "GE",
+      "name": "Mestia Queen Tamar Airport",
+      "source": "geo-tz candidate, accepted because zone1970.tab lists the airport country for the zone"
+    },
+    "UGSA": {
+      "tz": "Asia/Tbilisi",
+      "iso_country": "GE",
+      "name": "Natakhtari Airfield",
+      "source": "geo-tz candidate, accepted because zone1970.tab lists the airport country for the zone"
+    },
+    "UHMH": {
+      "tz": "Asia/Magadan",
+      "iso_country": "RU",
+      "name": "Susuman Airport",
+      "source": "geo-tz candidate, accepted because zone1970.tab lists the airport country for the zone"
+    },
+    "UHSI": {
+      "tz": "Asia/Magadan",
+      "iso_country": "RU",
+      "name": "Iturup Airport",
+      "source": "geo-tz candidate, accepted because zone1970.tab lists the airport country for the zone"
+    },
+    "UHSN": {
+      "tz": "Asia/Sakhalin",
+      "iso_country": "RU",
+      "name": "Nogliki Airport",
+      "source": "geo-tz candidate, accepted because zone1970.tab lists the airport country for the zone"
+    },
+    "UIIH": {
+      "tz": "Asia/Irkutsk",
+      "iso_country": "RU",
+      "name": "Khuzhir Airport",
+      "source": "geo-tz candidate, accepted because zone1970.tab lists the airport country for the zone"
+    },
+    "UKKA": {
+      "tz": "Europe/Simferopol",
+      "iso_country": "UA",
+      "name": "Kacha Air Base",
+      "source": "geo-tz candidate, accepted because zone1970.tab lists the airport country for the zone"
+    },
+    "UKKO": {
+      "tz": "Europe/Kyiv",
+      "iso_country": "UA",
+      "name": "Ozerne Air Base",
+      "source": "geo-tz candidate, accepted because zone1970.tab lists the airport country for the zone"
+    },
+    "US-7494": {
+      "tz": "America/Juneau",
+      "iso_country": "US",
+      "name": "Point Retreat CG Light Station Helipad",
+      "source": "geo-tz candidate, accepted because zone1970.tab lists the airport country for the zone"
+    },
+    "US-8448": {
+      "tz": "America/Nome",
+      "iso_country": "US",
+      "name": "Akutan Seaplane Base Heliport",
+      "source": "geo-tz candidate, accepted because zone1970.tab lists the airport country for the zone"
+    },
+    "US-8450": {
+      "tz": "America/Nome",
+      "iso_country": "US",
+      "name": "Pilot Station Airport",
+      "source": "geo-tz candidate, accepted because zone1970.tab lists the airport country for the zone"
+    },
+    "US-8513": {
+      "tz": "America/Chicago",
+      "iso_country": "US",
+      "name": "Hutchinson Health Heliport",
+      "source": "geo-tz candidate, accepted because zone1970.tab lists the airport country for the zone"
+    },
+    "USHQ": {
+      "tz": "Asia/Yekaterinburg",
+      "iso_country": "RU",
+      "name": "Beloyarskiy Airport",
+      "source": "geo-tz candidate, accepted because zone1970.tab lists the airport country for the zone"
+    },
+    "USTJ": {
+      "tz": "Asia/Yekaterinburg",
+      "iso_country": "RU",
+      "name": "Tobolsk Remezov Airport",
+      "source": "geo-tz candidate, accepted because zone1970.tab lists the airport country for the zone"
+    },
+    "UT1G": {
+      "tz": "Asia/Ashgabat",
+      "iso_country": "TM",
+      "name": "Ashgabat Bezmein Air Base",
+      "source": "geo-tz candidate, accepted because zone1970.tab lists the airport country for the zone"
+    },
+    "UT1H": {
+      "tz": "Asia/Ashgabat",
+      "iso_country": "TM",
+      "name": "Balkanabat Airport",
+      "source": "geo-tz candidate, accepted because zone1970.tab lists the airport country for the zone"
+    },
+    "UUMB": {
+      "tz": "Europe/Moscow",
+      "iso_country": "RU",
+      "name": "Kubinka Air Base",
+      "source": "geo-tz candidate, accepted because zone1970.tab lists the airport country for the zone"
+    },
+    "VAJL": {
+      "tz": "Asia/Kolkata",
+      "iso_country": "IN",
+      "name": "Jalgaon Airport",
+      "source": "geo-tz candidate, accepted because zone1970.tab lists the airport country for the zone"
+    },
+    "VDDS": {
+      "tz": "Asia/Phnom_Penh",
+      "canonical": "Asia/Bangkok",
+      "iso_country": "KH",
+      "name": "Dara Sakor International Airport",
+      "source": "geo-tz candidate, accepted because zone1970.tab lists the airport country for the zone"
+    },
+    "VEAP": {
+      "tz": "Asia/Kolkata",
+      "iso_country": "IN",
+      "name": "Maa Mahamaya Airport",
+      "source": "geo-tz candidate, accepted because zone1970.tab lists the airport country for the zone"
+    },
+    "VEDG": {
+      "tz": "Asia/Kolkata",
+      "iso_country": "IN",
+      "name": "Kazi Nazrul Islam Airport",
+      "source": "geo-tz candidate, accepted because zone1970.tab lists the airport country for the zone"
+    },
+    "VEHX": {
+      "tz": "Asia/Kolkata",
+      "iso_country": "IN",
+      "name": "Hashimara Air Force Station",
+      "source": "geo-tz candidate, accepted because zone1970.tab lists the airport country for the zone"
+    },
+    "VEJR": {
+      "tz": "Asia/Kolkata",
+      "iso_country": "IN",
+      "name": "Jagdalpur Airport",
+      "source": "geo-tz candidate, accepted because zone1970.tab lists the airport country for the zone"
+    },
+    "VHSS": {
+      "tz": "Asia/Hong_Kong",
+      "iso_country": "HK",
+      "name": "Shun Tak Heliport",
+      "source": "geo-tz candidate, accepted because zone1970.tab lists the airport country for the zone"
+    },
+    "VI22": {
+      "tz": "America/St_Thomas",
+      "canonical": "America/Puerto_Rico",
+      "iso_country": "VI",
+      "name": "Charlotte Amalie Harbor Seaplane Base",
+      "source": "geo-tz candidate, accepted because zone1970.tab lists the airport country for the zone"
+    },
+    "VI32": {
+      "tz": "America/St_Thomas",
+      "canonical": "America/Puerto_Rico",
+      "iso_country": "VI",
+      "name": "Christiansted Harbor Seaplane Base",
+      "source": "geo-tz candidate, accepted because zone1970.tab lists the airport country for the zone"
+    },
+    "VIMB": {
+      "tz": "Asia/Kolkata",
+      "iso_country": "IN",
+      "name": "Moradabad Airport",
+      "source": "geo-tz candidate, accepted because zone1970.tab lists the airport country for the zone"
+    },
+    "VMI": {
+      "tz": "America/Asuncion",
+      "iso_country": "PY",
+      "name": "Aeropuerto Nacional Doctor Juan Plate",
+      "source": "geo-tz candidate, accepted because zone1970.tab lists the airport country for the zone"
+    },
+    "VNSL": {
+      "tz": "Asia/Kathmandu",
+      "iso_country": "NP",
+      "name": "Rukum Salle Airport",
+      "source": "geo-tz candidate, accepted because zone1970.tab lists the airport country for the zone"
+    },
+    "VOPN": {
+      "tz": "Asia/Kolkata",
+      "iso_country": "IN",
+      "name": "Sri Sathya Sai Airport",
+      "source": "geo-tz candidate, accepted because zone1970.tab lists the airport country for the zone"
+    },
+    "VOSR": {
+      "tz": "Asia/Kolkata",
+      "iso_country": "IN",
+      "name": "Sindhudurg Airport",
+      "source": "geo-tz candidate, accepted because zone1970.tab lists the airport country for the zone"
+    },
+    "VQTY": {
+      "tz": "Asia/Thimphu",
+      "iso_country": "BT",
+      "name": "Yongphulla Airport",
+      "source": "geo-tz candidate, accepted because zone1970.tab lists the airport country for the zone"
+    },
+    "VRMD": {
+      "tz": "Indian/Maldives",
+      "iso_country": "MV",
+      "name": "Dharavandhoo Airport",
+      "source": "geo-tz candidate, accepted because zone1970.tab lists the airport country for the zone"
+    },
+    "VRQF": {
+      "tz": "Indian/Maldives",
+      "iso_country": "MV",
+      "name": "Faresmaathoda Airport",
+      "source": "geo-tz candidate, accepted because zone1970.tab lists the airport country for the zone"
+    },
+    "VVLT": {
+      "tz": "Asia/Ho_Chi_Minh",
+      "iso_country": "VN",
+      "name": "Long Thanh International Airport (Under Construction)",
+      "source": "geo-tz candidate, accepted because zone1970.tab lists the airport country for the zone"
+    },
+    "W33": {
+      "tz": "America/Los_Angeles",
+      "iso_country": "US",
+      "name": "Friday Harbor Seaplane Base",
+      "source": "geo-tz candidate, accepted because zone1970.tab lists the airport country for the zone"
+    },
+    "W39": {
+      "tz": "America/Los_Angeles",
+      "iso_country": "US",
+      "name": "Roche Harbor Seaplane Base",
+      "source": "geo-tz candidate, accepted because zone1970.tab lists the airport country for the zone"
+    },
+    "W49": {
+      "tz": "America/Los_Angeles",
+      "iso_country": "US",
+      "name": "Rosario Seaplane Base",
+      "source": "geo-tz candidate, accepted because zone1970.tab lists the airport country for the zone"
+    },
+    "W55": {
+      "tz": "America/Los_Angeles",
+      "iso_country": "US",
+      "name": "Kenmore Air Harbor Seaplane Base",
+      "source": "geo-tz candidate, accepted because zone1970.tab lists the airport country for the zone"
+    },
+    "WA81": {
+      "tz": "America/Los_Angeles",
+      "iso_country": "US",
+      "name": "Fishermans Bay Seaplane Base",
+      "source": "geo-tz candidate, accepted because zone1970.tab lists the airport country for the zone"
+    },
+    "WA83": {
+      "tz": "America/Los_Angeles",
+      "iso_country": "US",
+      "name": "Westsound/WSX Seaplane Base",
+      "source": "geo-tz candidate, accepted because zone1970.tab lists the airport country for the zone"
+    },
+    "WADE": {
+      "tz": "Asia/Makassar",
+      "iso_country": "ID",
+      "name": "Lieutenant Colonel Wisnu Airfield",
+      "source": "geo-tz candidate, accepted because zone1970.tab lists the airport country for the zone"
+    },
+    "WADY": {
+      "tz": "Asia/Jakarta",
+      "iso_country": "ID",
+      "name": "Banyuwangi Airport",
+      "source": "geo-tz candidate, accepted because zone1970.tab lists the airport country for the zone"
+    },
+    "WAFB": {
+      "tz": "Asia/Makassar",
+      "iso_country": "ID",
+      "name": "Toraja Airport",
+      "source": "geo-tz candidate, accepted because zone1970.tab lists the airport country for the zone"
+    },
+    "WAFD": {
+      "tz": "Asia/Makassar",
+      "iso_country": "ID",
+      "name": "Bua - Palopo Lagaligo Airport",
+      "source": "geo-tz candidate, accepted because zone1970.tab lists the airport country for the zone"
+    },
+    "WAFO": {
+      "tz": "Asia/Makassar",
+      "iso_country": "ID",
+      "name": "Maleo Airport",
+      "source": "geo-tz candidate, accepted because zone1970.tab lists the airport country for the zone"
+    },
+    "WAFU": {
+      "tz": "Asia/Makassar",
+      "iso_country": "ID",
+      "name": "Tanjung Api Airport",
+      "source": "geo-tz candidate, accepted because zone1970.tab lists the airport country for the zone"
+    },
+    "WAGB": {
+      "tz": "Asia/Pontianak",
+      "iso_country": "ID",
+      "name": "Haji Muhammad Sidik Airport",
+      "source": "geo-tz candidate, accepted because zone1970.tab lists the airport country for the zone"
+    },
+    "WAGF": {
+      "tz": "Asia/Pontianak",
+      "iso_country": "ID",
+      "name": "Seruyan Kuala Pembuang Airport",
+      "source": "geo-tz candidate, accepted because zone1970.tab lists the airport country for the zone"
+    },
+    "WAGT": {
+      "tz": "Asia/Pontianak",
+      "iso_country": "ID",
+      "name": "Tumbang Samba Airport",
+      "source": "geo-tz candidate, accepted because zone1970.tab lists the airport country for the zone"
+    },
+    "WAHU": {
+      "tz": "Asia/Jakarta",
+      "iso_country": "ID",
+      "name": "Dewadaru Airport",
+      "source": "geo-tz candidate, accepted because zone1970.tab lists the airport country for the zone"
+    },
+    "WAJK": {
+      "tz": "Asia/Jayapura",
+      "iso_country": "ID",
+      "name": "Kiwirok Airstrip",
+      "source": "geo-tz candidate, accepted because zone1970.tab lists the airport country for the zone"
+    },
+    "WAJV": {
+      "tz": "Asia/Jayapura",
+      "iso_country": "ID",
+      "name": "Iwur Airstrip",
+      "source": "geo-tz candidate, accepted because zone1970.tab lists the airport country for the zone"
+    },
+    "WAPM": {
+      "tz": "Asia/Jayapura",
+      "iso_country": "ID",
+      "name": "Jos Orno Imsula Airport",
+      "source": "geo-tz candidate, accepted because zone1970.tab lists the airport country for the zone"
+    },
+    "WAQH": {
+      "tz": "Asia/Makassar",
+      "iso_country": "ID",
+      "name": "Long Rungan Airport",
+      "source": "geo-tz candidate, accepted because zone1970.tab lists the airport country for the zone"
+    },
+    "WAQM": {
+      "tz": "Asia/Makassar",
+      "iso_country": "ID",
+      "name": "Robert Atty Bessing",
+      "source": "geo-tz candidate, accepted because zone1970.tab lists the airport country for the zone"
+    },
+    "WARD": {
+      "tz": "Asia/Jakarta",
+      "iso_country": "ID",
+      "name": "Dhoho International Airport",
+      "source": "geo-tz candidate, accepted because zone1970.tab lists the airport country for the zone"
+    },
+    "WARE": {
+      "tz": "Asia/Jakarta",
+      "iso_country": "ID",
+      "name": "Notohadinegoro Airport",
+      "source": "geo-tz candidate, accepted because zone1970.tab lists the airport country for the zone"
+    },
+    "WASN": {
+      "tz": "Asia/Jayapura",
+      "iso_country": "ID",
+      "name": "Marinda Airport",
+      "source": "geo-tz candidate, accepted because zone1970.tab lists the airport country for the zone"
+    },
+    "WATR": {
+      "tz": "Asia/Makassar",
+      "iso_country": "ID",
+      "name": "David Constantijn Saudale Airport",
+      "source": "geo-tz candidate, accepted because zone1970.tab lists the airport country for the zone"
+    },
+    "WAVD": {
+      "tz": "Asia/Jayapura",
+      "iso_country": "ID",
+      "name": "Nop Goliat Dekai Airport",
+      "source": "geo-tz candidate, accepted because zone1970.tab lists the airport country for the zone"
+    },
+    "WAWD": {
+      "tz": "Asia/Makassar",
+      "iso_country": "ID",
+      "name": "Matahora Airport",
+      "source": "geo-tz candidate, accepted because zone1970.tab lists the airport country for the zone"
+    },
+    "WAWH": {
+      "tz": "Asia/Makassar",
+      "iso_country": "ID",
+      "name": "Selayar - Haji Aroeppala Airport",
+      "source": "geo-tz candidate, accepted because zone1970.tab lists the airport country for the zone"
+    },
+    "WBB": {
+      "tz": "America/Nome",
+      "iso_country": "US",
+      "name": "Stebbins Airport",
+      "source": "geo-tz candidate, accepted because zone1970.tab lists the airport country for the zone"
+    },
+    "WICN": {
+      "tz": "Asia/Jakarta",
+      "iso_country": "ID",
+      "name": "Nusawiru Airport",
+      "source": "geo-tz candidate, accepted because zone1970.tab lists the airport country for the zone"
+    },
+    "WIEB": {
+      "tz": "Asia/Jakarta",
+      "iso_country": "ID",
+      "name": "Mentawai Airport",
+      "source": "geo-tz candidate, accepted because zone1970.tab lists the airport country for the zone"
+    },
+    "WIJB": {
+      "tz": "Asia/Jakarta",
+      "iso_country": "ID",
+      "name": "Muara Bungo Airport",
+      "source": "geo-tz candidate, accepted because zone1970.tab lists the airport country for the zone"
+    },
+    "WIMI": {
+      "tz": "Asia/Jakarta",
+      "iso_country": "ID",
+      "name": "Syekh Hamzah Fansyuri Airport",
+      "source": "geo-tz candidate, accepted because zone1970.tab lists the airport country for the zone"
+    },
+    "WIMU": {
+      "tz": "Asia/Jakarta",
+      "iso_country": "ID",
+      "name": "Alas Leuser Airport",
+      "source": "geo-tz candidate, accepted because zone1970.tab lists the airport country for the zone"
+    },
+    "WITK": {
+      "tz": "Asia/Jakarta",
+      "iso_country": "ID",
+      "name": "Rembele Airport",
+      "source": "geo-tz candidate, accepted because zone1970.tab lists the airport country for the zone"
+    },
+    "WSJ": {
+      "tz": "America/Anchorage",
+      "iso_country": "US",
+      "name": "San Juan /Uganik/ Seaplane Base",
+      "source": "geo-tz candidate, accepted because zone1970.tab lists the airport country for the zone"
+    },
+    "WWT": {
+      "tz": "America/Nome",
+      "iso_country": "US",
+      "name": "Newtok Seaplane Base",
+      "source": "geo-tz candidate, accepted because zone1970.tab lists the airport country for the zone"
+    },
+    "XRMU": {
+      "tz": "Europe/Moscow",
+      "iso_country": "RU",
+      "name": "Khankala Air Base",
+      "source": "geo-tz candidate, accepted because zone1970.tab lists the airport country for the zone"
+    },
+    "YAJ": {
+      "tz": "America/Vancouver",
+      "iso_country": "CA",
+      "name": "Lyall Harbour Seaplane Base",
+      "source": "geo-tz candidate, accepted because zone1970.tab lists the airport country for the zone"
+    },
+    "YAQ": {
+      "tz": "America/Vancouver",
+      "iso_country": "CA",
+      "name": "Maple Bay Seaplane Base",
+      "source": "geo-tz candidate, accepted because zone1970.tab lists the airport country for the zone"
+    },
+    "YBQ": {
+      "tz": "America/Vancouver",
+      "iso_country": "CA",
+      "name": "Telegraph Harbour Seaplane Base",
+      "source": "geo-tz candidate, accepted because zone1970.tab lists the airport country for the zone"
+    },
+    "YEWA": {
+      "tz": "Australia/Perth",
+      "iso_country": "AU",
+      "name": "Eliwana",
+      "source": "geo-tz candidate, accepted because zone1970.tab lists the airport country for the zone"
+    },
+    "YGN": {
+      "tz": "America/Vancouver",
+      "iso_country": "CA",
+      "name": "Greenway Sound Seaplane Base",
+      "source": "geo-tz candidate, accepted because zone1970.tab lists the airport country for the zone"
+    },
+    "YKAR": {
+      "tz": "Australia/Perth",
+      "iso_country": "AU",
+      "name": "Karara Airport",
+      "source": "geo-tz candidate, accepted because zone1970.tab lists the airport country for the zone"
+    },
+    "YNKR": {
+      "tz": "Australia/Darwin",
+      "iso_country": "AU",
+      "name": "Nackeroo Airfield",
+      "source": "geo-tz candidate, accepted because zone1970.tab lists the airport country for the zone"
+    },
+    "YPMH": {
+      "tz": "Australia/Adelaide",
+      "iso_country": "AU",
+      "name": "Prominent Hill Airport",
+      "source": "geo-tz candidate, accepted because zone1970.tab lists the airport country for the zone"
+    },
+    "Z19O": {
+      "tz": "Asia/Beirut",
+      "iso_country": "LB",
+      "name": "Wujah Al Hajar Air Base",
+      "source": "geo-tz candidate, accepted because zone1970.tab lists the airport country for the zone"
+    },
+    "Z91": {
+      "tz": "America/Anchorage",
+      "iso_country": "US",
+      "name": "Birch Creek Airport",
+      "source": "geo-tz candidate, accepted because zone1970.tab lists the airport country for the zone"
+    },
+    "ZBDH": {
+      "tz": "Asia/Shanghai",
+      "iso_country": "CN",
+      "name": "Qinhuangdao Beidaihe Airport",
+      "source": "geo-tz candidate, accepted because zone1970.tab lists the airport country for the zone"
+    },
+    "ZBLF": {
+      "tz": "Asia/Shanghai",
+      "iso_country": "CN",
+      "name": "Linfen Yaodu Airport",
+      "source": "geo-tz candidate, accepted because zone1970.tab lists the airport country for the zone"
+    },
+    "ZBLL": {
+      "tz": "Asia/Shanghai",
+      "iso_country": "CN",
+      "name": "Lüliang Dawu Airport",
+      "source": "geo-tz candidate, accepted because zone1970.tab lists the airport country for the zone"
+    },
+    "ZBNJ": {
+      "tz": "Asia/Shanghai",
+      "iso_country": "CN",
+      "name": "Beijing Nanjiao Airport",
+      "source": "geo-tz candidate, accepted because zone1970.tab lists the airport country for the zone"
+    },
+    "ZBUT": {
+      "tz": "Asia/Shanghai",
+      "iso_country": "CN",
+      "name": "Ruad Zhongqi Hailiutu Airport",
+      "source": "geo-tz candidate, accepted because zone1970.tab lists the airport country for the zone"
+    },
+    "ZBXJ": {
+      "tz": "Asia/Shanghai",
+      "iso_country": "CN",
+      "name": "[Duplicate] Beijing Xijiao Airport",
+      "source": "geo-tz candidate, accepted because zone1970.tab lists the airport country for the zone"
+    },
+    "ZBXZ": {
+      "tz": "Asia/Shanghai",
+      "iso_country": "CN",
+      "name": "Xinzhou Wutaishan Airport",
+      "source": "geo-tz candidate, accepted because zone1970.tab lists the airport country for the zone"
+    },
+    "ZBZJ": {
+      "tz": "Asia/Shanghai",
+      "iso_country": "CN",
+      "name": "Zhangjiakou Ningyuan Airport",
+      "source": "geo-tz candidate, accepted because zone1970.tab lists the airport country for the zone"
+    },
+    "ZGSY": {
+      "tz": "Asia/Shanghai",
+      "iso_country": "CN",
+      "name": "Shaoyang Wugang Airport",
+      "source": "geo-tz candidate, accepted because zone1970.tab lists the airport country for the zone"
+    },
+    "ZGXX": {
+      "tz": "Asia/Shanghai",
+      "iso_country": "CN",
+      "name": "Xiangxi Biancheng Airport",
+      "source": "geo-tz candidate, accepted because zone1970.tab lists the airport country for the zone"
+    },
+    "ZHQQ": {
+      "tz": "Asia/Shanghai",
+      "iso_country": "CN",
+      "name": "Anyang Hongqiqu Airport",
+      "source": "geo-tz candidate, accepted because zone1970.tab lists the airport country for the zone"
+    },
+    "ZHSN": {
+      "tz": "Asia/Shanghai",
+      "iso_country": "CN",
+      "name": "Shennongjia Hongping Airport",
+      "source": "geo-tz candidate, accepted because zone1970.tab lists the airport country for the zone"
+    },
+    "ZHSY": {
+      "tz": "Asia/Shanghai",
+      "iso_country": "CN",
+      "name": "Shiyan Wudangshan Airport",
+      "source": "geo-tz candidate, accepted because zone1970.tab lists the airport country for the zone"
+    },
+    "ZKSC": {
+      "tz": "Asia/Pyongyang",
+      "iso_country": "KP",
+      "name": "Sunchon Air Base",
+      "source": "geo-tz candidate, accepted because zone1970.tab lists the airport country for the zone"
+    },
+    "ZKWS": {
+      "tz": "Asia/Pyongyang",
+      "iso_country": "KP",
+      "name": "Wonsan Kalma Airport",
+      "source": "geo-tz candidate, accepted because zone1970.tab lists the airport country for the zone"
+    },
+    "ZLGL": {
+      "tz": "Asia/Shanghai",
+      "iso_country": "CN",
+      "name": "Golog Maqên Airport",
+      "source": "geo-tz candidate, accepted because zone1970.tab lists the airport country for the zone"
+    },
+    "ZLHN": {
+      "tz": "Asia/Shanghai",
+      "iso_country": "CN",
+      "name": "Hainanzhou Gonghe Airport",
+      "source": "geo-tz candidate, accepted because zone1970.tab lists the airport country for the zone"
+    },
+    "ZLHX": {
+      "tz": "Asia/Shanghai",
+      "iso_country": "CN",
+      "name": "Huatugou Airport",
+      "source": "geo-tz candidate, accepted because zone1970.tab lists the airport country for the zone"
+    },
+    "ZLXH": {
+      "tz": "Asia/Shanghai",
+      "iso_country": "CN",
+      "name": "Gannan Xiahe Airport",
+      "source": "geo-tz candidate, accepted because zone1970.tab lists the airport country for the zone"
+    },
+    "ZM-0045": {
+      "tz": "Africa/Lusaka",
+      "canonical": "Africa/Maputo",
+      "iso_country": "ZM",
+      "name": "Kalumbila Airport",
+      "source": "geo-tz candidate, accepted because zone1970.tab lists the airport country for the zone"
+    },
+    "ZMDN": {
+      "tz": "Asia/Ulaanbaatar",
+      "iso_country": "MN",
+      "name": "Donoi Airport",
+      "source": "geo-tz candidate, accepted because zone1970.tab lists the airport country for the zone"
+    },
+    "ZMMG": {
+      "tz": "Asia/Ulaanbaatar",
+      "iso_country": "MN",
+      "name": "Mandalgobi Airport",
+      "source": "geo-tz candidate, accepted because zone1970.tab lists the airport country for the zone"
+    },
+    "ZPCW": {
+      "tz": "Asia/Shanghai",
+      "iso_country": "CN",
+      "name": "Cangyuan Washan Airport",
+      "source": "geo-tz candidate, accepted because zone1970.tab lists the airport country for the zone"
+    },
+    "ZPJM": {
+      "tz": "Asia/Shanghai",
+      "iso_country": "CN",
+      "name": "Lancang Jingmai Airport",
+      "source": "geo-tz candidate, accepted because zone1970.tab lists the airport country for the zone"
+    },
+    "ZPNL": {
+      "tz": "Asia/Shanghai",
+      "iso_country": "CN",
+      "name": "Ninglang Luguhu Airport",
+      "source": "geo-tz candidate, accepted because zone1970.tab lists the airport country for the zone"
+    },
+    "ZPWS": {
+      "tz": "Asia/Shanghai",
+      "iso_country": "CN",
+      "name": "Wenshan Puzhehei Airport",
+      "source": "geo-tz candidate, accepted because zone1970.tab lists the airport country for the zone"
+    },
+    "ZPYM": {
+      "tz": "Asia/Shanghai",
+      "iso_country": "CN",
+      "name": "Yuanmou Air Base",
+      "source": "geo-tz candidate, accepted because zone1970.tab lists the airport country for the zone"
+    },
+    "ZSBA": {
+      "tz": "Asia/Shanghai",
+      "iso_country": "CN",
+      "name": "Bengbu Tenghu Airport",
+      "source": "geo-tz candidate, accepted because zone1970.tab lists the airport country for the zone"
+    },
+    "ZSHZ": {
+      "tz": "Asia/Shanghai",
+      "iso_country": "CN",
+      "name": "Heze Mudan Airport",
+      "source": "geo-tz candidate, accepted because zone1970.tab lists the airport country for the zone"
+    },
+    "ZSJH": {
+      "tz": "Asia/Shanghai",
+      "iso_country": "CN",
+      "name": "Chizhou Jiuhuashan Airport",
+      "source": "geo-tz candidate, accepted because zone1970.tab lists the airport country for the zone"
+    },
+    "ZSRZ": {
+      "tz": "Asia/Shanghai",
+      "iso_country": "CN",
+      "name": "Rizhao Shanzihe Airport",
+      "source": "geo-tz candidate, accepted because zone1970.tab lists the airport country for the zone"
+    },
+    "ZSYC": {
+      "tz": "Asia/Shanghai",
+      "iso_country": "CN",
+      "name": "Yichun Mingyueshan Airport",
+      "source": "geo-tz candidate, accepted because zone1970.tab lists the airport country for the zone"
+    },
+    "ZUDJ": {
+      "tz": "Asia/Shanghai",
+      "iso_country": "CN",
+      "name": "Tongren Dejiang Airport (Under Construction)",
+      "source": "geo-tz candidate, accepted because zone1970.tab lists the airport country for the zone"
+    },
+    "ZUGH": {
+      "tz": "Asia/Shanghai",
+      "iso_country": "CN",
+      "name": "Guanghan Airport",
+      "source": "geo-tz candidate, accepted because zone1970.tab lists the airport country for the zone"
+    },
+    "ZUKD": {
+      "tz": "Asia/Shanghai",
+      "iso_country": "CN",
+      "name": "Kangding Airport",
+      "source": "geo-tz candidate, accepted because zone1970.tab lists the airport country for the zone"
+    },
+    "ZURK": {
+      "tz": "Asia/Shanghai",
+      "iso_country": "CN",
+      "name": "Xigaze Peace Airport / Shigatse Air Base",
+      "source": "geo-tz candidate, accepted because zone1970.tab lists the airport country for the zone"
+    },
+    "ZUSH": {
+      "tz": "Asia/Shanghai",
+      "iso_country": "CN",
+      "name": "Shannan Longzi Airport",
+      "source": "geo-tz candidate, accepted because zone1970.tab lists the airport country for the zone"
+    },
+    "ZWFY": {
+      "tz": "Asia/Shanghai",
+      "iso_country": "CN",
+      "name": "Fuyun Koktokay Airport",
+      "source": "geo-tz candidate, accepted because zone1970.tab lists the airport country for the zone"
+    },
+    "ZWHJ": {
+      "tz": "Asia/Shanghai",
+      "iso_country": "CN",
+      "name": "Hejing Bayinbuluke Airport",
+      "source": "geo-tz candidate, accepted because zone1970.tab lists the airport country for the zone"
+    },
+    "ZWHZ": {
+      "tz": "Asia/Urumqi",
+      "iso_country": "CN",
+      "name": "Shihezi Huayuan Airport",
+      "source": "geo-tz candidate, accepted because zone1970.tab lists the airport country for the zone"
+    },
+    "ZWKN": {
+      "tz": "Asia/Urumqi",
+      "iso_country": "CN",
+      "name": "Burqin Kanas Airport",
+      "source": "geo-tz candidate, accepted because zone1970.tab lists the airport country for the zone"
+    },
+    "ZWLK": {
+      "tz": "Asia/Urumqi",
+      "iso_country": "CN",
+      "name": "Barkol Dahe Airport",
+      "source": "geo-tz candidate, accepted because zone1970.tab lists the airport country for the zone"
+    },
+    "ZWNL": {
+      "tz": "Asia/Shanghai",
+      "iso_country": "CN",
+      "name": "Xinyuan Nalati Airport",
+      "source": "geo-tz candidate, accepted because zone1970.tab lists the airport country for the zone"
+    },
+    "ZWQT": {
+      "tz": "Asia/Urumqi",
+      "iso_country": "CN",
+      "name": "Qitai Jiangbulake Airport",
+      "source": "geo-tz candidate, accepted because zone1970.tab lists the airport country for the zone"
+    },
+    "ZWSC": {
+      "tz": "Asia/Shanghai",
+      "iso_country": "CN",
+      "name": "Shache Airport",
+      "source": "geo-tz candidate, accepted because zone1970.tab lists the airport country for the zone"
+    },
+    "ZYBA": {
+      "tz": "Asia/Shanghai",
+      "iso_country": "CN",
+      "name": "Baicheng Chang'an Airport",
+      "source": "geo-tz candidate, accepted because zone1970.tab lists the airport country for the zone"
+    },
+    "ZYDU": {
+      "tz": "Asia/Shanghai",
+      "iso_country": "CN",
+      "name": "Wudalianchi Dedu Airport",
+      "source": "geo-tz candidate, accepted because zone1970.tab lists the airport country for the zone"
+    },
+    "ZYFY": {
+      "tz": "Asia/Shanghai",
+      "iso_country": "CN",
+      "name": "Fuyuan Dongji Airport",
+      "source": "geo-tz candidate, accepted because zone1970.tab lists the airport country for the zone"
+    },
+    "ZYJD": {
+      "tz": "Asia/Shanghai",
+      "iso_country": "CN",
+      "name": "Daxing'anling Elunchun Airport",
+      "source": "geo-tz candidate, accepted because zone1970.tab lists the airport country for the zone"
+    },
+    "ZYJS": {
+      "tz": "Asia/Shanghai",
+      "iso_country": "CN",
+      "name": "Jiansanjiang Shidi Airport",
+      "source": "geo-tz candidate, accepted because zone1970.tab lists the airport country for the zone"
+    }
+  }
+}

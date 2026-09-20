@@ -40,6 +40,26 @@ jobs:
 
   test:
     runs-on: ubuntu-latest
+    # @planeahead/db runs its suite against this container through TEST_DATABASE_URL; the api
+    # and shared packages ignore the variable. Locally the same suite starts embedded-postgres.
+    # src/migrate.ts asserts server_version_num >= 180000, which is the guard against this tag
+    # ever resolving to a different major.
+    services:
+      postgres:
+        image: postgres:18
+        env:
+          POSTGRES_USER: planeahead
+          POSTGRES_PASSWORD: planeahead
+          POSTGRES_DB: planeahead_admin
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+    env:
+      TEST_DATABASE_URL: postgres://planeahead:planeahead@localhost:5432/planeahead_admin
     steps:
       - uses: actions/checkout@v5
       - uses: pnpm/action-setup@v4

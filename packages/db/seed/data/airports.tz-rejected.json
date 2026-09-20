@@ -1,0 +1,47 @@
+{
+  "$comment": "Written on 2026-09-20 by scripts/curate-tz-overrides.mjs. Airports whose geo-tz candidate did not pass the country check. The airports loader skips these with a warning; resolving one means adding it to airports.tz-overrides.json by hand with a stated source and removing it here.",
+  "curated_on": "2026-09-20",
+  "count": 5,
+  "entries": [
+    {
+      "icao": "AT03",
+      "iso_country": "AQ",
+      "name": "Concordia Skyway",
+      "candidate": "Australia/Perth",
+      "zone_countries": ["AU"],
+      "reason": "zone Australia/Perth is listed for AU, not AQ"
+    },
+    {
+      "icao": "KR-1113",
+      "iso_country": "KR",
+      "name": "Ulleung Airport",
+      "candidate": "Asia/Shanghai",
+      "zone_countries": ["CN"],
+      "reason": "zone Asia/Shanghai is listed for CN, not KR"
+    },
+    {
+      "icao": "MA-0003",
+      "iso_country": "EH",
+      "name": "Mahbes Airbase",
+      "candidate": "Africa/Casablanca",
+      "zone_countries": ["MA"],
+      "reason": "zone Africa/Casablanca is listed for MA, not EH"
+    },
+    {
+      "icao": "VE-0526",
+      "iso_country": "VE",
+      "name": "(Misplaced duplicate?)Aeropuerto internacional Simón bolivar",
+      "candidate": "Africa/Ndjamena",
+      "zone_countries": ["TD"],
+      "reason": "zone Africa/Ndjamena is listed for TD, not VE"
+    },
+    {
+      "icao": "XP-0003",
+      "iso_country": "XP",
+      "name": "Yongxing Dao (Woody Island) Air Base",
+      "candidate": "Asia/Shanghai",
+      "zone_countries": ["CN"],
+      "reason": "zone Asia/Shanghai is listed for CN, not XP"
+    }
+  ]
+}
