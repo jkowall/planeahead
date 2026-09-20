@@ -1,0 +1,55 @@
+# Increment 9: mobile scaffold
+
+Status: spec (2026-09-20). Builder: Opus 5. Reviewers: Opus 5 (Expo and React Native correctness) plus orchestrator read. Branch `inc9-mobile-scaffold` based on `inc8-flight-routes`.
+
+Read `docs/increments/09-11-mobile.facts.md` sections 1 to 4 and `08-flight-routes-and-sync.facts.md` section 4 first. Several plan statements about Expo were wrong or incomplete and are corrected below.
+
+## Goal
+
+`apps/mobile` becomes a real Expo SDK 57 app inside the pnpm 12 isolated workspace: Expo Router with `(auth)` and `(app)` groups, continuous native generation with three variants, the Better Auth Expo client with anonymous, magic link (verified in-app through a universal link), native Apple and native Google sign-in against the increment 5 endpoints, the expo-sqlite offline store with Drizzle live queries and the sync client, settings, Sentry with PII scrubbing proven by a test, install-scoped analytics, EAS profiles, privacy manifests. Screens beyond sign-in and settings arrive in increment 10.
+
+Acceptance: `eas build --profile development` (or the local equivalent `expo run:ios` / `expo run:android` from the CNG output) produces a dev build that signs in anonymously on the iPhone 17 Pro simulator and the Pixel AVD (a Google APIs image), upgrades that account via a magic link opened as a universal link and verified in-app, and via native Apple on the simulator (the credential-state call is skipped on Simulator, where it always throws); Google native sign-in is exercised on the AVD with the play-services ladder; settings persist across an offline relaunch through the expo-sqlite store; a Jest test proves `Sentry.init` has `sendDefaultPii: false`, no replay, and that `beforeSend` and `beforeBreadcrumb` strip URLs carrying a magic-link token; the CI `typecheck`, `lint` and `test-mobile` jobs pass on a clean checkout; `expo prebuild` plus both native compiles succeed under the isolated linker (spike 1).
+
+## Spikes first (results in the build log)
+
+1. `expo prebuild` and both native compiles under `nodeLinker: isolated` with the real dependency set; if a library breaks resolution, try `experiments.onDemandFilesystem` before falling back to hoisting, and record which.
+2. Whether the Hono client's async `headers` function is evaluated per request (otherwise a cookie refresh needs a custom fetch).
+3. Whether an Android FCM device token needs `google-services.json` in a dev build (only the permission and token read are wired; no push service).
+
+## Decisions taken (do not reopen)
+
+- Pins: `expo ~57.0.24`, `react-native 0.86.3`, `react 19.2.3`, `expo-router ~57.0.22` plus its non-optional peers `@expo/metro-runtime` and `@expo/log-box`, `expo-sqlite ~57.0.3`, `expo-build-properties ~57.0.21`, `expo-secure-store`, `expo-linking`, `expo-network`, `expo-constants`, `expo-web-browser` (all five as direct dependencies: the Better Auth Expo client imports two statically), `expo-apple-authentication`, `expo-crypto`, `expo-standard-web-crypto`, `expo-notifications ~57.0.20`, `@better-auth/expo 1.7.5` exact, `react-native-nitro-google-signin 2.3.0` exact plus `react-native-nitro-modules`, `@sentry/react-native ~7.11.0` (Expo's own pin, not 8.x), `@tanstack/react-query ~5.103`, `zustand ~5.0`, `@maplibre/maplibre-react-native 11.4.0` exact (dependency only), `jest-expo 57.0.5` with `@react-native/jest-preset 0.86.3` declared explicitly, `@testing-library/react-native` 14 with `test-renderer`. TypeScript stays `~6.0.3` as policy.
+- `metro.config.js` is exactly `getSentryExpoConfig(__dirname)`: Metro auto-configures for monorepos since SDK 52; no `watchFolders` or `nodeModulesPaths`.
+- `app.config.ts`: `APP_VARIANT` selects `app.planeahead.mobile`, `.dev`, `.preview` with matching names and icons; `ios.entitlements` declares the App Group `group.<bundleId>` explicitly per variant (owner registers all three) and `aps-environment`; `NSSupportsLiveActivities`; `ios.associatedDomains: ['applinks:api.planeahead.app', 'applinks:api-staging.planeahead.app']` and `android.intentFilters` with `autoVerify: true` for the path prefix `/api/auth/magic-link/*` (the API Worker serves `/.well-known/apple-app-site-association` and `/.well-known/assetlinks.json`; the prefix is effectively permanent because Apple's CDN caches the AASA); `privacyManifests` declared by hand for UserDefaults CA92.1 and 1C8F.1, FileTimestamp C617.1, DiskSpace E174.1, SystemBootTime 35F9.1 (Expo does not aggregate them automatically); plugins in this order: `expo-router`, `expo-build-properties` with `ios.enableSceneSupport: true` (it is a build-properties option, not an `ios.*` key, and iOS 27 builds do not launch without it), `expo-sqlite`, `expo-secure-store`, `expo-apple-authentication`, `react-native-nitro-google-signin`, `@sentry/react-native/expo`, `expo-notifications`, and last a local `plugins/withApsEnvironment.ts` stub that will force the correct `aps-environment` after expo-widgets in increment 11. `experiments.reactCompiler` off. `runtimeVersion: { policy: 'fingerprint' }`.
+- Entry: `polyfillWebCrypto()` from `expo-standard-web-crypto` is the first statement (SDK 57's runtime installs no global `crypto`; `uuidv7()` from shared throws without it). Root `src/app/_layout.tsx` mounts `SQLiteProvider` (module-scope `onInit` that sets WAL and runs Drizzle's `migrate` before any child mounts), `QueryClientProvider`, the auth session gate; `src/app/(app)/_layout.tsx` redirects to `(auth)` when there is no session.
+- Auth client: `createAuthClient({ baseURL, plugins: [expoClient({ scheme: 'planeahead', storagePrefix: 'planeahead', storage: SecureStore }), anonymousClient(), magicLinkClient()] })`. Anonymous sign-in on first launch (lazy server-side anonymous user per the plan). Magic link: request with no `callbackURL`; the universal link opens the app, `src/app/auth/magic-link.tsx` reads the token and calls `authClient.magicLink.verify({ token })` so the anonymous cookie is attached and the merge fires. Native Apple: `AppleAuthentication.signInAsync({ requestedScopes, nonce: sha256hex(rawNonce) })` then `authClient.$fetch('/sign-in/apple-native', { body: { identityToken, authorizationCode, rawNonce, fullName } })`; a Jest test asserts the body has no `idToken` key (the client strips the cookie for that key) and that `getCredentialStateAsync` is not called on Simulator. Native Google: `configure({ iosClientId, webClientId, nonce: rawNonce })` before EVERY `signIn()` (a configured nonce is sticky for the process), then `/sign-in/google-native` with `identityToken` and `rawNonce`; on Android the `checkPlayServices` → `signIn` → `createAccount` → `presentExplicitSignIn` ladder.
+- API client: `hc<AppType>` from the pre-compiled `hcWithType`, `headers: async () => ({ Cookie: await authClient.getCookie() })`, `init: { credentials: 'omit' }` (the session lives in SecureStore, not the cookie jar); TanStack Query `onlineManager` from `expo-network`, `focusManager` from `AppState`, no query persistence.
+- Offline store: `src/lib/db/schema.ts` mirrors the sync entities with the flight snapshot DENORMALISED onto `flight_subscriptions` (`useLiveQuery` only watches the root table), plus `sync_state` (cursor) and `outbox` tables and empty `trips` and `logbook_entries`; no `WITHOUT ROWID`, no `INSERT OR REPLACE`, no unqualified `DELETE FROM` (all three suppress the update hook); a sync page is applied with `db.transaction(cb, { behavior: 'immediate' })` on the main connection (never `withExclusiveTransactionAsync`, which opens a second connection with a deferred `BEGIN`), cursor written in the same transaction, 200-row pages looped until `hasMore` is false, 410 `resync_required` resets the store; the outbox drains with `Idempotency-Key` and is suspended while a page applies; `useLiveQuery` is wrapped in a coalescing hook (trailing microtask) before any list uses it. Drizzle migrations generated with `driver: 'expo'`; a CI guard fails if a committed mobile migration file changes. `zustand` `persist` backed by `expo-sqlite/kv-store` (synchronous hydration) for preferences only.
+- Sentry: `~7.11.0`, `sendDefaultPii: false`, no replay, `beforeSend` and `beforeBreadcrumb` scrub query strings and `Referer`; source maps uploaded by a separate CI step after `eas update`. Analytics: `POST /v1/events` with an install-scoped random id stored in `expo-sqlite/kv-store`, declared in App Privacy as Device ID, not linked, purpose Analytics; no ATT prompt (first-party analytics is not tracking).
+- EAS: `eas.json` profiles `development` (developmentClient, simulator variant for iOS), `preview` (internal), `production` (`autoIncrement` with `cli.appVersionSource: "remote"`); Starter plan; nightly native builds stay on GitHub runners (increment 11), never on EAS credit.
+- Jest via `jest-expo`; pure logic lives in `packages/shared` and is tested there under Vitest.
+
+## Files
+
+```
+apps/mobile/{package.json, app.config.ts, eas.json, metro.config.js, babel.config.js, jest.config.js, tsconfig.json, index.ts (polyfill first)}
+apps/mobile/src/app/{_layout.tsx, (auth)/_layout.tsx, (auth)/sign-in.tsx, (app)/_layout.tsx, (app)/index.tsx (placeholder), (app)/settings.tsx, auth/magic-link.tsx}
+apps/mobile/src/lib/{api-client.ts, auth-client.ts, sync/{client.ts, apply.ts, outbox.ts}, analytics.ts, sentry.ts, db/{schema.ts, migrations/, live-query.ts, kv.ts}, native-signin/{apple.ts, google.ts}}
+apps/mobile/plugins/withApsEnvironment.ts (stub ordered last)
+apps/mobile/__tests__/{sign-in.test.tsx, settings.test.tsx, sentry-privacy.test.ts, apple-body-shape.test.ts, sync-apply.test.ts}
+apps/api/src/routes/well-known.ts (AASA and assetlinks with the team id, bundle ids and Play fingerprints from env)
+.github/workflows/ci.yml: test-mobile job (jest-expo), typecheck includes apps/mobile after `npx expo customize tsconfig.json`; mobile-preview.yml (eas update --auto on PRs, source-map upload step)
+docs/adr/0001-expo.md, docs/adr/0005-identifiers.md
+```
+
+## Constraints
+
+- No Expo Go; development builds only. No `@react-native-async-storage/async-storage`. No `credentials: 'include'`. No hand-written native code in this increment.
+- The three bundle identifiers are immutable after the first store upload; the App Groups and associated domains are owner registrations before the first device build.
+- No em dashes. ESM where the toolchain allows; Jest config may be CommonJS if jest-expo requires it.
+
+## Owner tasks surfaced
+
+- Register three App Groups (`group.app.planeahead.mobile`, `.dev`, `.preview`) and the Sign in with Apple capability on the App IDs; provide the Team ID, the `.p8` key and key id, and the Google client ids (web, iOS, Android).
+- Register Google Play as an Organization account before Phase 5 (a personal account created after November 2023 faces a 12-tester, 14-day gate).
+- Provide the Play upload and signing certificate SHA-256 fingerprints for `assetlinks.json` once the app exists in Play Console.
