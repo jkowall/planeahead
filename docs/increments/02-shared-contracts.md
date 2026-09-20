@@ -1,6 +1,6 @@
 # Increment 2: `@planeahead/shared` contracts
 
-Status: spec (2026-09-19). Builder: Fable 5.1. Reviewers: two Opus 5 lenses (correctness, API design) plus orchestrator read.
+Status: complete (2026-09-20) on branch `inc2-shared-contracts`, PR opened for CI. Builder: Fable 5.1. Reviewers: two Opus 5 lenses (correctness, API design), twelve Opus skeptics on the serious findings, two Opus re-reviews, orchestrator read of every module. Outcome and deviations are recorded in `docs/build-log.md`; the derived constants are A2 74 polls / 122 PE, A1 84, literal 181, B 5 (the 72 / 120 / 83 quoted below were the plan's round()-rule figures and are superseded by `docs/architecture.md`).
 
 ## Goal
 
