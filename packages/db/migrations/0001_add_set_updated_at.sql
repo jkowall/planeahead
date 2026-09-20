@@ -1,12 +1,18 @@
 -- Custom migration (drizzle-kit generate --custom --name add_set_updated_at), body written by
 -- scripts/gen-updated-at-migration.mjs. set_updated_at() stamps updated_at on every UPDATE so
 -- writers that bypass Drizzle (queue consumers, raw SQL, admin tools) keep the column honest.
--- The WHEN clause skips no-op updates so the sync feed does not see phantom changes; tables
--- with a generated column cannot carry it (Postgres restriction) and always bump. The migrator
--- splits this file on the breakpoint marker: one marker separates the function from each
--- CREATE TRIGGER and none may appear inside the dollar-quoted body, not even in a comment.
+-- Every trigger has a WHEN clause that skips no-op updates, so a replayed identical upsert does
+-- not move updated_at and the sync feed sees no phantom change. A table with a STORED generated
+-- column cannot use OLD.* IS DISTINCT FROM NEW.* (Postgres restriction), so its clause names
+-- every non-generated column explicitly; the generator derives that list from the snapshot.
+-- The function pins search_path so the trigger cannot be redirected by a session setting.
+-- The migrator splits this file on the breakpoint marker: one marker separates the function
+-- from each CREATE TRIGGER and none may appear inside the dollar-quoted body, not even in a
+-- comment.
 CREATE OR REPLACE FUNCTION set_updated_at() RETURNS trigger
-LANGUAGE plpgsql AS $$
+LANGUAGE plpgsql
+SET search_path = pg_catalog, public
+AS $$
 BEGIN
   NEW.updated_at = now();
   RETURN NEW;
@@ -51,7 +57,7 @@ CREATE TRIGGER "entitlements_set_updated_at" BEFORE UPDATE ON "entitlements" FOR
 --> statement-breakpoint
 CREATE TRIGGER "flight_designators_set_updated_at" BEFORE UPDATE ON "flight_designators" FOR EACH ROW WHEN (OLD.* IS DISTINCT FROM NEW.*) EXECUTE FUNCTION set_updated_at();
 --> statement-breakpoint
-CREATE TRIGGER "flight_instances_set_updated_at" BEFORE UPDATE ON "flight_instances" FOR EACH ROW EXECUTE FUNCTION set_updated_at();
+CREATE TRIGGER "flight_instances_set_updated_at" BEFORE UPDATE ON "flight_instances" FOR EACH ROW WHEN (OLD."id" IS DISTINCT FROM NEW."id" OR OLD."operating_carrier_icao" IS DISTINCT FROM NEW."operating_carrier_icao" OR OLD."flight_number" IS DISTINCT FROM NEW."flight_number" OR OLD."scheduled_departure_date" IS DISTINCT FROM NEW."scheduled_departure_date" OR OLD."origin_icao" IS DISTINCT FROM NEW."origin_icao" OR OLD."leg_seq" IS DISTINCT FROM NEW."leg_seq" OR OLD."origin_airport_id" IS DISTINCT FROM NEW."origin_airport_id" OR OLD."origin_tz" IS DISTINCT FROM NEW."origin_tz" OR OLD."destination_icao" IS DISTINCT FROM NEW."destination_icao" OR OLD."destination_airport_id" IS DISTINCT FROM NEW."destination_airport_id" OR OLD."diverted_to_icao" IS DISTINCT FROM NEW."diverted_to_icao" OR OLD."status" IS DISTINCT FROM NEW."status" OR OLD."scheduled_out" IS DISTINCT FROM NEW."scheduled_out" OR OLD."estimated_out" IS DISTINCT FROM NEW."estimated_out" OR OLD."actual_out" IS DISTINCT FROM NEW."actual_out" OR OLD."scheduled_off" IS DISTINCT FROM NEW."scheduled_off" OR OLD."estimated_off" IS DISTINCT FROM NEW."estimated_off" OR OLD."actual_off" IS DISTINCT FROM NEW."actual_off" OR OLD."scheduled_on" IS DISTINCT FROM NEW."scheduled_on" OR OLD."estimated_on" IS DISTINCT FROM NEW."estimated_on" OR OLD."actual_on" IS DISTINCT FROM NEW."actual_on" OR OLD."scheduled_in" IS DISTINCT FROM NEW."scheduled_in" OR OLD."estimated_in" IS DISTINCT FROM NEW."estimated_in" OR OLD."actual_in" IS DISTINCT FROM NEW."actual_in" OR OLD."origin_terminal" IS DISTINCT FROM NEW."origin_terminal" OR OLD."origin_gate" IS DISTINCT FROM NEW."origin_gate" OR OLD."destination_terminal" IS DISTINCT FROM NEW."destination_terminal" OR OLD."destination_gate" IS DISTINCT FROM NEW."destination_gate" OR OLD."baggage_claim" IS DISTINCT FROM NEW."baggage_claim" OR OLD."aircraft_type_icao" IS DISTINCT FROM NEW."aircraft_type_icao" OR OLD."registration" IS DISTINCT FROM NEW."registration" OR OLD."icao_hex" IS DISTINCT FROM NEW."icao_hex" OR OLD."inbound_flight_instance_id" IS DISTINCT FROM NEW."inbound_flight_instance_id" OR OLD."aeroapi_fa_flight_id" IS DISTINCT FROM NEW."aeroapi_fa_flight_id" OR OLD."aerodatabox_ref" IS DISTINCT FROM NEW."aerodatabox_ref" OR OLD."tracking_state" IS DISTINCT FROM NEW."tracking_state" OR OLD."refresh_cadence" IS DISTINCT FROM NEW."refresh_cadence" OR OLD."next_refresh_at" IS DISTINCT FROM NEW."next_refresh_at" OR OLD."last_refreshed_at" IS DISTINCT FROM NEW."last_refreshed_at" OR OLD."provider_call_count" IS DISTINCT FROM NEW."provider_call_count" OR OLD."provider_cost_units" IS DISTINCT FROM NEW."provider_cost_units" OR OLD."subscriber_count" IS DISTINCT FROM NEW."subscriber_count" OR OLD."do_schema_version" IS DISTINCT FROM NEW."do_schema_version" OR OLD."superseded_by_id" IS DISTINCT FROM NEW."superseded_by_id" OR OLD."supersede_reason" IS DISTINCT FROM NEW."supersede_reason" OR OLD."finished_at" IS DISTINCT FROM NEW."finished_at" OR OLD."events_r2_key" IS DISTINCT FROM NEW."events_r2_key" OR OLD."timeline_summary" IS DISTINCT FROM NEW."timeline_summary" OR OLD."created_at" IS DISTINCT FROM NEW."created_at" OR OLD."updated_at" IS DISTINCT FROM NEW."updated_at") EXECUTE FUNCTION set_updated_at();
 --> statement-breakpoint
 CREATE TRIGGER "flight_subscriptions_set_updated_at" BEFORE UPDATE ON "flight_subscriptions" FOR EACH ROW WHEN (OLD.* IS DISTINCT FROM NEW.*) EXECUTE FUNCTION set_updated_at();
 --> statement-breakpoint

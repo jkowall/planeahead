@@ -9,6 +9,12 @@
  * recreates a changed generated column and does not recreate dependent indexes (drizzle-orm
  * issue 4929). It is written with `extract`/`lpad` rather than `date::text` because the text
  * cast of a date depends on `DateStyle` and Postgres rejects it as not immutable.
+ *
+ * `origin_icao`, `origin_airport_id` and `origin_tz` (and the destination pair) describe one
+ * airport and are derived from a single `airports` lookup (`resolveAirportEndpoint` in
+ * src/queries/airports.ts), never from separate provider fields. The composite foreign key
+ * `(origin_airport_id, origin_icao) -> airports (id, icao)` makes a mismatch impossible to
+ * store, and `origin_tz` must be present whenever the airport is known.
  */
 
 import { sql } from 'drizzle-orm';
@@ -27,9 +33,13 @@ import {
 } from 'drizzle-orm/pg-core';
 import {
   FLIGHT_NUMBER_SQL_RE,
+  IATA_CARRIER_SQL_RE,
+  ICAO_AIRCRAFT_TYPE_SQL_RE,
   ICAO_AIRPORT_SQL_RE,
   ICAO_CARRIER_SQL_RE,
+  ICAO_HEX_SQL_RE,
   createdOnly,
+  formatCheck,
   id,
   inList,
   instant,
@@ -82,14 +92,10 @@ export const flightInstances = pgTable(
     legSeq: smallint('leg_seq').notNull().default(1),
     flightKey: text('flight_key').notNull().generatedAlwaysAs(FLIGHT_KEY_EXPRESSION),
     // airports
-    originAirportId: uuid('origin_airport_id').references(() => airports.id, {
-      onDelete: 'restrict',
-    }),
+    originAirportId: uuid('origin_airport_id'),
     originTz: text('origin_tz'),
     destinationIcao: text('destination_icao'),
-    destinationAirportId: uuid('destination_airport_id').references(() => airports.id, {
-      onDelete: 'restrict',
-    }),
+    destinationAirportId: uuid('destination_airport_id'),
     divertedToIcao: text('diverted_to_icao'),
     // status and OOOI (all instants, timestamptz)
     status: text('status').notNull().default('scheduled'),
@@ -137,6 +143,19 @@ export const flightInstances = pgTable(
     ...timestamps(),
   },
   (t) => [
+    // Composite keys: the code and the airport row can never disagree (MATCH SIMPLE, so an
+    // unresolved airport with a null id is still allowed). Restrict: an airport that a flight
+    // names cannot be deleted from under it.
+    foreignKey({
+      name: 'flight_instances_origin_airport_fk',
+      columns: [t.originAirportId, t.originIcao],
+      foreignColumns: [airports.id, airports.icao],
+    }).onDelete('restrict'),
+    foreignKey({
+      name: 'flight_instances_destination_airport_fk',
+      columns: [t.destinationAirportId, t.destinationIcao],
+      foreignColumns: [airports.id, airports.icao],
+    }).onDelete('restrict'),
     uniqueIndex('flight_instances_flight_key_key').on(t.flightKey),
     index('flight_instances_tracking_state_next_refresh_at_idx')
       .on(t.trackingState, t.nextRefreshAt)
@@ -169,6 +188,24 @@ export const flightInstances = pgTable(
     check(
       'flight_instances_origin_icao_check',
       sql`${t.originIcao} ~ ${literal(ICAO_AIRPORT_SQL_RE)}`,
+    ),
+    formatCheck('flight_instances_destination_icao_check', t.destinationIcao, ICAO_AIRPORT_SQL_RE),
+    formatCheck('flight_instances_diverted_to_icao_check', t.divertedToIcao, ICAO_AIRPORT_SQL_RE),
+    formatCheck(
+      'flight_instances_aircraft_type_icao_check',
+      t.aircraftTypeIcao,
+      ICAO_AIRCRAFT_TYPE_SQL_RE,
+    ),
+    formatCheck('flight_instances_icao_hex_check', t.icaoHex, ICAO_HEX_SQL_RE),
+    // Knowing the airport row implies knowing its code and its zone (the zone decides the
+    // origin-local date in the frozen key).
+    check(
+      'flight_instances_origin_tz_check',
+      sql`${t.originAirportId} is null or ${t.originTz} is not null`,
+    ),
+    check(
+      'flight_instances_destination_consistency_check',
+      sql`${t.destinationAirportId} is null or ${t.destinationIcao} is not null`,
     ),
     check('flight_instances_leg_seq_check', sql`${t.legSeq} >= 1`),
     check('flight_instances_status_check', sql`${t.status} in (${inList(FLIGHT_STATUSES)})`),
@@ -269,6 +306,15 @@ export const flightDesignators = pgTable(
     check(
       'flight_designators_flight_number_check',
       sql`${t.flightNumber} ~ ${literal(FLIGHT_NUMBER_SQL_RE)}`,
+    ),
+    check(
+      'flight_designators_origin_icao_check',
+      sql`${t.originIcao} ~ ${literal(ICAO_AIRPORT_SQL_RE)}`,
+    ),
+    formatCheck(
+      'flight_designators_marketing_carrier_iata_check',
+      t.marketingCarrierIata,
+      IATA_CARRIER_SQL_RE,
     ),
     check('flight_designators_kind_check', sql`${t.kind} in (${inList(DESIGNATOR_KINDS)})`),
     check('flight_designators_source_check', sql`${t.source} in (${inList(DESIGNATOR_SOURCES)})`),

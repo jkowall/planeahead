@@ -44,26 +44,28 @@ export async function seedAircraftTypes(db: Db, options: SeedOptions = {}): Prom
     });
   }
   let upserted = 0;
-  for (const batch of chunk(rows, BATCH_SIZE)) {
-    await db
-      .insert(aircraftTypes)
-      .values(batch)
-      .onConflictDoUpdate({
-        target: aircraftTypes.icao,
-        set: {
-          manufacturer: sql`excluded.manufacturer`,
-          model: sql`excluded.model`,
-          engines: sql`excluded.engines`,
-          engineTypeCode: sql`excluded.engine_type_code`,
-          enginePlacementCode: sql`excluded.engine_placement_code`,
-          speciesCode: sql`excluded.species_code`,
-          wakeTurbulence: sql`excluded.wake_turbulence`,
-          wakeSource: sql`excluded.wake_source`,
-          isActive: sql`excluded.is_active`,
-        },
-      });
-    upserted += batch.length;
-  }
+  await db.transaction(async (tx) => {
+    for (const batch of chunk(rows, BATCH_SIZE)) {
+      await tx
+        .insert(aircraftTypes)
+        .values(batch)
+        .onConflictDoUpdate({
+          target: aircraftTypes.icao,
+          set: {
+            manufacturer: sql`excluded.manufacturer`,
+            model: sql`excluded.model`,
+            engines: sql`excluded.engines`,
+            engineTypeCode: sql`excluded.engine_type_code`,
+            enginePlacementCode: sql`excluded.engine_placement_code`,
+            speciesCode: sql`excluded.species_code`,
+            wakeTurbulence: sql`excluded.wake_turbulence`,
+            wakeSource: sql`excluded.wake_source`,
+            isActive: sql`excluded.is_active`,
+          },
+        });
+      upserted += batch.length;
+    }
+  });
   log(
     `aircraft_types: read ${records.length}, upserted ${upserted}, skipped ${JSON.stringify(skipped)}`,
   );

@@ -415,7 +415,10 @@
         "M"
       ],
       "coltjd45_rows": 7388,
-      "patched_j": 2
+      "patched_j": 1,
+      "patched_j_designators": [
+        "A388"
+      ]
     }
   },
   "warnings": []

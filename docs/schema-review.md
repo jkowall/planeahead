@@ -28,16 +28,28 @@ orchestrator read. See section 17 for the checklist each reviewer walks.
 2. **Every instant is `timestamptz`; exactly one origin-local `date` lives in the flight key.**
    `created_at` defaults to `now()`; `updated_at` is maintained by the `set_updated_at()` trigger
    on all 45 mutable tables (custom migration 0001), never by application code, so raw SQL and
-   queue consumers keep it honest. Drizzle reads timestamps as ISO strings (`mode: 'string'`),
-   except the four Better Auth tables with timestamps, which use `mode: 'date'` (section 12).
-3. **Enumerations are `text` plus a `check()` constraint.** No `pgEnum`. 106 check constraints
-   in migration 0000. The value lists that mirror `@planeahead/shared` (flight status, provider
-   ids, call triggers and results, sync entities) are asserted identical by
-   `test/schema-contracts.test.ts`.
+   queue consumers keep it honest, and every trigger skips a no-op UPDATE so a replayed
+   identical write does not move it. Drizzle reads every instant as an ISO-8601 UTC string
+   (`2026-09-19T22:30:00Z`, microseconds preserved) that satisfies `IsoInstantSchema` in
+   shared: the `instant()` column type (`src/schema/columns.ts`) normalises the
+   session-time-zone text Postgres renders (`2026-09-19 22:30:00+00`, which is not ISO-8601 and
+   fails the contract) on every read, and refuses a write without a zone designator. Raw SQL
+   reads (`sql<string>`, `db.execute`) get Postgres text; pass it through the exported
+   `toIsoInstant()`. The four Better Auth tables with timestamps use Drizzle's `mode: 'date'`
+   (section 13). `test/migrate-and-roundtrip.test.ts` asserts one instant per domain against
+   the shared schema.
+3. **Enumerations are `text` plus a `check()` constraint.** No `pgEnum`. 137 check constraints
+   in migration 0000, including a format check on every column that stores an ICAO, IATA,
+   Mode S hex or flight-number code (a lower-case or padded value can never fork a lookup or a
+   KV key; the contracts test finds any such column without one). The value lists that mirror
+   `@planeahead/shared` (flight status, provider ids, call triggers and results, sync entities,
+   alert events) are asserted identical by `test/schema-contracts.test.ts`.
 4. **Tombstones only on sync entities.** `deleted_at` exists on exactly `flight_subscriptions`,
    `trips`, `trip_members`, `user_preferences`, `notification_preferences` and
    `logbook_entries`, which is the `SYNC_ENTITIES` list in shared. Everything else is hard
-   deleted.
+   deleted. The column name is reserved for that tombstone (the mobile client replays deletes
+   from it); `deleted_subjects` records `subject_deleted_at`, so the contracts test is a pure
+   structural check with no allowlist.
 5. **Denormalised `user_id` on every user-owned row; no row-level security.** Hyperdrive pools in
    transaction mode, so a per-request `SET ROLE` or session variable would not stick. Ownership
    is enforced in the API layer and every user-owned table cascades from `users`.
@@ -49,7 +61,10 @@ orchestrator read. See section 17 for the checklist each reviewer walks.
 7. **Tables that must survive account deletion have no foreign key to `users`:** `audit_log`,
    `revenuecat_events`, `subscriptions`, `notification_deliveries`, `deleted_subjects`,
    `provider_calls`, `provider_call_daily`. They are keyed by a pseudonymous `subject_id` or by
-   RevenueCat's random app user id.
+   RevenueCat's random app user id. Better Auth's `rate_limits` and `verifications` also have
+   no FK but are not survivors by design: `key` and `identifier` can hold an email address or
+   an IP, so the deletion job purges them by subject and the housekeeping cron by age
+   (section 5).
 8. **Append-only tables get a BRIN index on `created_at`:** `flight_events`,
    `provider_calls`, `airport_wx_observations`, `notification_deliveries`, `audit_log`. Insert
    order correlates with `created_at` (UUIDv7 ids, single writer), which is what makes BRIN
@@ -98,7 +113,8 @@ Reference
   airlines, regional_operators, aircraft_types, aircraft, currency_rates: standalone
 
 Flight core
-  airports <- flight_instances.origin_airport_id, destination_airport_id (restrict)
+  airports (id, icao) <- flight_instances (origin_airport_id, origin_icao) and
+                         (destination_airport_id, destination_icao), composite, restrict
   flight_instances <- flight_designators, flight_events, flight_tracks(1:1),
                       flight_instance_merges.survivor/merged (cascade)
   flight_instances.superseded_by_id, inbound_flight_instance_id: soft self references, no FK
@@ -147,20 +163,20 @@ by design, pseudonymous). Rows: order of magnitude twelve months in, after reten
 
 ### Identity
 
-| Table               | Purpose                                                | Writer                   | Readers                | PII | Enc                                                            | Retention                   | GDPR                   | Rows 1k / 10k / 100k |
-| ------------------- | ------------------------------------------------------ | ------------------------ | ---------------------- | --- | -------------------------------------------------------------- | --------------------------- | ---------------------- | -------------------- |
-| `users`             | Better Auth user plus status, plan cache, home airport | Better Auth, API         | API, auth, jobs        | 2   | none (email in plaintext, unique on `lower(email)`)            | until deletion              | hard delete            | 1k / 10k / 100k      |
-| `sessions`          | Better Auth sessions                                   | Better Auth              | auth                   | 2   | `token` plaintext (Better Auth-owned)                          | expired rows purged at 30 d | cascade                | 3k / 30k / 300k      |
-| `accounts`          | Better Auth OAuth and credential accounts              | Better Auth, Apple route | auth, deletion job     | 3   | `refresh_token_enc`; Better Auth's own token columns plaintext | until deletion              | cascade                | 1.5k / 15k / 150k    |
-| `verifications`     | Magic link and OAuth state (`storeToken: 'hashed'`)    | Better Auth              | auth                   | 1   | hashed by the plugin                                           | purged after `expires_at`   | n/a                    | hundreds / 1k / 10k  |
-| `rate_limits`       | Better Auth database rate limiting                     | Better Auth              | auth                   | 1   | key is an IP or email                                          | rolling                     | n/a                    | 1k / 10k / 100k      |
-| `user_keys`         | Wrapped per-user DEK and KEK version                   | crypto module            | crypto module          | 3   | `wrapped_dek` is AES-KW ciphertext                             | until deletion              | cascade                | 1k / 10k / 100k      |
-| `devices`           | Installs, platform, OS, attestation reserved           | `POST /v1/devices`       | push, analytics        | 1   | none                                                           | until deletion              | cascade                | 1.5k / 15k / 150k    |
-| `user_preferences`  | Units, time format, settings blob (sync entity)        | API                      | API, sync              | 1   | none                                                           | tombstoned, purged at 30 d  | cascade                | 1k / 10k / 100k      |
-| `user_consents`     | Terms, privacy, marketing, email import consents       | API                      | export, compliance     | 1   | none                                                           | until deletion              | cascade                | 3k / 30k / 300k      |
-| `user_sync_changes` | Change feed with `xid8` watermark for `GET /v1/sync`   | API (same tx as the row) | sync                   | 1   | none                                                           | 30 d                        | cascade                | 20k / 200k / 2M      |
-| `idempotency_keys`  | Replay store for mutating routes                       | idempotency middleware   | idempotency middleware | 1   | request hash                                                   | 24 h                        | cascade                | hundreds / 5k / 50k  |
-| `deleted_subjects`  | Pseudonymous record that a subject was deleted         | deletion job             | webhooks, audit        | 1   | RevenueCat id hashed                                           | kept                        | kept (that is its job) | tens / hundreds / 1k |
+| Table               | Purpose                                                | Writer                   | Readers                | PII | Enc                                                                  | Retention                                                                               | GDPR                                                                   | Rows 1k / 10k / 100k |
+| ------------------- | ------------------------------------------------------ | ------------------------ | ---------------------- | --- | -------------------------------------------------------------------- | --------------------------------------------------------------------------------------- | ---------------------------------------------------------------------- | -------------------- |
+| `users`             | Better Auth user plus status, plan cache, home airport | Better Auth, API         | API, auth, jobs        | 2   | none (email in plaintext, unique on `lower(email)`)                  | until deletion                                                                          | hard delete                                                            | 1k / 10k / 100k      |
+| `sessions`          | Better Auth sessions                                   | Better Auth              | auth                   | 2   | `token` plaintext (Better Auth-owned)                                | expired rows purged at 30 d                                                             | cascade                                                                | 3k / 30k / 300k      |
+| `accounts`          | Better Auth OAuth and credential accounts              | Better Auth, Apple route | auth, deletion job     | 3   | `refresh_token_enc`; Better Auth's own token columns plaintext       | until deletion                                                                          | cascade                                                                | 1.5k / 15k / 150k    |
+| `verifications`     | Magic link and OAuth state (`storeToken: 'hashed'`)    | Better Auth              | auth                   | 2   | magic-link tokens hashed by the plugin; `identifier` may be an email | expired rows purged by the increment 12 cron over `verifications_expires_at_idx`        | by subject (rows whose `identifier` is the user's email)               | hundreds / 1k / 10k  |
+| `rate_limits`       | Better Auth database rate limiting                     | Better Auth              | auth                   | 2   | none: `key` is an IP or an email in plaintext                        | rows idle over 24 h purged by the increment 12 cron over `rate_limits_last_request_idx` | by subject (rows whose `key` embeds the user's email; IP rows age out) | 1k / 10k / 100k      |
+| `user_keys`         | Wrapped per-user DEK and KEK version                   | crypto module            | crypto module          | 3   | `wrapped_dek` is AES-KW ciphertext                                   | until deletion                                                                          | cascade                                                                | 1k / 10k / 100k      |
+| `devices`           | Installs, platform, OS, attestation reserved           | `POST /v1/devices`       | push, analytics        | 1   | none                                                                 | until deletion                                                                          | cascade                                                                | 1.5k / 15k / 150k    |
+| `user_preferences`  | Units, time format, settings blob (sync entity)        | API                      | API, sync              | 1   | none                                                                 | tombstoned, purged at 30 d                                                              | cascade                                                                | 1k / 10k / 100k      |
+| `user_consents`     | Terms, privacy, marketing, email import consents       | API                      | export, compliance     | 1   | none                                                                 | until deletion                                                                          | cascade                                                                | 3k / 30k / 300k      |
+| `user_sync_changes` | Change feed with `xid8` watermark for `GET /v1/sync`   | API (same tx as the row) | sync                   | 1   | none                                                                 | 30 d                                                                                    | cascade                                                                | 20k / 200k / 2M      |
+| `idempotency_keys`  | Replay store for mutating routes                       | idempotency middleware   | idempotency middleware | 1   | request hash                                                         | 24 h                                                                                    | cascade                                                                | hundreds / 5k / 50k  |
+| `deleted_subjects`  | Pseudonymous record that a subject was deleted         | deletion job             | webhooks, audit        | 1   | RevenueCat id hashed                                                 | kept                                                                                    | kept (that is its job)                                                 | tens / hundreds / 1k |
 
 ### Reference
 
@@ -257,67 +273,88 @@ by design, pseudonymous). Rows: order of magnitude twelve months in, after reten
 
 ## 6. Invariants and natural keys
 
-| Invariant                                                                                            | Enforced by                                                                                               |
-| ---------------------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------- |
-| One instance per operating carrier, number, origin-local date, origin ICAO and leg                   | `flight_instances.flight_key` STORED generated column, unique index `flight_instances_flight_key_key`     |
-| The flight key expression is frozen (drizzle-kit 0.31 would drop the column and lose the index)      | `FLIGHT_KEY_EXPRESSION` constant, `test/generated-column.test.ts`, `db:generate` no-diff test             |
-| Flight number is normalised (no leading zeros, optional suffix); carrier is three upper-case letters | check constraints mirroring `FLIGHT_NUMBER_RE` and `ICAO_CARRIER_RE` in shared                            |
-| A superseded instance always carries a reason and vice versa                                         | `flight_instances_superseded_consistency_check`                                                           |
-| One live subscription per user per instance                                                          | partial unique `(user_id, flight_instance_id) where deleted_at is null`                                   |
-| A subscribed instance cannot be deleted from under the user                                          | `flight_subscriptions.flight_instance_id` ON DELETE RESTRICT                                              |
-| One event per instance and sequence number (replays are no-ops)                                      | unique `(flight_instance_id, seq)`                                                                        |
-| One designator per marketing carrier, number, date, origin                                           | `flight_designators_designator_key`                                                                       |
-| Email is unique case-insensitively                                                                   | unique index on `lower(email)`                                                                            |
-| Session token, API token hash, share token hash, ICS token hash, meet-me token hash are unique       | unique indexes                                                                                            |
-| Every airport has a timezone; the seed fails rather than guesses                                     | `airports.tz NOT NULL`, `MissingTimezoneError` in the loader                                              |
-| Real ICAO codes are four characters; ident-derived pseudo codes are marked                           | `airports_icao_format_check` keyed on `icao_source`                                                       |
-| Sync entity set equals `SYNC_ENTITIES` in shared                                                     | `user_sync_changes_entity_check`, contracts test                                                          |
-| Regional operator blocks do not overlap on the same key                                              | unique `(marketing_iata, number_from, number_to)`; overlap is a loader-time check to add with the BTS job |
+| Invariant                                                                                            | Enforced by                                                                                                                                                                                                             |
+| ---------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| One instance per operating carrier, number, origin-local date, origin ICAO and leg                   | `flight_instances.flight_key` STORED generated column, unique index `flight_instances_flight_key_key`                                                                                                                   |
+| The flight key expression is frozen (drizzle-kit 0.31 would drop the column and lose the index)      | `FLIGHT_KEY_EXPRESSION` constant, `test/generated-column.test.ts`, `db:generate` no-diff test                                                                                                                           |
+| Flight number is normalised (no leading zeros, optional suffix); carrier is three upper-case letters | check constraints mirroring `FLIGHT_NUMBER_RE` and `ICAO_CARRIER_RE` in shared on `flight_instances`, `flight_designators`, `logbook_entries`, `bts_carrier_flight_monthly`                                             |
+| The generated key is exactly what shared parses                                                      | `test/generated-column.test.ts` asserts `FLIGHT_KEY_RE` and `FlightKeySchema` on edge-case tuples                                                                                                                       |
+| A flight's airport code, airport row and zone describe one airport                                   | composite FKs `flight_instances_origin_airport_fk` and `_destination_airport_fk` on `airports (id, icao)`; `flight_instances_origin_tz_check`, `_destination_consistency_check`; writers use `resolveAirportEndpoint()` |
+| Every stored ICAO, IATA, Mode S hex and flight-number code is upper-case and well formed             | format checks on all 37 code columns; `test/schema-contracts.test.ts` fails on a code column without one                                                                                                                |
+| One notification per user per dedupe key (a fan-out reaches every subscriber once)                   | unique `(user_id, dedupe_key)`; a global key would let the first subscriber's row block the rest                                                                                                                        |
+| An alert registration's event set is a subset of shared `ALERT_EVENTS`                               | `provider_alert_registrations_events_check` (jsonb containment); lists asserted identical                                                                                                                               |
+| A superseded instance always carries a reason and vice versa                                         | `flight_instances_superseded_consistency_check`                                                                                                                                                                         |
+| One live subscription per user per instance                                                          | partial unique `(user_id, flight_instance_id) where deleted_at is null`                                                                                                                                                 |
+| A subscribed instance cannot be deleted from under the user                                          | `flight_subscriptions.flight_instance_id` ON DELETE RESTRICT                                                                                                                                                            |
+| One event per instance and sequence number (replays are no-ops)                                      | unique `(flight_instance_id, seq)`                                                                                                                                                                                      |
+| One designator per marketing carrier, number, date, origin                                           | `flight_designators_designator_key`                                                                                                                                                                                     |
+| Email is unique case-insensitively                                                                   | unique index on `lower(email)`                                                                                                                                                                                          |
+| Session token, API token hash, share token hash, ICS token hash, meet-me token hash are unique       | unique indexes                                                                                                                                                                                                          |
+| Every airport has a timezone; the seed fails rather than guesses                                     | `airports.tz NOT NULL`, `MissingTimezoneError` in the loader                                                                                                                                                            |
+| Real ICAO codes are four characters; ident-derived pseudo codes are marked                           | `airports_icao_format_check` keyed on `icao_source`                                                                                                                                                                     |
+| Sync entity set equals `SYNC_ENTITIES` in shared                                                     | `user_sync_changes_entity_check`, contracts test                                                                                                                                                                        |
+| Regional operator blocks do not overlap on the same key                                              | unique `(marketing_iata, number_from, number_to)`; overlap is a loader-time check to add with the BTS job                                                                                                               |
 
 Natural keys used for idempotent upserts by the seed loaders: `airports.icao`, `airlines.icao`,
 `aircraft_types.icao`, `regional_operators (marketing_iata, number_from, number_to)`.
 
 ## 7. Write-path ownership
 
-| Table group                                                                                                                      | Only writer                                                                                  | Everyone else                                                                                              |
-| -------------------------------------------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------- |
-| `flight_instances`, `flight_events`, `flight_tracks`, `flight_instance_merges`, `provider_calls`, `provider_alert_registrations` | persist queue consumer (ADR 0007)                                                            | read only; the search route upserts `flight_designators` and the registry row's key columns on first sight |
-| Better Auth tables                                                                                                               | Better Auth through the Drizzle adapter, plus the Apple native route for `refresh_token_enc` | read only                                                                                                  |
-| Sync entities                                                                                                                    | API request handlers, in the same transaction as the `user_sync_changes` row                 | read only                                                                                                  |
-| Reference tables                                                                                                                 | seed loaders and the BTS import                                                              | read only                                                                                                  |
-| `usage_counters`, `idempotency_keys`, `rate_limits`                                                                              | middleware                                                                                   | read only                                                                                                  |
-| `audit_log`                                                                                                                      | every write path appends; nothing updates or deletes before the retention cron               | append only                                                                                                |
-| `notification_deliveries`                                                                                                        | notify consumer                                                                              | append only                                                                                                |
+| Table group                                                                                                                      | Only writer                                                                                  | Everyone else                                                                                                                            |
+| -------------------------------------------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------- |
+| `flight_instances`, `flight_events`, `flight_tracks`, `flight_instance_merges`, `provider_calls`, `provider_alert_registrations` | persist queue consumer (ADR 0007)                                                            | read only; the search route upserts `flight_designators` and the registry row's key columns on first sight                               |
+| Better Auth tables                                                                                                               | Better Auth through the Drizzle adapter, plus the Apple native route for `refresh_token_enc` | read only; the deletion job deletes `rate_limits` rows whose key embeds the user's email and `verifications` rows whose identifier is it |
+| Sync entities                                                                                                                    | API request handlers, in the same transaction as the `user_sync_changes` row                 | read only                                                                                                                                |
+| Reference tables                                                                                                                 | seed loaders and the BTS import                                                              | read only                                                                                                                                |
+| `usage_counters`, `idempotency_keys`, `rate_limits`                                                                              | middleware                                                                                   | read only                                                                                                                                |
+| `audit_log`                                                                                                                      | every write path appends; nothing updates or deletes before the retention cron               | append only                                                                                                                              |
+| `notification_deliveries`                                                                                                        | notify consumer                                                                              | append only                                                                                                                              |
 
 Durable Objects never write Postgres (ADR 0007).
 
+Two rules the flight writers must keep:
+
+- **One airport lookup.** `origin_icao`, `origin_airport_id` and `origin_tz` (and the
+  destination pair) come from a single `resolveAirportEndpoint()` call
+  (`originColumns()` / `destinationColumns()` in `@planeahead/db`), never from separate
+  provider fields. The composite foreign keys reject a code that does not belong to the airport
+  row, and `flight_instances_origin_tz_check` rejects a known airport without its zone, so a
+  mismatch cannot be frozen into the key or the FlightTracker name.
+- **Replays are silent.** The persist queue is at-least-once. Every `set_updated_at` trigger
+  skips a no-op UPDATE, so a byte-identical replayed upsert leaves `updated_at` alone and the
+  sync join (query 11) sees no phantom change; `test/trigger.test.ts` replays one upsert six
+  times to prove it. The consumer does not need a guard of its own for this, but it must not
+  write differing values on a replay (a fresh `now()` in the SET list would defeat the clause).
+
 ## 8. Top-20 query catalog
 
-| #   | Query                                                                     | Serving index                                                                                                  |
-| --- | ------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------- |
-| 1   | Find the instance for a flight key                                        | `flight_instances_flight_key_key`                                                                              |
-| 2   | Search by marketing designator and date                                   | `flight_designators_designator_key`, `flight_designators_iata_lookup_idx`                                      |
-| 3   | Reconcile: active trackers whose refresh is overdue                       | `flight_instances_tracking_state_next_refresh_at_idx` (partial)                                                |
-| 4   | Departures board by origin and date                                       | `flight_instances_origin_airport_date_idx`                                                                     |
-| 5   | Arrivals board by destination and date                                    | `flight_instances_destination_airport_date_idx`                                                                |
-| 6   | Airborne instance for a Mode S hex                                        | `flight_instances_icao_hex_idx` (partial)                                                                      |
-| 7   | Instance for an AeroAPI `fa_flight_id`                                    | `flight_instances_aeroapi_fa_flight_id_idx` (partial)                                                          |
-| 8   | A user's live subscriptions                                               | `flight_subscriptions_user_id_flight_instance_id_key` (partial), `flight_subscriptions_user_id_updated_at_idx` |
-| 9   | Subscribers of an instance (fan-out for notify)                           | `flight_subscriptions_flight_instance_id_idx` (partial)                                                        |
-| 10  | Sync feed: changes for a user after a cursor                              | `user_sync_changes_user_id_xid_seq_idx`                                                                        |
-| 11  | Sync join: instances updated after a timestamp for a user's subscriptions | 8 plus `flight_instances_pkey`; `updated_at` filter on the joined rows                                         |
-| 12  | Event timeline for an instance                                            | `flight_events_flight_instance_id_seq_key`                                                                     |
-| 13  | Provider calls for an instance (admin)                                    | `provider_calls_flight_instance_id_created_at_idx`                                                             |
-| 14  | Provider calls per provider per day (admin, rollup)                       | `provider_calls_provider_created_at_idx`, `provider_call_daily_day_provider_operation_result_key`              |
-| 15  | Session lookup by token                                                   | `sessions_token_key`                                                                                           |
-| 16  | User by email (sign-in, magic link)                                       | `users_email_key`                                                                                              |
-| 17  | API token by hash                                                         | `api_tokens_token_hash_key`                                                                                    |
-| 18  | Share link by hash                                                        | `share_links_token_hash_key`                                                                                   |
-| 19  | Inbox for a user, newest first                                            | `notifications_user_id_created_at_idx`                                                                         |
-| 20  | Latest METAR for an airport                                               | `airport_wx_observations_icao_kind_observed_at_key`                                                            |
+| #   | Query                                                                     | Serving index                                                                                                   |
+| --- | ------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------- |
+| 1   | Find the instance for a flight key                                        | `flight_instances_flight_key_key`                                                                               |
+| 2   | Search by marketing designator and date                                   | `flight_designators_designator_key`, `flight_designators_iata_lookup_idx`                                       |
+| 3   | Reconcile: active trackers whose refresh is overdue                       | `flight_instances_tracking_state_next_refresh_at_idx` (partial)                                                 |
+| 4   | Departures board by origin and date                                       | `flight_instances_origin_airport_date_idx`                                                                      |
+| 5   | Arrivals board by destination and date                                    | `flight_instances_destination_airport_date_idx`                                                                 |
+| 6   | Airborne instance for a Mode S hex                                        | `flight_instances_icao_hex_idx` (partial)                                                                       |
+| 7   | Instance for an AeroAPI `fa_flight_id`                                    | `flight_instances_aeroapi_fa_flight_id_idx` (partial)                                                           |
+| 8   | A user's live subscriptions                                               | `flight_subscriptions_user_id_flight_instance_id_key` (partial), `flight_subscriptions_user_id_updated_at_idx`  |
+| 9   | Subscribers of an instance (fan-out for notify)                           | `flight_subscriptions_flight_instance_id_idx` (partial)                                                         |
+| 10  | Sync feed: changes for a user after a cursor                              | `user_sync_changes_user_id_xid_seq_idx`                                                                         |
+| 11  | Sync join: instances updated after a timestamp for a user's subscriptions | 8 plus `flight_instances_pkey`; `updated_at` filter on the joined rows (moves only on a real change, section 7) |
+| 12  | Event timeline for an instance                                            | `flight_events_flight_instance_id_seq_key`                                                                      |
+| 13  | Provider calls for an instance (admin)                                    | `provider_calls_flight_instance_id_created_at_idx`                                                              |
+| 14  | Provider calls per provider per day (admin, rollup)                       | `provider_calls_provider_created_at_idx`, `provider_call_daily_day_provider_operation_result_key`               |
+| 15  | Session lookup by token                                                   | `sessions_token_key`                                                                                            |
+| 16  | User by email (sign-in, magic link)                                       | `users_email_key`                                                                                               |
+| 17  | API token by hash                                                         | `api_tokens_token_hash_key`                                                                                     |
+| 18  | Share link by hash                                                        | `share_links_token_hash_key`                                                                                    |
+| 19  | Inbox for a user, newest first                                            | `notifications_user_id_created_at_idx`                                                                          |
+| 20  | Latest METAR for an airport                                               | `airport_wx_observations_icao_kind_observed_at_key`                                                             |
 
 Retention purges (`flight_events`, `provider_calls`, `airport_wx_observations`,
-`notification_deliveries`, `audit_log`) scan by `created_at` through the BRIN indexes.
+`notification_deliveries`, `audit_log`) scan by `created_at` through the BRIN indexes;
+`sessions` purges by `sessions_expires_at_idx`, `verifications` by
+`verifications_expires_at_idx`, `rate_limits` by `rate_limits_last_request_idx`.
 
 ## 9. Durable Object schemas, outbox and migration runner
 
@@ -381,6 +418,13 @@ Sources: `docs/increments/03-db-schema.facts.md` section 5.
   `ALTER ROLE <role> SET statement_timeout = '10s'` as an environment setup step (verify on the
   dev branch: `SELECT context FROM pg_settings WHERE name = 'statement_timeout'` must be `user`,
   then reconnect and `SHOW statement_timeout`), never per request and never inside a migration.
+- **Session `TimeZone`.** Set the same way, once per environment:
+  `ALTER ROLE <role> SET TimeZone = 'UTC'`. Drizzle reads are normalised whatever the zone
+  (principle 2) and writes must carry a zone designator, but raw SQL text and console output
+  should render `+00` everywhere. CI sets `TZ=UTC` on the `postgres:18` service container, the
+  embedded harness passes `-c timezone=UTC`, and `test/globalSetup.ts` refuses any target whose
+  session offset is not zero with a message naming this rule, so a drifted Neon branch fails
+  with a diagnosis rather than a string mismatch.
 - **Check constraints (spike D6, drizzle-kit 0.31.10).** Changing a `check()` expression emits
   `ALTER TABLE ... DROP CONSTRAINT "<name>"` followed by
   `ALTER TABLE ... ADD CONSTRAINT "<name>" CHECK (...)` in a new migration. It is not a silent
@@ -396,10 +440,15 @@ Sources: `docs/increments/03-db-schema.facts.md` section 5.
 - **Custom migrations.** `drizzle-kit generate --custom --name <name>` creates the empty file
   and journal entry; the SQL goes in by hand with `--> statement-breakpoint` between statements
   and never inside a dollar-quoted body or a comment (the migrator splits on the literal
-  marker). `scripts/gen-updated-at-migration.mjs` writes 0001 from the snapshot; a later
-  increment that adds a table with `updated_at` writes a new custom migration with that one
-  trigger. A table with a STORED generated column gets its trigger without the no-op WHEN
-  clause (Postgres restriction).
+  marker). `scripts/gen-updated-at-migration.mjs` writes 0001 from the snapshot (regenerated in
+  increment 3 before it was applied anywhere); a later increment that adds a table with
+  `updated_at` writes a new custom migration with that one trigger. Every trigger carries a
+  no-op WHEN clause. A table with a STORED generated column cannot use
+  `OLD.* IS DISTINCT FROM NEW.*` (Postgres restriction), so the generator emits an explicit
+  disjunction over its non-generated columns from the snapshot; adding a column to such a
+  table (today only `flight_instances`) means a new custom migration that drops and recreates
+  its trigger, and `test/trigger.test.ts` fails if the clause misses a column.
+  `set_updated_at()` pins `search_path = pg_catalog, public`.
 - **Identifiers.** Every constraint and index name stays within 63 bytes; name foreign keys
   explicitly when Drizzle's generated name would exceed it (the contracts test fails otherwise).
 - **DO schemas** are additive only for one release (section 9).
@@ -412,9 +461,11 @@ connection at the end of the invocation); `createNodeDb` for CI, scripts and tes
 explicit `close()`. No module-scope client (`planeahead/no-module-scope-drizzle` covers
 `packages/db/src` as well as `apps/api/src`). Verified on PG 18.4 through postgres.js: `bytea`
 round-trips as a `Buffer`, `bigint({ mode: 'number' })` returns a number, `timestamptz` with
-`mode: 'date'` round-trips a `Date` exactly, and `mode: 'string'` returns the session-time-zone
-text form (`2026-09-19 22:30:00+00` under UTC; Neon, the CI container and the embedded harness
-all run UTC).
+`mode: 'date'` round-trips a `Date` exactly, and the `instant()` column type returns
+`2026-09-19T22:30:00Z` whatever the session zone (Drizzle's postgres-js driver installs a
+transparent parser for timestamptz, so the raw text is `2026-09-19 22:30:00+00` under UTC and
+`2026-09-19 18:30:00-04` under America/New_York; both normalise to the same ISO string). The
+session zone is pinned to UTC per environment anyway (section 12).
 
 **Better Auth 1.7.5 ownership.** Export keys are exactly `users`, `sessions`, `accounts`,
 `verifications`, `rateLimits` (SQL `rate_limits`); the adapter addresses tables by export key
@@ -428,6 +479,9 @@ and has no hashed mode; `accounts.access_token`, `refresh_token` and `id_token` 
 Auth-owned plaintext columns (increment 5 decides `account.encryptOAuthTokens`); PlaneAhead's
 Apple refresh token lives only in `accounts.refresh_token_enc`. Magic-link tokens are hashed by
 the plugin into `verifications`. `rate_limits.last_request` is `bigint` mode number.
+`rate_limits.key` and `verifications.identifier` hold personal data (an IP or an email, PII
+class 2) and neither table has a foreign key: the deletion job purges both by subject and the
+housekeeping cron by `last_request` and `expires_at` (section 5).
 `users.email` is unique on `lower(email)`; if increment 5 finds `validateSchema` insists on a
 plain unique constraint, replace the expression index and keep lower-casing in the auth config.
 
@@ -437,14 +491,16 @@ Committed under `packages/db/seed/data` with `MANIFEST.json` (upstream URL, SHA-
 `Content-Length` seen, fetched_at, licence, row counts) and `LICENSES.md`.
 `scripts/fetch-seed-data.mjs` requests the identity encoding (Node's fetch otherwise
 decompresses gzip and makes `Content-Length` the compressed size) and fails on any byte-count
-mismatch. Loaded on 2026-09-20 in 665 ms:
+mismatch. Each loader upserts on its natural key, checks every other unique column across the
+source rows before writing (`SeedCollisionError` names both rows) and loads inside one
+transaction, so a refresh lands completely or not at all. Loaded on 2026-09-20 in 665 ms:
 
-| Loader               | Source                                           | Read  | Written | Notes                                                                                                                                                                                |
-| -------------------- | ------------------------------------------------ | ----- | ------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| `airports`           | OurAirports filtered, mwgg tz, curated overrides | 6,346 | 6,341   | 5,602 tz from mwgg, 739 from curated overrides, 5 rejected by the country check and skipped with a warning; 829 rows are ident-derived pseudo codes, 426 of them not four characters |
-| `airlines`           | VRS spine, OPTD alliances                        | 5,964 | 5,904   | 60 rows without an ICAO skipped; 92 carry an alliance; one OPTD alliance value (`2018-01-02`) discarded                                                                              |
-| `aircraft_types`     | VRS model-type, ColtJD45 J patch                 | 2,855 | 2,855   | 11,084 VRS rows deduped; 2 fake `-` designators dropped at fetch time; J patched on 2 designators                                                                                    |
-| `regional_operators` | `@planeahead/shared` hint seed                   | 23    | 23      | confidence `hint`; the seed's own confidence kept in `source_confidence`                                                                                                             |
+| Loader               | Source                                           | Read  | Written | Notes                                                                                                                                                                                                                                           |
+| -------------------- | ------------------------------------------------ | ----- | ------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `airports`           | OurAirports filtered, mwgg tz, curated overrides | 6,346 | 6,341   | 5,602 tz from mwgg, 739 from curated overrides, 5 rejected by the country check and skipped with a warning; 829 rows are ident-derived pseudo codes, 426 of them not four characters                                                            |
+| `airlines`           | VRS spine, OPTD alliances                        | 5,964 | 5,904   | 60 rows without an ICAO skipped; 92 carry an alliance; one OPTD alliance value (`2018-01-02`) discarded                                                                                                                                         |
+| `aircraft_types`     | VRS model-type, ColtJD45 J patch                 | 2,855 | 2,855   | 11,084 VRS rows deduped; 2 fake `-` designators dropped at fetch time; J patched on 1 designator (A388; ColtJD45 lists it twice, does not list the An-225 and has the An-124 as H, verified against the upstream file by SHA-256 on 2026-09-20) |
+| `regional_operators` | `@planeahead/shared` hint seed                   | 23    | 23      | confidence `hint`; the seed's own confidence kept in `source_confidence`                                                                                                                                                                        |
 
 ## 15. ADR links
 
@@ -458,10 +514,20 @@ mismatch. Loaded on 2026-09-20 in 665 ms:
 
 1. **Table count.** The spec says 61 tables; its normative list names 70 and all 70 are built.
    Confirm the list is the contract and retire the number.
-2. **Airports without a four-character code.** 426 seeded airports carry an ident-derived code
-   such as `ID-0004`; they exist for display but cannot be a flight origin until a synthetic
-   `ZZxx` code (shared `SYNTHETIC_ICAO_RE`) is assigned. Decide whether to assign codes at seed
-   time (curated file) or on first use.
+2. **Airports without a four-character code.** Of the 829 seeded airports whose code is an
+   ident-derived pseudo code, 426 are not four characters (`03N` Utirik, `19P` Port Protection,
+   `4A2` Atmautluak) and **181 of those carry scheduled service**. They exist for display and
+   search and cannot be a flight origin or destination (`flight_instances_origin_icao_check` is
+   `^[A-Z0-9]{4}$`), so the flight-creation route must refuse such an origin with a clear error
+   rather than surface SQLSTATE 23514. The other 403 are four characters (`05AK`) and pass the
+   check on shape although the facts sheet says an ident-derived code will not resolve at
+   AeroAPI: the check is on shape, not provenance. `test/seed.test.ts` pins all three counts
+   and demonstrates both outcomes. Recommended: assign synthetic `ZZxx` codes (shared
+   `SYNTHETIC_ICAO_RE`, 1,296 combinations) at seed time from a committed, append-only
+   allocation file, add `synthetic` to `ICAO_SOURCES` and mark the row; a `ZZxx` code already
+   passes the origin check, so this is a seed-data change, not a schema change. Not done in
+   this increment because the spec and ruling D8 fix `icao_source` to `icao_code | ident` and
+   the allocation must be stable forever (it is frozen into flight keys).
 3. **Five airports rejected by the timezone country check** (Concordia Station AQ, Ulleung KR,
    Mahbes EH, a misplaced Venezuelan duplicate, Woody Island XP) are skipped by the loader. Any
    of them can be promoted by hand into `airports.tz-overrides.json` with a stated source.
@@ -483,6 +549,9 @@ mismatch. Loaded on 2026-09-20 in 665 ms:
 - [ ] Every enumeration is `text` plus `check`; lists that mirror shared are asserted identical.
 - [ ] `flight_key` is generated, unique by index, and the expression is unchanged.
 - [ ] `db:generate` emits nothing; `db:check` is clean; no identifier exceeds 63 bytes.
+- [ ] Every instant read through Drizzle satisfies `IsoInstantSchema` (roundtrip test); every
+      code column has a format check (contracts test).
+- [ ] `flight_instances` writers derive the airport triple from `resolveAirportEndpoint()`.
 - [ ] Migrations run only over the direct endpoint, refuse PG17 and `-pooler` hosts.
 - [ ] Seed loaders are idempotent and the manifest matches the committed files.
 - [ ] Connection budget arithmetic matches the current Neon and Hyperdrive limits.

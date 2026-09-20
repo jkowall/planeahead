@@ -17,7 +17,19 @@ import {
   uniqueIndex,
   uuid,
 } from 'drizzle-orm/pg-core';
-import { encrypted, id, inList, instant, softDelete, timestamps } from './columns';
+import {
+  AIRPORT_CODE_SQL_RE,
+  FLIGHT_NUMBER_SQL_RE,
+  ICAO_AIRCRAFT_TYPE_SQL_RE,
+  ICAO_CARRIER_SQL_RE,
+  encrypted,
+  formatCheck,
+  id,
+  inList,
+  instant,
+  softDelete,
+  timestamps,
+} from './columns';
 import { flightInstances } from './flights';
 import { users } from './identity';
 
@@ -131,7 +143,11 @@ export const flightSubscriptions = pgTable(
 export const CABINS = ['economy', 'premium_economy', 'business', 'first'] as const;
 export const LOGBOOK_SOURCES = ['auto', 'manual', 'import'] as const;
 
-/** Flown flights for stats and year-in-review. A sync entity per SYNC_ENTITIES in shared. */
+/**
+ * Flown flights for stats and year-in-review. A sync entity per SYNC_ENTITIES in shared. The
+ * airport columns hold `airports.icao` as the user knows it, which may be an ident-derived
+ * pseudo code (`03N`), so they use the airport-code pattern rather than the strict ICAO form.
+ */
 export const logbookEntries = pgTable(
   'logbook_entries',
   {
@@ -167,6 +183,19 @@ export const logbookEntries = pgTable(
       sql`${t.cabin} is null or ${t.cabin} in (${inList(CABINS)})`,
     ),
     check('logbook_entries_source_check', sql`${t.source} in (${inList(LOGBOOK_SOURCES)})`),
+    formatCheck('logbook_entries_origin_icao_check', t.originIcao, AIRPORT_CODE_SQL_RE),
+    formatCheck('logbook_entries_destination_icao_check', t.destinationIcao, AIRPORT_CODE_SQL_RE),
+    formatCheck(
+      'logbook_entries_operating_carrier_icao_check',
+      t.operatingCarrierIcao,
+      ICAO_CARRIER_SQL_RE,
+    ),
+    formatCheck('logbook_entries_flight_number_check', t.flightNumber, FLIGHT_NUMBER_SQL_RE),
+    formatCheck(
+      'logbook_entries_aircraft_type_icao_check',
+      t.aircraftTypeIcao,
+      ICAO_AIRCRAFT_TYPE_SQL_RE,
+    ),
   ],
 );
 
@@ -187,7 +216,9 @@ export const userStatsYearly = pgTable(
     delayedFlights: integer('delayed_flights').notNull().default(0),
     cancelledFlights: integer('cancelled_flights').notNull().default(0),
     details: jsonb('details'),
-    computedAt: instant('computed_at').notNull().defaultNow(),
+    computedAt: instant('computed_at')
+      .notNull()
+      .default(sql`now()`),
     ...timestamps(),
   },
   (t) => [

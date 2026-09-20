@@ -1,6 +1,6 @@
 {
-  "id": "7e311241-259b-47a0-b3fe-6567773a3714",
-  "prevId": "105f3d46-859b-4c1c-936a-6693395818ed",
+  "id": "8aa84d6a-e82a-482a-b91e-feba63e060ab",
+  "prevId": "54aa7d18-68c8-441b-9001-11eda42b4d51",
   "version": "7",
   "dialect": "postgresql",
   "tables": {
@@ -124,6 +124,14 @@
         "aircraft_icao_hex_check": {
           "name": "aircraft_icao_hex_check",
           "value": "\"aircraft\".\"icao_hex\" ~ '^[0-9A-F]{6}$'"
+        },
+        "aircraft_operator_icao_check": {
+          "name": "aircraft_operator_icao_check",
+          "value": "\"aircraft\".\"operator_icao\" is null or \"aircraft\".\"operator_icao\" ~ '^[A-Z]{3}$'"
+        },
+        "aircraft_aircraft_type_icao_check": {
+          "name": "aircraft_aircraft_type_icao_check",
+          "value": "\"aircraft\".\"aircraft_type_icao\" is null or \"aircraft\".\"aircraft_type_icao\" ~ '^[A-Z0-9]{2,4}$'"
         }
       },
       "isRLSEnabled": false
@@ -237,6 +245,10 @@
       "uniqueConstraints": {},
       "policies": {},
       "checkConstraints": {
+        "aircraft_types_icao_check": {
+          "name": "aircraft_types_icao_check",
+          "value": "\"aircraft_types\".\"icao\" is null or \"aircraft_types\".\"icao\" ~ '^[A-Z0-9]{2,4}$'"
+        },
         "aircraft_types_wake_turbulence_check": {
           "name": "aircraft_types_wake_turbulence_check",
           "value": "\"aircraft_types\".\"wake_turbulence\" is null or \"aircraft_types\".\"wake_turbulence\" in ('L', 'M', 'H', 'J', 'L/M', 'M/H')"
@@ -407,6 +419,10 @@
         "airlines_icao_format_check": {
           "name": "airlines_icao_format_check",
           "value": "\"airlines\".\"icao\" ~ '^[A-Z]{3}$'"
+        },
+        "airlines_iata_check": {
+          "name": "airlines_iata_check",
+          "value": "\"airlines\".\"iata\" is null or \"airlines\".\"iata\" ~ '^[A-Z0-9]{2}$'"
         },
         "airlines_alliance_check": {
           "name": "airlines_alliance_check",
@@ -743,7 +759,13 @@
       },
       "foreignKeys": {},
       "compositePrimaryKeys": {},
-      "uniqueConstraints": {},
+      "uniqueConstraints": {
+        "airports_id_icao_key": {
+          "name": "airports_id_icao_key",
+          "columns": ["id", "icao"],
+          "nullsNotDistinct": false
+        }
+      },
       "policies": {},
       "checkConstraints": {
         "airports_type_check": {
@@ -761,6 +783,10 @@
         "airports_icao_format_check": {
           "name": "airports_icao_format_check",
           "value": "(\"airports\".\"icao_source\" = 'icao_code' and \"airports\".\"icao\" ~ '^[A-Z0-9]{4}$') or (\"airports\".\"icao_source\" = 'ident' and \"airports\".\"icao\" ~ '^[A-Z0-9-]{3,8}$')"
+        },
+        "airports_iata_check": {
+          "name": "airports_iata_check",
+          "value": "\"airports\".\"iata\" is null or \"airports\".\"iata\" ~ '^[A-Z0-9]{3}$'"
         },
         "airports_latitude_check": {
           "name": "airports_latitude_check",
@@ -1032,6 +1058,10 @@
         "regional_operators_operating_icao_check": {
           "name": "regional_operators_operating_icao_check",
           "value": "\"regional_operators\".\"operating_icao\" ~ '^[A-Z]{3}$'"
+        },
+        "regional_operators_marketing_iata_check": {
+          "name": "regional_operators_marketing_iata_check",
+          "value": "\"regional_operators\".\"marketing_iata\" is null or \"regional_operators\".\"marketing_iata\" ~ '^[A-Z0-9]{2}$'"
         }
       },
       "isRLSEnabled": false
@@ -1218,8 +1248,8 @@
           "primaryKey": false,
           "notNull": true
         },
-        "deleted_at": {
-          "name": "deleted_at",
+        "subject_deleted_at": {
+          "name": "subject_deleted_at",
           "type": "timestamp with time zone",
           "primaryKey": false,
           "notNull": true,
@@ -1534,6 +1564,21 @@
             }
           ],
           "isUnique": true,
+          "with": {},
+          "method": "btree",
+          "concurrently": false
+        },
+        "rate_limits_last_request_idx": {
+          "name": "rate_limits_last_request_idx",
+          "columns": [
+            {
+              "expression": "last_request",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            }
+          ],
+          "isUnique": false,
           "with": {},
           "method": "btree",
           "concurrently": false
@@ -2524,6 +2569,14 @@
           "name": "flight_designators_flight_number_check",
           "value": "\"flight_designators\".\"flight_number\" ~ '^[1-9][0-9]{0,3}[A-Z]?$'"
         },
+        "flight_designators_origin_icao_check": {
+          "name": "flight_designators_origin_icao_check",
+          "value": "\"flight_designators\".\"origin_icao\" ~ '^[A-Z0-9]{4}$'"
+        },
+        "flight_designators_marketing_carrier_iata_check": {
+          "name": "flight_designators_marketing_carrier_iata_check",
+          "value": "\"flight_designators\".\"marketing_carrier_iata\" is null or \"flight_designators\".\"marketing_carrier_iata\" ~ '^[A-Z0-9]{2}$'"
+        },
         "flight_designators_kind_check": {
           "name": "flight_designators_kind_check",
           "value": "\"flight_designators\".\"kind\" in ('operating', 'codeshare')"
@@ -3239,21 +3292,21 @@
         }
       },
       "foreignKeys": {
-        "flight_instances_origin_airport_id_airports_id_fk": {
-          "name": "flight_instances_origin_airport_id_airports_id_fk",
+        "flight_instances_origin_airport_fk": {
+          "name": "flight_instances_origin_airport_fk",
           "tableFrom": "flight_instances",
-          "columnsFrom": ["origin_airport_id"],
+          "columnsFrom": ["origin_airport_id", "origin_icao"],
           "tableTo": "airports",
-          "columnsTo": ["id"],
+          "columnsTo": ["id", "icao"],
           "onUpdate": "no action",
           "onDelete": "restrict"
         },
-        "flight_instances_destination_airport_id_airports_id_fk": {
-          "name": "flight_instances_destination_airport_id_airports_id_fk",
+        "flight_instances_destination_airport_fk": {
+          "name": "flight_instances_destination_airport_fk",
           "tableFrom": "flight_instances",
-          "columnsFrom": ["destination_airport_id"],
+          "columnsFrom": ["destination_airport_id", "destination_icao"],
           "tableTo": "airports",
-          "columnsTo": ["id"],
+          "columnsTo": ["id", "icao"],
           "onUpdate": "no action",
           "onDelete": "restrict"
         }
@@ -3273,6 +3326,30 @@
         "flight_instances_origin_icao_check": {
           "name": "flight_instances_origin_icao_check",
           "value": "\"flight_instances\".\"origin_icao\" ~ '^[A-Z0-9]{4}$'"
+        },
+        "flight_instances_destination_icao_check": {
+          "name": "flight_instances_destination_icao_check",
+          "value": "\"flight_instances\".\"destination_icao\" is null or \"flight_instances\".\"destination_icao\" ~ '^[A-Z0-9]{4}$'"
+        },
+        "flight_instances_diverted_to_icao_check": {
+          "name": "flight_instances_diverted_to_icao_check",
+          "value": "\"flight_instances\".\"diverted_to_icao\" is null or \"flight_instances\".\"diverted_to_icao\" ~ '^[A-Z0-9]{4}$'"
+        },
+        "flight_instances_aircraft_type_icao_check": {
+          "name": "flight_instances_aircraft_type_icao_check",
+          "value": "\"flight_instances\".\"aircraft_type_icao\" is null or \"flight_instances\".\"aircraft_type_icao\" ~ '^[A-Z0-9]{2,4}$'"
+        },
+        "flight_instances_icao_hex_check": {
+          "name": "flight_instances_icao_hex_check",
+          "value": "\"flight_instances\".\"icao_hex\" is null or \"flight_instances\".\"icao_hex\" ~ '^[0-9A-F]{6}$'"
+        },
+        "flight_instances_origin_tz_check": {
+          "name": "flight_instances_origin_tz_check",
+          "value": "\"flight_instances\".\"origin_airport_id\" is null or \"flight_instances\".\"origin_tz\" is not null"
+        },
+        "flight_instances_destination_consistency_check": {
+          "name": "flight_instances_destination_consistency_check",
+          "value": "\"flight_instances\".\"destination_airport_id\" is null or \"flight_instances\".\"destination_icao\" is not null"
         },
         "flight_instances_leg_seq_check": {
           "name": "flight_instances_leg_seq_check",
@@ -3827,6 +3904,26 @@
         "logbook_entries_source_check": {
           "name": "logbook_entries_source_check",
           "value": "\"logbook_entries\".\"source\" in ('auto', 'manual', 'import')"
+        },
+        "logbook_entries_origin_icao_check": {
+          "name": "logbook_entries_origin_icao_check",
+          "value": "\"logbook_entries\".\"origin_icao\" is null or \"logbook_entries\".\"origin_icao\" ~ '^[A-Z0-9-]{3,8}$'"
+        },
+        "logbook_entries_destination_icao_check": {
+          "name": "logbook_entries_destination_icao_check",
+          "value": "\"logbook_entries\".\"destination_icao\" is null or \"logbook_entries\".\"destination_icao\" ~ '^[A-Z0-9-]{3,8}$'"
+        },
+        "logbook_entries_operating_carrier_icao_check": {
+          "name": "logbook_entries_operating_carrier_icao_check",
+          "value": "\"logbook_entries\".\"operating_carrier_icao\" is null or \"logbook_entries\".\"operating_carrier_icao\" ~ '^[A-Z]{3}$'"
+        },
+        "logbook_entries_flight_number_check": {
+          "name": "logbook_entries_flight_number_check",
+          "value": "\"logbook_entries\".\"flight_number\" is null or \"logbook_entries\".\"flight_number\" ~ '^[1-9][0-9]{0,3}[A-Z]?$'"
+        },
+        "logbook_entries_aircraft_type_icao_check": {
+          "name": "logbook_entries_aircraft_type_icao_check",
+          "value": "\"logbook_entries\".\"aircraft_type_icao\" is null or \"logbook_entries\".\"aircraft_type_icao\" ~ '^[A-Z0-9]{2,4}$'"
         }
       },
       "isRLSEnabled": false
@@ -4475,7 +4572,12 @@
       "compositePrimaryKeys": {},
       "uniqueConstraints": {},
       "policies": {},
-      "checkConstraints": {},
+      "checkConstraints": {
+        "airport_delay_hourly_icao_check": {
+          "name": "airport_delay_hourly_icao_check",
+          "value": "\"airport_delay_hourly\".\"icao\" is null or \"airport_delay_hourly\".\"icao\" ~ '^[A-Z0-9]{4}$'"
+        }
+      },
       "isRLSEnabled": false
     },
     "public.airport_delay_snapshots": {
@@ -4586,6 +4688,10 @@
         "airport_delay_snapshots_source_check": {
           "name": "airport_delay_snapshots_source_check",
           "value": "\"airport_delay_snapshots\".\"source\" in ('aeroapi', 'aerodatabox', 'adsb_lol', 'adsb_fi', 'airplanes_live', 'aviationweather', 'nws', 'open_meteo', 'faa_nas', 'llm', 'mock')"
+        },
+        "airport_delay_snapshots_icao_check": {
+          "name": "airport_delay_snapshots_icao_check",
+          "value": "\"airport_delay_snapshots\".\"icao\" is null or \"airport_delay_snapshots\".\"icao\" ~ '^[A-Z0-9]{4}$'"
         }
       },
       "isRLSEnabled": false
@@ -4722,6 +4828,14 @@
         "airport_nas_events_kind_check": {
           "name": "airport_nas_events_kind_check",
           "value": "\"airport_nas_events\".\"kind\" in ('ground_stop', 'ground_delay', 'arrival_delay', 'departure_delay', 'closure', 'deicing', 'other')"
+        },
+        "airport_nas_events_airport_iata_check": {
+          "name": "airport_nas_events_airport_iata_check",
+          "value": "\"airport_nas_events\".\"airport_iata\" is null or \"airport_nas_events\".\"airport_iata\" ~ '^[A-Z0-9]{3}$'"
+        },
+        "airport_nas_events_airport_icao_check": {
+          "name": "airport_nas_events_airport_icao_check",
+          "value": "\"airport_nas_events\".\"airport_icao\" is null or \"airport_nas_events\".\"airport_icao\" ~ '^[A-Z0-9]{4}$'"
         }
       },
       "isRLSEnabled": false
@@ -4838,6 +4952,10 @@
         "airport_wx_observations_source_check": {
           "name": "airport_wx_observations_source_check",
           "value": "\"airport_wx_observations\".\"source\" in ('aeroapi', 'aerodatabox', 'adsb_lol', 'adsb_fi', 'airplanes_live', 'aviationweather', 'nws', 'open_meteo', 'faa_nas', 'llm', 'mock')"
+        },
+        "airport_wx_observations_icao_check": {
+          "name": "airport_wx_observations_icao_check",
+          "value": "\"airport_wx_observations\".\"icao\" is null or \"airport_wx_observations\".\"icao\" ~ '^[A-Z0-9]{4}$'"
         }
       },
       "isRLSEnabled": false
@@ -4991,6 +5109,10 @@
         "bts_airport_hourly_direction_check": {
           "name": "bts_airport_hourly_direction_check",
           "value": "\"bts_airport_hourly\".\"direction\" in ('dep', 'arr')"
+        },
+        "bts_airport_hourly_airport_iata_check": {
+          "name": "bts_airport_hourly_airport_iata_check",
+          "value": "\"bts_airport_hourly\".\"airport_iata\" is null or \"bts_airport_hourly\".\"airport_iata\" ~ '^[A-Z0-9]{3}$'"
         }
       },
       "isRLSEnabled": false
@@ -5206,6 +5328,18 @@
         "bts_carrier_flight_monthly_month_check": {
           "name": "bts_carrier_flight_monthly_month_check",
           "value": "\"bts_carrier_flight_monthly\".\"month\" between 1 and 12"
+        },
+        "bts_carrier_flight_monthly_flight_number_check": {
+          "name": "bts_carrier_flight_monthly_flight_number_check",
+          "value": "\"bts_carrier_flight_monthly\".\"flight_number\" is null or \"bts_carrier_flight_monthly\".\"flight_number\" ~ '^[1-9][0-9]{0,3}[A-Z]?$'"
+        },
+        "bts_carrier_flight_monthly_origin_iata_check": {
+          "name": "bts_carrier_flight_monthly_origin_iata_check",
+          "value": "\"bts_carrier_flight_monthly\".\"origin_iata\" is null or \"bts_carrier_flight_monthly\".\"origin_iata\" ~ '^[A-Z0-9]{3}$'"
+        },
+        "bts_carrier_flight_monthly_destination_iata_check": {
+          "name": "bts_carrier_flight_monthly_destination_iata_check",
+          "value": "\"bts_carrier_flight_monthly\".\"destination_iata\" is null or \"bts_carrier_flight_monthly\".\"destination_iata\" ~ '^[A-Z0-9]{3}$'"
         }
       },
       "isRLSEnabled": false
@@ -5504,6 +5638,14 @@
         "bts_route_monthly_month_check": {
           "name": "bts_route_monthly_month_check",
           "value": "\"bts_route_monthly\".\"month\" between 1 and 12"
+        },
+        "bts_route_monthly_origin_iata_check": {
+          "name": "bts_route_monthly_origin_iata_check",
+          "value": "\"bts_route_monthly\".\"origin_iata\" is null or \"bts_route_monthly\".\"origin_iata\" ~ '^[A-Z0-9]{3}$'"
+        },
+        "bts_route_monthly_destination_iata_check": {
+          "name": "bts_route_monthly_destination_iata_check",
+          "value": "\"bts_route_monthly\".\"destination_iata\" is null or \"bts_route_monthly\".\"destination_iata\" ~ '^[A-Z0-9]{3}$'"
         }
       },
       "isRLSEnabled": false
@@ -5748,6 +5890,12 @@
           "primaryKey": false,
           "notNull": true
         },
+        "events": {
+          "name": "events",
+          "type": "jsonb",
+          "primaryKey": false,
+          "notNull": false
+        },
         "max_weekly": {
           "name": "max_weekly",
           "type": "integer",
@@ -5851,6 +5999,10 @@
         "provider_alert_registrations_provider_check": {
           "name": "provider_alert_registrations_provider_check",
           "value": "\"provider_alert_registrations\".\"provider\" in ('aeroapi', 'aerodatabox', 'adsb_lol', 'adsb_fi', 'airplanes_live', 'aviationweather', 'nws', 'open_meteo', 'faa_nas', 'llm', 'mock')"
+        },
+        "provider_alert_registrations_events_check": {
+          "name": "provider_alert_registrations_events_check",
+          "value": "\"provider_alert_registrations\".\"events\" is null or (jsonb_typeof(\"provider_alert_registrations\".\"events\") = 'array' and \"provider_alert_registrations\".\"events\" <@ '[\"filed\",\"departure\",\"arrival\",\"cancelled\",\"diverted\",\"out\",\"off\",\"on\",\"in\",\"hold_start\",\"hold_end\"]'::jsonb)"
         }
       },
       "isRLSEnabled": false
@@ -6928,9 +7080,15 @@
         }
       },
       "indexes": {
-        "notifications_dedupe_key_key": {
-          "name": "notifications_dedupe_key_key",
+        "notifications_user_id_dedupe_key_key": {
+          "name": "notifications_user_id_dedupe_key_key",
           "columns": [
+            {
+              "expression": "user_id",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            },
             {
               "expression": "dedupe_key",
               "isExpression": false,

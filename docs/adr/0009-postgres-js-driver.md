@@ -39,9 +39,10 @@ snapshot); `prepare: true` keeps Hyperdrive's prepared-statement cache working, 
 - Harder: if Hyperdrive caching is ever enabled and shows a measurable gap against node-postgres,
   the driver swap touches `withDb`, `createNodeDb`, `migrate.ts` and the test helpers. Drizzle's
   query builder is driver-neutral, so the schema and queries do not change.
-- Commits us to postgres.js semantics for timestamps (timestamptz text values render in the
-  session time zone; Neon, the CI container and the embedded harness all run UTC).
-  Reversibility: high.
+- Commits us to postgres.js's raw text for `timestamptz` (Drizzle's postgres-js driver installs
+  a transparent parser for it), which renders in the session time zone and is not ISO-8601.
+  `@planeahead/db` normalises it in the `instant()` column type and pins the session zone to
+  UTC per environment (schema-review section 12). Reversibility: high.
 
 ## Alternatives considered
 

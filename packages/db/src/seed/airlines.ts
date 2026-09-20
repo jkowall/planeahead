@@ -3,6 +3,9 @@
  * Republic Airways); OPTD (CC BY 4.0) is left-joined on ICAO for alliance and validity dates.
  * OPTD alliance names are dirty (`OneWorld` and `Oneworld`, one row with a date as the code), so
  * they are normalised and anything unknown becomes null.
+ *
+ * `vrs_code` is unique in the table while the upsert conflicts on `icao`, so the loader checks
+ * it across the source rows before writing and loads inside one transaction.
  */
 
 import { readFile } from 'node:fs/promises';
@@ -10,7 +13,14 @@ import { join } from 'node:path';
 import { sql } from 'drizzle-orm';
 import type { Db } from '../client';
 import { airlines } from '../schema/reference';
-import { BATCH_SIZE, SEED_DATA_DIR, count, type SeedOptions, type SeedResult } from './common';
+import {
+  BATCH_SIZE,
+  SEED_DATA_DIR,
+  UniqueTracker,
+  count,
+  type SeedOptions,
+  type SeedResult,
+} from './common';
 import { chunk, column, optional, parseCsvRecords } from './csv';
 
 const ALLIANCES: Readonly<Record<string, string>> = {
@@ -80,6 +90,7 @@ export async function seedAirlines(db: Db, options: SeedOptions = {}): Promise<S
   }
 
   const seen = new Set<string>();
+  const uniqueVrsCode = new UniqueTracker('airlines', 'vrs_code');
   const rows: (typeof airlines.$inferInsert)[] = [];
   for (const record of spine) {
     const icao = column(record, 'ICAO').trim().toUpperCase();
@@ -96,6 +107,7 @@ export async function seedAirlines(db: Db, options: SeedOptions = {}): Promise<S
       continue;
     }
     seen.add(icao);
+    uniqueVrsCode.claim(column(record, 'Code'), `Code ${column(record, 'Code')} (${icao})`);
     const picked = pickOptd(optdByIcao.get(icao) ?? []);
     rows.push({
       icao,
@@ -113,27 +125,29 @@ export async function seedAirlines(db: Db, options: SeedOptions = {}): Promise<S
   }
 
   let upserted = 0;
-  for (const batch of chunk(rows, BATCH_SIZE)) {
-    await db
-      .insert(airlines)
-      .values(batch)
-      .onConflictDoUpdate({
-        target: airlines.icao,
-        set: {
-          iata: sql`excluded.iata`,
-          vrsCode: sql`excluded.vrs_code`,
-          name: sql`excluded.name`,
-          positioningFlightPattern: sql`excluded.positioning_flight_pattern`,
-          charterFlightPattern: sql`excluded.charter_flight_pattern`,
-          alliance: sql`excluded.alliance`,
-          allianceStatus: sql`excluded.alliance_status`,
-          validFrom: sql`excluded.valid_from`,
-          validTo: sql`excluded.valid_to`,
-          optdPk: sql`excluded.optd_pk`,
-        },
-      });
-    upserted += batch.length;
-  }
+  await db.transaction(async (tx) => {
+    for (const batch of chunk(rows, BATCH_SIZE)) {
+      await tx
+        .insert(airlines)
+        .values(batch)
+        .onConflictDoUpdate({
+          target: airlines.icao,
+          set: {
+            iata: sql`excluded.iata`,
+            vrsCode: sql`excluded.vrs_code`,
+            name: sql`excluded.name`,
+            positioningFlightPattern: sql`excluded.positioning_flight_pattern`,
+            charterFlightPattern: sql`excluded.charter_flight_pattern`,
+            alliance: sql`excluded.alliance`,
+            allianceStatus: sql`excluded.alliance_status`,
+            validFrom: sql`excluded.valid_from`,
+            validTo: sql`excluded.valid_to`,
+            optdPk: sql`excluded.optd_pk`,
+          },
+        });
+      upserted += batch.length;
+    }
+  });
   log(`airlines: read ${spine.length}, upserted ${upserted}, skipped ${JSON.stringify(skipped)}`);
   return { read: spine.length, upserted, skipped };
 }

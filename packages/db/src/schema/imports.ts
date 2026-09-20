@@ -82,7 +82,9 @@ export const emailMessagesProcessed = pgTable(
       .references(() => users.id, { onDelete: 'cascade' }),
     providerMessageId: text('provider_message_id').notNull(),
     outcome: text('outcome').notNull(),
-    processedAt: instant('processed_at').notNull().defaultNow(),
+    processedAt: instant('processed_at')
+      .notNull()
+      .default(sql`now()`),
     ...createdOnly(),
   },
   (t) => [
@@ -178,7 +180,9 @@ export const inboundMessages = pgTable(
     messageId: text('message_id'),
     fromDomain: text('from_domain'),
     sizeBytes: integer('size_bytes'),
-    receivedAt: instant('received_at').notNull().defaultNow(),
+    receivedAt: instant('received_at')
+      .notNull()
+      .default(sql`now()`),
     status: text('status').notNull().default('received'),
     rejectReason: text('reject_reason'),
     ...createdOnly(),
@@ -403,7 +407,9 @@ export const shareLinkViews = pgTable(
     shareLinkId: uuid('share_link_id')
       .notNull()
       .references(() => shareLinks.id, { onDelete: 'cascade' }),
-    viewedAt: instant('viewed_at').notNull().defaultNow(),
+    viewedAt: instant('viewed_at')
+      .notNull()
+      .default(sql`now()`),
     ipHash: bytea('ip_hash'),
     userAgentHash: bytea('user_agent_hash'),
     country: text('country'),

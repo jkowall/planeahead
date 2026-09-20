@@ -1,18 +1,23 @@
-import { uuidv7 } from '@planeahead/shared';
+import { IsoInstantSchema, uuidv7 } from '@planeahead/shared';
 import { Table, eq, getTableName, is } from 'drizzle-orm';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
+import { destinationColumns, originColumns, resolveAirportEndpoint } from '../src/queries/airports';
+import { InstantFormatError } from '../src/schema/columns';
 import * as schema from '../src/schema/index';
 import { createMigratedDatabase, sqlState, type TestDatabase } from './helpers';
 
 /**
  * Applies every migration to a fresh PG18 database, then inserts one row per domain through
  * Drizzle and reads it back, covering the driver-sensitive types: bytea, bigint mode number,
- * xid8, timestamptz in both modes, jsonb and the generated flight_key.
+ * xid8, timestamptz in both modes, jsonb and the generated flight_key. Every instant read back
+ * through an `instant()` column must satisfy `IsoInstantSchema`, the type of every instant that
+ * crosses a package boundary (`FlightTimes`, `SyncUpsertV1.updatedAt`, `TrackerStateV1`).
  */
 
 let tdb: TestDatabase;
 const ids = {
   user: uuidv7(),
+  user2: uuidv7(),
   airport: uuidv7(),
   destination: uuidv7(),
   flight: uuidv7(),
@@ -22,6 +27,13 @@ const ids = {
   notification: uuidv7(),
   btsRun: uuidv7(),
 };
+
+function expectIso(value: unknown): void {
+  expect(typeof value).toBe('string');
+  expect(IsoInstantSchema.safeParse(value).success, `not an ISO instant: ${String(value)}`).toBe(
+    true,
+  );
+}
 
 beforeAll(async () => {
   tdb = await createMigratedDatabase('roundtrip');
@@ -63,7 +75,7 @@ describe('migrations', () => {
 });
 
 describe('reference domain', () => {
-  it('round-trips an airport and enforces the type check', async () => {
+  it('round-trips an airport and enforces the type and code checks', async () => {
     const { db } = tdb;
     await db
       .insert(schema.airports)
@@ -75,9 +87,13 @@ describe('reference domain', () => {
     expect(row?.id).toBe(ids.airport);
     expect(row?.tz).toBe('America/New_York');
     expect(row?.latitude).toBeCloseTo(40.6413);
-    expect(typeof row?.createdAt).toBe('string');
+    expectIso(row?.createdAt);
+    expectIso(row?.updatedAt);
     await expect(
       db.insert(schema.airports).values(airport(uuidv7(), 'ZZZZ', null, 'UTC', 'spaceport')),
+    ).rejects.toSatisfy((error) => sqlState(error) === '23514');
+    await expect(
+      db.insert(schema.airports).values(airport(uuidv7(), 'KLAX', 'lax', 'UTC')),
     ).rejects.toSatisfy((error) => sqlState(error) === '23514');
   });
 
@@ -112,10 +128,22 @@ describe('reference domain', () => {
     });
     const [airline] = await db.select().from(schema.airlines);
     expect(airline?.validFrom).toBe('1934-04-15');
+    expectIso(airline?.createdAt);
     const [type] = await db.select().from(schema.aircraftTypes);
     expect(type?.wakeTurbulence).toBe('J');
     await expect(
       db.insert(schema.aircraftTypes).values({ icao: 'XXXX', model: 'x', wakeTurbulence: 'X' }),
+    ).rejects.toSatisfy((error) => sqlState(error) === '23514');
+    await expect(
+      db.insert(schema.aircraftTypes).values({ icao: 'b738x', model: 'x' }),
+    ).rejects.toSatisfy((error) => sqlState(error) === '23514');
+    await expect(
+      db.insert(schema.aircraft).values({
+        registration: 'N12345',
+        icaoHex: 'A1B2C3',
+        operatorIcao: 'american',
+        validFrom: '2020-01-01',
+      }),
     ).rejects.toSatisfy((error) => sqlState(error) === '23514');
   });
 });
@@ -124,14 +152,17 @@ describe('identity domain', () => {
   it('round-trips Better Auth rows with Date timestamps, bytea and bigint mode number', async () => {
     const { db } = tdb;
     const now = new Date('2026-09-20T12:00:00.000Z');
-    await db.insert(schema.users).values({
-      id: ids.user,
-      name: 'Test',
-      email: 'Test@Example.com',
-      createdAt: now,
-      updatedAt: now,
-      homeAirportId: ids.airport,
-    });
+    await db.insert(schema.users).values([
+      {
+        id: ids.user,
+        name: 'Test',
+        email: 'Test@Example.com',
+        createdAt: now,
+        updatedAt: now,
+        homeAirportId: ids.airport,
+      },
+      { id: ids.user2, name: 'Second', email: 'second@example.com' },
+    ]);
     const [user] = await db.select().from(schema.users).where(eq(schema.users.id, ids.user));
     expect(user?.createdAt).toBeInstanceOf(Date);
     expect(user?.createdAt.getTime()).toBe(now.getTime());
@@ -201,6 +232,7 @@ describe('identity domain', () => {
     expect(typeof change?.seq).toBe('number');
     expect(change?.xid).toMatch(/^[0-9]+$/);
     expect(BigInt(change?.xid ?? '0')).toBeGreaterThan(0n);
+    expectIso(change?.createdAt);
     await db.insert(schema.idempotencyKeys).values({
       userId: ids.user,
       key: 'idem-1',
@@ -219,13 +251,23 @@ describe('identity domain', () => {
         expiresAt: new Date().toISOString(),
       }),
     ).rejects.toSatisfy((error) => sqlState(error) === '23505');
-    await db.insert(schema.deletedSubjects).values({ subjectId: uuidv7(), reason: 'user_request' });
+    const [deleted] = await db
+      .insert(schema.deletedSubjects)
+      .values({ subjectId: uuidv7(), reason: 'user_request' })
+      .returning();
+    expectIso(deleted?.subjectDeletedAt);
+    const [prefs] = await db.select().from(schema.userPreferences);
+    expectIso(prefs?.updatedAt);
+    expect(prefs?.deletedAt).toBeNull();
   });
 });
 
 describe('flight core domain', () => {
-  it('computes flight_key from the natural key and rejects a duplicate', async () => {
+  it('computes flight_key from the natural key, reads instants as ISO, and rejects a duplicate', async () => {
     const { db } = tdb;
+    const origin = await resolveAirportEndpoint(db, 'KJFK');
+    const destination = await resolveAirportEndpoint(db, 'EGLL');
+    expect(origin).toEqual({ airportId: ids.airport, icao: 'KJFK', tz: 'America/New_York' });
     const [flight] = await db
       .insert(schema.flightInstances)
       .values({
@@ -233,17 +275,23 @@ describe('flight core domain', () => {
         operatingCarrierIcao: 'AAL',
         flightNumber: '100',
         scheduledDepartureDate: '2026-09-19',
-        originIcao: 'KJFK',
-        originAirportId: ids.airport,
-        destinationIcao: 'EGLL',
-        destinationAirportId: ids.destination,
+        ...originColumns(origin!),
+        ...destinationColumns(destination!),
         scheduledOut: '2026-09-19T22:30:00.000Z',
+        actualIn: '2026-09-20 10:05:00.5+00',
         timelineSummary: { events: 0 },
       })
       .returning();
     expect(flight?.flightKey).toBe('AAL-100-2026-09-19-KJFK');
-    // mode: 'string' renders in the session time zone; the harness, CI and Neon all run UTC.
-    expect(flight?.scheduledOut).toBe('2026-09-19 22:30:00+00');
+    expect(flight?.originTz).toBe('America/New_York');
+    // Postgres renders `2026-09-19 22:30:00+00`; the instant() column normalises it to the
+    // ISO-8601 UTC form the shared contracts require, whatever the session time zone.
+    expect(flight?.scheduledOut).toBe('2026-09-19T22:30:00Z');
+    expect(flight?.actualIn).toBe('2026-09-20T10:05:00.5Z');
+    expectIso(flight?.scheduledOut);
+    expectIso(flight?.createdAt);
+    expect(flight?.estimatedOut).toBeNull();
+
     const [leg2] = await db
       .insert(schema.flightInstances)
       .values({
@@ -273,6 +321,58 @@ describe('flight core domain', () => {
     ).rejects.toSatisfy((error) => sqlState(error) === '23514');
   });
 
+  it('keeps the airport triple consistent and every code well formed', async () => {
+    const { db } = tdb;
+    const base = {
+      operatingCarrierIcao: 'AAL',
+      flightNumber: '101',
+      scheduledDepartureDate: '2026-09-19',
+    };
+    // The code and the airport row disagree: composite FK (23503).
+    await expect(
+      db.insert(schema.flightInstances).values({
+        ...base,
+        originIcao: 'EGLL',
+        originAirportId: ids.airport,
+        originTz: 'America/New_York',
+      }),
+    ).rejects.toSatisfy((error) => sqlState(error) === '23503');
+    // The airport is known but its zone was not carried over (23514).
+    await expect(
+      db.insert(schema.flightInstances).values({
+        ...base,
+        originIcao: 'KJFK',
+        originAirportId: ids.airport,
+      }),
+    ).rejects.toSatisfy((error) => sqlState(error) === '23514');
+    // A destination row without its code (23514).
+    await expect(
+      db.insert(schema.flightInstances).values({
+        ...base,
+        originIcao: 'KJFK',
+        destinationAirportId: ids.destination,
+      }),
+    ).rejects.toSatisfy((error) => sqlState(error) === '23514');
+    for (const junk of [
+      { destinationIcao: 'not-an-icao' },
+      { divertedToIcao: 'kbos' },
+      { aircraftTypeIcao: 'b738x' },
+      { icaoHex: 'a1b2c3' },
+    ]) {
+      await expect(
+        db.insert(schema.flightInstances).values({ ...base, originIcao: 'KJFK', ...junk }),
+      ).rejects.toSatisfy((error) => sqlState(error) === '23514');
+    }
+    // A bare timestamp without a zone designator never reaches Postgres.
+    await expect(
+      (async () => {
+        await db
+          .insert(schema.flightInstances)
+          .values({ ...base, originIcao: 'KJFK', scheduledOut: '2026-09-19 22:30:00' });
+      })(),
+    ).rejects.toThrow(InstantFormatError);
+  });
+
   it('round-trips designators, events, merges and tracks', async () => {
     const { db } = tdb;
     await db.insert(schema.flightDesignators).values({
@@ -285,6 +385,16 @@ describe('flight core domain', () => {
       kind: 'codeshare',
       source: 'aerodatabox',
     });
+    await expect(
+      db.insert(schema.flightDesignators).values({
+        marketingCarrierIcao: 'BAW',
+        flightNumber: '1513',
+        scheduledDepartureDate: '2026-09-19',
+        originIcao: 'jfk',
+        flightInstanceId: ids.flight,
+        source: 'aerodatabox',
+      }),
+    ).rejects.toSatisfy((error) => sqlState(error) === '23514');
     await db.insert(schema.flightEvents).values([
       {
         flightInstanceId: ids.flight,
@@ -320,6 +430,8 @@ describe('flight core domain', () => {
       .where(eq(schema.flightEvents.flightInstanceId, ids.flight));
     expect(events).toHaveLength(2);
     expect(events[1]?.newValue).toEqual({ gate: 'B31' });
+    expect(events[0]?.occurredAt).toBe('2026-09-19T20:00:00Z');
+    expectIso(events[0]?.occurredAt);
     await db.insert(schema.flightTracks).values({
       flightInstanceId: ids.flight,
       r2Key: 'tracks/2026/09/AAL-100-2026-09-19-KJFK.jsonl.gz',
@@ -356,14 +468,39 @@ describe('trips and subscriptions domain', () => {
     await expect(
       db.delete(schema.flightInstances).where(eq(schema.flightInstances.id, ids.flight)),
     ).rejects.toSatisfy((error) => sqlState(error) === '23001');
-    await db.insert(schema.logbookEntries).values({
-      userId: ids.user,
-      flightInstanceId: ids.flight,
-      flightDate: '2026-09-19',
-      originIcao: 'KJFK',
-      destinationIcao: 'EGLL',
-      cabin: 'business',
-    });
+    await db.insert(schema.logbookEntries).values([
+      {
+        userId: ids.user,
+        flightInstanceId: ids.flight,
+        flightDate: '2026-09-19',
+        operatingCarrierIcao: 'AAL',
+        flightNumber: '100',
+        originIcao: 'KJFK',
+        destinationIcao: 'EGLL',
+        aircraftTypeIcao: 'B772',
+        cabin: 'business',
+      },
+      // A manual entry at an airport whose code is an ident-derived pseudo code.
+      {
+        userId: ids.user,
+        flightDate: '2026-09-20',
+        originIcao: '03N',
+        destinationIcao: 'PKMJ',
+        source: 'manual',
+      },
+    ]);
+    for (const junk of [
+      { originIcao: 'kjfk', destinationIcao: 'EGLL' },
+      { originIcao: 'KJFK', destinationIcao: 'yy' },
+      { originIcao: 'KJFK', destinationIcao: 'EGLL', operatingCarrierIcao: 'american airlines' },
+      { originIcao: 'KJFK', destinationIcao: 'EGLL', flightNumber: 'AA 0100' },
+    ]) {
+      await expect(
+        db
+          .insert(schema.logbookEntries)
+          .values({ userId: ids.user, flightDate: '2026-09-19', source: 'manual', ...junk }),
+      ).rejects.toSatisfy((error) => sqlState(error) === '23514');
+    }
     await db.insert(schema.userStatsYearly).values({ userId: ids.user, year: 2026, flights: 1 });
     await db.insert(schema.usageCounters).values({
       scope: 'user',
@@ -378,6 +515,9 @@ describe('trips and subscriptions domain', () => {
       .where(eq(schema.flightSubscriptions.id, ids.subscription));
     expect(sub?.notificationOverrides).toEqual({ gate_change: false });
     expect(sub?.deletedAt).toBeNull();
+    expectIso(sub?.updatedAt);
+    const [counter] = await db.select().from(schema.usageCounters);
+    expect(counter?.windowStart).toBe('2026-09-20T00:00:00Z');
   });
 });
 
@@ -396,6 +536,8 @@ describe('providers domain', () => {
       flightInstanceId: ids.flight,
       flightKey: 'AAL-100-2026-09-19-KJFK',
     });
+    const [call] = await db.select().from(schema.providerCalls);
+    expectIso(call?.createdAt);
     await db.insert(schema.providerCallDaily).values({
       day: '2026-09-19',
       provider: 'aeroapi',
@@ -409,12 +551,28 @@ describe('providers domain', () => {
     await db
       .insert(schema.providerBudgetConfig)
       .values({ provider: 'aeroapi', dailyCapUnits: 10_000 });
-    await db.insert(schema.providerAlertRegistrations).values({
-      provider: 'aeroapi',
-      externalAlertId: 'alert-1',
-      flightInstanceId: ids.flight,
-      maxWeekly: 50,
-    });
+    const [registration] = await db
+      .insert(schema.providerAlertRegistrations)
+      .values({
+        provider: 'aeroapi',
+        externalAlertId: 'alert-1',
+        flightInstanceId: ids.flight,
+        events: ['departure', 'arrival', 'cancelled'],
+        maxWeekly: 50,
+      })
+      .returning();
+    expect(registration?.events).toEqual(['departure', 'arrival', 'cancelled']);
+    expectIso(registration?.registeredAt);
+    for (const events of [['departure', 'bogus'], { departure: true }, 'departure']) {
+      await expect(
+        db.insert(schema.providerAlertRegistrations).values({
+          provider: 'aeroapi',
+          externalAlertId: `alert-bad-${JSON.stringify(events)}`,
+          flightInstanceId: ids.flight,
+          events,
+        }),
+      ).rejects.toSatisfy((error) => sqlState(error) === '23514');
+    }
     await db.insert(schema.providerWebhookEvents).values({
       provider: 'aeroapi',
       externalId: 'evt-1',
@@ -435,8 +593,18 @@ describe('providers domain', () => {
       observedAt: '2026-09-19T20:51:00Z',
       raw: 'KJFK 192051Z 18010KT 10SM FEW250 27/18 A3001',
     });
+    // The KV key is `wx:metar:{ICAO}`; a lower-case row would fork the namespace.
+    await expect(
+      db.insert(schema.airportWxObservations).values({
+        icao: 'kjfk',
+        kind: 'metar',
+        observedAt: '2026-09-19T20:51:00Z',
+        raw: 'x',
+      }),
+    ).rejects.toSatisfy((error) => sqlState(error) === '23514');
     await db.insert(schema.airportNasEvents).values({
       airportIata: 'JFK',
+      airportIcao: 'KJFK',
       kind: 'ground_stop',
       startedAt: '2026-09-19T20:00:00Z',
     });
@@ -445,9 +613,21 @@ describe('providers domain', () => {
       capturedAt: '2026-09-19T20:00:00Z',
       source: 'aerodatabox',
     });
+    await expect(
+      db.insert(schema.airportDelaySnapshots).values({
+        icao: ' KJFK ',
+        capturedAt: '2026-09-19T20:00:00Z',
+        source: 'aerodatabox',
+      }),
+    ).rejects.toSatisfy((error) => sqlState(error) === '23514');
     await db
       .insert(schema.airportDelayHourly)
       .values({ icao: 'KJFK', hourStart: '2026-09-19T20:00:00Z' });
+    await expect(
+      db
+        .insert(schema.airportDelayHourly)
+        .values({ icao: 'kjfk', hourStart: '2026-09-19T21:00:00Z' }),
+    ).rejects.toSatisfy((error) => sqlState(error) === '23514');
     await db.insert(schema.btsImportRuns).values({
       id: ids.btsRun,
       year: 2026,
@@ -459,6 +639,7 @@ describe('providers domain', () => {
     });
     const [run] = await db.select().from(schema.btsImportRuns);
     expect(run?.sourceBytes).toBe(3_000_000_000);
+    expectIso(run?.startedAt);
     await db.insert(schema.btsCarrierFlightMonthly).values({
       year: 2026,
       month: 6,
@@ -528,12 +709,45 @@ describe('notifications domain', () => {
       status: 'sent',
       sentAt: '2026-09-19T21:00:05Z',
     });
+    const [delivery] = await db.select().from(schema.notificationDeliveries);
+    expect(delivery?.sentAt).toBe('2026-09-19T21:00:05Z');
+    expectIso(delivery?.createdAt);
     await expect(
       db.insert(schema.notificationPreferences).values({
         userId: uuidv7(),
         quietHoursStartMinutes: 1500,
       }),
     ).rejects.toSatisfy((error) => sqlState(error) === '23514' || sqlState(error) === '23503');
+  });
+
+  it('dedupes notifications per user: a fan-out of one event reaches every subscriber once', async () => {
+    const { db } = tdb;
+    const dedupeKey = `${ids.flight}:gate_change:B31`;
+    // The same logical event for a second subscriber is a new row for that user.
+    await db.insert(schema.notifications).values({
+      userId: ids.user2,
+      flightInstanceId: ids.flight,
+      kind: 'gate_change',
+      dedupeKey,
+      title: 'Gate change',
+      body: 'AA100 now departs from B31',
+    });
+    // A replay for a user who already has it is rejected.
+    await expect(
+      db.insert(schema.notifications).values({
+        userId: ids.user2,
+        flightInstanceId: ids.flight,
+        kind: 'gate_change',
+        dedupeKey,
+        title: 'Gate change',
+        body: 'replay',
+      }),
+    ).rejects.toSatisfy((error) => sqlState(error) === '23505');
+    const rows = await db
+      .select({ userId: schema.notifications.userId })
+      .from(schema.notifications)
+      .where(eq(schema.notifications.dedupeKey, dedupeKey));
+    expect(rows.map((r) => r.userId).sort()).toEqual([ids.user, ids.user2].sort());
   });
 });
 
@@ -551,6 +765,7 @@ describe('import, calendar and sharing domain', () => {
         scopes: ['gmail.metadata'],
       })
       .returning();
+    expectIso(emailAccount?.createdAt);
     const [processed] = await db
       .insert(schema.emailMessagesProcessed)
       .values({
@@ -627,13 +842,17 @@ describe('import, calendar and sharing domain', () => {
       }),
     ).rejects.toSatisfy((error) => sqlState(error) === '23514');
     await db.insert(schema.shareLinkViews).values({ shareLinkId: link!.id, country: 'US' });
-    await db.insert(schema.meetMeSessions).values({
-      userId: ids.user,
-      flightInstanceId: ids.flight,
-      tokenHash: new Uint8Array(32).fill(5),
-      tokenPrefix: 'pa_mtm_a',
-      expiresAt: '2026-09-20T02:00:00Z',
-    });
+    const [session] = await db
+      .insert(schema.meetMeSessions)
+      .values({
+        userId: ids.user,
+        flightInstanceId: ids.flight,
+        tokenHash: new Uint8Array(32).fill(5),
+        tokenPrefix: 'pa_mtm_a',
+        expiresAt: '2026-09-20T02:00:00Z',
+      })
+      .returning();
+    expect(session?.expiresAt).toBe('2026-09-20T02:00:00Z');
   });
 });
 
@@ -670,18 +889,24 @@ describe('billing, API and GDPR domain', () => {
       tokenPrefix: 'pa_pat_a',
       scopes: ['flights:read'],
     });
-    await db.insert(schema.auditLog).values({
-      subjectId: ids.user,
-      actorType: 'user',
-      actorId: ids.user,
-      action: 'flight.subscribe',
-      targetType: 'flight_subscription',
-      targetId: ids.subscription,
-    });
+    const [audit] = await db
+      .insert(schema.auditLog)
+      .values({
+        subjectId: ids.user,
+        actorType: 'user',
+        actorId: ids.user,
+        action: 'flight.subscribe',
+        targetType: 'flight_subscription',
+        targetId: ids.subscription,
+      })
+      .returning();
+    expectIso(audit?.createdAt);
     await db.insert(schema.dataExportJobs).values({ userId: ids.user });
     await db.insert(schema.accountDeletionRequests).values({ subjectId: ids.user, source: 'app' });
     const [token] = await db.select().from(schema.apiTokens);
     expect(token?.scopes).toEqual(['flights:read']);
+    const [event] = await db.select().from(schema.revenuecatEvents);
+    expect(event?.occurredAt).toBe('2026-09-19T00:00:00Z');
   });
 
   it('keeps audit, delivery and billing rows when the user is deleted', async () => {
@@ -697,6 +922,10 @@ describe('billing, API and GDPR domain', () => {
     expect(await db.select().from(schema.accountDeletionRequests)).toHaveLength(1);
     // The flight itself survives: it belongs to nobody.
     expect(await db.select().from(schema.flightInstances)).toHaveLength(2);
+    // Better Auth's rate_limits and verifications rows have no FK and survive too: the
+    // deletion job must purge them by key and identifier (docs/schema-review.md section 5).
+    expect(await db.select().from(schema.rateLimits)).toHaveLength(1);
+    expect(await db.select().from(schema.verifications)).toHaveLength(1);
   });
 });
 

@@ -21,7 +21,19 @@ import {
   uniqueIndex,
   uuid,
 } from 'drizzle-orm/pg-core';
-import { bytea, createdOnly, id, inList, instant, timestamps } from './columns';
+import {
+  FLIGHT_NUMBER_SQL_RE,
+  IATA_AIRPORT_SQL_RE,
+  ICAO_AIRPORT_SQL_RE,
+  bytea,
+  createdOnly,
+  formatCheck,
+  id,
+  inList,
+  instant,
+  jsonbArrayOfCheck,
+  timestamps,
+} from './columns';
 import { flightInstances } from './flights';
 
 /** Mirrors PROVIDER_IDS in @planeahead/shared; a test asserts the lists agree. */
@@ -55,6 +67,21 @@ export const CALL_TRIGGERS = [
 
 /** Mirrors PROVIDER_CALL_RESULTS in @planeahead/shared. */
 export const CALL_RESULTS = ['ok', 'not_found', 'rate_limited', 'error'] as const;
+
+/** Mirrors ALERT_EVENTS in @planeahead/shared; a test asserts the lists agree. */
+export const ALERT_EVENTS = [
+  'filed',
+  'departure',
+  'arrival',
+  'cancelled',
+  'diverted',
+  'out',
+  'off',
+  'on',
+  'in',
+  'hold_start',
+  'hold_end',
+] as const;
 
 /** One row per outbound provider call (including LLM extractions). Purged at 90 days. */
 export const providerCalls = pgTable(
@@ -137,7 +164,12 @@ export const providerBudgetConfig = pgTable(
   ],
 );
 
-/** AeroAPI and AeroDataBox alert registrations per flight, for reconciliation and deletion. */
+/**
+ * AeroAPI and AeroDataBox alert registrations per flight, for reconciliation and deletion.
+ * `events` records the AlertEvent set the registration covers (cadence A2 and B register
+ * different sets), so the reconcile cron can tell a live registration with the wrong set from
+ * one that only needs its delivery count refreshed. Null means the set was not recorded.
+ */
 export const providerAlertRegistrations = pgTable(
   'provider_alert_registrations',
   {
@@ -145,10 +177,13 @@ export const providerAlertRegistrations = pgTable(
     provider: text('provider').notNull(),
     externalAlertId: text('external_alert_id').notNull(),
     flightInstanceId: uuid('flight_instance_id').notNull(),
+    events: jsonb('events'),
     maxWeekly: integer('max_weekly'),
     deliveries: integer('deliveries').notNull().default(0),
     expectedBy: instant('expected_by'),
-    registeredAt: instant('registered_at').notNull().defaultNow(),
+    registeredAt: instant('registered_at')
+      .notNull()
+      .default(sql`now()`),
     cancelledAt: instant('cancelled_at'),
     ...timestamps(),
   },
@@ -167,6 +202,7 @@ export const providerAlertRegistrations = pgTable(
       'provider_alert_registrations_provider_check',
       sql`${t.provider} in (${inList(PROVIDERS)})`,
     ),
+    jsonbArrayOfCheck('provider_alert_registrations_events_check', t.events, ALERT_EVENTS),
   ],
 );
 
@@ -177,7 +213,9 @@ export const providerWebhookEvents = pgTable(
     id: id(),
     provider: text('provider').notNull(),
     externalId: text('external_id').notNull(),
-    receivedAt: instant('received_at').notNull().defaultNow(),
+    receivedAt: instant('received_at')
+      .notNull()
+      .default(sql`now()`),
     signatureValid: boolean('signature_valid').notNull(),
     payload: jsonb('payload').notNull(),
     flightInstanceId: uuid('flight_instance_id'),
@@ -202,7 +240,9 @@ export const delayPredictions = pgTable(
       .notNull()
       .references(() => flightInstances.id, { onDelete: 'cascade' }),
     modelVersion: text('model_version').notNull(),
-    predictedAt: instant('predicted_at').notNull().defaultNow(),
+    predictedAt: instant('predicted_at')
+      .notNull()
+      .default(sql`now()`),
     horizonMinutes: integer('horizon_minutes'),
     pDelay15: real('p_delay_15').notNull(),
     pDelay60: real('p_delay_60'),
@@ -232,7 +272,9 @@ export const delayOutcomes = pgTable(
     arrivalDelayMinutes: integer('arrival_delay_minutes'),
     cancelled: boolean('cancelled').notNull().default(false),
     diverted: boolean('diverted').notNull().default(false),
-    resolvedAt: instant('resolved_at').notNull().defaultNow(),
+    resolvedAt: instant('resolved_at')
+      .notNull()
+      .default(sql`now()`),
     ...createdOnly(),
   },
   (t) => [uniqueIndex('delay_outcomes_flight_instance_id_key').on(t.flightInstanceId)],
@@ -262,6 +304,8 @@ export const airportWxObservations = pgTable(
     index('airport_wx_observations_created_at_brin_idx').using('brin', t.createdAt),
     check('airport_wx_observations_kind_check', sql`${t.kind} in (${inList(WX_KINDS)})`),
     check('airport_wx_observations_source_check', sql`${t.source} in (${inList(PROVIDERS)})`),
+    // The KV cache key is `wx:metar:{ICAO}`; one lower-case row would fork the namespace.
+    formatCheck('airport_wx_observations_icao_check', t.icao, ICAO_AIRPORT_SQL_RE),
   ],
 );
 
@@ -298,6 +342,8 @@ export const airportNasEvents = pgTable(
     ),
     index('airport_nas_events_airport_iata_started_at_idx').on(t.airportIata, t.startedAt),
     check('airport_nas_events_kind_check', sql`${t.kind} in (${inList(NAS_EVENT_KINDS)})`),
+    formatCheck('airport_nas_events_airport_iata_check', t.airportIata, IATA_AIRPORT_SQL_RE),
+    formatCheck('airport_nas_events_airport_icao_check', t.airportIcao, ICAO_AIRPORT_SQL_RE),
   ],
 );
 
@@ -320,6 +366,7 @@ export const airportDelaySnapshots = pgTable(
   (t) => [
     uniqueIndex('airport_delay_snapshots_icao_captured_at_key').on(t.icao, t.capturedAt),
     check('airport_delay_snapshots_source_check', sql`${t.source} in (${inList(PROVIDERS)})`),
+    formatCheck('airport_delay_snapshots_icao_check', t.icao, ICAO_AIRPORT_SQL_RE),
   ],
 );
 
@@ -338,7 +385,10 @@ export const airportDelayHourly = pgTable(
     avgArrivalDelayMinutes: real('avg_arrival_delay_minutes'),
     ...timestamps(),
   },
-  (t) => [uniqueIndex('airport_delay_hourly_icao_hour_start_key').on(t.icao, t.hourStart)],
+  (t) => [
+    uniqueIndex('airport_delay_hourly_icao_hour_start_key').on(t.icao, t.hourStart),
+    formatCheck('airport_delay_hourly_icao_check', t.icao, ICAO_AIRPORT_SQL_RE),
+  ],
 );
 
 export const BTS_IMPORT_STATUSES = ['running', 'succeeded', 'failed'] as const;
@@ -356,7 +406,9 @@ export const btsImportRuns = pgTable(
     rowsRead: integer('rows_read').notNull().default(0),
     rowsWritten: integer('rows_written').notNull().default(0),
     status: text('status').notNull().default('running'),
-    startedAt: instant('started_at').notNull().defaultNow(),
+    startedAt: instant('started_at')
+      .notNull()
+      .default(sql`now()`),
     finishedAt: instant('finished_at'),
     error: text('error'),
     ...createdOnly(),
@@ -412,6 +464,17 @@ export const btsCarrierFlightMonthly = pgTable(
       t.month,
     ),
     check('bts_carrier_flight_monthly_month_check', sql`${t.month} between 1 and 12`),
+    formatCheck(
+      'bts_carrier_flight_monthly_flight_number_check',
+      t.flightNumber,
+      FLIGHT_NUMBER_SQL_RE,
+    ),
+    formatCheck('bts_carrier_flight_monthly_origin_iata_check', t.originIata, IATA_AIRPORT_SQL_RE),
+    formatCheck(
+      'bts_carrier_flight_monthly_destination_iata_check',
+      t.destinationIata,
+      IATA_AIRPORT_SQL_RE,
+    ),
   ],
 );
 
@@ -446,6 +509,8 @@ export const btsRouteMonthly = pgTable(
       t.destinationIata,
     ),
     check('bts_route_monthly_month_check', sql`${t.month} between 1 and 12`),
+    formatCheck('bts_route_monthly_origin_iata_check', t.originIata, IATA_AIRPORT_SQL_RE),
+    formatCheck('bts_route_monthly_destination_iata_check', t.destinationIata, IATA_AIRPORT_SQL_RE),
   ],
 );
 
@@ -480,5 +545,6 @@ export const btsAirportHourly = pgTable(
     check('bts_airport_hourly_month_check', sql`${t.month} between 1 and 12`),
     check('bts_airport_hourly_hour_local_check', sql`${t.hourLocal} between 0 and 23`),
     check('bts_airport_hourly_direction_check', sql`${t.direction} in (${inList(BTS_DIRECTIONS)})`),
+    formatCheck('bts_airport_hourly_airport_iata_check', t.airportIata, IATA_AIRPORT_SQL_RE),
   ],
 );

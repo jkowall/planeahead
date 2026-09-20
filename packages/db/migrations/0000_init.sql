@@ -9,7 +9,9 @@ CREATE TABLE "aircraft" (
 	"source" text,
 	"created_at" timestamp with time zone DEFAULT now() NOT NULL,
 	"updated_at" timestamp with time zone DEFAULT now() NOT NULL,
-	CONSTRAINT "aircraft_icao_hex_check" CHECK ("aircraft"."icao_hex" ~ '^[0-9A-F]{6}$')
+	CONSTRAINT "aircraft_icao_hex_check" CHECK ("aircraft"."icao_hex" ~ '^[0-9A-F]{6}$'),
+	CONSTRAINT "aircraft_operator_icao_check" CHECK ("aircraft"."operator_icao" is null or "aircraft"."operator_icao" ~ '^[A-Z]{3}$'),
+	CONSTRAINT "aircraft_aircraft_type_icao_check" CHECK ("aircraft"."aircraft_type_icao" is null or "aircraft"."aircraft_type_icao" ~ '^[A-Z0-9]{2,4}$')
 );
 --> statement-breakpoint
 CREATE TABLE "aircraft_types" (
@@ -26,6 +28,7 @@ CREATE TABLE "aircraft_types" (
 	"is_active" boolean DEFAULT true NOT NULL,
 	"created_at" timestamp with time zone DEFAULT now() NOT NULL,
 	"updated_at" timestamp with time zone DEFAULT now() NOT NULL,
+	CONSTRAINT "aircraft_types_icao_check" CHECK ("aircraft_types"."icao" is null or "aircraft_types"."icao" ~ '^[A-Z0-9]{2,4}$'),
 	CONSTRAINT "aircraft_types_wake_turbulence_check" CHECK ("aircraft_types"."wake_turbulence" is null or "aircraft_types"."wake_turbulence" in ('L', 'M', 'H', 'J', 'L/M', 'M/H')),
 	CONSTRAINT "aircraft_types_wake_source_check" CHECK ("aircraft_types"."wake_source" is null or "aircraft_types"."wake_source" in ('vrs', 'coltjd45', 'manual'))
 );
@@ -48,6 +51,7 @@ CREATE TABLE "airlines" (
 	"created_at" timestamp with time zone DEFAULT now() NOT NULL,
 	"updated_at" timestamp with time zone DEFAULT now() NOT NULL,
 	CONSTRAINT "airlines_icao_format_check" CHECK ("airlines"."icao" ~ '^[A-Z]{3}$'),
+	CONSTRAINT "airlines_iata_check" CHECK ("airlines"."iata" is null or "airlines"."iata" ~ '^[A-Z0-9]{2}$'),
 	CONSTRAINT "airlines_alliance_check" CHECK ("airlines"."alliance" is null or "airlines"."alliance" in ('oneworld', 'skyteam', 'star_alliance')),
 	CONSTRAINT "airlines_alliance_status_check" CHECK ("airlines"."alliance_status" is null or "airlines"."alliance_status" in ('member', 'affiliate', 'former', 'future'))
 );
@@ -88,10 +92,12 @@ CREATE TABLE "airports" (
 	"tz_source" text NOT NULL,
 	"created_at" timestamp with time zone DEFAULT now() NOT NULL,
 	"updated_at" timestamp with time zone DEFAULT now() NOT NULL,
+	CONSTRAINT "airports_id_icao_key" UNIQUE("id","icao"),
 	CONSTRAINT "airports_type_check" CHECK ("airports"."type" in ('balloonport', 'closed', 'heliport', 'large_airport', 'medium_airport', 'seaplane_base', 'small_airport')),
 	CONSTRAINT "airports_icao_source_check" CHECK ("airports"."icao_source" in ('icao_code', 'ident')),
 	CONSTRAINT "airports_tz_source_check" CHECK ("airports"."tz_source" in ('mwgg', 'override')),
 	CONSTRAINT "airports_icao_format_check" CHECK (("airports"."icao_source" = 'icao_code' and "airports"."icao" ~ '^[A-Z0-9]{4}$') or ("airports"."icao_source" = 'ident' and "airports"."icao" ~ '^[A-Z0-9-]{3,8}$')),
+	CONSTRAINT "airports_iata_check" CHECK ("airports"."iata" is null or "airports"."iata" ~ '^[A-Z0-9]{3}$'),
 	CONSTRAINT "airports_latitude_check" CHECK ("airports"."latitude" between -90 and 90 and "airports"."longitude" between -180 and 180)
 );
 --> statement-breakpoint
@@ -126,7 +132,8 @@ CREATE TABLE "regional_operators" (
 	"updated_at" timestamp with time zone DEFAULT now() NOT NULL,
 	CONSTRAINT "regional_operators_confidence_check" CHECK ("regional_operators"."confidence" in ('hint', 'observed')),
 	CONSTRAINT "regional_operators_range_check" CHECK ("regional_operators"."number_from" >= 1 and "regional_operators"."number_to" <= 9999 and "regional_operators"."number_from" <= "regional_operators"."number_to"),
-	CONSTRAINT "regional_operators_operating_icao_check" CHECK ("regional_operators"."operating_icao" ~ '^[A-Z]{3}$')
+	CONSTRAINT "regional_operators_operating_icao_check" CHECK ("regional_operators"."operating_icao" ~ '^[A-Z]{3}$'),
+	CONSTRAINT "regional_operators_marketing_iata_check" CHECK ("regional_operators"."marketing_iata" is null or "regional_operators"."marketing_iata" ~ '^[A-Z0-9]{2}$')
 );
 --> statement-breakpoint
 CREATE TABLE "accounts" (
@@ -152,7 +159,7 @@ CREATE TABLE "deleted_subjects" (
 	"subject_id" uuid NOT NULL,
 	"rc_app_user_id_hash" "bytea",
 	"reason" text NOT NULL,
-	"deleted_at" timestamp with time zone DEFAULT now() NOT NULL,
+	"subject_deleted_at" timestamp with time zone DEFAULT now() NOT NULL,
 	"created_at" timestamp with time zone DEFAULT now() NOT NULL,
 	CONSTRAINT "deleted_subjects_reason_check" CHECK ("deleted_subjects"."reason" in ('user_request', 'admin', 'inactivity', 'apple_revoke'))
 );
@@ -301,6 +308,8 @@ CREATE TABLE "flight_designators" (
 	"updated_at" timestamp with time zone DEFAULT now() NOT NULL,
 	CONSTRAINT "flight_designators_marketing_carrier_icao_check" CHECK ("flight_designators"."marketing_carrier_icao" ~ '^[A-Z]{3}$'),
 	CONSTRAINT "flight_designators_flight_number_check" CHECK ("flight_designators"."flight_number" ~ '^[1-9][0-9]{0,3}[A-Z]?$'),
+	CONSTRAINT "flight_designators_origin_icao_check" CHECK ("flight_designators"."origin_icao" ~ '^[A-Z0-9]{4}$'),
+	CONSTRAINT "flight_designators_marketing_carrier_iata_check" CHECK ("flight_designators"."marketing_carrier_iata" is null or "flight_designators"."marketing_carrier_iata" ~ '^[A-Z0-9]{2}$'),
 	CONSTRAINT "flight_designators_kind_check" CHECK ("flight_designators"."kind" in ('operating', 'codeshare')),
 	CONSTRAINT "flight_designators_source_check" CHECK ("flight_designators"."source" in ('aerodatabox', 'aeroapi', 'user', 'seed', 'import'))
 );
@@ -387,6 +396,12 @@ CREATE TABLE "flight_instances" (
 	CONSTRAINT "flight_instances_operating_carrier_icao_check" CHECK ("flight_instances"."operating_carrier_icao" ~ '^[A-Z]{3}$'),
 	CONSTRAINT "flight_instances_flight_number_check" CHECK ("flight_instances"."flight_number" ~ '^[1-9][0-9]{0,3}[A-Z]?$'),
 	CONSTRAINT "flight_instances_origin_icao_check" CHECK ("flight_instances"."origin_icao" ~ '^[A-Z0-9]{4}$'),
+	CONSTRAINT "flight_instances_destination_icao_check" CHECK ("flight_instances"."destination_icao" is null or "flight_instances"."destination_icao" ~ '^[A-Z0-9]{4}$'),
+	CONSTRAINT "flight_instances_diverted_to_icao_check" CHECK ("flight_instances"."diverted_to_icao" is null or "flight_instances"."diverted_to_icao" ~ '^[A-Z0-9]{4}$'),
+	CONSTRAINT "flight_instances_aircraft_type_icao_check" CHECK ("flight_instances"."aircraft_type_icao" is null or "flight_instances"."aircraft_type_icao" ~ '^[A-Z0-9]{2,4}$'),
+	CONSTRAINT "flight_instances_icao_hex_check" CHECK ("flight_instances"."icao_hex" is null or "flight_instances"."icao_hex" ~ '^[0-9A-F]{6}$'),
+	CONSTRAINT "flight_instances_origin_tz_check" CHECK ("flight_instances"."origin_airport_id" is null or "flight_instances"."origin_tz" is not null),
+	CONSTRAINT "flight_instances_destination_consistency_check" CHECK ("flight_instances"."destination_airport_id" is null or "flight_instances"."destination_icao" is not null),
 	CONSTRAINT "flight_instances_leg_seq_check" CHECK ("flight_instances"."leg_seq" >= 1),
 	CONSTRAINT "flight_instances_status_check" CHECK ("flight_instances"."status" in ('scheduled', 'boarding', 'departed', 'en_route', 'landed', 'arrived', 'cancelled', 'diverted', 'unknown')),
 	CONSTRAINT "flight_instances_tracking_state_check" CHECK ("flight_instances"."tracking_state" in ('pending', 'tracking', 'airborne', 'landed', 'finished', 'archived', 'superseded')),
@@ -450,7 +465,12 @@ CREATE TABLE "logbook_entries" (
 	"updated_at" timestamp with time zone DEFAULT now() NOT NULL,
 	"deleted_at" timestamp with time zone,
 	CONSTRAINT "logbook_entries_cabin_check" CHECK ("logbook_entries"."cabin" is null or "logbook_entries"."cabin" in ('economy', 'premium_economy', 'business', 'first')),
-	CONSTRAINT "logbook_entries_source_check" CHECK ("logbook_entries"."source" in ('auto', 'manual', 'import'))
+	CONSTRAINT "logbook_entries_source_check" CHECK ("logbook_entries"."source" in ('auto', 'manual', 'import')),
+	CONSTRAINT "logbook_entries_origin_icao_check" CHECK ("logbook_entries"."origin_icao" is null or "logbook_entries"."origin_icao" ~ '^[A-Z0-9-]{3,8}$'),
+	CONSTRAINT "logbook_entries_destination_icao_check" CHECK ("logbook_entries"."destination_icao" is null or "logbook_entries"."destination_icao" ~ '^[A-Z0-9-]{3,8}$'),
+	CONSTRAINT "logbook_entries_operating_carrier_icao_check" CHECK ("logbook_entries"."operating_carrier_icao" is null or "logbook_entries"."operating_carrier_icao" ~ '^[A-Z]{3}$'),
+	CONSTRAINT "logbook_entries_flight_number_check" CHECK ("logbook_entries"."flight_number" is null or "logbook_entries"."flight_number" ~ '^[1-9][0-9]{0,3}[A-Z]?$'),
+	CONSTRAINT "logbook_entries_aircraft_type_icao_check" CHECK ("logbook_entries"."aircraft_type_icao" is null or "logbook_entries"."aircraft_type_icao" ~ '^[A-Z0-9]{2,4}$')
 );
 --> statement-breakpoint
 CREATE TABLE "trip_members" (
@@ -525,7 +545,8 @@ CREATE TABLE "airport_delay_hourly" (
 	"avg_departure_delay_minutes" real,
 	"avg_arrival_delay_minutes" real,
 	"created_at" timestamp with time zone DEFAULT now() NOT NULL,
-	"updated_at" timestamp with time zone DEFAULT now() NOT NULL
+	"updated_at" timestamp with time zone DEFAULT now() NOT NULL,
+	CONSTRAINT "airport_delay_hourly_icao_check" CHECK ("airport_delay_hourly"."icao" is null or "airport_delay_hourly"."icao" ~ '^[A-Z0-9]{4}$')
 );
 --> statement-breakpoint
 CREATE TABLE "airport_delay_snapshots" (
@@ -540,7 +561,8 @@ CREATE TABLE "airport_delay_snapshots" (
 	"avg_arrival_delay_minutes" real,
 	"source" text NOT NULL,
 	"created_at" timestamp with time zone DEFAULT now() NOT NULL,
-	CONSTRAINT "airport_delay_snapshots_source_check" CHECK ("airport_delay_snapshots"."source" in ('aeroapi', 'aerodatabox', 'adsb_lol', 'adsb_fi', 'airplanes_live', 'aviationweather', 'nws', 'open_meteo', 'faa_nas', 'llm', 'mock'))
+	CONSTRAINT "airport_delay_snapshots_source_check" CHECK ("airport_delay_snapshots"."source" in ('aeroapi', 'aerodatabox', 'adsb_lol', 'adsb_fi', 'airplanes_live', 'aviationweather', 'nws', 'open_meteo', 'faa_nas', 'llm', 'mock')),
+	CONSTRAINT "airport_delay_snapshots_icao_check" CHECK ("airport_delay_snapshots"."icao" is null or "airport_delay_snapshots"."icao" ~ '^[A-Z0-9]{4}$')
 );
 --> statement-breakpoint
 CREATE TABLE "airport_nas_events" (
@@ -555,7 +577,9 @@ CREATE TABLE "airport_nas_events" (
 	"raw" jsonb,
 	"created_at" timestamp with time zone DEFAULT now() NOT NULL,
 	"updated_at" timestamp with time zone DEFAULT now() NOT NULL,
-	CONSTRAINT "airport_nas_events_kind_check" CHECK ("airport_nas_events"."kind" in ('ground_stop', 'ground_delay', 'arrival_delay', 'departure_delay', 'closure', 'deicing', 'other'))
+	CONSTRAINT "airport_nas_events_kind_check" CHECK ("airport_nas_events"."kind" in ('ground_stop', 'ground_delay', 'arrival_delay', 'departure_delay', 'closure', 'deicing', 'other')),
+	CONSTRAINT "airport_nas_events_airport_iata_check" CHECK ("airport_nas_events"."airport_iata" is null or "airport_nas_events"."airport_iata" ~ '^[A-Z0-9]{3}$'),
+	CONSTRAINT "airport_nas_events_airport_icao_check" CHECK ("airport_nas_events"."airport_icao" is null or "airport_nas_events"."airport_icao" ~ '^[A-Z0-9]{4}$')
 );
 --> statement-breakpoint
 CREATE TABLE "airport_wx_observations" (
@@ -568,7 +592,8 @@ CREATE TABLE "airport_wx_observations" (
 	"source" text DEFAULT 'aviationweather' NOT NULL,
 	"created_at" timestamp with time zone DEFAULT now() NOT NULL,
 	CONSTRAINT "airport_wx_observations_kind_check" CHECK ("airport_wx_observations"."kind" in ('metar', 'taf')),
-	CONSTRAINT "airport_wx_observations_source_check" CHECK ("airport_wx_observations"."source" in ('aeroapi', 'aerodatabox', 'adsb_lol', 'adsb_fi', 'airplanes_live', 'aviationweather', 'nws', 'open_meteo', 'faa_nas', 'llm', 'mock'))
+	CONSTRAINT "airport_wx_observations_source_check" CHECK ("airport_wx_observations"."source" in ('aeroapi', 'aerodatabox', 'adsb_lol', 'adsb_fi', 'airplanes_live', 'aviationweather', 'nws', 'open_meteo', 'faa_nas', 'llm', 'mock')),
+	CONSTRAINT "airport_wx_observations_icao_check" CHECK ("airport_wx_observations"."icao" is null or "airport_wx_observations"."icao" ~ '^[A-Z0-9]{4}$')
 );
 --> statement-breakpoint
 CREATE TABLE "bts_airport_hourly" (
@@ -586,7 +611,8 @@ CREATE TABLE "bts_airport_hourly" (
 	"created_at" timestamp with time zone DEFAULT now() NOT NULL,
 	CONSTRAINT "bts_airport_hourly_month_check" CHECK ("bts_airport_hourly"."month" between 1 and 12),
 	CONSTRAINT "bts_airport_hourly_hour_local_check" CHECK ("bts_airport_hourly"."hour_local" between 0 and 23),
-	CONSTRAINT "bts_airport_hourly_direction_check" CHECK ("bts_airport_hourly"."direction" in ('dep', 'arr'))
+	CONSTRAINT "bts_airport_hourly_direction_check" CHECK ("bts_airport_hourly"."direction" in ('dep', 'arr')),
+	CONSTRAINT "bts_airport_hourly_airport_iata_check" CHECK ("bts_airport_hourly"."airport_iata" is null or "bts_airport_hourly"."airport_iata" ~ '^[A-Z0-9]{3}$')
 );
 --> statement-breakpoint
 CREATE TABLE "bts_carrier_flight_monthly" (
@@ -606,7 +632,10 @@ CREATE TABLE "bts_carrier_flight_monthly" (
 	"avg_arrival_delay_minutes" real,
 	"import_run_id" uuid NOT NULL,
 	"created_at" timestamp with time zone DEFAULT now() NOT NULL,
-	CONSTRAINT "bts_carrier_flight_monthly_month_check" CHECK ("bts_carrier_flight_monthly"."month" between 1 and 12)
+	CONSTRAINT "bts_carrier_flight_monthly_month_check" CHECK ("bts_carrier_flight_monthly"."month" between 1 and 12),
+	CONSTRAINT "bts_carrier_flight_monthly_flight_number_check" CHECK ("bts_carrier_flight_monthly"."flight_number" is null or "bts_carrier_flight_monthly"."flight_number" ~ '^[1-9][0-9]{0,3}[A-Z]?$'),
+	CONSTRAINT "bts_carrier_flight_monthly_origin_iata_check" CHECK ("bts_carrier_flight_monthly"."origin_iata" is null or "bts_carrier_flight_monthly"."origin_iata" ~ '^[A-Z0-9]{3}$'),
+	CONSTRAINT "bts_carrier_flight_monthly_destination_iata_check" CHECK ("bts_carrier_flight_monthly"."destination_iata" is null or "bts_carrier_flight_monthly"."destination_iata" ~ '^[A-Z0-9]{3}$')
 );
 --> statement-breakpoint
 CREATE TABLE "bts_import_runs" (
@@ -644,7 +673,9 @@ CREATE TABLE "bts_route_monthly" (
 	"avg_taxi_in_minutes" real,
 	"import_run_id" uuid NOT NULL,
 	"created_at" timestamp with time zone DEFAULT now() NOT NULL,
-	CONSTRAINT "bts_route_monthly_month_check" CHECK ("bts_route_monthly"."month" between 1 and 12)
+	CONSTRAINT "bts_route_monthly_month_check" CHECK ("bts_route_monthly"."month" between 1 and 12),
+	CONSTRAINT "bts_route_monthly_origin_iata_check" CHECK ("bts_route_monthly"."origin_iata" is null or "bts_route_monthly"."origin_iata" ~ '^[A-Z0-9]{3}$'),
+	CONSTRAINT "bts_route_monthly_destination_iata_check" CHECK ("bts_route_monthly"."destination_iata" is null or "bts_route_monthly"."destination_iata" ~ '^[A-Z0-9]{3}$')
 );
 --> statement-breakpoint
 CREATE TABLE "delay_outcomes" (
@@ -678,6 +709,7 @@ CREATE TABLE "provider_alert_registrations" (
 	"provider" text NOT NULL,
 	"external_alert_id" text NOT NULL,
 	"flight_instance_id" uuid NOT NULL,
+	"events" jsonb,
 	"max_weekly" integer,
 	"deliveries" integer DEFAULT 0 NOT NULL,
 	"expected_by" timestamp with time zone,
@@ -685,7 +717,8 @@ CREATE TABLE "provider_alert_registrations" (
 	"cancelled_at" timestamp with time zone,
 	"created_at" timestamp with time zone DEFAULT now() NOT NULL,
 	"updated_at" timestamp with time zone DEFAULT now() NOT NULL,
-	CONSTRAINT "provider_alert_registrations_provider_check" CHECK ("provider_alert_registrations"."provider" in ('aeroapi', 'aerodatabox', 'adsb_lol', 'adsb_fi', 'airplanes_live', 'aviationweather', 'nws', 'open_meteo', 'faa_nas', 'llm', 'mock'))
+	CONSTRAINT "provider_alert_registrations_provider_check" CHECK ("provider_alert_registrations"."provider" in ('aeroapi', 'aerodatabox', 'adsb_lol', 'adsb_fi', 'airplanes_live', 'aviationweather', 'nws', 'open_meteo', 'faa_nas', 'llm', 'mock')),
+	CONSTRAINT "provider_alert_registrations_events_check" CHECK ("provider_alert_registrations"."events" is null or (jsonb_typeof("provider_alert_registrations"."events") = 'array' and "provider_alert_registrations"."events" <@ '["filed","departure","arrival","cancelled","diverted","out","off","on","in","hold_start","hold_end"]'::jsonb))
 );
 --> statement-breakpoint
 CREATE TABLE "provider_budget_config" (
@@ -1161,8 +1194,8 @@ ALTER TABLE "flight_designators" ADD CONSTRAINT "flight_designators_flight_insta
 ALTER TABLE "flight_events" ADD CONSTRAINT "flight_events_flight_instance_id_flight_instances_id_fk" FOREIGN KEY ("flight_instance_id") REFERENCES "public"."flight_instances"("id") ON DELETE cascade ON UPDATE no action;--> statement-breakpoint
 ALTER TABLE "flight_instance_merges" ADD CONSTRAINT "flight_instance_merges_survivor_fk" FOREIGN KEY ("survivor_flight_instance_id") REFERENCES "public"."flight_instances"("id") ON DELETE cascade ON UPDATE no action;--> statement-breakpoint
 ALTER TABLE "flight_instance_merges" ADD CONSTRAINT "flight_instance_merges_merged_fk" FOREIGN KEY ("merged_flight_instance_id") REFERENCES "public"."flight_instances"("id") ON DELETE cascade ON UPDATE no action;--> statement-breakpoint
-ALTER TABLE "flight_instances" ADD CONSTRAINT "flight_instances_origin_airport_id_airports_id_fk" FOREIGN KEY ("origin_airport_id") REFERENCES "public"."airports"("id") ON DELETE restrict ON UPDATE no action;--> statement-breakpoint
-ALTER TABLE "flight_instances" ADD CONSTRAINT "flight_instances_destination_airport_id_airports_id_fk" FOREIGN KEY ("destination_airport_id") REFERENCES "public"."airports"("id") ON DELETE restrict ON UPDATE no action;--> statement-breakpoint
+ALTER TABLE "flight_instances" ADD CONSTRAINT "flight_instances_origin_airport_fk" FOREIGN KEY ("origin_airport_id","origin_icao") REFERENCES "public"."airports"("id","icao") ON DELETE restrict ON UPDATE no action;--> statement-breakpoint
+ALTER TABLE "flight_instances" ADD CONSTRAINT "flight_instances_destination_airport_fk" FOREIGN KEY ("destination_airport_id","destination_icao") REFERENCES "public"."airports"("id","icao") ON DELETE restrict ON UPDATE no action;--> statement-breakpoint
 ALTER TABLE "flight_tracks" ADD CONSTRAINT "flight_tracks_flight_instance_id_flight_instances_id_fk" FOREIGN KEY ("flight_instance_id") REFERENCES "public"."flight_instances"("id") ON DELETE cascade ON UPDATE no action;--> statement-breakpoint
 ALTER TABLE "flight_subscriptions" ADD CONSTRAINT "flight_subscriptions_user_id_users_id_fk" FOREIGN KEY ("user_id") REFERENCES "public"."users"("id") ON DELETE cascade ON UPDATE no action;--> statement-breakpoint
 ALTER TABLE "flight_subscriptions" ADD CONSTRAINT "flight_subscriptions_flight_instance_id_flight_instances_id_fk" FOREIGN KEY ("flight_instance_id") REFERENCES "public"."flight_instances"("id") ON DELETE restrict ON UPDATE no action;--> statement-breakpoint
@@ -1237,6 +1270,7 @@ CREATE UNIQUE INDEX "deleted_subjects_subject_id_key" ON "deleted_subjects" USIN
 CREATE UNIQUE INDEX "devices_user_id_install_id_key" ON "devices" USING btree ("user_id","install_id");--> statement-breakpoint
 CREATE INDEX "idempotency_keys_expires_at_idx" ON "idempotency_keys" USING btree ("expires_at");--> statement-breakpoint
 CREATE UNIQUE INDEX "rate_limits_key_key" ON "rate_limits" USING btree ("key");--> statement-breakpoint
+CREATE INDEX "rate_limits_last_request_idx" ON "rate_limits" USING btree ("last_request");--> statement-breakpoint
 CREATE UNIQUE INDEX "sessions_token_key" ON "sessions" USING btree ("token");--> statement-breakpoint
 CREATE INDEX "sessions_user_id_idx" ON "sessions" USING btree ("user_id");--> statement-breakpoint
 CREATE INDEX "sessions_expires_at_idx" ON "sessions" USING btree ("expires_at");--> statement-breakpoint
@@ -1304,7 +1338,7 @@ CREATE INDEX "notification_deliveries_created_at_brin_idx" ON "notification_deli
 CREATE INDEX "notification_deliveries_notification_id_idx" ON "notification_deliveries" USING btree ("notification_id");--> statement-breakpoint
 CREATE INDEX "notification_deliveries_subject_id_created_at_idx" ON "notification_deliveries" USING btree ("subject_id","created_at");--> statement-breakpoint
 CREATE UNIQUE INDEX "notification_preferences_user_id_key" ON "notification_preferences" USING btree ("user_id");--> statement-breakpoint
-CREATE UNIQUE INDEX "notifications_dedupe_key_key" ON "notifications" USING btree ("dedupe_key");--> statement-breakpoint
+CREATE UNIQUE INDEX "notifications_user_id_dedupe_key_key" ON "notifications" USING btree ("user_id","dedupe_key");--> statement-breakpoint
 CREATE INDEX "notifications_user_id_created_at_idx" ON "notifications" USING btree ("user_id","created_at" desc);--> statement-breakpoint
 CREATE UNIQUE INDEX "push_tokens_kind_token_key" ON "push_tokens" USING btree ("kind","token");--> statement-breakpoint
 CREATE INDEX "push_tokens_user_id_idx" ON "push_tokens" USING btree ("user_id") WHERE "push_tokens"."invalidated_at" is null;--> statement-breakpoint

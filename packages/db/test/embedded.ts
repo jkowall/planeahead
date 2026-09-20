@@ -102,8 +102,10 @@ export async function startEmbeddedPostgres(
       'full_page_writes=off',
       '-c',
       'listen_addresses=127.0.0.1',
-      // Neon defaults to GMT and the CI postgres:18 container to UTC; match them so
-      // timestamptz text values (mode: 'string') render identically everywhere.
+      // Pin the session TimeZone. Drizzle reads normalise timestamptz text to ISO UTC whatever
+      // the zone is, but raw SQL reads and the globalSetup guard expect a zero offset, as CI
+      // (TZ=UTC on the service container) and Neon (ALTER ROLE ... SET TimeZone, docs/
+      // schema-review.md section 12) do.
       '-c',
       'timezone=UTC',
     ],

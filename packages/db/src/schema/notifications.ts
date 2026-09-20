@@ -99,7 +99,9 @@ export const liveActivities = pgTable(
       .references(() => flightInstances.id, { onDelete: 'cascade' }),
     activityId: text('activity_id').notNull(),
     pushToken: text('push_token').notNull(),
-    pushTokenUpdatedAt: instant('push_token_updated_at').notNull().defaultNow(),
+    pushTokenUpdatedAt: instant('push_token_updated_at')
+      .notNull()
+      .default(sql`now()`),
     contentStateHash: bytea('content_state_hash'),
     lastPushedAt: instant('last_pushed_at'),
     staleAt: instant('stale_at'),
@@ -135,7 +137,11 @@ export const NOTIFICATION_KINDS = [
   'system',
 ] as const;
 
-/** In-app inbox row; deliveries per channel are in notification_deliveries. */
+/**
+ * In-app inbox row; deliveries per channel are in notification_deliveries. `dedupe_key` is
+ * unique per user, not globally: the notify consumer fans one flight event out to every
+ * subscriber with the same key (flight key, event, value), and each of them must get a row.
+ */
 export const notifications = pgTable(
   'notifications',
   {
@@ -154,7 +160,7 @@ export const notifications = pgTable(
     ...createdOnly(),
   },
   (t) => [
-    uniqueIndex('notifications_dedupe_key_key').on(t.dedupeKey),
+    uniqueIndex('notifications_user_id_dedupe_key_key').on(t.userId, t.dedupeKey),
     index('notifications_user_id_created_at_idx').on(t.userId, sql`${t.createdAt} desc`),
     check('notifications_kind_check', sql`${t.kind} in (${inList(NOTIFICATION_KINDS)})`),
   ],

@@ -17,12 +17,19 @@ import {
   pgTable,
   smallint,
   text,
+  unique,
   uniqueIndex,
   uuid,
 } from 'drizzle-orm/pg-core';
 import {
+  AIRPORT_CODE_SQL_RE,
+  IATA_AIRPORT_SQL_RE,
+  IATA_CARRIER_SQL_RE,
+  ICAO_AIRCRAFT_TYPE_SQL_RE,
   ICAO_AIRPORT_SQL_RE,
   ICAO_CARRIER_SQL_RE,
+  ICAO_HEX_SQL_RE,
+  formatCheck,
   id,
   inList,
   instant,
@@ -75,6 +82,9 @@ export const airports = pgTable(
   },
   (t) => [
     uniqueIndex('airports_icao_key').on(t.icao),
+    // A unique constraint (not an index) because flight_instances' composite foreign keys
+    // reference it and drizzle-kit emits foreign keys before indexes.
+    unique('airports_id_icao_key').on(t.id, t.icao),
     uniqueIndex('airports_ident_key').on(t.ident),
     uniqueIndex('airports_ourairports_id_key').on(t.ourairportsId),
     uniqueIndex('airports_iata_key')
@@ -85,12 +95,14 @@ export const airports = pgTable(
     check('airports_icao_source_check', sql`${t.icaoSource} in (${inList(ICAO_SOURCES)})`),
     check('airports_tz_source_check', sql`${t.tzSource} in (${inList(TZ_SOURCES)})`),
     // A real ICAO code is four characters. An ident-derived pseudo code (OurAirports idents such
-    // as ID-0004 or Q51) is kept as-is so the airport exists for display and search; it cannot be
-    // a flight origin until a synthetic ZZxx code is assigned (open decision in schema-review.md).
+    // as ID-0004 or 03N) is kept as-is so the airport exists for display and search; a code that
+    // is not four characters cannot be a flight origin or destination until a synthetic ZZxx
+    // code is assigned (open decision in schema-review.md section 16, counts pinned by a test).
     check(
       'airports_icao_format_check',
-      sql`(${t.icaoSource} = 'icao_code' and ${t.icao} ~ ${literal(ICAO_AIRPORT_SQL_RE)}) or (${t.icaoSource} = 'ident' and ${t.icao} ~ '^[A-Z0-9-]{3,8}$')`,
+      sql`(${t.icaoSource} = 'icao_code' and ${t.icao} ~ ${literal(ICAO_AIRPORT_SQL_RE)}) or (${t.icaoSource} = 'ident' and ${t.icao} ~ ${literal(AIRPORT_CODE_SQL_RE)})`,
     ),
+    formatCheck('airports_iata_check', t.iata, IATA_AIRPORT_SQL_RE),
     check(
       'airports_latitude_check',
       sql`${t.latitude} between -90 and 90 and ${t.longitude} between -180 and 180`,
@@ -151,6 +163,7 @@ export const airlines = pgTable(
     uniqueIndex('airlines_vrs_code_key').on(t.vrsCode),
     index('airlines_iata_idx').on(t.iata),
     check('airlines_icao_format_check', sql`${t.icao} ~ ${literal(ICAO_CARRIER_SQL_RE)}`),
+    formatCheck('airlines_iata_check', t.iata, IATA_CARRIER_SQL_RE),
     check(
       'airlines_alliance_check',
       sql`${t.alliance} is null or ${t.alliance} in (${inList(AIRLINE_ALLIANCES)})`,
@@ -203,6 +216,7 @@ export const regionalOperators = pgTable(
       'regional_operators_operating_icao_check',
       sql`${t.operatingIcao} ~ ${literal(ICAO_CARRIER_SQL_RE)}`,
     ),
+    formatCheck('regional_operators_marketing_iata_check', t.marketingIata, IATA_CARRIER_SQL_RE),
   ],
 );
 
@@ -229,6 +243,7 @@ export const aircraftTypes = pgTable(
   },
   (t) => [
     uniqueIndex('aircraft_types_icao_key').on(t.icao),
+    formatCheck('aircraft_types_icao_check', t.icao, ICAO_AIRCRAFT_TYPE_SQL_RE),
     check(
       'aircraft_types_wake_turbulence_check',
       sql`${t.wakeTurbulence} is null or ${t.wakeTurbulence} in (${inList(WAKE_TURBULENCE_CATEGORIES)})`,
@@ -260,7 +275,9 @@ export const aircraft = pgTable(
   (t) => [
     uniqueIndex('aircraft_registration_valid_from_key').on(t.registration, t.validFrom),
     uniqueIndex('aircraft_icao_hex_valid_from_key').on(t.icaoHex, t.validFrom),
-    check('aircraft_icao_hex_check', sql`${t.icaoHex} ~ '^[0-9A-F]{6}$'`),
+    check('aircraft_icao_hex_check', sql`${t.icaoHex} ~ ${literal(ICAO_HEX_SQL_RE)}`),
+    formatCheck('aircraft_operator_icao_check', t.operatorIcao, ICAO_CARRIER_SQL_RE),
+    formatCheck('aircraft_aircraft_type_icao_check', t.aircraftTypeIcao, ICAO_AIRCRAFT_TYPE_SQL_RE),
   ],
 );
 
@@ -274,7 +291,9 @@ export const currencyRates = pgTable(
     rate: numeric('rate', { precision: 18, scale: 8 }).notNull(),
     asOf: date('as_of', { mode: 'string' }).notNull(),
     source: text('source').notNull(),
-    fetchedAt: instant('fetched_at').notNull().defaultNow(),
+    fetchedAt: instant('fetched_at')
+      .notNull()
+      .default(sql`now()`),
     ...timestamps(),
   },
   (t) => [

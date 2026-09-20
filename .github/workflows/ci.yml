@@ -51,6 +51,10 @@ jobs:
           POSTGRES_USER: planeahead
           POSTGRES_PASSWORD: planeahead
           POSTGRES_DB: planeahead_admin
+          # initdb takes the cluster's default TimeZone from TZ. The harness asserts a zero
+          # offset before any test runs (test/globalSetup.ts), so this is explicit, not lucky.
+          TZ: UTC
+          PGTZ: UTC
         ports:
           - 5432:5432
         options: >-

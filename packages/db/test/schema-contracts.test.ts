@@ -1,13 +1,16 @@
 import { readFileSync, readdirSync, statSync } from 'node:fs';
 import { join, relative, resolve } from 'node:path';
 import {
+  ALERT_EVENTS,
   FLIGHT_STATUS_VALUES,
+  IsoInstantSchema,
   PROVIDER_CALL_RESULTS,
   PROVIDER_CALL_TRIGGERS,
   PROVIDER_IDS,
   SYNC_ENTITIES,
 } from '@planeahead/shared';
 import { Table, getTableColumns, getTableName, is } from 'drizzle-orm';
+import type { PgColumn } from 'drizzle-orm/pg-core';
 import { describe, expect, it } from 'vitest';
 import { DB_SCHEMA_VERSION } from '../src/index';
 import { readJournal } from '../src/migrate';
@@ -145,10 +148,13 @@ interface SnapshotTable {
   name: string;
   columns: Record<string, SnapshotColumn>;
   indexes: Record<string, SnapshotIndex>;
-  foreignKeys: Record<string, { tableTo: string; columnsFrom: string[] }>;
+  foreignKeys: Record<
+    string,
+    { tableTo: string; columnsFrom: string[]; columnsTo: string[]; onDelete?: string }
+  >;
   compositePrimaryKeys: Record<string, { columns: string[] }>;
-  uniqueConstraints: Record<string, unknown>;
-  checkConstraints: Record<string, unknown>;
+  uniqueConstraints: Record<string, { columns: string[] }>;
+  checkConstraints: Record<string, { name: string; value: string }>;
 }
 const snapshot = JSON.parse(
   readFileSync(join(PACKAGE_ROOT, 'migrations', 'meta', '0000_snapshot.json'), 'utf8'),
@@ -238,9 +244,9 @@ describe('column conventions', () => {
     }
   });
 
-  it('puts deleted_at on exactly the sync entities', () => {
+  it('puts deleted_at on exactly the sync entities (no other table may reuse the name)', () => {
     const withTombstone = tables
-      .filter((t) => t.columns['deleted_at'] !== undefined && t.name !== 'deleted_subjects')
+      .filter((t) => t.columns['deleted_at'] !== undefined)
       .map((t) => t.name)
       .sort();
     expect(withTombstone).toEqual([...SOFT_DELETE].sort());
@@ -294,28 +300,85 @@ describe('column conventions', () => {
     }
   });
 
-  it('uses timestamptz mode date only on the Better Auth tables', () => {
-    const modeDate: string[] = [];
-    const modeString: string[] = [];
+  it('reads every instant as an ISO-8601 UTC string; only the Better Auth tables read a Date', () => {
+    const modeDate = new Set<string>();
+    const isoString = new Set<string>();
+    const rawString = new Set<string>();
+    let sample: PgColumn | undefined;
     for (const value of Object.values(schema)) {
       if (!is(value, Table)) {
         continue;
       }
-      const types = new Set(
-        Object.values(getTableColumns(value) as Record<string, { columnType: string }>).map(
-          (c) => c.columnType,
-        ),
-      );
-      if (types.has('PgTimestamp')) {
-        modeDate.push(getTableName(value));
-      }
-      if (types.has('PgTimestampString')) {
-        modeString.push(getTableName(value));
+      for (const column of Object.values(getTableColumns(value)) as PgColumn[]) {
+        if (column.getSQLType() !== 'timestamp with time zone') {
+          continue;
+        }
+        if (column.columnType === 'PgTimestamp') {
+          modeDate.add(getTableName(value));
+        } else if (column.columnType === 'PgCustomColumn') {
+          isoString.add(getTableName(value));
+          sample ??= column;
+        } else {
+          rawString.add(`${getTableName(value)}.${column.name}`);
+        }
       }
     }
-    expect(modeDate.sort()).toEqual(['accounts', 'sessions', 'users', 'verifications']);
-    expect(modeString).not.toContain('users');
-    expect(modeString.length).toBe(65);
+    expect([...modeDate].sort()).toEqual(['accounts', 'sessions', 'users', 'verifications']);
+    // Drizzle's own mode: 'string' hands back Postgres text (`2026-09-19 22:30:00+00`), which
+    // is not ISO-8601 and fails IsoInstantSchema; the instant() column type normalises it.
+    expect([...rawString]).toEqual([]);
+    expect(isoString.size).toBe(65);
+    for (const auth of modeDate) {
+      expect(isoString.has(auth)).toBe(false);
+    }
+    const mapped = sample!.mapFromDriverValue('2026-09-19 22:30:00+00') as string;
+    expect(mapped).toBe('2026-09-19T22:30:00Z');
+    expect(IsoInstantSchema.safeParse(mapped).success).toBe(true);
+    expect(IsoInstantSchema.safeParse('2026-09-19 22:30:00+00').success).toBe(false);
+  });
+
+  it('carries a format check on every column that stores an ICAO, IATA, hex or flight-number code', () => {
+    const CODE_COLUMN = /(^|_)(icao|iata|icao_hex|flight_number)$/;
+    const missing: string[] = [];
+    for (const table of tables) {
+      for (const name of Object.keys(table.columns)) {
+        if (!CODE_COLUMN.test(name)) {
+          continue;
+        }
+        const covered = Object.values(table.checkConstraints).some((c) =>
+          c.value.includes(`"${table.name}"."${name}"`),
+        );
+        if (!covered) {
+          missing.push(`${table.name}.${name}`);
+        }
+      }
+    }
+    expect(missing).toEqual([]);
+  });
+
+  it('ties a flight instance to its airports with composite foreign keys on (id, icao)', () => {
+    const flights = byName.get('flight_instances')!;
+    const fks = Object.values(flights.foreignKeys).filter((fk) => fk.tableTo === 'airports');
+    expect(fks.map((fk) => [fk.columnsFrom, fk.columnsTo, fk.onDelete]).sort()).toEqual([
+      [['destination_airport_id', 'destination_icao'], ['id', 'icao'], 'restrict'],
+      [['origin_airport_id', 'origin_icao'], ['id', 'icao'], 'restrict'],
+    ]);
+    expect(byName.get('airports')!.uniqueConstraints['airports_id_icao_key']?.columns).toEqual([
+      'id',
+      'icao',
+    ]);
+  });
+
+  it('dedupes notifications per user and gives rate_limits a purge index', () => {
+    const notifications = byName.get('notifications')!;
+    const dedupe = notifications.indexes['notifications_user_id_dedupe_key_key'];
+    expect(dedupe?.isUnique).toBe(true);
+    expect(dedupe?.columns.map((c) => c.expression)).toEqual(['user_id', 'dedupe_key']);
+    expect(Object.keys(notifications.indexes)).not.toContain('notifications_dedupe_key_key');
+    const rateLimits = byName.get('rate_limits')!;
+    expect(rateLimits.indexes['rate_limits_last_request_idx']?.columns[0]?.expression).toBe(
+      'last_request',
+    );
   });
 });
 
@@ -326,6 +389,7 @@ describe('agreement with @planeahead/shared', () => {
     expect([...schema.CALL_TRIGGERS]).toEqual([...PROVIDER_CALL_TRIGGERS]);
     expect([...schema.CALL_RESULTS]).toEqual([...PROVIDER_CALL_RESULTS]);
     expect([...schema.SYNC_CHANGE_ENTITIES]).toEqual([...SYNC_ENTITIES]);
+    expect([...schema.ALERT_EVENTS]).toEqual([...ALERT_EVENTS]);
     for (const provider of PROVIDER_IDS) {
       expect(schema.EVENT_SOURCES).toContain(provider);
     }

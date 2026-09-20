@@ -133,7 +133,13 @@ export const verifications = pgTable(
   ],
 );
 
-/** Better Auth `rateLimit.storage = 'database'`; `last_request` is epoch milliseconds. */
+/**
+ * Better Auth `rateLimit.storage = 'database'`; `last_request` is epoch milliseconds. `key` is
+ * the client IP or, for per-account limits, the email address: personal data (PII class 2).
+ * Better Auth rewrites rows in place and never deletes them, so the housekeeping cron purges
+ * rows idle for more than 24 h through `rate_limits_last_request_idx`, and the deletion job
+ * removes rows whose key embeds the deleted user's email (docs/schema-review.md section 5).
+ */
 export const rateLimits = pgTable(
   'rate_limits',
   {
@@ -142,7 +148,10 @@ export const rateLimits = pgTable(
     count: integer('count').notNull(),
     lastRequest: bigint('last_request', { mode: 'number' }).notNull(),
   },
-  (t) => [uniqueIndex('rate_limits_key_key').on(t.key)],
+  (t) => [
+    uniqueIndex('rate_limits_key_key').on(t.key),
+    index('rate_limits_last_request_idx').on(t.lastRequest),
+  ],
 );
 
 export const KEY_WRAP_ALGORITHMS = ['A256KW'] as const;
@@ -257,7 +266,9 @@ export const userConsents = pgTable(
     version: text('version').notNull(),
     granted: boolean('granted').notNull(),
     source: text('source').notNull(),
-    recordedAt: instant('recorded_at').notNull().defaultNow(),
+    recordedAt: instant('recorded_at')
+      .notNull()
+      .default(sql`now()`),
     ...createdOnly(),
   },
   (t) => [
@@ -331,6 +342,8 @@ export const DELETION_REASONS = ['user_request', 'admin', 'inactivity', 'apple_r
 /**
  * Pseudonymous record that a subject was deleted, kept so webhooks and audit rows that arrive
  * later can be matched and dropped. No PII, no FK to users (the row must outlive the user).
+ * The column is `subject_deleted_at`, not `deleted_at`: that name is reserved for the sync
+ * entities' tombstone, which the mobile client replays deletes from.
  */
 export const deletedSubjects = pgTable(
   'deleted_subjects',
@@ -339,7 +352,9 @@ export const deletedSubjects = pgTable(
     subjectId: uuid('subject_id').notNull(),
     rcAppUserIdHash: bytea('rc_app_user_id_hash'),
     reason: text('reason').notNull(),
-    deletedAt: instant('deleted_at').notNull().defaultNow(),
+    subjectDeletedAt: instant('subject_deleted_at')
+      .notNull()
+      .default(sql`now()`),
     ...createdOnly(),
   },
   (t) => [

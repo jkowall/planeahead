@@ -37,7 +37,9 @@ export const entitlements = pgTable(
     status: text('status').notNull(),
     willRenew: boolean('will_renew'),
     expiresAt: instant('expires_at'),
-    syncedAt: instant('synced_at').notNull().defaultNow(),
+    syncedAt: instant('synced_at')
+      .notNull()
+      .default(sql`now()`),
     ...timestamps(),
   },
   (t) => [
@@ -179,7 +181,9 @@ export const dataExportJobs = pgTable(
     status: text('status').notNull().default('queued'),
     r2Key: text('r2_key'),
     sizeBytes: bigint('size_bytes', { mode: 'number' }),
-    requestedAt: instant('requested_at').notNull().defaultNow(),
+    requestedAt: instant('requested_at')
+      .notNull()
+      .default(sql`now()`),
     completedAt: instant('completed_at'),
     expiresAt: instant('expires_at'),
     error: text('error'),
@@ -202,7 +206,9 @@ export const accountDeletionRequests = pgTable(
     subjectId: uuid('subject_id').notNull(),
     source: text('source').notNull(),
     status: text('status').notNull().default('pending'),
-    requestedAt: instant('requested_at').notNull().defaultNow(),
+    requestedAt: instant('requested_at')
+      .notNull()
+      .default(sql`now()`),
     completedAt: instant('completed_at'),
     steps: jsonb('steps')
       .notNull()

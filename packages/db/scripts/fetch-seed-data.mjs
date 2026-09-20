@@ -505,7 +505,8 @@ async function buildAircraftTypes(bodies) {
       }
     }
   }
-  let patchedJ = 0;
+  // Distinct designators, not rows: ColtJD45 lists A388 twice (one row per model variant).
+  const patchedJ = new Set();
   let coltRows = 0;
   if (bodies.coltjd45_aircraft !== undefined) {
     const colt = parseCsvObjects(decode(bodies.coltjd45_aircraft));
@@ -516,7 +517,7 @@ async function buildAircraftTypes(bodies) {
         if (entry !== undefined) {
           entry.wake = 'J';
           entry.wakeSource = 'coltjd45';
-          patchedJ += 1;
+          patchedJ.add(row.type_designator);
         } else {
           warnings.push(
             `ColtJD45 lists ${row.type_designator} as J but VRS has no such designator`,
@@ -548,7 +549,8 @@ async function buildAircraftTypes(bodies) {
     ...new Set(rows.map((r) => r.wake_turbulence)),
   ].sort();
   manifestOutputs['aircraft-types.csv'].coltjd45_rows = coltRows;
-  manifestOutputs['aircraft-types.csv'].patched_j = patchedJ;
+  manifestOutputs['aircraft-types.csv'].patched_j = patchedJ.size;
+  manifestOutputs['aircraft-types.csv'].patched_j_designators = [...patchedJ].sort();
 }
 
 await main();

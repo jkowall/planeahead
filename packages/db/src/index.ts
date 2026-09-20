@@ -21,6 +21,12 @@ export {
   type NodeDb,
   type NodeDbOptions,
 } from './client';
+export {
+  destinationColumns,
+  originColumns,
+  resolveAirportEndpoint,
+  type AirportEndpoint,
+} from './queries/airports';
 
 /**
  * Number of migrations in `migrations/meta/_journal.json`. A test keeps it in sync; `/health`

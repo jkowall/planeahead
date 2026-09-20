@@ -10,7 +10,7 @@ import { seedAirports } from './airports';
 import type { SeedOptions, SeedResult } from './common';
 import { seedRegionalOperators } from './regional-operators';
 
-export { SEED_DATA_DIR, type SeedOptions, type SeedResult } from './common';
+export { SEED_DATA_DIR, SeedCollisionError, type SeedOptions, type SeedResult } from './common';
 export { seedAirports, MissingTimezoneError } from './airports';
 export { seedAirlines, normaliseAlliance, normaliseAllianceStatus } from './airlines';
 export { seedAircraftTypes } from './aircraft-types';
