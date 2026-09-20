@@ -6,19 +6,30 @@
  * sends `Idempotency-Key`, the first request's response is stored, and a replay of the same key
  * with the same request returns the stored response instead of running the handler again.
  *
- * Two stores:
+ * Where this middleware sits decides what it can see. Ruling E6 registers it in the global chain
+ * AHEAD of the auth middleware (`src/app.ts`), and increment 5 keeps that slot ("Auth middleware
+ * replaces the placeholder"), so in the global chain `c.var.user` is never assigned by the time
+ * this code reads it. Two things follow:
  *
- *   - `idempotency_keys` in Postgres through `withDb`, used when a user is resolved, the
- *     Hyperdrive binding is present and the environment is not `test`. The table is keyed by
- *     `(user_id, key)` with a foreign key to `users`, so it cannot hold anonymous traffic.
- *   - an in-memory map otherwise. Per isolate, lost on eviction, not shared between colos. It is
- *     a development convenience, not a guarantee, and it says so at the call site.
+ *   - The caller has to identify itself. An anonymous request carrying `Idempotency-Key` must
+ *     also carry `X-Install-Id`, the per-installation id the mobile app generates once and sends
+ *     on every request (increment 5's `POST /v1/devices` registers the same value). The key is
+ *     scoped by it. A keyed request with neither a user nor an install id is answered 400, not
+ *     silently run: a client that asked for a guarantee and is not getting one should hear so.
+ *     The client IP is NOT a scope. It changes when a phone moves from WiFi to LTE mid-retry,
+ *     which is exactly the retry this middleware exists to serve, and behind a carrier NAT two
+ *     phones share one.
+ *   - The Postgres store is unreachable from the global slot. `idempotency_keys` is keyed by
+ *     `(user_id, key)` with a foreign key to `users`, so it cannot hold anonymous traffic, and
+ *     there is no user here. In the global slot the in-memory store is the only store: per
+ *     isolate, lost on eviction, not shared between colos. A development convenience, not a
+ *     guarantee, and increment 4 has no route that answers 2xx to a keyed request anyway.
  *
- * In increment 4 the database path is unreachable by construction: this middleware runs BEFORE
- * the auth placeholder (ruling E6), so `c.var.user` is never assigned by the time `storeFor` and
- * `scopeFor` read it. Both read it as `?? null` for exactly that reason. It is written now so
- * increment 5 turns the database path on by replacing one middleware rather than by writing
- * storage code under time pressure.
+ * `storeFor` and `scopeFor` keep a resolved-user branch. It is never taken in the global slot,
+ * in this increment or the next: it is for the second `idempotency()` instance that increment 8
+ * (flight routes) mounts under `/v1` BEHIND auth, where plan section 10 puts idempotency last in
+ * the chain, the user id is the scope and Postgres is the store. Until then both branches are
+ * compiled and type-checked but never executed, and the tests say so rather than pretend.
  */
 
 import { and, eq, sql } from 'drizzle-orm';
@@ -28,21 +39,35 @@ import { createMiddleware } from 'hono/factory';
 import type { ContentfulStatusCode } from 'hono/utils/http-status';
 import { type AppBindings, type Env, environmentName } from '../env';
 import { createLogger } from '../observability/log';
-import { clientIp } from './rate-limit';
 
 export const IDEMPOTENCY_KEY_HEADER = 'Idempotency-Key';
 export const IDEMPOTENCY_REPLAYED_HEADER = 'Idempotency-Replayed';
+
+/**
+ * The per-installation id an anonymous caller scopes its keys by. Generated once by the app,
+ * kept for the life of the install, and the same value `POST /v1/devices` registers.
+ */
+export const INSTALL_ID_HEADER = 'X-Install-Id';
 
 /** How long a stored response stays replayable. */
 export const IDEMPOTENCY_TTL_SECONDS = 24 * 60 * 60;
 
 const MUTATING_METHODS: ReadonlySet<string> = new Set(['POST', 'PUT', 'PATCH', 'DELETE']);
 
-/** Bounded and printable: the value is echoed into storage and into log lines. */
-const VALID_KEY = /^[A-Za-z0-9_.:-]{8,255}$/;
+/**
+ * Bounded and printable: the value is echoed into storage and into log lines. One shape for the
+ * key and for the install id, because both end up in the same store key and the same scope
+ * string, and `KEY_SEPARATOR` below relies on neither containing a control character.
+ */
+const VALID_TOKEN = /^[A-Za-z0-9_.:-]{8,255}$/;
+const TOKEN_SHAPE = '8 to 255 characters of [A-Za-z0-9_.:-]';
 
 export function isValidIdempotencyKey(value: string): boolean {
-  return VALID_KEY.test(value);
+  return VALID_TOKEN.test(value);
+}
+
+export function isValidInstallId(value: string): boolean {
+  return VALID_TOKEN.test(value);
 }
 
 export interface StoredResponse {
@@ -68,8 +93,8 @@ const MEMORY_STORE_LIMIT = 500;
  * Separates the scope from the key in the in-memory map, so `("a", "b:c")` and `("a:b", "c")`
  * cannot collide. U+0000 is written as an escape rather than as a literal byte: a raw NUL in a
  * source file makes git classify the blob as binary, which costs the file its diff, its
- * line-level review comments and its three-way merge. `VALID_KEY` below guarantees the separator
- * can never appear inside a key.
+ * line-level review comments and its three-way merge. `VALID_TOKEN` above guarantees the
+ * separator can never appear inside a key or an install id.
  */
 const KEY_SEPARATOR = '\u0000';
 
@@ -106,7 +131,13 @@ function bytesToHex(bytes: Uint8Array): string {
   return [...bytes].map((byte) => byte.toString(16).padStart(2, '0')).join('');
 }
 
-/** Postgres-backed store for a known user. `scope` is the user id and is not read again here. */
+/**
+ * Postgres-backed store for a known user. `scope` is the user id and is not read again here.
+ *
+ * Not reachable from the global chain (see the file header). It exists for the `/v1` mount
+ * behind auth in increment 8, and is kept here so that mount is one `idempotency({ store })`
+ * call rather than storage code written under time pressure.
+ */
 export function createDbIdempotencyStore(env: Env, userId: string): IdempotencyStore {
   return {
     async get(_scope, key) {
@@ -159,13 +190,14 @@ function hasHyperdriveBinding(env: Env): boolean {
 }
 
 /**
- * Picks the store for this request. The database path needs all three of a resolved user, a
- * Hyperdrive binding and a non-test environment; anything else falls back to memory.
+ * Picks the store for this request.
  *
- * `c.var.user ?? null` rather than `c.var.user`, because this middleware runs BEFORE the auth
- * middleware (ruling E6, `src/app.ts`) and the variable is therefore `undefined`, not `null`, on
- * every request. `undefined !== null` is true, so reading `user.id` without the coalesce threw a
- * TypeError on the first mutating request that carried an `Idempotency-Key`.
+ * In the global chain this always returns the memory store. The database branch needs a resolved
+ * user, and ruling E6 puts this middleware ahead of auth, so `c.var.user` is unset there: hence
+ * the `?? null`, without which `undefined !== null` read `user.id` off `undefined` and answered
+ * 500 to the first keyed request. The branch is live only where the factory is mounted behind
+ * auth, which increment 8 does for `/v1`. The `test` and Hyperdrive guards are what keep the
+ * Workers suite from dialling Postgres if that mount is ever tested here.
  */
 export function storeFor(c: Context<AppBindings>): IdempotencyStore {
   const user = c.var.user ?? null;
@@ -176,26 +208,28 @@ export function storeFor(c: Context<AppBindings>): IdempotencyStore {
 }
 
 /**
- * The bucket a key is stored under.
+ * The bucket a key is stored under, or null when the request cannot be scoped.
  *
- * A resolved user gets their own id. An unauthenticated caller must NOT share one global
- * `anonymous` bucket: the store is keyed by `(scope, key)`, so two callers that happen to send
- * the same `Idempotency-Key` would read each other's stored response, or get a 422
- * `idempotency_key_reuse` for a request they never made. The client IP is the only thing that
- * distinguishes anonymous callers at this point in the chain, so it is what the scope is built
- * from. Under `wrangler dev` and in the test pool there is no `CF-Connecting-IP` at all and every
- * anonymous caller collapses into one bucket again; that is acceptable locally and is why the
- * memory store is documented as a convenience rather than a guarantee.
+ * A resolved user is scoped by id (only when mounted behind auth, never in the global slot; see
+ * the file header). An unauthenticated caller is scoped by `X-Install-Id`, a value the CLIENT
+ * owns and keeps across a network change: two installs that send the same key stay apart, and
+ * one install that retries from a new IP replays. Neither property held for the client IP, which
+ * an earlier version used, and a phone that moved from WiFi to LTE mid-retry created its resource
+ * twice.
  *
- * Increment 5 resolves a Better Auth anonymous user before this runs, and its id replaces the IP.
+ * `null` means the guarantee cannot be given. The middleware answers 400 rather than running the
+ * handler as if no key had been sent.
  */
-export function scopeFor(c: Context<AppBindings>): string {
+export function scopeFor(c: Context<AppBindings>): string | null {
   const user = c.var.user ?? null;
   if (user !== null) {
     return `user:${user.id}`;
   }
-  const ip = clientIp(c);
-  return ip === null ? 'anonymous:unknown' : `anonymous:ip:${ip}`;
+  const installId = c.req.header(INSTALL_ID_HEADER);
+  if (installId === undefined || !isValidInstallId(installId)) {
+    return null;
+  }
+  return `install:${installId}`;
 }
 
 async function hashRequest(c: Context<AppBindings>): Promise<string> {
@@ -240,7 +274,7 @@ export function idempotency(options: IdempotencyOptions = {}): MiddlewareHandler
       return c.json(
         {
           error: 'invalid_idempotency_key',
-          message: 'Idempotency-Key must be 8 to 255 characters of [A-Za-z0-9_.:-]',
+          message: `${IDEMPOTENCY_KEY_HEADER} must be ${TOKEN_SHAPE}`,
           requestId: c.var.requestId,
         },
         400,
@@ -250,6 +284,17 @@ export function idempotency(options: IdempotencyOptions = {}): MiddlewareHandler
     const log = createLogger({ request_id: c.var.requestId });
     const store = selectStore(c);
     const scope = scopeFor(c);
+    if (scope === null) {
+      log.info('idempotency_scope_missing');
+      return c.json(
+        {
+          error: 'idempotency_scope_missing',
+          message: `an unauthenticated request with ${IDEMPOTENCY_KEY_HEADER} must also send ${INSTALL_ID_HEADER} (${TOKEN_SHAPE})`,
+          requestId: c.var.requestId,
+        },
+        400,
+      );
+    }
     const requestHash = await hashRequest(c);
 
     const existing = await store.get(scope, key);

@@ -77,6 +77,16 @@ What follows from idempotency running BEFORE auth: nothing in a slot ahead of au
 `c.var.user` has been assigned. It is `undefined` there, not `null`, so every reader uses
 `c.var.user ?? null` (`storeFor`, `scopeFor`, `principalLimiter`, `requireUser`).
 
+**A keyed anonymous request needs `X-Install-Id`.** Idempotency runs ahead of auth, so in the
+global chain it never sees a user and needs something the CLIENT owns to scope a key by. The app
+sends its install id (the value `POST /v1/devices` registers in increment 5) on every request; a
+mutating request that carries `Idempotency-Key` without it, or with a malformed one, is answered
+400 `idempotency_scope_missing` rather than run unprotected. The client IP was rejected as the
+scope: it changes when a phone moves from WiFi to LTE mid-retry, which is the retry the key exists
+to make safe, and behind a carrier NAT two phones share one. In the global slot the store is the
+in-memory map; the Postgres store and the per-user scope in `idempotency.ts` are for the `/v1`
+mount behind auth in increment 8 and are never taken before then.
+
 `app.onError` and `app.notFound` are registered **before** the Sentry middleware: `withSentry`
 wraps whatever `app.errorHandler` is at the moment it runs, and a later `app.onError()` replaces
 the wrapper and stops the reporting. `handleError` keeps Hono's `HTTPException` branch, without

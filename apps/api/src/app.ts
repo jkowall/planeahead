@@ -18,8 +18,9 @@
  *   6. auth         sets c.var.user; a placeholder until increment 5
  *
  * Note what follows from 5 running before 6: nothing in the idempotency middleware may assume
- * `c.var.user` has been assigned. It reads the variable as `?? null`, and so must anything else
- * that lands in a slot ahead of auth (the principal limiter increment 5 adds is the next one).
+ * `c.var.user` has been assigned. It reads the variable as `?? null`, scopes anonymous keys by the
+ * `X-Install-Id` header because there is no user to scope them by, and so must anything else that
+ * lands in a slot ahead of auth (the principal limiter increment 5 adds is the next one).
  *
  * `app.onError` and `app.notFound` are registered BEFORE the Sentry middleware on purpose:
  * `withSentry` wraps whatever `app.errorHandler` is at the moment it runs, and a later
@@ -59,7 +60,16 @@ export interface ChainOptions {
   readonly sentry?: Partial<CloudflareOptions>;
 }
 
-/** The chain's registration order, as data. Asserted in test/workers/chain.test.ts. */
+/**
+ * The chain's registration order, as data.
+ *
+ * Documentation with a check behind it, not the source of truth: `registerChain` below is the
+ * source of truth, and it returns the names of the slots it registered in the order it registered
+ * them. test/workers/chain.test.ts asserts that return value equals this list, so the two cannot
+ * drift apart silently. Beyond the list, the suite pins the two positions that carry behaviour:
+ * sentry after request-id (the `request_id` tag) and idempotency ahead of auth (`c.var.user`
+ * unset in that slot).
+ */
 export const MIDDLEWARE_ORDER = [
   'request-id',
   'sentry',
@@ -68,6 +78,8 @@ export const MIDDLEWARE_ORDER = [
   'idempotency',
   'auth',
 ] as const;
+
+export type MiddlewareName = (typeof MIDDLEWARE_ORDER)[number];
 
 /**
  * Translates a thrown error into a response.
@@ -98,16 +110,34 @@ export function handleNotFound(c: Context<AppBindings>): Response {
   return c.json({ error: 'not_found', requestId: c.var.requestId ?? 'unknown' }, 404);
 }
 
-/** Registers the chain on `app`, in order. Nothing else may call `app.use()` on the root app. */
-export function registerChain(app: Hono<AppBindings>, options: ChainOptions = {}): void {
-  app.use(requestId());
-  app.use(sentryMiddleware(app, options.sentry ?? {}));
-  app.use(corsMiddleware());
-  app.use(options.rateLimit ?? ipLimiter(options.limiter));
-  app.use(
-    idempotency(options.idempotencyStore === undefined ? {} : { store: options.idempotencyStore }),
-  );
-  app.use(authPlaceholder());
+/**
+ * Registers the chain on `app`, in order, and returns the slot names in the order they were
+ * registered. Nothing else may call `app.use()` on the root app.
+ *
+ * Each slot is a `[name, handler]` pair and the loop registers from that list, so the returned
+ * names are the registration order by construction rather than a second copy of it.
+ */
+export function registerChain(
+  app: Hono<AppBindings>,
+  options: ChainOptions = {},
+): readonly MiddlewareName[] {
+  const slots: readonly (readonly [MiddlewareName, MiddlewareHandler<AppBindings>])[] = [
+    ['request-id', requestId()],
+    ['sentry', sentryMiddleware(app, options.sentry ?? {})],
+    ['cors', corsMiddleware()],
+    ['rate-limit', options.rateLimit ?? ipLimiter(options.limiter)],
+    [
+      'idempotency',
+      idempotency(
+        options.idempotencyStore === undefined ? {} : { store: options.idempotencyStore },
+      ),
+    ],
+    ['auth', authPlaceholder()],
+  ];
+  for (const [, handler] of slots) {
+    app.use(handler);
+  }
+  return slots.map(([name]) => name);
 }
 
 /**

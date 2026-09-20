@@ -63,6 +63,18 @@ jobs:
 
       - run: pnpm install --frozen-lockfile
 
+      # The Worker reports the hash of the migration journal on /health. Failing on a diff means a
+      # deploy can never claim a schema version the repository does not have.
+      #
+      # This step must stay the FIRST thing after install. The api `typecheck` and `test` scripts
+      # both begin by regenerating src/generated/migration-hash.ts on disk, and `--check` only
+      # compares the file on disk with the journal, so a check placed after those steps compares
+      # the file they just wrote and can never fail. That is how this workflow once shipped, with
+      # ci.yml red and staging deploying a silently corrected constant.
+      # tools/workflows/migration-hash-check.test.js asserts the ordering.
+      - name: Check the generated migration hash is current
+        run: node scripts/gen-migration-hash.mjs --check
+
       # ci.yml is a SEPARATE workflow triggered by the same push, so nothing orders the two: a
       # commit that fails typecheck would otherwise still migrate the staging database and deploy,
       # and migrations are forward-only. These three steps repeat the checks that matter here
@@ -81,12 +93,6 @@ jobs:
 
       - name: Validate the Worker config and bundle
         run: pnpm --filter @planeahead/api exec wrangler deploy --dry-run --env staging
-
-      # The Worker reports the hash of the migration journal on /health. Regenerating it here and
-      # failing on a diff means a deploy can never claim a schema version the repository does not
-      # have.
-      - name: Check the generated migration hash is current
-        run: node scripts/gen-migration-hash.mjs --check
 
       # Migrations run against the Neon DIRECT endpoint, never through Hyperdrive and never
       # through the -pooler host; packages/db asserts both. Missing secret is a warning, not a

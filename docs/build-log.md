@@ -37,11 +37,16 @@ and alarm findings are in `apps/api/vitest.config.ts` and `apps/api/test/workers
   event could have: `url.query` and the query half of `url.full` ride out as SEGMENT SPAN
   attributes, which `event.request` does not cover. The scrubber now clears body, header and query
   attributes from `contexts.trace.data` and from every `spans[].data`.
-- **Unauthenticated idempotency scopes are per client IP**, not one shared `anonymous` bucket. Two
-  callers sending the same key would otherwise read each other's stored response. Under
-  `wrangler dev` and in the test pool there is no `CF-Connecting-IP` and they collapse again,
-  which is documented at the call site and is why the memory store is a convenience, not a
-  guarantee.
+- **Unauthenticated idempotency scopes are per `X-Install-Id`**, the client-owned install id
+  increment 5's `POST /v1/devices` registers, not one shared `anonymous` bucket and not the
+  client IP. The first fix round scoped by `CF-Connecting-IP`, which closed the cross-caller leak
+  only for callers on different addresses and broke the one retry the key exists for: a phone
+  moving from WiFi to LTE mid-retry changed scope and created its resource twice. A keyed request
+  with neither a user nor an install id is answered 400 `idempotency_scope_missing` rather than
+  run without the guarantee it asked for. Ruling E6 stands (idempotency ahead of auth), so the
+  Postgres store and the per-user scope stay in the file as the documented path for the `/v1`
+  mount behind auth in increment 8 and are stated, in code and in tests, to be unreachable from
+  the global slot until then.
 - **New ESLint rule `planeahead/no-literal-control-characters`**, with a RuleTester unit test and
   a `.gitattributes` backstop. A raw NUL in a template literal made git classify
   `apps/api/src/middleware/idempotency.ts` as binary (`Bin 0 -> 9233 bytes`), costing the one file
@@ -85,6 +90,16 @@ and alarm findings are in `apps/api/vitest.config.ts` and `apps/api/test/workers
 - **`.dev.vars.example` lists the rest of the secret set** from plan section 5 as commented-out
   placeholders tagged with the increment that turns each one on, so the file is a checklist rather
   than a snapshot of what increment 4 happens to read.
+- **`deploy-staging.yml` checks the migration hash first, immediately after install.** The first
+  fix round inserted typecheck, test and the dry run between install and the `--check` step, and
+  the api `typecheck` and `test` scripts regenerate the constant, so the check compared the file
+  they had just written and could never fail. `tools/workflows/migration-hash-check.test.js`
+  (run by the root `test:tools` script, which replaces `test:eslint-rules`) asserts in every job
+  that checks that the check precedes every regenerating step.
+- **`registerChain` returns the order it registered.** `MIDDLEWARE_ORDER` was a hand-maintained
+  list compared to a literal copy of itself, and the suite stayed green with cors and rate-limit
+  swapped in the code. The slots are now `[name, handler]` pairs the loop registers from, and
+  chain.test.ts compares the returned names to the constant.
 
 ## Pinned versions (increment 3)
 

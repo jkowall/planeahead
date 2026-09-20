@@ -37,7 +37,7 @@
       ]
     },
     "test": {
-      "dependsOn": ["//#test:eslint-rules"],
+      "dependsOn": ["//#test:tools"],
       "inputs": [
         "src/**",
         "scripts/**",
@@ -57,8 +57,10 @@
     "//#lint:root": {
       "inputs": ["eslint.config.js", "scripts/**", "tools/**"]
     },
-    "//#test:eslint-rules": {
-      "inputs": ["tools/eslint/**"]
+    "//#test:tools": {
+      // The ESLint rule tests and the workflow-order test. The latter reads the workflow files,
+      // so they are inputs too or a reordered step would cache-hit against a stale pass.
+      "inputs": ["tools/**", ".github/workflows/**"]
     },
     "//#format:check": {
       "cache": false

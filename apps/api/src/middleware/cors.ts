@@ -10,6 +10,7 @@
 import { cors } from 'hono/cors';
 import type { Context, MiddlewareHandler } from 'hono';
 import type { AppBindings, Env } from '../env';
+import { INSTALL_ID_HEADER } from './idempotency';
 import { REQUEST_ID_HEADER } from './request-id';
 
 /** Origins allowed in every environment. `planeahead://` is the Expo app scheme. */
@@ -30,7 +31,13 @@ export function corsMiddleware(): MiddlewareHandler<AppBindings> {
     // reapplied here rather than letting `c.env` decay to `any`.
     origin: (origin, c: Context<AppBindings>) =>
       allowedOrigins(c.env).includes(origin) ? origin : null,
-    allowHeaders: ['Content-Type', 'Authorization', 'Idempotency-Key', REQUEST_ID_HEADER],
+    allowHeaders: [
+      'Content-Type',
+      'Authorization',
+      'Idempotency-Key',
+      INSTALL_ID_HEADER,
+      REQUEST_ID_HEADER,
+    ],
     exposeHeaders: [REQUEST_ID_HEADER, 'Retry-After'],
     allowMethods: ['GET', 'POST', 'PATCH', 'DELETE', 'OPTIONS'],
     credentials: true,

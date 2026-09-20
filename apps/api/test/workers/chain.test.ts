@@ -20,20 +20,27 @@
 
 import { createExecutionContext, waitOnExecutionContext } from 'cloudflare:test';
 import { env, exports } from 'cloudflare:workers';
+import { Hono } from 'hono';
 import { HTTPException } from 'hono/http-exception';
 import { describe, expect, it } from 'vitest';
-import { MIDDLEWARE_ORDER, createApp } from '../../src/app';
+import { MIDDLEWARE_ORDER, createApp, registerChain } from '../../src/app';
 import type { AuthenticatedUser } from '../../src/auth/user';
+import type { AppBindings } from '../../src/env';
 import {
   IDEMPOTENCY_KEY_HEADER,
+  INSTALL_ID_HEADER,
   createMemoryIdempotencyStore,
 } from '../../src/middleware/idempotency';
 import { REQUEST_ID_HEADER } from '../../src/middleware/request-id';
 
-function postInit(key?: string): RequestInit {
+/** A keyed request the way the mobile outbox sends one: key and install id together. */
+function postInit(key?: string, installId: string | null = 'chain-install-0001'): RequestInit {
   const headers: Record<string, string> = { 'Content-Type': 'application/json' };
   if (key !== undefined) {
     headers[IDEMPOTENCY_KEY_HEADER] = key;
+  }
+  if (installId !== null) {
+    headers[INSTALL_ID_HEADER] = installId;
   }
   return { method: 'POST', headers, body: JSON.stringify({ number: 'AA100' }) };
 }
@@ -60,6 +67,20 @@ describe('the deployed chain answers the shape it documents', () => {
     );
 
     expect(response.status).toBe(501);
+  });
+
+  it('answers 400, not 500, for a keyed request that carries no X-Install-Id', async () => {
+    // No user can be resolved ahead of auth and there is no install id, so the key has no scope.
+    // The Worker says so instead of running the handler as if the key had not been sent.
+    const response = await exports.default.fetch(
+      'https://api.planeahead.test/v1/flights',
+      postInit('chain-key-00000005', null),
+    );
+    const body = await response.json<{ error: string; requestId: string }>();
+
+    expect(response.status).toBe(400);
+    expect(body.error).toBe('idempotency_scope_missing');
+    expect(body.requestId).toBe(response.headers.get(REQUEST_ID_HEADER));
   });
 
   it('answers 501 for a keyed POST to the auth surface increment 5 owns', async () => {
@@ -98,7 +119,9 @@ describe('the deployed chain answers the shape it documents', () => {
 });
 
 describe('registration order', () => {
-  it('is the order ruling E6 fixes', () => {
+  it('pins MIDDLEWARE_ORDER to the order ruling E6 fixes', () => {
+    // The constant against the ruling's text. On its own this is a list compared to a copy of
+    // itself; the case below is what ties the constant to the code.
     expect([...MIDDLEWARE_ORDER]).toEqual([
       'request-id',
       'sentry',
@@ -107,6 +130,17 @@ describe('registration order', () => {
       'idempotency',
       'auth',
     ]);
+  });
+
+  it('registers the slots in the order MIDDLEWARE_ORDER documents', () => {
+    // `registerChain` returns the names of the slots it registered, in the order it called
+    // `app.use()`. The list comes from the same tuples the registrations do, so swapping two
+    // `use()` calls swaps two entries here and this fails, which a comparison of the constant to
+    // a literal never could. An earlier version of this file only did the comparison above, and
+    // the whole suite stayed green with cors and rate-limit swapped in the code.
+    const registered = registerChain(new Hono<AppBindings>());
+
+    expect(registered).toEqual([...MIDDLEWARE_ORDER]);
   });
 
   it('reaches the idempotency slot with c.var.user still unset', async () => {

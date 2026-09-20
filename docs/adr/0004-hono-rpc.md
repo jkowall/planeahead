@@ -63,6 +63,10 @@ Sentry, CORS, rate-limit, idempotency, auth, then routes. `apps/mobile` will typ
   slot ahead of the auth middleware. Readers there use `c.var.user ?? null`. The `Variables`
   generic types the value as `AuthenticatedUser | null` and cannot express "not set yet", so this
   is a convention the tests enforce rather than a type the compiler checks.
+- Also follows: the global idempotency slot never sees a user, so an anonymous keyed request is
+  scoped by the client-owned `X-Install-Id` header (400 without it), and the per-user Postgres
+  store is reachable only from a second `idempotency()` mounted behind auth, which increment 8
+  does for `/v1`.
 - Harder: `AppType` is only correct if every route stays in the single chained expression in
   `src/index.ts`. That is a convention a reviewer has to enforce; nothing fails loudly when it is
   broken, the mobile client simply loses types. The comment at the top of `src/index.ts` says so.

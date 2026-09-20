@@ -321,6 +321,7 @@ describe('a real request through the real chain', () => {
           cookie: `session=${COOKIE_SECRET}`,
           'content-type': 'application/json',
           'idempotency-key': 'sentry-key-00001',
+          'x-install-id': 'sentry-install-00001',
         },
         body: JSON.stringify({ email: BODY_EMAIL, identityToken: BODY_SECRET }),
       }),
