@@ -1,0 +1,24 @@
+# Local variables and secrets for `wrangler dev`. Copy to `.dev.vars` and fill in.
+#
+# `.dev.vars` is gitignored; this template is not. `.dev.vars.<environment>` REPLACES `.dev.vars`
+# entirely when you pass `--env <environment>`, it does not merge with it, so a `.dev.vars.staging`
+# has to repeat every line it needs.
+#
+# None of this reaches the Vitest pool. `pnpm --filter @planeahead/api test` reads its bindings
+# from wrangler.jsonc and from the `miniflare` block in vitest.config.ts, and it opens no database
+# connection at all.
+
+# Overrides the Hyperdrive binding's connection string for `wrangler dev` only. Point it at your
+# own Neon branch (for example dev-jkowall); there is no local Postgres and no Docker in this
+# project. The variable name is CLOUDFLARE_HYPERDRIVE_LOCAL_CONNECTION_STRING_<BINDING>.
+CLOUDFLARE_HYPERDRIVE_LOCAL_CONNECTION_STRING_DB=postgres://user:password@ep-example.us-east-1.aws.neon.tech/planeahead
+
+# Mirrors the `vars.ENVIRONMENT` in wrangler.jsonc. Keep it `local`.
+ENVIRONMENT=local
+
+# Leave empty to run without Sentry: the SDK initialises and drops every event.
+SENTRY_DSN=
+
+# `wrangler dev --env staging` needs the line above even though the staging Hyperdrive binding has
+# no localConnectionString of its own: environment blocks do not inherit it, and wrangler refuses
+# to start a local Hyperdrive without one.

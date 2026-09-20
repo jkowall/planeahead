@@ -38,10 +38,44 @@ jobs:
       - run: pnpm turbo run lint
       - run: pnpm prettier --check .
 
+  # The Workers suite. No service container: increment 4's tests open no database connection at
+  # all. /health reports a build-time constant, the Durable Objects never touch Postgres (ADR
+  # 0007), and the Hyperdrive binding carries a connection string that is never dialled. Keeping
+  # this job Postgres-free is what makes that property visible: the day a Workers test needs a
+  # database, this job fails rather than quietly picking one up.
+  test-workers:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v6
+        with:
+          node-version-file: .node-version
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm turbo run test --filter=@planeahead/api
+
+  # Validates wrangler.jsonc and bundles the Worker without credentials: `wrangler deploy
+  # --dry-run` never resolves an account id in 4.135.0. It does NOT verify that the KV, R2, queue
+  # or Hyperdrive ids exist; the first staging deploy is that check.
+  wrangler-dry-run:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v6
+        with:
+          node-version-file: .node-version
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - run: node scripts/gen-migration-hash.mjs --check
+      - run: pnpm --filter @planeahead/api exec wrangler deploy --dry-run --env staging
+      - run: pnpm --filter @planeahead/api exec wrangler deploy --dry-run --env production
+
   test:
     runs-on: ubuntu-latest
-    # @planeahead/db runs its suite against this container through TEST_DATABASE_URL; the api
-    # and shared packages ignore the variable. Locally the same suite starts embedded-postgres.
+    # @planeahead/db runs its suite against this container through TEST_DATABASE_URL; the shared
+    # package ignores the variable. Locally the same suite starts embedded-postgres.
     # src/migrate.ts asserts server_version_num >= 180000, which is the guard against this tag
     # ever resolving to a different major.
     services:
@@ -72,7 +106,7 @@ jobs:
           node-version-file: .node-version
           cache: pnpm
       - run: pnpm install --frozen-lockfile
-      - run: pnpm turbo run test
+      - run: pnpm turbo run test --filter=!@planeahead/api
 
   toolchain-guard:
     runs-on: ubuntu-latest

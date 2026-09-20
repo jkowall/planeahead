@@ -6,6 +6,10 @@ pnpm-lock.yaml
 
 # Cloudflare
 .wrangler/
+# Written byte-for-byte by `wrangler types` and committed so CI and editors agree without running
+# wrangler. 15k lines of Cloudflare's own formatting; reformatting it would churn on every
+# regeneration.
+apps/api/worker-configuration.d.ts
 
 # Expo / React Native continuous native generation
 .expo/
