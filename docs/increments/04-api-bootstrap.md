@@ -1,6 +1,6 @@
 # Increment 4: API Worker bootstrap
 
-Status: spec (2026-09-19, revised the same day against `04-api-bootstrap.facts.md`). Builder: Opus 5. Reviewer: Opus 5 (Workers best practices lens) plus orchestrator read. Branch `inc4-api-bootstrap` based on `inc3-db-schema`.
+Status: complete (2026-09-21) on branch `inc4-api-bootstrap`, stacked PR opened for CI. Outcome, spikes and deviations are in `docs/build-log.md`. Builder: Opus 5. Reviewer: Opus 5 (Workers best practices lens) plus orchestrator read. Branch `inc4-api-bootstrap` based on `inc3-db-schema`.
 
 Read `docs/increments/04-api-bootstrap.facts.md` first. Every fact there was verified against a primary source on 2026-09-19 and several overrode the first version of this spec; the rules below already incorporate them.
 
