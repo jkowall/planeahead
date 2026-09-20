@@ -363,7 +363,8 @@ export const RegionalOperatorSeedSchema = z.looseObject({
 
 /**
  * HINT TABLE. Parsed and validated at module load from `data/regional-operators.seed.json`;
- * `packages/db` seeds `regional_operators` from OPTD and overrides it. See the `$comment` in
+ * `packages/db` seeds `regional_operators` from this file (confidence `hint`) until a
+ * BTS-derived table replaces it. See the `$comment` in
  * the JSON for what each confidence level means.
  */
 export const REGIONAL_OPERATOR_SEED: readonly RegionalOperatorRule[] =

@@ -321,17 +321,42 @@ function formatLeg(leg: RelaxedLeg): string {
   return `${formatFromDeparture(leg.fromMinutes)} to ${formatFromDeparture(leg.toMinutes)}`;
 }
 
+/**
+ * The recorded decision behind each relaxation. Anything without a decision prints as OPEN so
+ * the document never presents a rounding artefact as an accepted trade-off.
+ */
 function whyAccepted(cadence: CadenceDefinition, relaxation: SloRelaxation): string {
+  const legs = relaxation.relaxedLegs.map(formatLeg).join(', ');
   if (cadence.id === 'literal') {
     return 'the brief as written, kept for comparison only';
   }
-  if (relaxation.alerts) {
-    return cadence.aerodataboxAlerts === null
-      ? 'alerts carry OOOI and ETA; polls only need gates'
-      : 'webhooks and alerts carry the SLO (unverified)';
+  if (cadence.id === 'B') {
+    return 'webhooks and alerts are assumed to carry the SLO (unverified, Phase 1 decision)';
   }
-  const legs = relaxation.relaxedLegs.map(formatLeg).join(', ');
-  return `polls are the only source; the SLO holds except on ${legs}`;
+  if (cadence.id === 'A2' && relaxation.sloWindow === '3h_to_arrival') {
+    return 'plan section 8: OOOI and ETA arrive by alert; in-flight gate changes are accepted at 30-minute latency';
+  }
+  if (cadence.id === 'A2' && relaxation.sloWindow === 'post_arrival') {
+    return 'plan section 8: alerts carry in; the tail only refreshes baggage claim';
+  }
+  if (cadence.id === 'A1' && relaxation.sloWindow === 'post_arrival') {
+    return 'plan section 8: the fallback tail is five fixed polls, 15-minute cover for the first 45 minutes then a final poll';
+  }
+  return `OPEN: no recorded decision for ${legs}`;
+}
+
+/** The single widest gap behind a relaxation row, as a span. */
+function widestLeg(relaxation: SloRelaxation): string {
+  let widest: RelaxedLeg | undefined;
+  for (const leg of relaxation.relaxedLegs) {
+    if (
+      widest === undefined ||
+      leg.toMinutes - leg.fromMinutes > widest.toMinutes - widest.fromMinutes
+    ) {
+      widest = leg;
+    }
+  }
+  return widest === undefined ? 'n/a' : formatLeg(widest);
 }
 
 function relaxationsTable(): string {
@@ -341,7 +366,7 @@ function relaxationsTable(): string {
       rows.push([
         cadence.id,
         SLO_WINDOW_LABELS[relaxation.sloWindow],
-        relaxation.tiers.map((tier) => TIER_LABELS[tier]).join(', '),
+        widestLeg(relaxation),
         formatMinutes(relaxation.maxGapMinutes),
         formatMinutes(relaxation.strictestSloMinutes),
         whyAccepted(cadence, relaxation),
@@ -352,7 +377,7 @@ function relaxationsTable(): string {
     [
       'Cadence',
       'SLO window',
-      'Cadence windows',
+      'Widest gap span',
       'Widest poll gap',
       'Strictest poll SLO',
       'Why it is accepted',
@@ -365,7 +390,7 @@ function relaxationsTable(): string {
 function landingGapLine(): string {
   const parts = CADENCES.map((cadence) => {
     const { pollInstants } = expectedCalls(cadence, {
-      leadTimeDays: 2,
+      leadTimeDays: SLO_REPORT_LEAD_TIME_DAYS,
       blockMinutes: BLOCK_MINUTES,
     });
     const gap = gapAcross(pollInstants, BLOCK_MINUTES);
@@ -388,7 +413,7 @@ export function renderCadenceSection(): string {
     '',
     '_Generated from `packages/shared/src/cadence.ts` by `pnpm --filter @planeahead/shared gen:cadence-table`. Do not edit between the markers; `packages/shared/test/cadence-table.test.ts` fails when this block drifts from the code._',
     '',
-    `Assumptions: block ${String(BLOCK_MINUTES)} min, boarding at T-${String(params.boardingMinutesBefore)} min, tail stops at in+${String(params.postArrivalStopMinutes)} min, on-time flight, one creation fetch at the lead time. Slot rule: start-anchored windows yield \`round(duration / interval)\` polls, so a trailing partial slot of at least half an interval earns a poll; the pre-48 h AeroDataBox windows count back from T-48 h (daily inside 14 d, every 2 d beyond) and yield \`floor(duration / interval)\`; the instant on a boundary belongs to the later window; fixed-slot windows list their slots. A flight that passes its planned arrival without \`in\` keeps polling until \`in\` or \`MAX_LIFETIME\`: interval windows continue their grid, fixed-slot windows poll every \`lateIntervalMinutes\` from the planned arrival. Prices are list prices from \`cost.ts\` (AeroAPI status $0.005, alert delivery $0.020; AeroDataBox 2 units per status call at $0.00025 per unit on Growth).`,
+    `Assumptions: block ${String(BLOCK_MINUTES)} min, boarding at T-${String(params.boardingMinutesBefore)} min, tail stops at in+${String(params.postArrivalStopMinutes)} min, on-time flight, one creation fetch at the lead time. Slot rule: start-anchored windows yield \`ceil(duration / interval)\` polls, so a trailing partial slot always earns a poll and no window ends with a gap longer than its interval; the pre-48 h AeroDataBox windows count back from T-48 h (daily inside 14 d, every 2 d beyond) and yield \`floor(duration / interval)\`; the instant on a boundary belongs to the later window; fixed-slot windows list their slots. A flight that passes its planned arrival without \`in\` keeps polling until \`in\` or \`MAX_LIFETIME\`: interval windows continue their grid, fixed-slot windows poll every \`lateIntervalMinutes\` from the planned arrival. Prices are list prices from \`cost.ts\` (AeroAPI status $0.005, alert delivery $0.020; AeroDataBox 2 units per status call at $0.00025 per unit on Growth).`,
     '',
     '### Windows inside 48 h (AeroAPI)',
     '',

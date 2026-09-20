@@ -36,14 +36,23 @@ describe('docs/architecture.md cadence block', () => {
     expect(rendered).toContain(`| ${String(A1_EXPECTED_POLLS)} `);
     expect(rendered).toContain(`| ${String(LITERAL_EXPECTED_POLLS)} `);
     expect(rendered).toContain('fixed slots in, in+15min, in+30min, in+45min, in+120min: 5');
-    expect(rendered).toMatch(/\| literal +\| 6 h to 3 h +\| Hourly window +\| 1 h +\| 15 min/);
-    expect(rendered).toMatch(/\| A1 +\| Post-arrival +\| Post-arrival tail +\| 75 min +\| 15 min/);
-    expect(rendered).toContain('the SLO holds except on in+45min to in+120min');
-    // A gap that crosses T-6 h is charged to both SLO windows (R10).
-    expect(rendered).toMatch(/\| B +\| 48 h to 6 h +\| Hourly window +\| 45 h +\| 1 h/);
-    expect(rendered).toMatch(/\| B +\| 6 h to 3 h +\| Pre-boarding window +\| 45 h +\| 15 min/);
+    expect(rendered).toMatch(/\| literal +\| 6 h to 3 h +\| T-6h to T-5h +\| 1 h +\| 15 min/);
+    expect(rendered).toMatch(
+      /\| A1 +\| Post-arrival +\| in\+45min to in\+120min +\| 75 min +\| 15 min/,
+    );
+    expect(rendered).toContain('the fallback tail is five fixed polls');
+    // No A1 row for 3 h to arrival: the pre-boarding grid runs to T-45, so there is no hole.
+    expect(rendered).not.toMatch(/\| A1 +\| 3 h to arrival/);
+    expect(rendered).toMatch(
+      /\| A2 +\| 3 h to arrival +\| T-40min to T-10min +\| 30 min +\| 15 min/,
+    );
+    // A gap that crosses T-6 h is charged to both SLO windows (R10); the span column names the gap.
+    expect(rendered).toMatch(/\| B +\| 48 h to 6 h +\| T-48h to T-3h +\| 45 h +\| 1 h/);
+    expect(rendered).toMatch(/\| B +\| 6 h to 3 h +\| T-48h to T-3h +\| 45 h +\| 15 min/);
+    // Every relaxation row carries a recorded decision; nothing prints as OPEN.
+    expect(rendered).not.toContain('OPEN:');
     expect(rendered).toContain(
-      'literal 2 min (out+178min to in); A1 10 min (out+170min to in); A2 40 min (out+140min to in); B 3 h (out+15min to in+15min)',
+      'literal 2 min (out+178min to in); A1 10 min (out+170min to in); A2 10 min (out+170min to in); B 3 h (out+15min to in+15min)',
     );
     expect(rendered).toContain('Do not edit between the markers');
     expect(rendered).toContain('<!-- prettier-ignore-start -->');

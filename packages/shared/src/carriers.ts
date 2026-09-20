@@ -3,8 +3,8 @@ import { z } from 'zod';
 /**
  * Carriers are identified by ICAO code in every flight key. Provider payloads and user input
  * mostly carry IATA codes, so the boundary shape allows either and the helpers below resolve
- * IATA to ICAO through an injected table. The authoritative table is the OPTD-derived
- * `airlines` seed in `packages/db`; `CARRIER_IATA_TO_ICAO_FALLBACK` exists only so the mobile
+ * IATA to ICAO through an injected table. The authoritative table is the `airlines` seed in
+ * `packages/db` (vradarserver standing-data spine, OPTD alliances); `CARRIER_IATA_TO_ICAO_FALLBACK` exists only so the mobile
  * app can build a probable designator offline. It is a fallback, not a source of truth.
  */
 
@@ -30,7 +30,7 @@ export type CarrierIataToIcaoTable = Readonly<Record<string, string>>;
 
 /**
  * FALLBACK ONLY. Roughly the top 60 carriers by passengers plus the US regional operators the
- * flight-key hint table refers to. `packages/db` overrides this with the OPTD-derived seed.
+ * flight-key hint table refers to. `packages/db` overrides this with the `airlines` seed.
  * Hand-checked against each carrier's published codes on 2026-09-19.
  */
 export const CARRIER_IATA_TO_ICAO_FALLBACK: CarrierIataToIcaoTable = Object.freeze({

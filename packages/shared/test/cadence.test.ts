@@ -104,14 +104,14 @@ const TIER_ORDER: CadenceTier[] = [
 ];
 
 describe('derived constants', () => {
-  it('reproduce the plan: A2 72 polls, 12 alerts, 120 PE; A1 83; literal 181; B 5', () => {
-    expect(A2_EXPECTED_POLLS).toBe(72);
+  it('derive A2 74 polls, 12 alerts, 122 PE; A1 84; literal 181; B 5 (the plan wrote 72 and 83 with a round() slot rule that left a 20-minute hole before boarding)', () => {
+    expect(A2_EXPECTED_POLLS).toBe(74);
     expect(A2_EXPECTED_ALERTS).toBe(12);
     expect(ASSUMED_ALERTS_PER_FLIGHT).toBe(12);
-    expect(A2_EXPECTED_PE).toBe(120);
-    expect(A2_SOFT_CAP_PE).toBe(240);
-    expect(A2_HARD_CAP_PE).toBe(480);
-    expect(A1_EXPECTED_POLLS).toBe(83);
+    expect(A2_EXPECTED_PE).toBe(122);
+    expect(A2_SOFT_CAP_PE).toBe(244);
+    expect(A2_HARD_CAP_PE).toBe(488);
+    expect(A1_EXPECTED_POLLS).toBe(84);
     expect(LITERAL_EXPECTED_POLLS).toBe(181);
     expect(B_EXPECTED_POLLS).toBe(5);
   });
@@ -256,12 +256,9 @@ describe('SLO table', () => {
     const summary = (c: CadenceDefinition): [SloWindow, number, number][] =>
       sloRelaxations(c).map((r) => [r.sloWindow, r.maxGapMinutes, r.strictestSloMinutes]);
     expect(summary(CADENCE_LITERAL)).toEqual([['6h_to_3h', 60, 15]]);
-    expect(summary(CADENCE_A1)).toEqual([
-      ['3h_to_arrival', 20, 15],
-      ['post_arrival', 75, 15],
-    ]);
+    expect(summary(CADENCE_A1)).toEqual([['post_arrival', 75, 15]]);
     expect(summary(CADENCE_A2)).toEqual([
-      ['3h_to_arrival', 40, 15],
+      ['3h_to_arrival', 30, 15],
       ['post_arrival', 60, 15],
     ]);
     expect(summary(CADENCE_B)).toEqual([
@@ -337,17 +334,14 @@ describe('SLO table', () => {
     expect(tail?.relaxedLegs).toEqual([{ fromMinutes: BLOCK + 45, toMinutes: BLOCK + 120 }]);
   });
 
-  it('surfaces the 20-minute hole the round() slot rule leaves before boarding on A1', () => {
-    // 320 minutes of 15-minute slots round to 21, so the last pre-boarding poll is at T-60 and
-    // the in-flight grid opens at T-40. Alerts cover it on A2; on A1 it is a real relaxation.
-    const [preBoarding] = sloRelaxations(CADENCE_A1);
-    expect(preBoarding).toMatchObject({
-      sloWindow: '3h_to_arrival',
-      tiers: ['pre_boarding', 'in_flight'],
-      alerts: false,
-      maxGapMinutes: 20,
-    });
-    expect(preBoarding?.relaxedLegs).toEqual([{ fromMinutes: -60, toMinutes: -40 }]);
+  it('leaves no hole before boarding: the 15-minute grid runs to T-45 and the in-flight grid opens at T-40', () => {
+    // 320 minutes of 15-minute slots ceil to 22 (a round() rule gave 21 and a 20-minute hole from
+    // T-60 to T-40, which a 15-minute gate SLO does not allow on a polls-only cadence).
+    const around = (c: CadenceDefinition): number[] =>
+      expectedCalls(c, { leadTimeDays: 2 }).pollInstants.filter((m) => m >= -120 && m <= 0);
+    expect(around(CADENCE_A1)).toEqual([-120, -105, -90, -75, -60, -45, -40, -25, -10]);
+    expect(around(CADENCE_A2)).toEqual([-120, -105, -90, -75, -60, -45, -40, -10]);
+    expect(sloRelaxations(CADENCE_A1).some((r) => r.sloWindow === '3h_to_arrival')).toBe(false);
   });
 
   it('measures the hole across the landing instant from the simulated polls (R2, R10)', () => {
@@ -357,7 +351,7 @@ describe('SLO table', () => {
     };
     // Before R2 was revised, A1's first tail slot at in+15 left 25 minutes from the in-10 poll.
     expect(across(CADENCE_A1)).toEqual([BLOCK - 10, BLOCK]);
-    expect(across(CADENCE_A2)).toEqual([BLOCK - 40, BLOCK]);
+    expect(across(CADENCE_A2)).toEqual([BLOCK - 10, BLOCK]);
     expect(across(CADENCE_LITERAL)).toEqual([BLOCK - 2, BLOCK]);
     expect(across(CADENCE_B)).toEqual([15, BLOCK + 15]);
     expect(gapAcross([10, 20], 30)).toBeNull();
@@ -461,15 +455,20 @@ describe('refreshIntervalFor (A2 unless stated)', () => {
   });
 
   it('switches to the in-flight interval at boarding', () => {
-    const d = decide(CADENCE_A2, -60);
+    const last = decide(CADENCE_A2, -60);
+    expect(nextMinutes(last)).toBe(-45);
+    expect(last.tier).toBe('pre_boarding');
+    const d = decide(CADENCE_A2, -45);
     expect(nextMinutes(d)).toBe(-40);
     expect(d.tier).toBe('in_flight');
     expect(d.nominalIntervalMinutes).toBe(30);
-    expect(d.intervalMs).toBe(20 * MINUTE_MS);
+    expect(d.intervalMs).toBe(5 * MINUTE_MS);
     expect(nextMinutes(decide(CADENCE_A2, -40))).toBe(-10);
     expect(nextMinutes(decide(CADENCE_A2, -10))).toBe(20);
-    expect(nextMinutes(decide(CADENCE_A2, 140))).toBe(180);
-    expect(decide(CADENCE_A2, 140).tier).toBe('post_arrival');
+    expect(nextMinutes(decide(CADENCE_A2, 140))).toBe(170);
+    expect(decide(CADENCE_A2, 140).tier).toBe('in_flight');
+    expect(nextMinutes(decide(CADENCE_A2, 170))).toBe(180);
+    expect(decide(CADENCE_A2, 170).tier).toBe('post_arrival');
   });
 
   it('runs the tail from arrival and stops at in + 2 h', () => {
@@ -628,8 +627,8 @@ describe('expectedCalls', () => {
     const polls = (c: CadenceDefinition): number[] =>
       expectedCalls(c, { leadTimeDays: 2 }).byWindow.map((w) => w.polls);
     expect(polls(CADENCE_LITERAL)).toEqual([0, 0, 45, 14, 110, 12]);
-    expect(polls(CADENCE_A1)).toEqual([0, 0, 42, 21, 15, 5]);
-    expect(polls(CADENCE_A2)).toEqual([0, 0, 42, 21, 7, 2]);
+    expect(polls(CADENCE_A1)).toEqual([0, 0, 42, 22, 15, 5]);
+    expect(polls(CADENCE_A2)).toEqual([0, 0, 42, 22, 8, 2]);
     expect(polls(CADENCE_B)).toEqual([0, 0, 1, 1, 1, 2]);
   });
 
@@ -656,19 +655,19 @@ describe('expectedCalls', () => {
   it('totals, poll-equivalents and list cost per cadence inside 48 h', () => {
     const a2 = expectedCalls(CADENCE_A2, { leadTimeDays: 2 });
     expect(a2).toMatchObject({
-      polls: 72,
+      polls: 74,
       alerts: 12,
       adbCalls: 0,
       adbUnits: 0,
       adbAlertItems: 0,
-      pollEquivalents: 120,
-      listCostUsdMicros: 600_000,
+      pollEquivalents: 122,
+      listCostUsdMicros: 610_000,
     });
     expect(expectedCalls(CADENCE_A1, { leadTimeDays: 2 })).toMatchObject({
-      polls: 83,
+      polls: 84,
       alerts: 0,
-      pollEquivalents: 83,
-      listCostUsdMicros: 415_000,
+      pollEquivalents: 84,
+      listCostUsdMicros: 420_000,
     });
     expect(expectedCalls(CADENCE_LITERAL, { leadTimeDays: 2 })).toMatchObject({
       polls: 181,
@@ -702,9 +701,9 @@ describe('expectedCalls', () => {
     const byLead = [3, 14, 30].map((leadTimeDays) => expectedCalls(CADENCE_A2, { leadTimeDays }));
     expect(byLead.map((r) => r.adbCalls)).toEqual([1, 12, 20]);
     expect(byLead.map((r) => r.adbUnits)).toEqual([2, 24, 40]);
-    expect(byLead.map((r) => r.polls)).toEqual([72, 72, 72]);
-    expect(byLead.map((r) => r.pollEquivalents)).toEqual([120.1, 121.2, 122]);
-    expect(byLead.map((r) => r.listCostUsdMicros)).toEqual([600_500, 606_000, 610_000]);
+    expect(byLead.map((r) => r.polls)).toEqual([74, 74, 74]);
+    expect(byLead.map((r) => r.pollEquivalents)).toEqual([122.1, 123.2, 124]);
+    expect(byLead.map((r) => r.listCostUsdMicros)).toEqual([610_500, 616_000, 620_000]);
     expect(byLead.map((r) => r.byWindow.slice(0, 2).map((w) => w.polls))).toEqual([
       [0, 1],
       [0, 12],
@@ -720,14 +719,14 @@ describe('expectedCalls', () => {
   });
 
   it('responds to the block, boarding and stop assumptions', () => {
-    expect(expectedCalls(CADENCE_A2, { leadTimeDays: 2, blockMinutes: 120 }).polls).toBe(70);
+    expect(expectedCalls(CADENCE_A2, { leadTimeDays: 2, blockMinutes: 120 }).polls).toBe(72);
     expect(expectedCalls(CADENCE_A2, { leadTimeDays: 2, boardingMinutesBefore: 30 }).polls).toBe(
       73,
     );
     expect(expectedCalls(CADENCE_A2, { leadTimeDays: 2, postArrivalStopMinutes: 60 }).polls).toBe(
-      71,
+      73,
     );
-    expect(expectedCalls(CADENCE_A2, { leadTimeDays: 1 }).polls).toBe(48);
+    expect(expectedCalls(CADENCE_A2, { leadTimeDays: 1 }).polls).toBe(50);
     expect(expectedCalls(CADENCE_A2, { leadTimeDays: 2, blockMinutes: 180 })).toEqual(
       expectedCalls(CADENCE_A2, { leadTimeDays: 2 }),
     );
@@ -777,7 +776,7 @@ describe('window helpers', () => {
     expect(resolveWindows(CADENCE_A2, ctx(10, { phase: 'cancelled' })).windows).toEqual([]);
   });
 
-  it('slotCount rounds start-anchored windows and floors end-anchored ones', () => {
+  it('slotCount ceils start-anchored windows and floors end-anchored ones', () => {
     const base = {
       tier: 'in_flight' as const,
       from: 'boarding' as const,
@@ -785,11 +784,12 @@ describe('window helpers', () => {
       source: 'aeroapi' as const,
       alerts: true,
     };
-    expect(slotCount({ ...base, intervalMinutes: 30 }, 0, 220 * MINUTE_MS)).toBe(7);
+    expect(slotCount({ ...base, intervalMinutes: 30 }, 0, 220 * MINUTE_MS)).toBe(8);
     expect(slotCount({ ...base, intervalMinutes: 15 }, 0, 220 * MINUTE_MS)).toBe(15);
     expect(slotCount({ ...base, intervalMinutes: 60 }, 0, 120 * MINUTE_MS)).toBe(2);
-    expect(slotCount({ ...base, intervalMinutes: 60 }, 0, 89 * MINUTE_MS)).toBe(1);
-    expect(slotCount({ ...base, intervalMinutes: 60 }, 0, 90 * MINUTE_MS)).toBe(2);
+    expect(slotCount({ ...base, intervalMinutes: 60 }, 0, 61 * MINUTE_MS)).toBe(2);
+    expect(slotCount({ ...base, intervalMinutes: 60 }, 0, 60 * MINUTE_MS)).toBe(1);
+    expect(slotCount({ ...base, intervalMinutes: 15 }, 0, 320 * MINUTE_MS)).toBe(22);
     expect(slotCount({ ...base, intervalMinutes: days(1), anchor: 'end' }, 0, 12.9 * DAY_MS)).toBe(
       12,
     );

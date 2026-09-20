@@ -7,8 +7,9 @@ import type { AlertEvent, FlightStatusValue } from './flight-status';
  * are placed inside it:
  *
  * - Interval windows place polls on a grid. Start-anchored windows (everything inside 48 h)
- *   put slot k at `start + k x interval` and yield `round(duration / interval)` slots, so a
- *   trailing partial slot earns a poll only when it is at least half an interval long. The
+ *   put slot k at `start + k x interval` and yield `ceil(duration / interval)` slots, so a
+ *   trailing partial slot always earns a poll and no window ends with a gap longer than its
+ *   own interval (a `round` rule left a 20-minute hole before boarding on a 15-minute grid). The
  *   pre-48 h windows are end-anchored (they count back from T-48 h so the daily grid lands on
  *   T-3 d, T-4 d, ...) and yield `floor(duration / interval)` slots, so no slot can precede
  *   the window start. The boundary instant between two windows belongs to the later window.
@@ -568,7 +569,8 @@ export function slotCount(window: IntervalWindow, start: number, end: number): n
     return Number.POSITIVE_INFINITY;
   }
   const ratio = duration / (window.intervalMinutes * MINUTE_MS);
-  return window.anchor === 'end' ? Math.floor(ratio) : Math.round(ratio);
+  // The epsilon guards an exact multiple against floating-point noise (42.000000001 must be 42).
+  return window.anchor === 'end' ? Math.floor(ratio + 1e-9) : Math.ceil(ratio - 1e-9);
 }
 
 function resolveFixedSlot(slot: FixedSlot, resolved: ResolvedWindow, bounds: Bounds): number {

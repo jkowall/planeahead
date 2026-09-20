@@ -43,7 +43,8 @@ for example `AAL-100-2026-09-19-KJFK`, built and parsed only by `@planeahead/sha
 (`buildFlightKey`, `parseFlightKey`, `canonicalizeFromProvider`), with these rules:
 
 1. **Operating carrier, ICAO.** Marketing designators and codeshares collapse onto the
-   operator. IATA is resolved to ICAO through the `airlines` seed (OPTD), with a small built-in
+   operator. IATA is resolved to ICAO through the `airlines` seed in `packages/db`
+   (vradarserver standing-data spine with OPTD alliances), with a small built-in
    fallback table for offline use. `regionalOperatorHint` and the `regional_operators` table
    only guess an operator so the DesignatorResolver can find an existing tracker before paying
    for a provider call; the provider's operating carrier is authoritative.
