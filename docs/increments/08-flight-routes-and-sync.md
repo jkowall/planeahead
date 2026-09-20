@@ -23,7 +23,7 @@ Acceptance (Workers tests through `exports.default.fetch()` against the embedded
 
 ## Idempotency
 
-`idempotency_keys` keyed by `(user_id, key)` with `request_hash` (SHA-256 over method, canonical path and key-sorted canonical JSON of the validated body), `response_status smallint` (migration 0002 adds it), `response_json`, 24 h TTL purged by the housekeeping cron. Reserve with `INSERT ... ON CONFLICT DO NOTHING RETURNING`: a returned row means this caller executes; no row means read the existing row and answer replay (same hash, response stored, `Idempotent-Replayed: true`), 409 (same hash, still in flight) or 422 (different hash). Terminal 4xx responses are persisted too, because the mobile outbox replays blindly. The burst limiter runs before idempotency so a 429 never consumes a key.
+`idempotency_keys` keyed by `(user_id, key)` (for anonymous callers the scope is the client-owned `X-Install-Id` header, per increment 4; a keyed request with neither is 400 `idempotency_scope_missing`) with `request_hash` (SHA-256 over method, canonical path and key-sorted canonical JSON of the validated body), `response_status smallint` (migration 0002 adds it), `response_json`, 24 h TTL purged by the housekeeping cron. Reserve with `INSERT ... ON CONFLICT DO NOTHING RETURNING`: a returned row means this caller executes; no row means read the existing row and answer replay (same hash, response stored, `Idempotent-Replayed: true`), 409 (same hash, still in flight) or 422 (different hash). Terminal 4xx responses are persisted too, because the mobile outbox replays blindly. The burst limiter runs before idempotency so a 429 never consumes a key.
 
 ## Caps
 

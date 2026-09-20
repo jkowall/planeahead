@@ -52,7 +52,7 @@ Magic-link verification is completed IN THE APP: the emailed link opens the app 
 
 ### Devices and me
 
-`POST /v1/devices { installId, platform: 'ios'|'android'|'web', osVersion, appVersion, pushTokenKind?, pushToken? }` upserts `devices` and, when a token is present, `push_tokens` (kinds `apns`, `fcm`, `expo`, `apns_live_activity_push_to_start`). Per-activity Live Activity tokens rotate during an activity and are N per device; they are NOT device tokens and land in `live_activities` (keyed by activity id) in Phase 1, so Phase 0 stores push-to-start tokens only. `GET /v1/me` returns the user and preferences; `PATCH /v1/me/preferences` validates with the shared schema.
+`POST /v1/devices { installId, platform: 'ios'|'android'|'web', osVersion, appVersion, pushTokenKind?, pushToken? }` upserts `devices` (the same `installId` rides on every mutating request as the `X-Install-Id` header: increment 4's idempotency middleware scopes anonymous callers by it and answers 400 `idempotency_scope_missing` when a keyed request has neither a user nor a valid install id) and, when a token is present, `push_tokens` (kinds `apns`, `fcm`, `expo`, `apns_live_activity_push_to_start`). Per-activity Live Activity tokens rotate during an activity and are N per device; they are NOT device tokens and land in `live_activities` (keyed by activity id) in Phase 1, so Phase 0 stores push-to-start tokens only. `GET /v1/me` returns the user and preferences; `PATCH /v1/me/preferences` validates with the shared schema.
 
 ### Auth middleware
 
