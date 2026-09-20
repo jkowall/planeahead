@@ -1,6 +1,6 @@
 # Increment 3: `@planeahead/db` schema, migrations, seeds
 
-Status: spec (2026-09-19, revised the same day against `03-db-schema.facts.md`). Builder: Fable 5.1. Reviewers: two Opus 5 lenses (data model correctness, Drizzle/Postgres pitfalls) plus orchestrator read. Branch: `inc3-db-schema`, based on `inc2-shared-contracts` (needs `uuidv7()` and the regional-operator hint JSON from `@planeahead/shared`).
+Status: complete (2026-09-20) on branch `inc3-db-schema`, stacked PR opened for CI. Outcome, spikes and deviations are in `docs/build-log.md`; the normative table list below has 70 entries (the plan's 61 was a miscount). Builder: Fable 5.1. Reviewers: two Opus 5 lenses (data model correctness, Drizzle/Postgres pitfalls) plus orchestrator read. Branch: `inc3-db-schema`, based on `inc2-shared-contracts` (needs `uuidv7()` and the regional-operator hint JSON from `@planeahead/shared`).
 
 Read `docs/increments/03-db-schema.facts.md` before writing any code. Every fact there was verified against a primary source on 2026-09-19 and several of them overrode the first version of this spec; the rules below already incorporate them.
 
