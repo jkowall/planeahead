@@ -7,6 +7,7 @@
  * default export, so the whole middleware chain runs exactly as it does in production.
  */
 
+import { listDurableObjectIds } from 'cloudflare:test';
 import { env, exports } from 'cloudflare:workers';
 import { describe, expect, it } from 'vitest';
 import { MIGRATION_COUNT, MIGRATION_HASH } from '../../src/generated/migration-hash';
@@ -52,7 +53,10 @@ describe('GET /health', () => {
   });
 
   it('does no I/O: the Durable Object namespaces are untouched by a health check', async () => {
-    const { listDurableObjectIds } = await import('cloudflare:test');
+    // `listDurableObjectIds` is imported statically at the top, like every other
+    // `cloudflare:test` helper in this suite. Dynamic `import()` happens to work in a test body,
+    // but it does NOT work inside a Durable Object handler or `export default` handler under this
+    // pool (facts sheet), and a pattern that works here and fails there is worth not copying.
     await getHealth();
 
     expect(await listDurableObjectIds(env.FLIGHT_TRACKER)).toHaveLength(0);

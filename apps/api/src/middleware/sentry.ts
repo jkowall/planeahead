@@ -26,8 +26,8 @@
  */
 
 import { sentry } from '@sentry/hono/cloudflare';
-import { setTag } from '@sentry/cloudflare';
-import type { Breadcrumb, CloudflareOptions, ErrorEvent } from '@sentry/cloudflare';
+import { httpServerIntegration, setTag } from '@sentry/cloudflare';
+import type { Breadcrumb, CloudflareOptions, ErrorEvent, Event } from '@sentry/cloudflare';
 import type { Hono, MiddlewareHandler } from 'hono';
 import { createMiddleware } from 'hono/factory';
 import { type AppBindings, type Env, environmentName } from '../env';
@@ -41,6 +41,35 @@ function stripQuery(url: string): string {
     url.includes('#') ? url.indexOf('#') : url.length,
   );
   return url.slice(0, cut);
+}
+
+/**
+ * Span attributes that carry request content rather than request shape.
+ *
+ * `http.request.body.data` comes from @sentry/core's request-data integration, which hardcodes
+ * `data: true` ("Always attach body data that's already on the scope"). `url.query` and the query
+ * half of `url.full` come from `getHttpSpanDetailsFromUrlObject`, and neither is gated on
+ * `sendDefaultPii`. Every `http.request.header.*` attribute is dropped by prefix.
+ */
+const SENSITIVE_SPAN_ATTRIBUTES: ReadonlySet<string> = new Set([
+  'http.request.body.data',
+  'url.query',
+]);
+
+/** Attributes that hold a whole URL, and therefore a query string. */
+const URL_SPAN_ATTRIBUTES: ReadonlySet<string> = new Set(['url.full', 'http.url']);
+
+function scrubSpanAttributes(data: Record<string, unknown>): void {
+  for (const key of Object.keys(data)) {
+    if (SENSITIVE_SPAN_ATTRIBUTES.has(key) || key.startsWith('http.request.header.')) {
+      delete data[key];
+      continue;
+    }
+    const value: unknown = data[key];
+    if (URL_SPAN_ATTRIBUTES.has(key) && typeof value === 'string') {
+      data[key] = stripQuery(value);
+    }
+  }
 }
 
 function scrubBreadcrumb(breadcrumb: Breadcrumb): void {
@@ -68,8 +97,13 @@ function scrubBreadcrumb(breadcrumb: Breadcrumb): void {
  * Headers carry `Authorization`, `Cookie` and `Idempotency-Key`; request bodies carry magic link
  * tokens and Apple identity tokens; query strings carry whatever a client put there. None of it
  * is needed to debug a stack trace, and `sendDefaultPii: false` alone does not remove all of it.
+ *
+ * Generic over the event type on purpose. `beforeSend` only ever sees ERROR events: Sentry's
+ * client dispatches transaction events to `beforeSendTransaction` instead, so a scrubber wired
+ * only to `beforeSend` never sees the transaction that carries the same request data. Both
+ * callbacks in `sentryOptions` call this one function.
  */
-export function scrubSentryEvent(event: ErrorEvent): ErrorEvent {
+export function scrubSentryEvent<T extends Event>(event: T): T {
   const request = event.request;
   if (request !== undefined) {
     delete request.headers;
@@ -88,6 +122,21 @@ export function scrubSentryEvent(event: ErrorEvent): ErrorEvent {
     delete response.body;
   }
 
+  // Span attributes, which are a second copy of the request that `event.request` never covers. A
+  // transaction event carries the SEGMENT span's attributes in `contexts.trace.data` and every
+  // child span's in `spans[].data`. Scrubbing only `event.request` left the query string (and,
+  // before `maxRequestBodySize: 'none'`, the body) on the transaction: an end-to-end test through
+  // the real chain is what found it, because a hand-built event does not have these fields.
+  const traceData = event.contexts?.trace?.data;
+  if (traceData !== undefined) {
+    scrubSpanAttributes(traceData);
+  }
+  for (const span of event.spans ?? []) {
+    if (span.data !== undefined) {
+      scrubSpanAttributes(span.data);
+    }
+  }
+
   for (const breadcrumb of event.breadcrumbs ?? []) {
     scrubBreadcrumb(breadcrumb);
   }
@@ -101,7 +150,11 @@ export function scrubSentryEvent(event: ErrorEvent): ErrorEvent {
  * both `sentry()` and `withSentry()` are given. Using one type for both is what keeps the two
  * registrations configured identically.
  */
-export function sentryOptions(env: Env): CloudflareOptions {
+export function sentryOptions(
+  env: Env,
+  /** Test seam. The suite injects a capturing transport and a DSN so events are observable. */
+  overrides: Partial<CloudflareOptions> = {},
+): CloudflareOptions {
   const environment = environmentName(env);
   return {
     // No DSN means the SDK initialises and drops every event, which is what local and test want.
@@ -113,8 +166,24 @@ export function sentryOptions(env: Env): CloudflareOptions {
     // The `dataCollection` shape is not documented on the Cloudflare options page yet; ADR 0004
     // records that the migration target is unsettled.
     sendDefaultPii: false,
+    // `sendDefaultPii: false` does NOT stop request body capture. @sentry/cloudflare puts
+    // `httpServerIntegration()` in its defaults with `maxRequestBodySize: 'medium'`, and
+    // `wrapRequestHandler` reads the body of every non-GET request into the isolation scope
+    // before the handler runs. Turning the capture off at the source is the only fix that holds
+    // for every event type; scrubbing afterwards only covers the shapes the scrubber knows about.
+    // Increment 4 has no use for a request body in Sentry, and increments 5 and 6 post Apple
+    // identity tokens and magic link tokens through these routes.
+    integrations: (defaults) => [
+      ...defaults.filter((integration) => integration.name !== 'HttpServer'),
+      httpServerIntegration({ maxRequestBodySize: 'none' }),
+    ],
     tracesSampleRate: environment === 'production' ? 0.1 : 1,
+    // Two callbacks, one scrubber. Sentry's client routes ERROR events to `beforeSend` and
+    // TRANSACTION events to `beforeSendTransaction`; with only the first one configured, every
+    // transaction event left the Worker unscrubbed.
     beforeSend: (event: ErrorEvent) => scrubSentryEvent(event),
+    beforeSendTransaction: (event) => scrubSentryEvent(event),
+    ...overrides,
   };
 }
 
@@ -123,8 +192,12 @@ export function sentryOptions(env: Env): CloudflareOptions {
  * order the plan states. The tag is set here rather than inside `beforeSend`, because
  * `beforeSend` runs on the event and has no access to the Hono context.
  */
-export function sentryMiddleware(app: Hono<AppBindings>): MiddlewareHandler<AppBindings> {
-  const inner = sentry(app, (env: Env) => sentryOptions(env));
+export function sentryMiddleware(
+  app: Hono<AppBindings>,
+  /** Test seam, forwarded to `sentryOptions`. */
+  overrides: Partial<CloudflareOptions> = {},
+): MiddlewareHandler<AppBindings> {
+  const inner = sentry(app, (env: Env) => sentryOptions(env, overrides));
   return createMiddleware<AppBindings>(async (c, next) => {
     setTag('request_id', c.var.requestId);
     return inner(c, next);

@@ -42,12 +42,23 @@ export default defineConfig({
     include: ['test/workers/**/*.test.ts'],
 
     // Vitest's 5 second default is too tight for the FIRST request into the Worker in a test
-    // file. Measured on an M-series Mac: `exports.default.fetch()` costs about 10 seconds the
-    // first time and 10 milliseconds afterwards, because that request is what makes workerd
-    // evaluate the whole bundle, and the bundle is a megabyte, most of it the Sentry SDK.
-    // Tests that only import modules from `src/` do not pay it. CI runners are slower than this
-    // machine, hence 30 seconds rather than 15.
-    testTimeout: 30_000,
-    hookTimeout: 30_000,
+    // file. That request is what makes workerd evaluate the whole bundle, and the bundle is a
+    // megabyte, most of it the Sentry SDK; every later request in the same file costs
+    // milliseconds, and tests that only import modules from `src/` never pay it at all.
+    //
+    // The number moves a great deal with what is cached, so treat it as a range rather than a
+    // constant. With a warm Vite transform cache that first request costs tens of milliseconds
+    // (measured: 33 ms). Cold, the bundle is built and evaluated on that call and the cost lands
+    // on the test: a review run on an M-series Mac measured 20.9 seconds for it, 11.1 on a
+    // repeat. An earlier version of this comment claimed "about 10 seconds" flat, which
+    // understated the cold case by 2x and left the worst observed test consuming 69 percent of
+    // a 30 second budget.
+    //
+    // GitHub's ubuntu-latest runners are slower than this machine and always start cold
+    // (turbo.json configures no remote cache), so 30 seconds was around 1.4x headroom on the one
+    // assertion that has to evaluate the bundle, and the failure mode is a bare timeout with no
+    // useful message. 60 seconds restores the margin; it costs nothing on a run that passes.
+    testTimeout: 60_000,
+    hookTimeout: 60_000,
   },
 });

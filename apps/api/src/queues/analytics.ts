@@ -33,14 +33,30 @@ export interface AnalyticsPoint {
 }
 
 export interface AnalyticsStats {
+  /** Points handed to the dataset. */
   readonly written: number;
+  /** Points refused because the per-invocation budget was already spent. */
   readonly overflowed: number;
+  /** Points the dataset threw on. A payload problem: the point broke a platform limit. */
   readonly failed: number;
+  /** Points dropped because the binding is absent. A configuration problem, not a payload one. */
+  readonly skipped: number;
 }
 
 const encoder = new TextEncoder();
+const decoder = new TextDecoder();
 
-function truncateToBytes(value: string, budget: number): string {
+/**
+ * Trims a string to at most `budget` UTF-8 bytes, cutting on a codepoint boundary.
+ *
+ * Slicing the byte array and decoding is not enough on its own. A cut inside a multi-byte
+ * sequence decodes to U+FFFD, which re-encodes to THREE bytes, so a naive
+ * `decode(bytes.subarray(0, budget))` can return a string that is larger than the budget it was
+ * asked to respect, and the platform limit it exists to enforce is broken by the enforcement.
+ * Walking back off the continuation bytes (`0b10xxxxxx`) puts the cut on a boundary, so the
+ * result is always at or under the budget and no replacement character is ever introduced.
+ */
+export function truncateToBytes(value: string, budget: number): string {
   if (budget <= 0) {
     return '';
   }
@@ -48,7 +64,11 @@ function truncateToBytes(value: string, budget: number): string {
   if (bytes.length <= budget) {
     return value;
   }
-  return new TextDecoder().decode(bytes.subarray(0, budget));
+  let end = budget;
+  while (end > 0 && ((bytes[end] ?? 0) & 0b1100_0000) === 0b1000_0000) {
+    end -= 1;
+  }
+  return decoder.decode(bytes.subarray(0, end));
 }
 
 /**
@@ -84,6 +104,8 @@ export class AnalyticsBudget {
   #written = 0;
   #overflowed = 0;
   #failed = 0;
+  #skipped = 0;
+  #missingLogged = false;
 
   constructor(
     dataset: AnalyticsEngineDataset | undefined,
@@ -98,7 +120,17 @@ export class AnalyticsBudget {
   /** Returns true when the point was handed to the dataset. Never throws. */
   write(point: AnalyticsPoint): boolean {
     if (this.#dataset === undefined) {
-      this.#failed += 1;
+      // A missing binding is a wrangler.jsonc mistake, not a payload problem, and counting it as
+      // a write failure makes a 100-message batch report `failed: 100` in exactly the shape a
+      // batch of oversized points reports. The two want opposite responses, so they get separate
+      // counters and this one names the cause once per invocation rather than per point.
+      if (!this.#missingLogged) {
+        this.#missingLogged = true;
+        this.#log.warn('analytics_dataset_missing', {
+          hint: 'analytics_engine_datasets is not inheritable; check the env block in wrangler.jsonc',
+        });
+      }
+      this.#skipped += 1;
       return false;
     }
     if (this.#written >= this.#limit) {
@@ -120,12 +152,17 @@ export class AnalyticsBudget {
   }
 
   get stats(): AnalyticsStats {
-    return { written: this.#written, overflowed: this.#overflowed, failed: this.#failed };
+    return {
+      written: this.#written,
+      overflowed: this.#overflowed,
+      failed: this.#failed,
+      skipped: this.#skipped,
+    };
   }
 
   /** Logs the invocation's totals. Call once, at the end of the invocation. */
   report(event: string): void {
-    if (this.#overflowed > 0 || this.#failed > 0) {
+    if (this.#overflowed > 0 || this.#failed > 0 || this.#skipped > 0) {
       this.#log.warn(event, { ...this.stats });
       return;
     }

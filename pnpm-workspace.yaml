@@ -16,9 +16,12 @@ catalog:
   # Expo SDK 57 nor typescript-eslint 8 supports it yet.
   typescript: ~6.0.3
   typescript-eslint: ^8.70.0
-  # Vitest is held at 4.1.x on purpose. @cloudflare/vitest-plugin 1.1.x peers on ^4.1,
-  # and Vitest 5 breaks the Workers pool.
-  vitest: ~4.1.11
+  # Vitest is held at 4.1.11 EXACTLY, which is what docs/increments/04-api-bootstrap.facts.md
+  # pins. @cloudflare/vitest-plugin 1.1.x peers on ^4.1 and Vitest 5 breaks the Workers pool, so a
+  # caret is out of the question; a tilde would still float to any 4.1.x, and nothing in the
+  # repository enforces the facts sheet's value once it floats (the toolchain guard's pair
+  # assertion deliberately covers wrangler, not vitest). Exact here, moved deliberately.
+  vitest: 4.1.11
   zod: ^4.6.5
   # tsx runs packages/shared/scripts/gen-cadence-table.ts and packages/db's drizzle-kit and
   # migrate entry points.
@@ -45,10 +48,10 @@ catalog:
   wrangler: 4.135.0
   '@cloudflare/vitest-plugin': 1.1.13
   # @vitest/runner and @vitest/snapshot are peers of @cloudflare/vitest-plugin. pnpm's isolated
-  # linker does not hoist them into apps/api, so they are declared explicitly and held on the
-  # same 4.1.x line as vitest itself.
-  '@vitest/runner': ~4.1.11
-  '@vitest/snapshot': ~4.1.11
+  # linker does not hoist them into apps/api, so they are declared explicitly and pinned to the
+  # same exact version as vitest itself.
+  '@vitest/runner': 4.1.11
+  '@vitest/snapshot': 4.1.11
   hono: ^4.13.8
   '@hono/zod-validator': ^0.9.1
   # @sentry/cloudflare and @sentry/hono share an internal core and must be the same version.

@@ -25,6 +25,18 @@ name: Deploy staging
 on:
   push:
     branches: [main]
+    # The header above says "touches the API or the database schema"; without this filter it was
+    # not true. A docs-only or mobile-only commit used to run migrations against the staging Neon
+    # branch and cut a new Worker version, and `cancel-in-progress: false` queues those rather
+    # than collapsing them.
+    paths:
+      - 'apps/api/**'
+      - 'packages/db/**'
+      - 'packages/shared/**'
+      - 'scripts/gen-migration-hash.mjs'
+      - 'pnpm-lock.yaml'
+      - 'pnpm-workspace.yaml'
+      - '.github/workflows/deploy-staging.yml'
   workflow_dispatch:
 
 concurrency:
@@ -38,7 +50,7 @@ jobs:
   deploy:
     runs-on: ubuntu-latest
     environment: staging
-    timeout-minutes: 20
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v5
 
@@ -50,6 +62,25 @@ jobs:
           cache: pnpm
 
       - run: pnpm install --frozen-lockfile
+
+      # ci.yml is a SEPARATE workflow triggered by the same push, so nothing orders the two: a
+      # commit that fails typecheck would otherwise still migrate the staging database and deploy,
+      # and migrations are forward-only. These three steps repeat the checks that matter here
+      # rather than gating on ci.yml with `workflow_run`, which fires on completion regardless of
+      # conclusion and resolves the workflow file from the default branch. Repeating them costs a
+      # few minutes on a deploy and cannot race.
+      #
+      # The @planeahead/db suite is deliberately NOT repeated: it needs the Postgres service
+      # container ci.yml gives it, and standing one up here to gate a Worker deploy is a second
+      # copy of ci.yml, not a gate. The Worker's own suite needs no database at all.
+      - name: Typecheck and lint
+        run: pnpm turbo run typecheck lint
+
+      - name: Test the Worker
+        run: pnpm turbo run test --filter=@planeahead/api
+
+      - name: Validate the Worker config and bundle
+        run: pnpm --filter @planeahead/api exec wrangler deploy --dry-run --env staging
 
       # The Worker reports the hash of the migration journal on /health. Regenerating it here and
       # failing on a diff means a deploy can never claim a schema version the repository does not

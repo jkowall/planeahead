@@ -46,7 +46,8 @@ Two things about `.dev.vars` are easy to get wrong:
 ## Layout
 
 ```
-src/index.ts              the Hono app as ONE chain, the five DO exports, the default export
+src/index.ts              the routes as ONE chain, the five DO exports, the default export
+src/app.ts                createApp(): the error handlers and the middleware chain, one definition
 src/env.ts                Env (from worker-configuration.d.ts) plus the Variables for c.var
 src/middleware/           request-id, sentry, cors, rate-limit, idempotency, auth  (in that order)
 src/routes/               health.ts, not-implemented.ts (the /v1 and /api/auth mounts)
@@ -63,12 +64,23 @@ test/workers/             everything that runs inside workerd
 of `.route()`. Add a route to the chain in `src/index.ts`; a separate `app.route(...)` statement
 compiles, runs correctly and silently empties the type the mobile client is built from.
 
-**Middleware order is the contract.** request-id first so everything after it can correlate,
-Sentry second so events carry the id, CORS third so a preflight is answered before anything can
-reject it, then the rate limit brake, then idempotency (it reads the body), then auth.
+**Middleware order is the contract, and it has exactly one definition.** request-id first so
+everything after it can correlate, Sentry second so events carry the id, CORS third so a preflight
+is answered before anything can reject it, then the rate limit brake, then idempotency (it reads
+the body), then auth. `registerChain()` in `src/app.ts` is the only place `use()` is called on the
+root app, and every test that needs the chain calls `createApp()` rather than assembling its own.
+A test that builds the chain by hand does not test this Worker, it tests one that does not exist:
+increment 4's first review found a 500 on every keyed `POST` that three middleware test files had
+been reproducing in the opposite order, and staying green about.
+
+What follows from idempotency running BEFORE auth: nothing in a slot ahead of auth may assume
+`c.var.user` has been assigned. It is `undefined` there, not `null`, so every reader uses
+`c.var.user ?? null` (`storeFor`, `scopeFor`, `principalLimiter`, `requireUser`).
+
 `app.onError` and `app.notFound` are registered **before** the Sentry middleware: `withSentry`
 wraps whatever `app.errorHandler` is at the moment it runs, and a later `app.onError()` replaces
-the wrapper and stops the reporting.
+the wrapper and stops the reporting. `handleError` keeps Hono's `HTTPException` branch, without
+which every 401, 403 and 413 a middleware signals by throwing becomes an opaque 500.
 
 **Durable Objects are declared through `exports` in `wrangler.jsonc`, and that is a one-way door.**
 `exports` and a `migrations` array are mutually exclusive; this repository has no `migrations`
@@ -89,7 +101,21 @@ append to an outbox; the `persist` queue consumer is the only writer of flight s
 its own try/catch through `consumeBatch`, and `queue()` never throws.
 
 **`writeDataPoint` is synchronous and throws on an oversized point.** Use `AnalyticsBudget`, one
-per invocation, which caps at 200 points against the documented 250 and wraps every write.
+per invocation, which caps at 200 points against the documented 250 and wraps every write. It
+counts a missing binding as `skipped`, not `failed`: one is a wrangler.jsonc mistake and the other
+is a payload bug, and they want opposite responses.
+
+**Sentry needs `beforeSend` AND `beforeSendTransaction`.** The client routes error events to the
+first and transaction events to the second, and the request data rides on both. Request bodies are
+not scrubbed but not captured: `sendDefaultPii: false` does not stop `httpServerIntegration`, so
+`sentryOptions` replaces it with `maxRequestBodySize: 'none'`. Span attributes
+(`contexts.trace.data` and `spans[].data`) are a second copy of the request that `event.request`
+does not cover, and the scrubber clears the body, header and query attributes there too.
+
+**No raw control characters in source.** A literal NUL makes git classify the blob as binary, and
+a binary blob has no diff, no line-level review comment and no three-way merge.
+`planeahead/no-literal-control-characters` fails the lint on the byte; `.gitattributes` is the
+second line of defence. Write the escape (`'\u0000'`), which compiles to the same string.
 
 **Rate limit `namespace_id` values are account-wide counters.** Staging, production and local each
 get their own block of ids in `wrangler.jsonc`, or staging load spends production's allowance.

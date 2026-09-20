@@ -50,9 +50,26 @@ Sentry, CORS, rate-limit, idempotency, auth, then routes. `apps/mobile` will typ
 - Easier: the middleware chain is one readable list, and the auth placeholder that sets
   `c.var.user = null` in increment 4 is replaced in increment 5 by editing one function rather
   than every call site.
+- The chain lives in `createApp()` in `src/app.ts`, not inline in `src/index.ts`, and that is a
+  correctness decision rather than a tidiness one. Registration order is a runtime contract: a
+  middleware that reads `c.var.user` behaves differently depending on whether auth has run, and
+  idempotency is pinned ahead of auth because it reads the body. A test that assembles its own
+  chain in a different order tests a Worker that does not exist and stays green while the deployed
+  one fails, which is exactly what happened in increment 4's first review. One definition, called
+  by `src/index.ts` and by every test that needs the chain, is what makes that impossible.
+  `src/index.ts` still owns the ROUTES, because only the chained `.route()` expression carries the
+  RPC types.
+- Follows from idempotency running before auth: `c.var.user` is `undefined`, not `null`, in every
+  slot ahead of the auth middleware. Readers there use `c.var.user ?? null`. The `Variables`
+  generic types the value as `AuthenticatedUser | null` and cannot express "not set yet", so this
+  is a convention the tests enforce rather than a type the compiler checks.
 - Harder: `AppType` is only correct if every route stays in the single chained expression in
   `src/index.ts`. That is a convention a reviewer has to enforce; nothing fails loudly when it is
   broken, the mobile client simply loses types. The comment at the top of `src/index.ts` says so.
+- Harder: replacing Hono's default `onError` means reimplementing its `HTTPException` branch.
+  Without it every 401, 403 and 413 that `hono/body-limit`, `hono/bearer-auth` or Better Auth
+  signals by throwing collapses into an opaque 500. `handleError` in `src/app.ts` keeps the branch
+  and answers 500 only for what is genuinely unhandled.
 - Harder: a large `AppType` is a real cost to `tsserver`. Two of the mounts (`/api/auth` and
   `/v1`) use `app.all()` today, which contributes every HTTP method to the type surface. If the
   editor slows measurably once increments 5 to 8 fill them in, the fix is to narrow those mounts

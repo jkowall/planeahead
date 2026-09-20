@@ -23,10 +23,16 @@ export function authPlaceholder(): MiddlewareHandler<AppBindings> {
   });
 }
 
-/** Rejects with 401 unless a user is resolved. Increment 5 makes it reachable. */
+/**
+ * Rejects with 401 unless a user is resolved. Increment 5 makes it reachable.
+ *
+ * `c.var.user ?? null`, not `c.var.user === null`: a strict comparison treats an UNSET variable
+ * as a resolved user and lets the request through, which is the dangerous direction for a guard.
+ * Mounting this ahead of the auth middleware by mistake must fail closed.
+ */
 export function requireUser(): MiddlewareHandler<AppBindings> {
   return createMiddleware<AppBindings>(async (c, next) => {
-    if (c.var.user === null) {
+    if ((c.var.user ?? null) === null) {
       return c.json(
         {
           error: 'unauthenticated',

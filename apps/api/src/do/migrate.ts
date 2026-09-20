@@ -53,15 +53,40 @@ export const EMPTY_MIGRATION_RESULT: MigrationResult = Object.freeze({
   applied: Object.freeze([]),
 });
 
+/**
+ * Why a migration run refused.
+ *
+ *  - `statement`: a migration's own SQL is the problem, and `migrationId` is that migration.
+ *  - `version_ahead`: the object carries a schema this build does not have. No migration failed;
+ *    `migrationId` is the first id this build cannot account for and `foundVersion` is what the
+ *    object is actually at.
+ *
+ * The discriminator exists because a single `migrationId` field cannot carry both meanings. It
+ * used to hold the found version on the `version_ahead` path, which told an operator (and any
+ * Sentry grouping rule keyed on it) that migration N had failed when migration N had in fact
+ * applied cleanly on a newer deployment.
+ */
+export type SqlMigrationErrorKind = 'statement' | 'version_ahead';
+
+export interface SqlMigrationErrorInit extends ErrorOptions {
+  readonly kind: SqlMigrationErrorKind;
+  /** The migration this error is about. Never a migration that ran successfully. */
+  readonly migrationId: number;
+  /** Only on `version_ahead`: `MAX(id)` found in `_sql_schema_migrations`. */
+  readonly foundVersion?: number;
+}
+
 export class SqlMigrationError extends Error {
   override readonly name = 'SqlMigrationError';
+  readonly kind: SqlMigrationErrorKind;
+  readonly migrationId: number;
+  readonly foundVersion: number | null;
 
-  constructor(
-    message: string,
-    readonly migrationId: number,
-    options?: ErrorOptions,
-  ) {
-    super(message, options);
+  constructor(message: string, init: SqlMigrationErrorInit) {
+    super(message, init);
+    this.kind = init.kind;
+    this.migrationId = init.migrationId;
+    this.foundVersion = init.foundVersion ?? null;
   }
 }
 
@@ -83,7 +108,7 @@ function assertStatementSizes(migrationId: number, statements: readonly string[]
       throw new SqlMigrationError(
         `migration ${migrationId} statement ${index + 1} is ${bytes} bytes, over the ` +
           `${MAX_SQL_STATEMENT_BYTES} byte limit for one Durable Object SQL statement; split it`,
-        migrationId,
+        { kind: 'statement', migrationId },
       );
     }
   }
@@ -119,10 +144,14 @@ export function runSqlMigrations(
   if (version > migrations.length) {
     // The object was migrated by a newer deployment. Writing against it with the old schema is
     // how data gets corrupted, so refuse to construct instead.
+    //
+    // `migrationId` is the first id this build cannot account for, NOT the found version: every
+    // migration up to `migrations.length` applied cleanly here and naming one of them as the
+    // failure is how an operator ends up debugging a migration that worked.
     throw new SqlMigrationError(
       `object is at schema version ${version} but this build only knows ${migrations.length}; ` +
         'this Worker is older than the data it was asked to open',
-      version,
+      { kind: 'version_ahead', migrationId: migrations.length + 1, foundVersion: version },
     );
   }
 

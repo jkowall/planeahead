@@ -1,21 +1,28 @@
 /**
- * The idempotency middleware.
+ * The idempotency middleware, in its real slot.
  *
- * It is exercised on a small Hono app rather than through `exports.default.fetch()`, because
- * every route the real Worker mounts today answers 501 and a 5xx is deliberately not stored.
- * The middleware itself is the unit under test; the chain order it depends on (request-id, then
- * auth, then this) is reproduced exactly.
+ * Every app in this file comes from `createApp()` in `src/app.ts`, which is the same function
+ * `src/index.ts` calls, so the middleware under test sits where the Worker puts it: after
+ * request-id, sentry, cors and rate-limit, and BEFORE the auth placeholder. The previous version
+ * of this file built its own Hono app with `authPlaceholder()` registered first and claimed in its
+ * docstring that the order was "reproduced exactly". It was the inverse, and that inversion is
+ * what let a chain that 500s on every keyed POST ship with a green suite: with auth first,
+ * `c.var.user` is `null` and the `=== null` tests in `storeFor` and `scopeFor` hold; in the real
+ * chain it is `undefined` and they read `user.id` off it.
  *
- * No Postgres. `ENVIRONMENT` is `test` in vitest.config.ts and `c.var.user` is null, so
+ * Routes are added to the app returned by `createApp()` rather than to a hand-built instance. The
+ * store is injected through the chain's own seam, so no test needs Postgres.
+ *
+ * No Postgres. `ENVIRONMENT` is `test` in vitest.config.ts and no user is ever resolved, so
  * `storeFor()` returns the in-memory store on every request, which is the increment 4 contract:
  * the database path exists but is unreachable until increment 5 resolves a session.
  */
 
 import { env } from 'cloudflare:workers';
-import { Hono } from 'hono';
 import { beforeEach, describe, expect, it } from 'vitest';
+import type { Hono } from 'hono';
+import { createApp } from '../../src/app';
 import type { AppBindings } from '../../src/env';
-import { authPlaceholder } from '../../src/middleware/auth';
 import {
   IDEMPOTENCY_KEY_HEADER,
   IDEMPOTENCY_REPLAYED_HEADER,
@@ -24,18 +31,15 @@ import {
   idempotency,
   isStorableResponse,
   isValidIdempotencyKey,
+  scopeFor,
   storeFor,
 } from '../../src/middleware/idempotency';
-import { requestId } from '../../src/middleware/request-id';
 
 let store: IdempotencyStore;
 let handlerCalls = 0;
 
 function app(): Hono<AppBindings> {
-  const instance = new Hono<AppBindings>();
-  instance.use(requestId());
-  instance.use(authPlaceholder());
-  instance.use(idempotency({ store: () => store }));
+  const instance = createApp({ idempotencyStore: () => store });
   instance.post('/things', async (c) => {
     handlerCalls += 1;
     const body = await c.req.json<{ name?: string }>();
@@ -52,10 +56,13 @@ function app(): Hono<AppBindings> {
   return instance;
 }
 
-function post(key: string | undefined, body: unknown, path = '/things'): Request {
+function post(key: string | undefined, body: unknown, path = '/things', ip?: string): Request {
   const headers: Record<string, string> = { 'Content-Type': 'application/json' };
   if (key !== undefined) {
     headers[IDEMPOTENCY_KEY_HEADER] = key;
+  }
+  if (ip !== undefined) {
+    headers['CF-Connecting-IP'] = ip;
   }
   return new Request(`https://api.planeahead.test${path}`, {
     method: 'POST',
@@ -140,7 +147,6 @@ describe('idempotency replay', () => {
 
   it('does not store a 5xx, so a retry after a failure really retries', async () => {
     const instance = app();
-    instance.onError((_error, c) => c.json({ error: 'internal_error' }, 500));
     const key = 'failure-key-0001';
 
     const first = await instance.fetch(post(key, {}, '/boom'), env);
@@ -152,6 +158,44 @@ describe('idempotency replay', () => {
   });
 });
 
+describe('scope isolation', () => {
+  it('does not let two anonymous callers share one bucket', async () => {
+    // `scopeFor` used to return the literal string `anonymous` for every unauthenticated caller,
+    // so two clients that happened to send the same Idempotency-Key read each other's stored
+    // response, or got a 422 for a request they never made. Increment 5 mounts routes that answer
+    // 2xx while the caller is still anonymous (`POST /api/auth/sign-in/anonymous` is exactly
+    // that), which is the moment a shared bucket becomes a cross-caller data leak.
+    const instance = app();
+    const key = 'shared-key-00001';
+
+    const first = await instance.fetch(post(key, { name: 'AA100' }, '/things', '203.0.113.1'), env);
+    const second = await instance.fetch(
+      post(key, { name: 'UA200' }, '/things', '203.0.113.2'),
+      env,
+    );
+
+    expect(first.status).toBe(201);
+    // Not a 422: the second caller's request is not a reuse of the first caller's key.
+    expect(second.status).toBe(201);
+    expect(await second.json()).toEqual({ created: 2, name: 'UA200' });
+    expect(handlerCalls).toBe(2);
+  });
+
+  it('still replays for the same caller', async () => {
+    const instance = app();
+    const key = 'same-caller-0001';
+
+    await instance.fetch(post(key, { name: 'AA100' }, '/things', '203.0.113.3'), env);
+    const replay = await instance.fetch(
+      post(key, { name: 'AA100' }, '/things', '203.0.113.3'),
+      env,
+    );
+
+    expect(replay.headers.get(IDEMPOTENCY_REPLAYED_HEADER)).toBe('true');
+    expect(handlerCalls).toBe(1);
+  });
+});
+
 describe('idempotency helpers', () => {
   it('accepts and rejects keys by the documented shape', () => {
     expect(isValidIdempotencyKey('0198f3c2-1f7a-7c4e-9a1b-2b3c4d5e6f70')).toBe(true);
@@ -160,6 +204,11 @@ describe('idempotency helpers', () => {
     expect(isValidIdempotencyKey('a'.repeat(256))).toBe(false);
     expect(isValidIdempotencyKey('has space')).toBe(false);
     expect(isValidIdempotencyKey('has/slash/1')).toBe(false);
+    // The in-memory store separates scope from key with U+0000, written as an escape in the
+    // source. A raw NUL byte there made git classify the whole file as binary, which cost it its
+    // diff and its three-way merge; `planeahead/no-literal-control-characters` now fails the lint
+    // on the byte. The separator is only unambiguous because no valid key can contain it.
+    expect(isValidIdempotencyKey(`abcdefgh\u0000ijkl`)).toBe(false);
   });
 
   it('stores only JSON responses that are not transient failures', () => {
@@ -183,26 +232,69 @@ describe('idempotency helpers', () => {
     expect(await bounded.get('scope', 'three')).not.toBeNull();
   });
 
+  it('keeps two scopes apart even when the key looks like a scope boundary', async () => {
+    const bounded = createMemoryIdempotencyStore();
+    const entry = { status: 200, body: { ok: true }, requestHash: 'aa' };
+
+    await bounded.put('a', 'b:c', entry);
+
+    expect(await bounded.get('a:b', 'c')).toBeNull();
+    expect(await bounded.get('a', 'b:c')).not.toBeNull();
+  });
+
   it('never selects the database store while the request is anonymous', async () => {
     // The Hyperdrive binding is present in the test pool with a connection string that is never
-    // dialled. `storeFor` must still pick memory, because `c.var.user` is null and ENVIRONMENT is
-    // `test`. If this ever flips, increment 4's suite would start opening Postgres connections.
+    // dialled. `storeFor` must still pick memory, because no user is resolved in this slot and
+    // ENVIRONMENT is `test`. If this ever flips, increment 4's suite would start opening Postgres
+    // connections.
     //
     // The memory store is a module singleton and the database store is built per request, so two
     // requests returning the same object reference is the proof that neither one built a client.
+    // The probe runs in the REAL idempotency slot, where `c.var.user` is unset rather than null.
     const selected: IdempotencyStore[] = [];
-    const instance = new Hono<AppBindings>();
-    instance.use(requestId());
-    instance.use(authPlaceholder());
-    instance.get('/probe', (c) => {
-      selected.push(storeFor(c));
-      return c.json({ ok: true });
+    const scopes: string[] = [];
+    const instance = createApp({
+      idempotencyStore: (c) => {
+        selected.push(storeFor(c));
+        scopes.push(scopeFor(c));
+        return store;
+      },
     });
+    instance.post('/probe', (c) => c.json({ ok: true }, 201));
 
-    await instance.fetch(new Request('https://api.planeahead.test/probe'), env);
-    await instance.fetch(new Request('https://api.planeahead.test/probe'), env);
+    await instance.fetch(post('probe-key-000001', {}, '/probe', '203.0.113.9'), env);
+    await instance.fetch(post('probe-key-000002', {}, '/probe', '203.0.113.9'), env);
 
     expect(selected).toHaveLength(2);
     expect(selected[0]).toBe(selected[1]);
+    expect(scopes).toEqual(['anonymous:ip:203.0.113.9', 'anonymous:ip:203.0.113.9']);
+  });
+
+  it('falls back to one bucket only when there is no client IP at all', async () => {
+    // `wrangler dev` and the test pool set no CF-Connecting-IP, so anonymous callers collapse
+    // together locally. That is documented at the call site and is why the memory store is a
+    // convenience rather than a guarantee.
+    const scopes: string[] = [];
+    const instance = createApp({
+      idempotencyStore: (c) => {
+        scopes.push(scopeFor(c));
+        return store;
+      },
+    });
+    instance.post('/probe', (c) => c.json({ ok: true }, 201));
+
+    await instance.fetch(post('probe-key-000003', {}, '/probe'), env);
+
+    expect(scopes).toEqual(['anonymous:unknown']);
+  });
+});
+
+describe('the middleware is still usable on its own', () => {
+  it('exports a factory a later increment can mount under a sub-router', () => {
+    // Increment 8 mounts a second idempotency instance with a different store under /v1. The
+    // factory has to stay callable outside `registerChain` for that, but nothing in this file
+    // builds a CHAIN by hand: the order is src/app.ts's business.
+    expect(typeof idempotency).toBe('function');
+    expect(typeof idempotency({ store: () => store })).toBe('function');
   });
 });

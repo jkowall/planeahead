@@ -17,15 +17,19 @@
  * currently running also reports null.
  */
 
-import type { CronContext } from './index';
+import type { CronHandler } from './index';
 
 /** CPU budget for a sub-hourly cron on the Paid plan, in seconds. */
 export const SUB_HOURLY_CRON_CPU_SECONDS = 30;
 
-export function reconcileCron({ log }: CronContext): void {
+/**
+ * Typed as `CronHandler` rather than as a plain `void` function so increment 7 can make the body
+ * async without touching the dispatcher or its callers. The body is synchronous today.
+ */
+export const reconcileCron: CronHandler = ({ log }) => {
   log.info('cron_reconcile', {
     implemented: false,
     increment: '07-flight-tracker',
     cpu_budget_seconds: SUB_HOURLY_CRON_CPU_SECONDS,
   });
-}
+};

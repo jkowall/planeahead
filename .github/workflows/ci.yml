@@ -53,6 +53,11 @@ jobs:
           node-version-file: .node-version
           cache: pnpm
       - run: pnpm install --frozen-lockfile
+      # The api `test` script regenerates src/generated/migration-hash.ts before vitest runs, so
+      # this job would stay green against a stale committed constant: it tests the value it just
+      # wrote. Checking first is what makes the job that CONSUMES the constant also report on it,
+      # rather than leaving that to wrangler-dry-run alone.
+      - run: node scripts/gen-migration-hash.mjs --check
       - run: pnpm turbo run test --filter=@planeahead/api
 
   # Validates wrangler.jsonc and bundles the Worker without credentials: `wrangler deploy

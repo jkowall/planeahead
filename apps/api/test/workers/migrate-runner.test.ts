@@ -177,11 +177,42 @@ describe('runSqlMigrations', () => {
         runSqlMigrations(state, [TWO[0] ?? []]);
         return 'no throw';
       } catch (error) {
-        return error instanceof SqlMigrationError ? `${error.name}:${error.migrationId}` : 'other';
+        if (!(error instanceof SqlMigrationError)) {
+          return 'other';
+        }
+        return { kind: error.kind, migrationId: error.migrationId, found: error.foundVersion };
       }
     });
 
-    expect(outcome).toBe('SqlMigrationError:2');
+    // The object is at version 2 and the build knows one migration, so the first id this build
+    // cannot account for is 2 and the found version is 2. `migrationId` names the id that is
+    // MISSING from this build, never a migration that ran: migration 1 applied cleanly here, and
+    // reporting a clean migration in a field called `migrationId` is how an operator (or a Sentry
+    // grouping rule keyed on it) ends up debugging a migration that worked. `kind` is what tells
+    // the two cases apart.
+    expect(outcome).toEqual({ kind: 'version_ahead', migrationId: 2, found: 2 });
+  });
+
+  it('reports a statement failure with the migration that actually failed', async () => {
+    const stub = host('statement-kind');
+    const oversized = `SELECT 1 -- ${'x'.repeat(MAX_SQL_STATEMENT_BYTES)}`;
+
+    const outcome = await runInDurableObject(stub, (_instance, state) => {
+      try {
+        runSqlMigrations(state, [
+          ...TWO,
+          ['CREATE TABLE gamma (id INTEGER PRIMARY KEY)', oversized],
+        ]);
+        return 'no throw';
+      } catch (error) {
+        if (!(error instanceof SqlMigrationError)) {
+          return 'other';
+        }
+        return { kind: error.kind, migrationId: error.migrationId, found: error.foundVersion };
+      }
+    });
+
+    expect(outcome).toEqual({ kind: 'statement', migrationId: 3, found: null });
   });
 
   it('refuses a statement over the 100 KB limit before running any of the migration', async () => {

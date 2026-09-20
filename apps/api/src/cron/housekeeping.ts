@@ -9,8 +9,9 @@
  * rather than 30 seconds. It may still do its work inline.
  */
 
-import type { CronContext } from './index';
+import type { CronHandler } from './index';
 
-export function housekeepingCron({ log }: CronContext): void {
+/** Typed as `CronHandler` so increment 12's real sweeps can await without a signature change. */
+export const housekeepingCron: CronHandler = ({ log }) => {
   log.info('cron_housekeeping', { implemented: false, increment: '12-hardening' });
-}
+};

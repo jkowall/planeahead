@@ -22,3 +22,20 @@ SENTRY_DSN=
 # `wrangler dev --env staging` needs the line above even though the staging Hyperdrive binding has
 # no localConnectionString of its own: environment blocks do not inherit it, and wrangler refuses
 # to start a local Hyperdrive without one.
+
+# ---------------------------------------------------------------------------------------------
+# Not yet. Everything above is what increment 4 reads; everything below is the rest of the secret
+# set docs/plans/phase0-plan.md section 5 names, listed here because this file is the only place a
+# developer finds out what `wrangler secret put --env staging` has to be run for. Each line turns
+# on in the increment named beside it, and the increment that turns it on also adds it to
+# `WorkerSecrets` in src/env.ts. Keep them commented out until then: `wrangler types` and
+# `environmentName()` do not read this file, but a half-set secret is worse than an absent one.
+#
+# BETTER_AUTH_SECRET=        increment 5   session and token signing
+# APPLE_SIWA_P8=             increment 5   Sign in with Apple private key, PEM, newlines escaped
+# GOOGLE_CLIENT_SECRET=      increment 5   Google ID token exchange
+# RESEND_API_KEY=            increment 5   magic link delivery
+# TOKEN_KEK_V1=              increment 5   key encryption key for stored provider tokens
+# AERODATABOX_API_KEY=       increment 6   primary flight data provider
+# AEROAPI_API_KEY=           increment 6   FlightAware AeroAPI, the fallback provider
+# PROVIDER_WEBHOOK_SECRET=   increment 6   shared secret on the inbound webhook receivers

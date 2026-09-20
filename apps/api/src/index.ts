@@ -13,33 +13,17 @@
  * types away and the client ends up with an empty surface. Add routes to the chain below, never
  * as separate statements.
  *
- * Middleware runs in registration order, which is why the order below is written out rather than
- * left to taste:
- *
- *   1. request-id   every later line of logging and every Sentry event needs the correlation id
- *   2. sentry       as early as possible, but after the id exists so it can be tagged
- *   3. cors         answer a preflight before anything that can reject it
- *   4. rate-limit   cheap abuse brake ahead of anything that reads a body
- *   5. idempotency  reads the body, so it must precede the handler that parses it
- *   6. auth         sets c.var.user; a placeholder until increment 5
- *
- * `app.onError` and `app.notFound` are registered BEFORE the Sentry middleware on purpose:
- * `withSentry` wraps whatever `app.errorHandler` is at the moment it runs, and a later
- * `app.onError()` would replace the wrapper and silently stop reporting handled route errors.
+ * The error handlers and the middleware chain live in `src/app.ts` and are applied by
+ * `createApp()`. They are not inlined here so that the tests can build the same chain instead of
+ * a hand-written approximation of it; the order is a runtime contract and a second copy of it is
+ * a second thing to get wrong.
  */
 
 import { withSentry } from '@sentry/cloudflare';
-import { Hono } from 'hono';
+import { createApp } from './app';
 import type { Env } from './env';
-import type { AppBindings } from './env';
 import { scheduled } from './cron/index';
-import { authPlaceholder } from './middleware/auth';
-import { corsMiddleware } from './middleware/cors';
-import { idempotency } from './middleware/idempotency';
-import { ipLimiter } from './middleware/rate-limit';
-import { requestId } from './middleware/request-id';
-import { sentryMiddleware, sentryOptions } from './middleware/sentry';
-import { createLogger, errorFields } from './observability/log';
+import { sentryOptions } from './middleware/sentry';
 import { queue } from './queues/index';
 import { health } from './routes/health';
 import { authStub, v1Stub } from './routes/not-implemented';
@@ -50,26 +34,7 @@ export { FlightTracker } from './do/flight-tracker';
 export { ProviderBudget } from './do/provider-budget';
 export { UserInbox } from './do/user-inbox';
 
-const app = new Hono<AppBindings>();
-
-app.onError((error, c) => {
-  const requestIdValue = c.var.requestId ?? 'unknown';
-  createLogger({ request_id: requestIdValue }).error('unhandled_error', {
-    path: new URL(c.req.url).pathname,
-    method: c.req.method,
-    ...errorFields(error),
-  });
-  return c.json({ error: 'internal_error', requestId: requestIdValue }, 500);
-});
-
-app.notFound((c) => c.json({ error: 'not_found', requestId: c.var.requestId ?? 'unknown' }, 404));
-
-app.use(requestId());
-app.use(sentryMiddleware(app));
-app.use(corsMiddleware());
-app.use(ipLimiter());
-app.use(idempotency());
-app.use(authPlaceholder());
+const app = createApp();
 
 /**
  * `route()` returns the same Hono instance, so `routes` and `app` are one object at run time.
@@ -80,7 +45,10 @@ const routes = app.route('/', health).route('/v1', v1Stub).route('/api/auth', au
 /** The RPC surface `hc<AppType>()` in apps/mobile is typed from. */
 export type AppType = typeof routes;
 
-export default withSentry(sentryOptions, {
+// The arrow rather than `sentryOptions` itself: the function takes an optional second argument
+// (the suite's transport and DSN overrides), and handing it straight to a callback whose arity
+// may grow would silently bind whatever that callback passes second to `overrides`.
+export default withSentry((env: Env) => sentryOptions(env), {
   // Must be the app's own `fetch`, which `routes.fetch` is. Sentry keys "already instrumented"
   // off function identity, so handing it the same object makes this a no-op for fetch; a wrapper
   // or a `.bind()` would produce a second request transaction for every request. See

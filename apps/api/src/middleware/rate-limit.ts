@@ -118,9 +118,14 @@ export function ipLimiter(
 /**
  * Per-principal limiter: USER_RL, 600 requests per 60 seconds.
  *
- * Not registered in increment 4's chain, because `c.var.user` is always null until increment 5
- * resolves a session. Increment 5 mounts it under `/v1` after the auth middleware, where the key
- * selector below starts returning a user id instead of null.
+ * Not registered in increment 4's chain, because no session is resolved until increment 5.
+ * Increment 5 mounts it under `/v1` after the auth middleware, where the key selector below
+ * starts returning a user id instead of null.
+ *
+ * `c.var.user ?? null`, not `c.var.user`: the rate-limit slot in the global chain runs BEFORE the
+ * auth middleware (ruling E6), so the variable is `undefined` there rather than `null`. Reading
+ * `user.id` off a strict `=== null` test would throw on every request the day this limiter is
+ * mounted anywhere ahead of auth, and a test that registers auth first would not notice.
  */
 export function principalLimiter(
   limiter: LimiterSelector = (env) => env.USER_RL,
@@ -129,7 +134,7 @@ export function principalLimiter(
     name: 'USER_RL',
     limiter,
     key: (c) => {
-      const user = c.var.user;
+      const user = c.var.user ?? null;
       return user === null ? null : `user:${user.id}`;
     },
     retryAfterSeconds: 60,

@@ -39,6 +39,16 @@ export default tseslint.config(
     },
   },
   {
+    // Every file ESLint sees, source and test alike. A raw NUL anywhere makes git treat that blob
+    // as binary, and the file loses its diff for good; catching it here is what makes the failure
+    // loud, because prettier, tsc and the toolchain guard all accept it silently.
+    files: ['**/*.ts', '**/*.tsx', '**/*.js', '**/*.mjs', '**/*.cjs'],
+    plugins: { planeahead },
+    rules: {
+      'planeahead/no-literal-control-characters': 'error',
+    },
+  },
+  {
     files: ['apps/api/src/**/*.ts', 'packages/db/src/**/*.ts'],
     plugins: { planeahead },
     rules: {

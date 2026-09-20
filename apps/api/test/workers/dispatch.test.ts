@@ -14,7 +14,14 @@
 import { createExecutionContext, createMessageBatch, getQueueResult } from 'cloudflare:test';
 import { env } from 'cloudflare:workers';
 import { describe, expect, it } from 'vitest';
-import { HOUSEKEEPING_CRON, RECONCILE_CRON, runCron } from '../../src/cron/index';
+import {
+  CRON_HANDLERS,
+  type CronHandlers,
+  HOUSEKEEPING_CRON,
+  RECONCILE_CRON,
+  runCron,
+  scheduled,
+} from '../../src/cron/index';
 import { type LogLine, createLogger } from '../../src/observability/log';
 import { backoffSeconds, consumeBatch } from '../../src/queues/consume';
 import { parseQueueName, queue } from '../../src/queues/index';
@@ -137,18 +144,18 @@ describe('runCron()', () => {
   it.each([
     [RECONCILE_CRON, 'cron_reconcile'],
     [HOUSEKEEPING_CRON, 'cron_housekeeping'],
-  ])('routes %s', (cron, event) => {
+  ])('routes %s', async (cron, event) => {
     const { lines, log } = capture();
 
-    runCron(cron, { env, ctx: createExecutionContext(), log });
+    await runCron(cron, { env, ctx: createExecutionContext(), log });
 
     expect(lines.map((line) => line.event)).toEqual([event]);
   });
 
-  it('logs rather than throws for an expression nothing handles', () => {
+  it('logs rather than throws for an expression nothing handles', async () => {
     const { lines, log } = capture();
 
-    runCron('0 0 1 1 *', { env, ctx: createExecutionContext(), log });
+    await runCron('0 0 1 1 *', { env, ctx: createExecutionContext(), log });
 
     expect(lines.map((line) => line.event)).toEqual(['cron_unrouted']);
   });
@@ -158,5 +165,77 @@ describe('runCron()', () => {
     // deploy time, so the constants and the config have to agree literally.
     expect(RECONCILE_CRON).toBe('*/15 * * * *');
     expect(HOUSEKEEPING_CRON).toBe('0 3 * * *');
+  });
+
+  it('waits for an async handler to finish before it returns', async () => {
+    // The seam is async so increment 7's reconcile can page `flight_instances` and fan out to a
+    // queue, both of which are awaited work. A `void` seam offered two bad ways to express that:
+    // change all four signatures later, or reach for `ctx.waitUntil` on work that should be
+    // awaited and lose the cron's error reporting with it. A promise a `void` `scheduled()`
+    // starts is also simply abandoned when the invocation returns.
+    const { lines, log } = capture();
+    let finished = false;
+    const handlers: CronHandlers = {
+      [RECONCILE_CRON]: async ({ log: handlerLog }) => {
+        await Promise.resolve();
+        finished = true;
+        handlerLog.info('slow_work_done', {});
+      },
+    };
+
+    await runCron(RECONCILE_CRON, { env, ctx: createExecutionContext(), log }, handlers);
+
+    expect(finished).toBe(true);
+    expect(lines.map((line) => line.event)).toEqual(['slow_work_done']);
+  });
+
+  it('logs a rejected async handler as cron_failed instead of leaking it', async () => {
+    // If `runCron` stopped awaiting, this rejection would become an unhandled rejection that no
+    // log line and no Sentry event would mention.
+    const { lines, log } = capture();
+    const handlers: CronHandlers = {
+      [RECONCILE_CRON]: async () => {
+        await Promise.resolve();
+        throw new Error('reconcile exploded');
+      },
+    };
+
+    await runCron(RECONCILE_CRON, { env, ctx: createExecutionContext(), log }, handlers);
+
+    const failure = lines.find((line) => line.event === 'cron_failed');
+    expect(failure?.['error_message']).toBe('reconcile exploded');
+    expect(failure?.level).toBe('error');
+  });
+
+  it('logs a synchronously thrown handler the same way', async () => {
+    const { lines, log } = capture();
+    const handlers: CronHandlers = {
+      [HOUSEKEEPING_CRON]: () => {
+        throw new Error('housekeeping exploded');
+      },
+    };
+
+    await runCron(HOUSEKEEPING_CRON, { env, ctx: createExecutionContext(), log }, handlers);
+
+    expect(lines.map((line) => line.event)).toEqual(['cron_failed']);
+  });
+
+  it('routes through the table the Worker itself uses', () => {
+    expect(Object.keys(CRON_HANDLERS).sort()).toEqual([HOUSEKEEPING_CRON, RECONCILE_CRON].sort());
+  });
+});
+
+describe('scheduled()', () => {
+  it('returns a promise, so workerd keeps the invocation alive until the work finishes', async () => {
+    const controller = {
+      cron: HOUSEKEEPING_CRON,
+      scheduledTime: Date.now(),
+      noRetry: () => undefined,
+    } as unknown as ScheduledController;
+
+    const returned = scheduled(controller, env, createExecutionContext());
+
+    expect(returned).toBeInstanceOf(Promise);
+    await expect(returned).resolves.toBeUndefined();
   });
 });
