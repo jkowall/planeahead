@@ -1,0 +1,79 @@
+{
+  "synthetic": true,
+  "spec": "specs/aerodatabox-direct-v1.15.3.yaml",
+  "schema": "FlightContract[]",
+  "note": "BA 1512 is a codeshare on AA 100: AeroDataBox names the marketing carrier only, and the ATC callsign is the one operator hint.",
+  "request": {
+    "method": "GET",
+    "path": "/flights/Number/BA1512/2026-09-22"
+  },
+  "response": {
+    "status": 200,
+    "contentType": "application/json",
+    "body": [
+      {
+        "greatCircleDistance": {
+          "meter": 5539970.0,
+          "km": 5539.97,
+          "mile": 3442.37,
+          "nm": 2991.34,
+          "feet": 18175754.6
+        },
+        "departure": {
+          "airport": {
+            "icao": "KJFK",
+            "iata": "JFK",
+            "name": "New York John F Kennedy",
+            "shortName": "John F Kennedy",
+            "municipalityName": "New York",
+            "location": {
+              "lat": 40.6398,
+              "lon": -73.7789
+            },
+            "countryCode": "US",
+            "timeZone": "America/New_York"
+          },
+          "scheduledTime": {
+            "utc": "2026-09-22 22:00Z",
+            "local": "2026-09-22 18:00"
+          },
+          "quality": ["Basic", "Live"]
+        },
+        "arrival": {
+          "airport": {
+            "icao": "EGLL",
+            "iata": "LHR",
+            "name": "London Heathrow",
+            "shortName": "Heathrow",
+            "municipalityName": "London",
+            "location": {
+              "lat": 51.4706,
+              "lon": -0.461941
+            },
+            "countryCode": "GB",
+            "timeZone": "Europe/London"
+          },
+          "scheduledTime": {
+            "utc": "2026-09-23 05:10Z",
+            "local": "2026-09-23 06:10"
+          },
+          "quality": ["Basic"]
+        },
+        "lastUpdatedUtc": "2026-09-22 20:45Z",
+        "number": "BA 1512",
+        "callSign": "AAL100",
+        "status": "Expected",
+        "codeshareStatus": "IsCodeshared",
+        "isCargo": false,
+        "aircraft": {
+          "model": "Boeing 777-300ER"
+        },
+        "airline": {
+          "name": "British Airways",
+          "iata": "BA",
+          "icao": "BAW"
+        }
+      }
+    ]
+  }
+}

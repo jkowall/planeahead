@@ -1,0 +1,93 @@
+{
+  "synthetic": true,
+  "spec": "specs/aeroapi-v4.17.1.yaml",
+  "schema": "flights",
+  "note": "The first, bracketed fetch by designator (ident_type=designator, start and end around scheduled_out).",
+  "request": {
+    "method": "GET",
+    "path": "/flights/AAL100?ident_type=designator&start=2026-09-21T22:00:00Z&end=2026-09-23T22:00:00Z&max_pages=1"
+  },
+  "response": {
+    "status": 200,
+    "contentType": "application/json; charset=UTF-8",
+    "body": {
+      "links": null,
+      "num_pages": 1,
+      "flights": [
+        {
+          "ident": "AAL100",
+          "ident_icao": "AAL100",
+          "ident_iata": "AA100",
+          "actual_runway_off": null,
+          "actual_runway_on": null,
+          "fa_flight_id": "AAL100-1758341600-schedule-0391",
+          "operator": "AAL",
+          "operator_icao": "AAL",
+          "operator_iata": "AA",
+          "flight_number": "100",
+          "registration": "N717AN",
+          "atc_ident": null,
+          "inbound_fa_flight_id": "AAL101-1758255200-schedule-0120",
+          "codeshares": ["BAW1512", "IBE4218"],
+          "codeshares_iata": ["BA1512", "IB4218"],
+          "blocked": false,
+          "diverted": false,
+          "cancelled": false,
+          "position_only": false,
+          "origin": {
+            "code": "KJFK",
+            "code_icao": "KJFK",
+            "code_iata": "JFK",
+            "code_lid": null,
+            "timezone": "America/New_York",
+            "name": "John F Kennedy Intl",
+            "city": "New York",
+            "airport_info_url": "/airports/KJFK"
+          },
+          "destination": {
+            "code": "EGLL",
+            "code_icao": "EGLL",
+            "code_iata": "LHR",
+            "code_lid": null,
+            "timezone": "Europe/London",
+            "name": "London Heathrow",
+            "city": "London",
+            "airport_info_url": "/airports/EGLL"
+          },
+          "departure_delay": 0,
+          "arrival_delay": 0,
+          "filed_ete": 25200,
+          "progress_percent": 0,
+          "status": "Scheduled",
+          "aircraft_type": "B77W",
+          "route_distance": 3451,
+          "filed_airspeed": 489,
+          "filed_altitude": null,
+          "route": null,
+          "baggage_claim": null,
+          "seats_cabin_business": 52,
+          "seats_cabin_coach": 216,
+          "seats_cabin_first": 8,
+          "gate_origin": "B32",
+          "gate_destination": null,
+          "terminal_origin": "8",
+          "terminal_destination": "3",
+          "type": "Airline",
+          "scheduled_out": "2026-09-22T22:00:00Z",
+          "estimated_out": "2026-09-22T22:00:00Z",
+          "actual_out": null,
+          "scheduled_off": "2026-09-22T22:15:00Z",
+          "estimated_off": "2026-09-22T22:15:00Z",
+          "actual_off": null,
+          "scheduled_on": "2026-09-23T05:00:00Z",
+          "estimated_on": "2026-09-23T05:00:00Z",
+          "actual_on": null,
+          "scheduled_in": "2026-09-23T05:10:00Z",
+          "estimated_in": "2026-09-23T05:10:00Z",
+          "actual_in": null,
+          "foresight_predictions_available": false
+        }
+      ]
+    }
+  }
+}

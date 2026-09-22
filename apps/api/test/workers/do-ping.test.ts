@@ -45,31 +45,50 @@ afterEach(async () => {
 interface PingCase {
   readonly className: string;
   readonly ping: (name: string) => Promise<DurableObjectPing>;
+  /** The class's migrations: none for the shells, one for ProviderBudget from increment 6. */
+  readonly version: number;
 }
 
 const CLASSES: readonly PingCase[] = [
-  { className: 'FlightTracker', ping: (name) => track(env.FLIGHT_TRACKER.getByName(name)).ping() },
+  {
+    className: 'FlightTracker',
+    ping: (name) => track(env.FLIGHT_TRACKER.getByName(name)).ping(),
+    version: 0,
+  },
   {
     className: 'DesignatorResolver',
     ping: (name) => track(env.DESIGNATOR_RESOLVER.getByName(name)).ping(),
+    version: 0,
   },
-  { className: 'AirportState', ping: (name) => track(env.AIRPORT_STATE.getByName(name)).ping() },
-  { className: 'UserInbox', ping: (name) => track(env.USER_INBOX.getByName(name)).ping() },
+  {
+    className: 'AirportState',
+    ping: (name) => track(env.AIRPORT_STATE.getByName(name)).ping(),
+    version: 0,
+  },
+  {
+    className: 'UserInbox',
+    ping: (name) => track(env.USER_INBOX.getByName(name)).ping(),
+    version: 0,
+  },
   {
     className: 'ProviderBudget',
     ping: (name) => track(env.PROVIDER_BUDGET.getByName(name)).ping(),
+    version: 1,
   },
 ];
 
 describe('Durable Object shells', () => {
-  it.each(CLASSES)('$className answers ping() at schema version 0', async ({ className, ping }) => {
-    const result = await ping(uniqueName(`ping-${className}`));
+  it.each(CLASSES)(
+    '$className answers ping() at schema version $version and applies its migrations on first touch',
+    async ({ className, ping, version }) => {
+      const result = await ping(uniqueName(`ping-${className}`));
 
-    expect(result.className).toBe(className);
-    expect(result.schemaVersion).toBe(0);
-    expect(result.appliedVersion).toBe(0);
-    expect(result.applied).toEqual([]);
-  });
+      expect(result.className).toBe(className);
+      expect(result.schemaVersion).toBe(version);
+      expect(result.appliedVersion).toBe(version);
+      expect(result.applied).toEqual(Array.from({ length: version }, (_value, index) => index + 1));
+    },
+  );
 
   it('creates the migrations table in the constructor, before the first RPC returns', async () => {
     const stub = track(env.AIRPORT_STATE.getByName(uniqueName('table')));

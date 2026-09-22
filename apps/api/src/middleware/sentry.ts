@@ -36,12 +36,22 @@ import { safeErrorMessage, stripQueryParams } from '../observability/log';
 /** Breadcrumb data keys worth keeping on an HTTP breadcrumb. Everything else is dropped. */
 const SAFE_HTTP_BREADCRUMB_KEYS = ['method', 'url', 'status_code', 'reason'] as const;
 
+/**
+ * The webhook receivers authenticate by a token in the PATH (`/v1/webhooks/{provider}/{token}`,
+ * src/routes/webhooks.ts), so a URL can carry a secret even without a query string.
+ */
+const WEBHOOK_TOKEN_PATH_RE = /(\/v1\/webhooks\/[a-z]+\/)[^/?#]+/g;
+
+export function redactWebhookToken(url: string): string {
+  return url.replace(WEBHOOK_TOKEN_PATH_RE, '$1[redacted]');
+}
+
 function stripQuery(url: string): string {
   const cut = Math.min(
     url.includes('?') ? url.indexOf('?') : url.length,
     url.includes('#') ? url.indexOf('#') : url.length,
   );
-  return url.slice(0, cut);
+  return redactWebhookToken(url.slice(0, cut));
 }
 
 /**
@@ -107,6 +117,9 @@ function scrubBreadcrumb(breadcrumb: Breadcrumb): void {
  * callbacks in `sentryOptions` call this one function.
  */
 export function scrubSentryEvent<T extends Event>(event: T): T {
+  if (typeof event.transaction === 'string') {
+    event.transaction = redactWebhookToken(event.transaction);
+  }
   const request = event.request;
   if (request !== undefined) {
     delete request.headers;

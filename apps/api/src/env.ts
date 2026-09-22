@@ -60,6 +60,21 @@ export interface WorkerSecrets {
   /** Resend API key. Unset means magic-link mail goes to the logging `NoopSender`. */
   readonly RESEND_API_KEY?: string;
 
+  /** AeroDataBox direct-gateway key (`X-Api-Key`), the primary flight data provider (increment 6). */
+  readonly AERODATABOX_API_KEY?: string;
+  /** FlightAware AeroAPI key (`x-apikey`). Unused while `AEROAPI_MODE` is `mock`. */
+  readonly AEROAPI_API_KEY?: string;
+
+  /**
+   * 256-bit path tokens for the webhook receivers, one per provider and per environment:
+   * `/v1/webhooks/aerodatabox/{token}` and `/v1/webhooks/aeroapi/{token}`. Neither provider signs
+   * its deliveries (AeroDataBox subscriptions carry no secret and must not require
+   * authorisation), so the unguessable path is the authentication. 43 base64url characters
+   * (`openssl rand -base64 32 | tr '+/' '-_' | tr -d '=')`) or 64 hex characters.
+   */
+  readonly WEBHOOK_TOKEN_AERODATABOX?: string;
+  readonly WEBHOOK_TOKEN_AEROAPI?: string;
+
   /**
    * Test seams. Unset in every deployed environment, where the code falls back to the real
    * hosts; the Workers suite points them at `test/fake-providers.ts`.
@@ -88,6 +103,10 @@ export const WORKER_SECRET_NAMES = [
   'GOOGLE_CLIENT_ID_IOS',
   'GOOGLE_CLIENT_ID_ANDROID',
   'RESEND_API_KEY',
+  'AERODATABOX_API_KEY',
+  'AEROAPI_API_KEY',
+  'WEBHOOK_TOKEN_AERODATABOX',
+  'WEBHOOK_TOKEN_AEROAPI',
 ] as const satisfies readonly (keyof WorkerSecrets)[];
 
 /** Bindings that redirect an external endpoint at a test double. Never set in a deployment. */
@@ -98,7 +117,29 @@ export const TEST_SEAM_NAMES = [
   'RESEND_API_URL',
 ] as const satisfies readonly (keyof WorkerSecrets)[];
 
-export type Env = Cloudflare.Env & WorkerSecrets;
+/**
+ * Provider settings (increment 6). Not secrets, but not in wrangler.jsonc `vars` either: each
+ * has a cautious default in code (`src/providers/config.ts`), so a deployment that sets none of
+ * them runs AeroAPI in `mock` mode, on the AeroDataBox Starter limits, with AeroDataBox alerts
+ * off. Set them in `.dev.vars` locally and with `wrangler secret put` (or a `vars` entry) in a
+ * deployment that needs a non-default.
+ */
+export interface WorkerSettings {
+  /** `mock` (default) routes every cadence window to AeroDataBox; `live` enables AeroAPI. */
+  readonly AEROAPI_MODE?: string;
+  /** `starter` (default), `growth` or `scale`: per-second limit, lookahead, FIDS window. */
+  readonly ADB_PLAN?: string;
+  /** `true` enables the AeroDataBox webhook receiver; anything else answers 404. */
+  readonly ADB_ALERTS_ENABLED?: string;
+}
+
+export const WORKER_SETTING_NAMES = [
+  'AEROAPI_MODE',
+  'ADB_PLAN',
+  'ADB_ALERTS_ENABLED',
+] as const satisfies readonly (keyof WorkerSettings)[];
+
+export type Env = Cloudflare.Env & WorkerSecrets & WorkerSettings;
 
 /** Values middleware puts on the context for later middleware and route handlers to read. */
 export interface Variables {

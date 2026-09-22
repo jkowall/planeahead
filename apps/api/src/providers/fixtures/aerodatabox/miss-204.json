@@ -1,0 +1,13 @@
+{
+  "synthetic": true,
+  "spec": "specs/aerodatabox-direct-v1.15.3.yaml",
+  "schema": null,
+  "note": "A miss: 204 No Content, no body. Billed 2 units like a hit; never parsed.",
+  "request": {
+    "method": "GET",
+    "path": "/flights/Number/AA100/2026-09-22"
+  },
+  "response": {
+    "status": 204
+  }
+}

@@ -11,6 +11,13 @@
     // the 5.x line workerd 1.20260918.1 actually implements.
     "types": ["node", "@cloudflare/vitest-plugin/types"]
   },
-  "include": ["src/**/*.ts", "test/**/*.ts", "vitest.config.ts", "worker-configuration.d.ts"],
+  // src/**/*.json: the provider fixtures (src/providers/fixtures) that the adapter tests import.
+  "include": [
+    "src/**/*.ts",
+    "src/**/*.json",
+    "test/**/*.ts",
+    "vitest.config.ts",
+    "worker-configuration.d.ts"
+  ],
   "references": [{ "path": "../../packages/shared" }, { "path": "../../packages/db" }]
 }

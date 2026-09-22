@@ -1,0 +1,142 @@
+{
+  "synthetic": true,
+  "spec": "specs/aerodatabox-direct-v1.15.3.yaml",
+  "schema": "AirportFidsContract",
+  "note": "KJFK departures 17:00 to 23:00 local. The last row has no ICAO counterpart and is skipped.",
+  "request": {
+    "method": "GET",
+    "path": "/flights/airports/Icao/KJFK/2026-09-22T17:00/2026-09-22T23:00"
+  },
+  "response": {
+    "status": 200,
+    "contentType": "application/json",
+    "body": {
+      "departures": [
+        {
+          "movement": {
+            "airport": {
+              "icao": "EGLL",
+              "iata": "LHR",
+              "name": "London Heathrow",
+              "shortName": "Heathrow",
+              "municipalityName": "London",
+              "location": {
+                "lat": 51.4706,
+                "lon": -0.461941
+              },
+              "countryCode": "GB",
+              "timeZone": "Europe/London"
+            },
+            "scheduledTime": {
+              "utc": "2026-09-22 22:00Z",
+              "local": "2026-09-22 18:00"
+            },
+            "quality": ["Basic", "Live"],
+            "revisedTime": {
+              "utc": "2026-09-22 23:10Z",
+              "local": "2026-09-22 19:10"
+            },
+            "terminal": "8",
+            "gate": "B32"
+          },
+          "number": "AA 100",
+          "status": "Delayed",
+          "codeshareStatus": "IsOperator",
+          "isCargo": false,
+          "aircraft": {
+            "model": "Boeing 777-300ER"
+          },
+          "airline": {
+            "name": "American",
+            "iata": "AA",
+            "icao": "AAL"
+          }
+        },
+        {
+          "movement": {
+            "airport": {
+              "icao": "EGLL",
+              "iata": "LHR",
+              "name": "London Heathrow",
+              "shortName": "Heathrow",
+              "municipalityName": "London",
+              "location": {
+                "lat": 51.4706,
+                "lon": -0.461941
+              },
+              "countryCode": "GB",
+              "timeZone": "Europe/London"
+            },
+            "scheduledTime": {
+              "utc": "2026-09-22 22:00Z",
+              "local": "2026-09-22 18:00"
+            },
+            "quality": ["Basic", "Live"],
+            "revisedTime": {
+              "utc": "2026-09-22 23:10Z",
+              "local": "2026-09-22 19:10"
+            },
+            "terminal": "8",
+            "gate": "B32"
+          },
+          "number": "BA 1512",
+          "callSign": "AAL100",
+          "status": "Delayed",
+          "codeshareStatus": "IsCodeshared",
+          "isCargo": false,
+          "airline": {
+            "name": "British Airways",
+            "iata": "BA",
+            "icao": "BAW"
+          }
+        },
+        {
+          "movement": {
+            "airport": {
+              "icao": "LFPG",
+              "iata": "CDG",
+              "name": "Paris Charles de Gaulle",
+              "timeZone": "Europe/Paris"
+            },
+            "scheduledTime": {
+              "utc": "2026-09-22 21:30Z",
+              "local": "2026-09-22 17:30"
+            },
+            "quality": ["Basic", "Live"],
+            "revisedTime": {
+              "utc": "2026-09-22 21:34Z",
+              "local": "2026-09-22 17:34"
+            },
+            "terminal": "1",
+            "gate": "7"
+          },
+          "number": "AF 11",
+          "status": "Departed",
+          "codeshareStatus": "IsOperator",
+          "isCargo": false,
+          "airline": {
+            "name": "Air France",
+            "iata": "AF",
+            "icao": "AFR"
+          }
+        },
+        {
+          "movement": {
+            "airport": {
+              "name": "Unknown field"
+            },
+            "scheduledTime": {
+              "utc": "2026-09-22 23:00Z",
+              "local": "2026-09-22 19:00"
+            },
+            "quality": ["Basic"]
+          },
+          "number": "ZZ 1",
+          "status": "Expected",
+          "codeshareStatus": "Unknown",
+          "isCargo": false
+        }
+      ]
+    }
+  }
+}

@@ -8,9 +8,13 @@ the Durable Object migration runner are in [ADR 0004](../../docs/adr/0004-hono-r
 Increment 4 is the bootstrap: the middleware chain, `GET /health`, the Durable Object shells and
 the queue and cron skeletons. Increment 5 adds authentication (Better Auth 1.7.5: anonymous,
 magic link, native Apple, native Google, the Expo transport), the envelope-encryption module,
-`POST /v1/devices`, `GET /v1/me` and `PATCH /v1/me/preferences`. Provider calls and the flight
-routes arrive in increments 6 to 8, and every path they will own answers `501` with the increment
-that owns it. The auth design is in [docs/increments/05-auth.md](../../docs/increments/05-auth.md)
+`POST /v1/devices`, `GET /v1/me` and `PATCH /v1/me/preferences`. Increment 6 adds the provider
+layer (`src/providers`: the AeroDataBox adapter, the fixture-backed AeroAPI adapter, the router,
+the cost logger, the budget guards and token bucket), the ProviderBudget Durable Object and the
+two webhook receivers under `/v1/webhooks`; its design is in
+[docs/increments/06-provider-layer.md](../../docs/increments/06-provider-layer.md) and
+[ADR 0010](../../docs/adr/0010-provider-identity.md). The flight routes arrive in increments 7 and
+8, and every path they will own answers `501` with the increment that owns it. The auth design is in [docs/increments/05-auth.md](../../docs/increments/05-auth.md)
 and its threat model in [docs/security/threat-model.md](../../docs/security/threat-model.md).
 
 ## Commands
@@ -70,9 +74,13 @@ src/mail/                 sender.ts (MailSender, the magic-link message), resend
                           cloudflare-email.ts (implementation only, never wired)
 src/routes/               health.ts, auth.ts (/api/auth: the gate, the verify wrapper, the browser
                           consume route), magic-link-landing.ts (/auth/magic-link, the emailed
-                          non-consuming page), v1.ts (/v1: devices.ts, me.ts, the stub)
+                          non-consuming page), v1.ts (/v1: devices.ts, me.ts, webhooks.ts, the stub)
+src/providers/            aerodatabox.adapter.ts, aeroapi.mock.ts, router.ts, cost-log.ts,
+                          budget.ts, token-bucket.ts, config.ts (plans and settings), http.ts;
+                          specs/ (the vendored OpenAPI snapshots), fixtures/ (test data only)
 src/validation/           nul.ts (U+0000 is refused at every JSON boundary; Postgres would 500)
-src/do/                   migrate.ts (the SQLite schema runner), base.ts, the five classes
+src/do/                   migrate.ts (the SQLite schema runner), base.ts, the five classes,
+                          migrations/<class>/NNN.ts (ProviderBudget has the first)
 src/queues/               index.ts dispatch, consume.ts (per-message ack), analytics.ts, consumers
 src/cron/                 index.ts dispatch, reconcile.ts, housekeeping.ts
 src/observability/log.ts  structured JSON logging with the request id
@@ -166,6 +174,18 @@ merge needs that cookie to find the account being upgraded.
 a binary blob has no diff, no line-level review comment and no three-way merge.
 `planeahead/no-literal-control-characters` fails the lint on the byte; `.gitattributes` is the
 second line of defence. Write the escape (`'\u0000'`), which compiles to the same string.
+
+**No test calls a real provider.** Every adapter takes an injected `fetch`; the router passes the
+Worker's, the tests pass a stub that serves fixtures shaped from the vendored specs. Every call
+returns its `ProviderCallRecord`, and each record is logged exactly once: the caller logs
+`result.call`, the adapter logs the attempts it does not return (the AeroDataBox day-either-side
+retry). `scripts/record-adb-fixtures.mjs` is the only thing that ever reaches AeroDataBox, by
+hand, with a key.
+
+**Webhooks authenticate by path token.** Neither provider signs deliveries, so each receiver has a
+256-bit `WEBHOOK_TOKEN_*` per environment in its URL, compared in constant time; a wrong token is
+the ordinary 404. The token is never logged by our code and the Sentry scrubber redacts it, but
+Cloudflare's own request logs keep URLs (ADR 0010 records the residual risk).
 
 **Rate limit `namespace_id` values are account-wide counters.** Staging, production and local each
 get their own block of ids in `wrangler.jsonc`, or staging load spends production's allowance.

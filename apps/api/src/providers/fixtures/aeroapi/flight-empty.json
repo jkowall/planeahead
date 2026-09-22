@@ -1,0 +1,19 @@
+{
+  "synthetic": true,
+  "spec": "specs/aeroapi-v4.17.1.yaml",
+  "schema": "flights",
+  "note": "No flight in the window: a billed empty result set.",
+  "request": {
+    "method": "GET",
+    "path": "/flights/AAL100?ident_type=designator&start=2026-09-21T22:00:00Z&end=2026-09-23T22:00:00Z&max_pages=1"
+  },
+  "response": {
+    "status": 200,
+    "contentType": "application/json; charset=UTF-8",
+    "body": {
+      "links": null,
+      "num_pages": 1,
+      "flights": []
+    }
+  }
+}

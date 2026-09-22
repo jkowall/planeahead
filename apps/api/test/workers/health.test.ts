@@ -48,7 +48,8 @@ describe('GET /health', () => {
       DesignatorResolver: 0,
       AirportState: 0,
       UserInbox: 0,
-      ProviderBudget: 0,
+      // Increment 6: the ledger, bucket, kill switch and outbox tables.
+      ProviderBudget: 1,
     });
   });
 

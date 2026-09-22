@@ -66,9 +66,29 @@ GOOGLE_JWKS_URL=
 RESEND_API_URL=
 
 # ---------------------------------------------------------------------------------------------
-# Not yet. Each line turns on in the increment named beside it, and the increment that turns it
-# on also adds it to `WorkerSecrets` and WORKER_SECRET_NAMES in src/env.ts.
-#
-# AERODATABOX_API_KEY=       increment 6   primary flight data provider
-# AEROAPI_API_KEY=           increment 6   FlightAware AeroAPI, the fallback provider
-# PROVIDER_WEBHOOK_SECRET=   increment 6   shared secret on the inbound webhook receivers
+# Flight data providers (increment 6). Secrets: `wrangler secret put <NAME> --env staging`.
+
+# AeroDataBox direct-gateway key (the `X-Api-Key` header), the primary provider. Empty means the
+# provider router refuses to build the adapter (ProviderConfigError) rather than calling without it.
+AERODATABOX_API_KEY=
+# FlightAware AeroAPI key (the `x-apikey` header). Unused while AEROAPI_MODE is `mock`.
+AEROAPI_API_KEY=
+
+# Webhook path tokens, one per provider AND per environment, 256 bits each: 43 base64url
+# characters (`openssl rand -base64 32 | tr '+/' '-_' | tr -d '='`) or 64 hex characters. They are
+# the ONLY authentication on POST /v1/webhooks/aerodatabox/{token} and /v1/webhooks/aeroapi/{token}
+# (neither provider signs its deliveries). A missing or shorter token disables the receiver: every
+# request answers 404. Never reuse a token across environments.
+WEBHOOK_TOKEN_AERODATABOX=
+WEBHOOK_TOKEN_AEROAPI=
+
+# Provider settings. Not secrets; each has a cautious default in src/providers/config.ts when
+# unset: AeroAPI mocked, the AeroDataBox Starter limits, AeroDataBox alerts off.
+# `mock` routes every cadence window to AeroDataBox and never calls AeroAPI; `live` enables it.
+AEROAPI_MODE=mock
+# The AeroDataBox plan: `starter`, `growth` or `scale` (per-second limit 5 / 10 / 20, lookahead
+# 180 / 365 / 365 days, FIDS window 12 / 24 / 48 hours). Growth is the planned floor: Starter's
+# 7-day caching term forbids keeping flight instances in Postgres and R2.
+ADB_PLAN=growth
+# `true` opens the AeroDataBox webhook receiver. Phase 0 has no subscription, so it stays false.
+ADB_ALERTS_ENABLED=false

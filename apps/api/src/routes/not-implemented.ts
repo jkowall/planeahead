@@ -36,9 +36,9 @@ function stub(increment: string, message: string) {
 }
 
 /**
- * `/v1/*` beyond the account routes: `/v1/flights`, `/v1/sync`, `/v1/events` and
- * `/v1/webhooks/*`. Increment 6 adds the webhook receivers, increments 7 and 8 the flight and
- * sync routes. Mounted last under `/v1` (src/routes/v1.ts), so a real route registered ahead of
+ * `/v1/*` beyond the account routes and the webhook receivers: `/v1/flights`, `/v1/sync` and
+ * `/v1/events`. Increment 6 added the webhook receivers (src/routes/webhooks.ts, which answers
+ * every other `/v1/webhooks/*` path with 404); increments 7 and 8 add the flight and sync routes. Mounted last under `/v1` (src/routes/v1.ts), so a real route registered ahead of
  * it answers first.
  */
 export const v1Stub = stub(

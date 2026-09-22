@@ -1,0 +1,32 @@
+{
+  "synthetic": true,
+  "spec": "specs/aerodatabox-direct-v1.15.3.yaml",
+  "schema": "AirportFeedServiceStatusContract",
+  "note": "FREE TIER health check: which feeds cover the airport.",
+  "request": {
+    "method": "GET",
+    "path": "/health/services/airports/KJFK/feeds"
+  },
+  "response": {
+    "status": 200,
+    "contentType": "application/json",
+    "body": {
+      "flightSchedulesFeed": {
+        "service": "FlightSchedules",
+        "status": "OK"
+      },
+      "liveFlightUpdatesFeed": {
+        "service": "FlightLiveUpdates",
+        "status": "OKPartial"
+      },
+      "adsbUpdatesFeed": {
+        "service": "AdsbUpdates",
+        "status": "OK"
+      },
+      "generalAvailability": {
+        "minAvailableLocalDate": "2025-09-22T00:00",
+        "maxAvailableLocalDate": "2027-09-22T00:00"
+      }
+    }
+  }
+}

@@ -23,3 +23,12 @@ GOOGLE_CLIENT_ID_WEB=000000000001-web.apps.googleusercontent.com
 GOOGLE_CLIENT_ID_IOS=000000000001-ios.apps.googleusercontent.com
 GOOGLE_CLIENT_ID_ANDROID=000000000001-android.apps.googleusercontent.com
 RESEND_API_KEY=re_test_000000000000000000000000000000
+# Increment 6: provider keys that no provider knows (every adapter test injects its own fetch),
+# and 256-bit webhook path tokens generated for this file.
+AERODATABOX_API_KEY=adb_test_00000000000000000000000000000000
+AEROAPI_API_KEY=aeroapi_test_000000000000000000000000000000
+WEBHOOK_TOKEN_AERODATABOX=HYIjTQsxMp3rTU8C_2AiSYuIh3WGpjbZ8bid0aVEgbk
+WEBHOOK_TOKEN_AEROAPI=gj_nWrnU5i8Hglvb7XEMfwCv186gO2tY84E11Gws6tM
+AEROAPI_MODE=mock
+ADB_PLAN=growth
+ADB_ALERTS_ENABLED=false

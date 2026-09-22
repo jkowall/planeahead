@@ -1,0 +1,78 @@
+{
+  "synthetic": true,
+  "spec": "specs/aerodatabox-direct-v1.15.3.yaml",
+  "schema": "FlightContract[]",
+  "note": "Seven days out, schedule layer only: no revised time, no gate, Basic quality.",
+  "request": {
+    "method": "GET",
+    "path": "/flights/Number/AA100/2026-09-29"
+  },
+  "response": {
+    "status": 200,
+    "contentType": "application/json",
+    "body": [
+      {
+        "greatCircleDistance": {
+          "meter": 5539970.0,
+          "km": 5539.97,
+          "mile": 3442.37,
+          "nm": 2991.34,
+          "feet": 18175754.6
+        },
+        "departure": {
+          "airport": {
+            "icao": "KJFK",
+            "iata": "JFK",
+            "name": "New York John F Kennedy",
+            "shortName": "John F Kennedy",
+            "municipalityName": "New York",
+            "location": {
+              "lat": 40.6398,
+              "lon": -73.7789
+            },
+            "countryCode": "US",
+            "timeZone": "America/New_York"
+          },
+          "scheduledTime": {
+            "utc": "2026-09-29 22:00Z",
+            "local": "2026-09-29 18:00"
+          },
+          "quality": ["Basic"]
+        },
+        "arrival": {
+          "airport": {
+            "icao": "EGLL",
+            "iata": "LHR",
+            "name": "London Heathrow",
+            "shortName": "Heathrow",
+            "municipalityName": "London",
+            "location": {
+              "lat": 51.4706,
+              "lon": -0.461941
+            },
+            "countryCode": "GB",
+            "timeZone": "Europe/London"
+          },
+          "scheduledTime": {
+            "utc": "2026-09-30 05:10Z",
+            "local": "2026-09-30 06:10"
+          },
+          "quality": ["Basic"]
+        },
+        "lastUpdatedUtc": "2026-09-22 06:00Z",
+        "number": "AA 100",
+        "status": "Expected",
+        "codeshareStatus": "IsOperator",
+        "isCargo": false,
+        "aircraft": {
+          "model": "Boeing 777-300ER"
+        },
+        "airline": {
+          "name": "American",
+          "iata": "AA",
+          "icao": "AAL"
+        }
+      }
+    ]
+  }
+}

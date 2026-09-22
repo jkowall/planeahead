@@ -1,0 +1,45 @@
+{
+  "synthetic": true,
+  "spec": "specs/aerodatabox-direct-v1.15.3.yaml",
+  "schema": "AirportContract",
+  "note": "Airport by ICAO code (TIER 1).",
+  "request": {
+    "method": "GET",
+    "path": "/airports/Icao/KJFK"
+  },
+  "response": {
+    "status": 200,
+    "contentType": "application/json",
+    "body": {
+      "icao": "KJFK",
+      "iata": "JFK",
+      "shortName": "John F Kennedy",
+      "fullName": "New York John F Kennedy",
+      "municipalityName": "New York",
+      "location": {
+        "lat": 40.6398,
+        "lon": -73.7789
+      },
+      "elevation": {
+        "meter": 3.96,
+        "km": 0.00396,
+        "mile": 0.00246,
+        "nm": 0.00214,
+        "feet": 13.0
+      },
+      "country": {
+        "code": "US",
+        "name": "United States"
+      },
+      "continent": {
+        "code": "NA",
+        "name": "North America"
+      },
+      "timeZone": "America/New_York",
+      "urls": {
+        "webSite": "https://www.jfkairport.com/",
+        "wikipedia": "https://en.wikipedia.org/wiki/John_F._Kennedy_International_Airport"
+      }
+    }
+  }
+}

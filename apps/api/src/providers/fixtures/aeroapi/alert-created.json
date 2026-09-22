@@ -1,0 +1,16 @@
+{
+  "synthetic": true,
+  "spec": "specs/aeroapi-v4.17.1.yaml",
+  "schema": null,
+  "note": "POST /alerts answers 201 with the id in the Location header and no body.",
+  "request": {
+    "method": "POST",
+    "path": "/alerts"
+  },
+  "response": {
+    "status": 201,
+    "headers": {
+      "Location": "/aeroapi/alerts/28754391"
+    }
+  }
+}
