@@ -23,6 +23,10 @@ import {
 import { authRuntime } from '../auth/runtime';
 import type { AppBindings } from '../env';
 import { currentUser, requireScope } from '../middleware/auth';
+import { withoutNul } from '../validation/nul';
+
+/** The shared contract plus the NUL refinement (`settings` is a jsonb bag Postgres would 500 on). */
+const PreferencesPatchBody = withoutNul(UserPreferencesPatchSchema);
 
 function toPreferences(row: {
   distanceUnit: string;
@@ -100,7 +104,7 @@ export const meRoutes = new Hono<AppBindings>()
   .patch(
     '/preferences',
     requireScope('user'),
-    zValidator('json', UserPreferencesPatchSchema),
+    zValidator('json', PreferencesPatchBody),
     async (c) => {
       const principal = currentUser(c.var.user);
       const patch = c.req.valid('json');

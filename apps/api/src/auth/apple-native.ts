@@ -14,8 +14,16 @@
  *   - `email` may be absent (managed Apple IDs, and every sign-in after the first);
  *   - the token endpoint takes form-encoded `client_id`, `client_secret`, `code`,
  *     `grant_type=authorization_code`, no `redirect_uri` for a native flow, and returns the
- *     refresh token only on this first exchange;
+ *     refresh token only on this first exchange, together with an `id_token` for the same
+ *     authorization;
  *   - `fullName` never rides in the token. It is attacker-controlled request input.
+ *
+ * The exchange is BOUND to the identity token. Apple's token response carries an `id_token` for
+ * the authorization the code came from; it is verified with the same JWKS, issuer and audience
+ * and its `sub` (and its `nonce`, when Apple includes one) must equal the identity token's. A
+ * code from one authorization presented with the identity token of another (a captured token
+ * replayed with the attacker's own fresh code) is refused before any sign-in happens, and the
+ * refresh token that would have landed on the victim's account row is never stored.
  */
 
 import { type JWTVerifyGetKey, jwtVerify } from 'jose';
@@ -41,13 +49,22 @@ export class AppleTokenError extends Error {
   }
 }
 
+export type AppleExchangeReason =
+  | 'unparsed_error'
+  | 'no_refresh_token'
+  | 'no_id_token'
+  | 'id_token_invalid'
+  | 'id_token_subject_mismatch'
+  | 'id_token_nonce_mismatch'
+  | (string & {});
+
 export class AppleExchangeError extends Error {
   override readonly name = 'AppleExchangeError';
 
   constructor(
     readonly status: number,
     /** Apple's `error` field when the body parsed, otherwise a short label. Never the body. */
-    readonly reason: string,
+    readonly reason: AppleExchangeReason,
   ) {
     super(`Apple token endpoint answered ${status} (${reason})`);
   }
@@ -59,6 +76,12 @@ export interface AppleIdentityClaims {
   readonly email: string | null;
   readonly emailVerified: boolean;
   readonly isPrivateEmail: boolean;
+  /** The token's `nonce` claim (the lowercase SHA-256 hex of `rawNonce`), as verified. */
+  readonly nonce: string;
+  /** `exp`, seconds since the epoch; the replay marker lives this long. */
+  readonly expiresAt: number;
+  /** `jti` when Apple sets one (it does not today). */
+  readonly jti: string | null;
 }
 
 export interface AppleVerifyOptions {
@@ -114,6 +137,10 @@ export async function verifyAppleIdentityToken(
   if (sub === null) {
     throw new AppleTokenError('invalid_token', 'the identity token has no subject');
   }
+  const expiresAt = typeof payload.exp === 'number' ? payload.exp : null;
+  if (expiresAt === null) {
+    throw new AppleTokenError('invalid_token', 'the identity token has no exp');
+  }
   const rawEmail = payload['email'];
   const email = typeof rawEmail === 'string' && rawEmail !== '' ? rawEmail.toLowerCase() : null;
   return {
@@ -121,6 +148,9 @@ export async function verifyAppleIdentityToken(
     email,
     emailVerified: parseBoolClaim(payload['email_verified']),
     isPrivateEmail: parseBoolClaim(payload['is_private_email']),
+    nonce: nonce.toLowerCase(),
+    expiresAt,
+    jti: typeof payload.jti === 'string' && payload.jti !== '' ? payload.jti : null,
   };
 }
 
@@ -165,11 +195,25 @@ export function sanitizeFullName(
   return [...joined].slice(0, FULL_NAME_MAX_LENGTH).join('').trim() || null;
 }
 
+/** What the `id_token` in the token response must agree with: the identity token, verified. */
+export interface AppleExchangeBinding {
+  /** The same JWKS resolver the identity token was verified with. */
+  readonly getKey: JWTVerifyGetKey;
+  /** The bundle id: `aud` of both tokens. */
+  readonly audience: string;
+  /** The identity token's `sub`; the exchanged token must name the same subject. */
+  readonly expectedSub: string;
+  /** The identity token's `nonce`; checked only when Apple puts a nonce on the exchanged token. */
+  readonly expectedNonce?: string;
+  readonly currentDate?: Date;
+}
+
 export interface AppleExchangeOptions {
   readonly code: string;
   /** The bundle id. Must match the `client_id` the authorization used. */
   readonly clientId: string;
   readonly clientSecret: string;
+  readonly binding: AppleExchangeBinding;
   readonly tokenUrl?: string;
   readonly fetch?: typeof fetch;
 }
@@ -178,11 +222,55 @@ export interface AppleExchangeResult {
   readonly refreshToken: string;
   readonly accessToken: string | null;
   readonly expiresIn: number | null;
+  /** The exchanged `id_token`'s subject, equal to `binding.expectedSub` by construction. */
+  readonly idTokenSub: string;
 }
 
 /**
- * Exchanges the single-use authorization code. The body is never logged or included in an
- * error: it may carry tokens on success and Apple's error text on failure.
+ * Verifies the `id_token` Apple returned with the code exchange against the identity token the
+ * request presented. Throws `AppleExchangeError` with a reason that names the check that failed
+ * and never quotes either token.
+ */
+async function verifyExchangedIdToken(
+  idToken: unknown,
+  binding: AppleExchangeBinding,
+  status: number,
+): Promise<string> {
+  if (typeof idToken !== 'string' || idToken === '') {
+    throw new AppleExchangeError(status, 'no_id_token');
+  }
+  let payload;
+  try {
+    const verified = await jwtVerify(idToken, binding.getKey, {
+      algorithms: ['RS256'],
+      issuer: APPLE_ISSUER,
+      audience: binding.audience,
+      ...(binding.currentDate === undefined ? {} : { currentDate: binding.currentDate }),
+    });
+    payload = verified.payload;
+  } catch {
+    throw new AppleExchangeError(status, 'id_token_invalid');
+  }
+  const sub = typeof payload.sub === 'string' ? payload.sub : '';
+  if (sub === '' || !(await timingSafeEqualStrings(sub, binding.expectedSub))) {
+    throw new AppleExchangeError(status, 'id_token_subject_mismatch');
+  }
+  const nonce = payload['nonce'];
+  if (
+    binding.expectedNonce !== undefined &&
+    typeof nonce === 'string' &&
+    nonce !== '' &&
+    !(await timingSafeEqualStrings(nonce.toLowerCase(), binding.expectedNonce))
+  ) {
+    throw new AppleExchangeError(status, 'id_token_nonce_mismatch');
+  }
+  return sub;
+}
+
+/**
+ * Exchanges the single-use authorization code and binds the result to the identity token. The
+ * body is never logged or included in an error: it may carry tokens on success and Apple's
+ * error text on failure.
  */
 export async function exchangeAppleAuthorizationCode(
   options: AppleExchangeOptions,
@@ -214,11 +302,17 @@ export async function exchangeAppleAuthorizationCode(
   if (typeof refreshToken !== 'string' || refreshToken === '') {
     throw new AppleExchangeError(response.status, 'no_refresh_token');
   }
+  const idTokenSub = await verifyExchangedIdToken(
+    record['id_token'],
+    options.binding,
+    response.status,
+  );
   const accessToken = record['access_token'];
   const expiresIn = record['expires_in'];
   return {
     refreshToken,
     accessToken: typeof accessToken === 'string' ? accessToken : null,
     expiresIn: typeof expiresIn === 'number' ? expiresIn : null,
+    idTokenSub,
   };
 }

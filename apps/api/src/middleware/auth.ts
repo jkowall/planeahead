@@ -11,6 +11,15 @@
  *   - the runtime it builds (one database client, one Better Auth instance) is kept on the
  *     context, so the route that follows reuses it instead of opening a second client.
  *
+ * The session read is Better Auth's sliding refresh: once a day it extends `sessions.expires_at`
+ * by another 30 days AND re-issues the `session_token` cookie with a fresh `Max-Age`. A plain
+ * `auth.api.getSession()` call throws those `Set-Cookie` headers away, and the Expo client
+ * expires the cookie it holds by that `Max-Age`, so a day on which `/v1` traffic came before
+ * `/api/auth/get-session` would refresh the row but not the cookie, and thirty days after
+ * sign-in the app would be signed out despite daily use (for an anonymous user, for good). The
+ * call therefore asks for the headers back (`returnHeaders: true`) and every `Set-Cookie` Better
+ * Auth produced is copied onto the response the route answered with.
+ *
  * It fails closed. A missing `BETTER_AUTH_SECRET` or `TOKEN_KEK_V1` throws out of `authRuntime`
  * on the first request that presents a cookie and answers 500; an invalid or expired cookie
  * resolves to no session and the request continues anonymous, which `requireUser` then rejects.
@@ -18,11 +27,12 @@
 
 import type { MiddlewareHandler } from 'hono';
 import { createMiddleware } from 'hono/factory';
+import { AUTH_PATH_PREFIX } from '../auth/paths';
 import { authRuntime } from '../auth/runtime';
 import type { AuthScope, AuthenticatedUser } from '../auth/user';
 import type { AppBindings } from '../env';
 
-export const AUTH_PATH_PREFIX = '/api/auth/';
+export { AUTH_PATH_PREFIX };
 /** Both cookie names Better Auth can use carry this suffix (`__Secure-` prefixed over https). */
 const SESSION_COOKIE_MARKER = 'session_token';
 
@@ -30,6 +40,22 @@ const SESSION_COOKIE_MARKER = 'session_token';
 export function presentsSession(headers: Headers): boolean {
   const cookie = headers.get('cookie');
   return cookie !== null && cookie.includes(SESSION_COOKIE_MARKER);
+}
+
+/** Appends `Set-Cookie` lines to a response whose headers may be immutable. */
+export function withSetCookies(response: Response, cookies: readonly string[]): Response {
+  if (cookies.length === 0) {
+    return response;
+  }
+  const headers = new Headers(response.headers);
+  for (const cookie of cookies) {
+    headers.append('set-cookie', cookie);
+  }
+  return new Response(response.body, {
+    status: response.status,
+    statusText: response.statusText,
+    headers,
+  });
 }
 
 export function authMiddleware(): MiddlewareHandler<AppBindings> {
@@ -42,7 +68,10 @@ export function authMiddleware(): MiddlewareHandler<AppBindings> {
     }
 
     const runtime = authRuntime(c);
-    const session = await runtime.auth.api.getSession({ headers: c.req.raw.headers });
+    const { headers, response: session } = await runtime.auth.api.getSession({
+      headers: c.req.raw.headers,
+      returnHeaders: true,
+    });
     if (session !== null) {
       const user: AuthenticatedUser = {
         id: session.user.id,
@@ -53,6 +82,13 @@ export function authMiddleware(): MiddlewareHandler<AppBindings> {
       c.set('user', user);
     }
     await next();
+
+    // A refreshed `session_token`, a fresh `session_data` cache, or the deletion of a cookie
+    // that no longer resolves: whichever Better Auth produced, the client gets it.
+    const cookies = headers.getSetCookie();
+    if (cookies.length > 0) {
+      c.res = withSetCookies(c.res, cookies);
+    }
   });
 }
 

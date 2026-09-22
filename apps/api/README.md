@@ -59,13 +59,19 @@ src/index.ts              the routes as ONE chain, the five DO exports, the defa
 src/app.ts                createApp(): the error handlers and the middleware chain, one definition
 src/env.ts                Env (from worker-configuration.d.ts) plus the Variables for c.var
 src/middleware/           request-id, sentry, cors, rate-limit, idempotency, auth  (in that order)
-                          plus magic-link-cap (per-address caps ahead of Better Auth)
+                          plus magic-link-cap (the gate ahead of Better Auth's magic-link request:
+                          body validation, per-address and per-requester caps, `{ email }` only)
 src/auth/                 create-auth.ts (the per-request Better Auth instance), plugin.ts (the
-                          native Apple and Google endpoints), merge.ts (anonymous upgrade), runtime.ts
+                          native Apple and Google endpoints), merge.ts (anonymous upgrade),
+                          magic-link-requester.ts (binds a link to the anonymous user who asked),
+                          used-tokens.ts (identity-token replay markers in KV), paths.ts, runtime.ts
 src/crypto/               envelope.ts, key-provider.ts, hash.ts
 src/mail/                 sender.ts (MailSender, the magic-link message), resend.ts, noop.ts,
                           cloudflare-email.ts (implementation only, never wired)
-src/routes/               health.ts, auth.ts (/api/auth), v1.ts (/v1: devices.ts, me.ts, the stub)
+src/routes/               health.ts, auth.ts (/api/auth: the gate, the verify wrapper, the browser
+                          consume route), magic-link-landing.ts (/auth/magic-link, the emailed
+                          non-consuming page), v1.ts (/v1: devices.ts, me.ts, the stub)
+src/validation/           nul.ts (U+0000 is refused at every JSON boundary; Postgres would 500)
 src/do/                   migrate.ts (the SQLite schema runner), base.ts, the five classes
 src/queues/               index.ts dispatch, consume.ts (per-message ack), analytics.ts, consumers
 src/cron/                 index.ts dispatch, reconcile.ts, housekeeping.ts
@@ -103,7 +109,10 @@ mutating request that carries `Idempotency-Key` without it, or with a malformed 
 scope: it changes when a phone moves from WiFi to LTE mid-retry, which is the retry the key exists
 to make safe, and behind a carrier NAT two phones share one. In the global slot the store is the
 in-memory map; the Postgres store and the per-user scope in `idempotency.ts` are for the `/v1`
-mount behind auth in increment 8 and are never taken before then.
+mount behind auth in increment 8 and are never taken before then. The one path the middleware
+skips is the Better Auth mount (`/api/auth/*`): its endpoints carry their own replay semantics, a
+stored 200 replayed for `/sign-in/magic-link` would answer ahead of the per-address cap and never
+count, and reading the body there would consume it ahead of the handler that has to parse it.
 
 `app.onError` and `app.notFound` are registered **before** the Sentry middleware: `withSentry`
 wraps whatever `app.errorHandler` is at the moment it runs, and a later `app.onError()` replaces

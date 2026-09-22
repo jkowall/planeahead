@@ -19,15 +19,18 @@ import { describe, expect, it } from 'vitest';
 import { Envelope } from '../../src/crypto/envelope';
 import { createWorkersSecretKeyProvider, readKekSecrets } from '../../src/crypto/key-provider';
 import {
+  appleAuthorizationCode,
   appleNativeSignIn,
   captureLogs,
   cookiesFrom,
+  googleNativeSignIn,
   jsonRequest,
   logEvents,
   registerDevice,
   sessionTokenOnly,
   signInAnonymously,
   testEnv,
+  uniqueEmail,
   uniqueInstallId,
   uniqueIp,
   worker,
@@ -112,7 +115,9 @@ describe('POST /api/auth/sign-in/apple-native', () => {
       sub,
       email,
       claims: { is_private_email: 'true' },
-      fullName: { givenName: '  Ada ', familyName: 'Lovelace\u0000' },
+      // A bell character: stripped by the sanitiser. A NUL would be refused at the boundary
+      // with 400 before the sanitiser ever ran (pinned below).
+      fullName: { givenName: '  Ada ', familyName: 'Lovelace\u0007' },
     });
     const body = await response.json<SignInBody>();
 
@@ -226,6 +231,15 @@ describe('POST /api/auth/sign-in/apple-native', () => {
     expect(cookiesFrom(response)).toBeNull();
   });
 
+  it('answers 400 to a NUL anywhere in the body, before the token is even looked at', async () => {
+    const before = (await tokenRequests()).length;
+    const { response } = await appleNativeSignIn({ fullName: { givenName: 'Ada\u0000' } });
+
+    expect(response.status).toBe(400);
+    expect((await response.json<SignInBody>()).code).toBe('INVALID_BODY');
+    expect((await tokenRequests()).length).toBe(before);
+  });
+
   it('caps and sanitises fullName rather than storing what the client sent', async () => {
     const { response } = await appleNativeSignIn({
       fullName: { givenName: `‮${'a'.repeat(150)}`, familyName: 'b​' },
@@ -292,5 +306,77 @@ describe('POST /api/auth/sign-in/apple-native', () => {
       }),
     );
     expect((await fresh.json<{ user: { id: string } }>()).user.id).toBe(body.user?.id);
+  });
+
+  it("refuses an identity token presented with someone else's authorization code, before any sign-in", async () => {
+    // A captured victim token replayed with the attacker's own fresh code: the id_token Apple
+    // returns for that code names the attacker, not the victim.
+    const victim = `00${crypto.randomUUID().replaceAll('-', '')}.victim`;
+    const attacker = `00${crypto.randomUUID().replaceAll('-', '')}.attacker`;
+    const { response } = await appleNativeSignIn({
+      sub: victim,
+      authorizationCode: appleAuthorizationCode(attacker),
+    });
+    const body = await response.json<SignInBody>();
+
+    expect(response.status).toBe(401);
+    expect(body.code).toBe('CODE_EXCHANGE_FAILED');
+    expect(cookiesFrom(response)).toBeNull();
+    expect(await accountFor(victim)).toBeNull();
+
+    // A code with no subject the fake can bind (Apple would never mint that) fails the same way.
+    const unbound = await appleNativeSignIn({ authorizationCode: `code-${crypto.randomUUID()}` });
+    expect(unbound.response.status).toBe(401);
+    expect((await unbound.response.json<SignInBody>()).code).toBe('CODE_EXCHANGE_FAILED');
+  });
+
+  it('refuses the same identity token a second time, even with a fresh code', async () => {
+    const sub = `00${crypto.randomUUID().replaceAll('-', '')}.replay`;
+    const first = await appleNativeSignIn({ sub });
+    expect(first.response.status).toBe(200);
+
+    const replay = await worker(
+      jsonRequest(
+        '/api/auth/sign-in/apple-native',
+        'POST',
+        {
+          identityToken: first.identityToken,
+          authorizationCode: appleAuthorizationCode(sub),
+          rawNonce: first.rawNonce,
+        },
+        { ip: uniqueIp(), cookie: null },
+      ),
+    );
+    const body = await replay.json<SignInBody>();
+
+    expect(replay.status).toBe(401);
+    expect(body.code).toBe('IDENTITY_TOKEN_REPLAYED');
+    expect(cookiesFrom(replay)).toBeNull();
+  });
+
+  it('will not unlink an Apple account through the built-in route until revocation exists', async () => {
+    const sub = `00${crypto.randomUUID().replaceAll('-', '')}.unlink`;
+    const email = uniqueEmail('unlink');
+    const apple = await appleNativeSignIn({ sub, email });
+    expect(apple.response.status).toBe(200);
+    // A second provider on the same user, so Better Auth's "last account" rule is not what
+    // refuses the unlink.
+    const google = await googleNativeSignIn({ email, cookie: cookiesFrom(apple.response) });
+    expect(google.response.status).toBe(200);
+    const account = await accountFor(sub);
+
+    const response = await worker(
+      jsonRequest(
+        '/api/auth/unlink-account',
+        'POST',
+        { accountId: account?.id ?? '' },
+        { cookie: cookiesFrom(apple.response) },
+      ),
+    );
+    const body = await response.json<SignInBody>();
+
+    expect(response.status).toBe(400);
+    expect(body.code).toBe('UNLINK_NOT_SUPPORTED');
+    expect((await accountFor(sub))?.refreshTokenEnc).not.toBeNull();
   });
 });

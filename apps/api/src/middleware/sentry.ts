@@ -31,6 +31,7 @@ import type { Breadcrumb, CloudflareOptions, ErrorEvent, Event } from '@sentry/c
 import type { Hono, MiddlewareHandler } from 'hono';
 import { createMiddleware } from 'hono/factory';
 import { type AppBindings, type Env, environmentName } from '../env';
+import { safeErrorMessage, stripQueryParams } from '../observability/log';
 
 /** Breadcrumb data keys worth keeping on an HTTP breadcrumb. Everything else is dropped. */
 const SAFE_HTTP_BREADCRUMB_KEYS = ['method', 'url', 'status_code', 'reason'] as const;
@@ -92,11 +93,13 @@ function scrubBreadcrumb(breadcrumb: Breadcrumb): void {
 }
 
 /**
- * Removes headers, cookies, bodies and query strings from an event before it leaves the Worker.
+ * Removes headers, cookies, bodies, query strings and bound query parameters from an event
+ * before it leaves the Worker.
  *
  * Headers carry `Authorization`, `Cookie` and `Idempotency-Key`; request bodies carry magic link
- * tokens and Apple identity tokens; query strings carry whatever a client put there. None of it
- * is needed to debug a stack trace, and `sendDefaultPii: false` alone does not remove all of it.
+ * tokens and Apple identity tokens; query strings carry whatever a client put there; a failed
+ * statement's message carries every value the request bound into it. None of it is needed to
+ * debug a stack trace, and `sendDefaultPii: false` alone does not remove any of it.
  *
  * Generic over the event type on purpose. `beforeSend` only ever sees ERROR events: Sentry's
  * client dispatches transaction events to `beforeSendTransaction` instead, so a scrubber wired
@@ -138,7 +141,22 @@ export function scrubSentryEvent<T extends Event>(event: T): T {
   }
 
   for (const breadcrumb of event.breadcrumbs ?? []) {
+    // A console breadcrumb's message is whatever was logged, which for a failed query written
+    // by anything outside `errorFields` (a library's own console.error) is the statement AND
+    // its bound values. The values go; the statement stays.
+    if (typeof breadcrumb.message === 'string') {
+      breadcrumb.message = stripQueryParams(breadcrumb.message);
+    }
     scrubBreadcrumb(breadcrumb);
+  }
+
+  // The exception value is `error.message` as the SDK serialised it, not what `errorFields`
+  // logged, so a DrizzleQueryError's `params:` tail would ride out here untouched. Same cut and
+  // the same length cap as the log line; the stack frames are unaffected.
+  for (const exception of event.exception?.values ?? []) {
+    if (typeof exception.value === 'string') {
+      exception.value = safeErrorMessage(exception.value);
+    }
   }
 
   return event;

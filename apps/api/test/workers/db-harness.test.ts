@@ -11,8 +11,19 @@ import { sql } from 'drizzle-orm';
 import { withDb } from '@planeahead/db';
 import { env } from 'cloudflare:workers';
 import { describe, expect, it } from 'vitest';
+import { testEnv } from './helpers/auth';
 
 describe('env.DB through the Workers pool', () => {
+  it('reports which database the harness used, so CI can prove its service container was hit', () => {
+    // `shell` is TEST_DATABASE_URL (CI's postgres:18 container), `embedded` the local cluster;
+    // test/globalSetup.ts throws when the shell set the variable and the harness ignored it, and
+    // ci.yml greps the harness line for `database source: shell`. This line is the same fact from
+    // inside the pool.
+    const source = testEnv.TEST_DATABASE_SOURCE;
+    console.log(`[api test harness] database source under test: ${source ?? 'unbound'}`);
+    expect(['shell', '.env.test', 'embedded']).toContain(source);
+  });
+
   it('answers a trivial query on PostgreSQL 18 with the migrated schema', async () => {
     const result = await withDb(env, async (db) => {
       const [row] = await db.execute<{ version_num: string; users: string }>(sql`

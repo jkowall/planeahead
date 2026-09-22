@@ -124,11 +124,16 @@ describe('PATCH /v1/me/preferences', () => {
     const big = await worker(
       jsonRequest('/v1/me/preferences', 'PATCH', { settings: bigSettings }, client),
     );
+    // A NUL inside the jsonb bag: Postgres would refuse it with a 500; the boundary says 400.
+    const nul = await worker(
+      jsonRequest('/v1/me/preferences', 'PATCH', { settings: { note: 'a\u0000b' } }, client),
+    );
 
     expect(empty.status).toBe(400);
     expect(unknown.status).toBe(400);
     expect(bad.status).toBe(400);
     expect(big.status).toBe(400);
+    expect(nul.status).toBe(400);
   });
 
   it('answers 401 without a session', async () => {

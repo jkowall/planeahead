@@ -13,15 +13,21 @@
  *      token, the identity tokens, the authorization code, the session cookies).
  */
 
+import { createExecutionContext, waitOnExecutionContext } from 'cloudflare:test';
+import { sql } from 'drizzle-orm';
+import { withDb } from '@planeahead/db';
 import { describe, expect, it } from 'vitest';
+import { createApp } from '../../src/app';
 import { normalisePem } from '../../src/auth/apple-client-secret';
 import { TEST_SEAM_NAMES, WORKER_SECRET_NAMES } from '../../src/env';
 import {
+  API_ORIGIN,
   appleNativeSignIn,
   captureLogs,
   cookiesFrom,
   googleNativeSignIn,
   jsonRequest,
+  logEvents,
   magicLinkTokenFor,
   registerDevice,
   signInAnonymously,
@@ -31,6 +37,9 @@ import {
   uniqueIp,
   worker,
 } from './helpers/auth';
+
+/** A value that would ride in a failed statement's bound parameters if anything let it. */
+const BODY_MARKER = `BODYMARKER_${crypto.randomUUID().replaceAll('-', '')}`;
 
 const exampleKeys = new Set((testEnv.TEST_DEV_VARS_EXAMPLE_KEYS ?? '').split(',').filter(Boolean));
 
@@ -146,6 +155,41 @@ describe('no secret value reaches a log line', () => {
       await worker(
         jsonRequest('/v1/me', 'GET', undefined, { cookie: 'better-auth.session_token=forged.sig' }),
       );
+
+      // U+0000 in every text input: refused at the boundary with 400, never a database error
+      // whose bound parameters would carry the rest of the body into a log line.
+      dynamicSecrets.push(BODY_MARKER);
+      const nulDevice = await registerDevice(anonymous, uniqueInstallId('nul-logs'), {
+        model: `${BODY_MARKER}\u0000X`,
+      });
+      expect(nulDevice.status).toBe(400);
+      const nulLink = await worker(
+        jsonRequest(
+          '/api/auth/sign-in/magic-link',
+          'POST',
+          { email: uniqueEmail('nul-logs'), name: `${BODY_MARKER}\u0000` },
+          { ip: uniqueIp(), origin: null },
+        ),
+      );
+      expect(nulLink.status).toBe(400);
+      const nulPreferences = await worker(
+        jsonRequest(
+          '/v1/me/preferences',
+          'PATCH',
+          { settings: { note: `${BODY_MARKER}\u0000` } },
+          { ip: anonymous.ip, cookie: anonymous.cookie },
+        ),
+      );
+      expect(nulPreferences.status).toBe(400);
+      const nulUpdateUser = await worker(
+        jsonRequest(
+          '/api/auth/update-user',
+          'POST',
+          { name: `${BODY_MARKER}\u0000` },
+          { ip: anonymous.ip, cookie: anonymous.cookie },
+        ),
+      );
+      expect(nulUpdateUser.status).toBe(400);
     });
 
     // The suite produced log lines (otherwise this test proves nothing).
@@ -193,5 +237,40 @@ describe('no secret value reaches a log line', () => {
     }
     // The raw email address never appears either (the cap hashes it, the sender logs a domain).
     expect(joined.includes('@example.test')).toBe(false);
+  });
+
+  it('logs a failed statement without its bound parameters, through the real error handler', async () => {
+    // drizzle-orm's DrizzleQueryError message is `Failed query: <sql>\nparams: <values>`, and
+    // the values of a failed INSERT are the request. A route on the real chain runs a statement
+    // Postgres refuses (a NUL inside a bound value) so the error reaches `handleError` exactly
+    // as an unhandled route error would.
+    const app = createApp();
+    app.get('/boom', async (c) => {
+      await withDb(c.env, (db) =>
+        db.execute(sql`select ${`${BODY_MARKER}\u0000tail`}::text as value`),
+      );
+      return c.json({ ok: true });
+    });
+    const ctx = createExecutionContext();
+
+    const { result: response, lines } = await captureLogs(async () => {
+      const answered = await app.fetch(
+        new Request(`${API_ORIGIN}/boom`, { headers: { 'cf-connecting-ip': uniqueIp() } }),
+        testEnv,
+        ctx,
+      );
+      await waitOnExecutionContext(ctx);
+      return answered;
+    });
+    const unhandled = logEvents(lines, 'unhandled_error');
+    const joined = lines.join('\n');
+
+    expect(response.status).toBe(500);
+    expect(unhandled).toHaveLength(1);
+    expect(String(unhandled[0]?.['error_message'])).toContain('Failed query');
+    expect(unhandled[0]?.['cause_code']).toBe('22021');
+    expect(joined).not.toContain(BODY_MARKER);
+    expect(joined).not.toContain('params:');
+    expect(joined).not.toContain('Failing row');
   });
 });

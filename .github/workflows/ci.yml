@@ -75,7 +75,18 @@ jobs:
       # wrote. Checking first is what makes the job that CONSUMES the constant also report on it,
       # rather than leaving that to wrangler-dry-run alone.
       - run: node scripts/gen-migration-hash.mjs --check
-      - run: pnpm turbo run test --filter=@planeahead/api
+      # The harness prints which database it used. turbo's strict env mode once dropped
+      # TEST_DATABASE_URL (turbo.json now lists it on the `test` task) and the suite quietly ran
+      # on embedded-postgres while the container above sat idle; the grep makes that a failure.
+      # `shell: bash` gives `-o pipefail`, so a failing suite still fails through the tee.
+      - name: Test the Worker against the service container
+        shell: bash
+        run: |
+          pnpm turbo run test --filter=@planeahead/api 2>&1 | tee test-workers.log
+          grep -q 'database source: shell' test-workers.log || {
+            echo '::error title=Wrong database::the Workers suite did not use the postgres:18 service container (TEST_DATABASE_URL did not reach vitest)'
+            exit 1
+          }
 
   # Validates wrangler.jsonc and bundles the Worker without credentials: `wrangler deploy
   # --dry-run` never resolves an account id in 4.135.0. It does NOT verify that the KV, R2, queue

@@ -8,7 +8,12 @@
  * dial a real one, so every host the Worker would call is a route here:
  *
  *   GET  /apple/keys            Apple's JWKS, serving the run's own RSA key
- *   POST /apple/token           the authorization-code exchange; `code=invalid-code` answers 400
+ *   POST /apple/token           the authorization-code exchange; `code=invalid-code` answers 400.
+ *                               Like Apple, it returns an `id_token` for the authorization the
+ *                               code came from: a test mints codes as `code_<hex(sub)>_<uuid>`
+ *                               (helpers/auth.ts `appleAuthorizationCode`), and the token names
+ *                               that subject, or `unknown-subject` for a code without one, so
+ *                               the exchange binding can be tested in both directions
  *   GET  /apple/token/requests  what the exchange received, so a test can assert on the form
  *   GET  /google/certs          Google's JWKS, the same key under a different kid
  *   POST /resend/emails         Resend's send endpoint; records the message and answers { id }
@@ -21,11 +26,21 @@
 
 import { randomUUID } from 'node:crypto';
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from 'node:http';
-import { exportJWK, exportPKCS8, generateKeyPair } from 'jose';
+import { SignJWT, exportJWK, exportPKCS8, generateKeyPair } from 'jose';
 
 export const APPLE_TEST_KID = 'planeahead-test-apple-kid';
 export const GOOGLE_TEST_KID = 'planeahead-test-google-kid';
 export const APPLE_INVALID_CODE = 'invalid-code';
+export const APPLE_UNKNOWN_SUBJECT = 'unknown-subject';
+
+/** The subject a test embedded in an authorization code (`code_<hex(sub)>_<uuid>`), if any. */
+export function subjectFromAuthorizationCode(code: string): string {
+  const match = /^code_([0-9a-f]+)_[0-9a-f-]{36}$/.exec(code);
+  if (match?.[1] === undefined) {
+    return APPLE_UNKNOWN_SUBJECT;
+  }
+  return Buffer.from(match[1], 'hex').toString('utf8');
+}
 
 export interface FakeProviders {
   readonly origin: string;
@@ -87,12 +102,23 @@ export async function startFakeProviders(): Promise<FakeProviders> {
         if (form['code'] === APPLE_INVALID_CODE || form['grant_type'] !== 'authorization_code') {
           return json(response, 400, { error: 'invalid_grant' });
         }
+        // Apple returns an id_token for the authorization the code belongs to, signed with the
+        // same keys as the identity token. No nonce claim here: Apple does not repeat it on the
+        // exchange, and the binding check skips the nonce when it is absent.
+        const idToken = await new SignJWT({ nonce_supported: true })
+          .setProtectedHeader({ alg: 'RS256', kid: APPLE_TEST_KID })
+          .setIssuer('https://appleid.apple.com')
+          .setAudience(form['client_id'] ?? '')
+          .setSubject(subjectFromAuthorizationCode(form['code'] ?? ''))
+          .setIssuedAt()
+          .setExpirationTime('10m')
+          .sign(privateKey);
         return json(response, 200, {
           access_token: `at_${randomUUID()}`,
           token_type: 'Bearer',
           expires_in: 3600,
           refresh_token: `rt_${form['code'] ?? ''}_${randomUUID()}`,
-          id_token: 'not-inspected',
+          id_token: idToken,
         });
       }
       if (method === 'GET' && url.pathname === '/apple/token/requests') {

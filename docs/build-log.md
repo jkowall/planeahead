@@ -9,6 +9,36 @@ increment is reviewed.
 | 2. Shared contracts | Fable 5.1 build and fixes, Opus 5 review panel | Fable ~970k output (build 714k incl. two stalled restarts, fix rounds 160k + 94k); Opus ~620k (two reviewers 365k, twelve skeptics 139k, two re-reviews 115k) | ~4.5 h from launch to final commit, of which ~1 h was API and GitHub stalls on the VPN      | `packages/shared`: uuidv7, flight key (ADR 0003), Zod 4 boundary schemas, provider interfaces, cost table, cadence engine with the SLO table and a simulation that derives every constant, RPC and sync envelopes, Live Activity state, secret patterns; `docs/architecture.md` generated from code with a drift test; ADR 0003 and 0006. Review: 15 findings (10 API design, 5 correctness), every blocker and major sent to two Opus skeptics (spec lens refuted 4 as deliberate spec choices, reproduction lens confirmed all real defects), 17 items fixed, re-review found 3 regressions in the fixes (fixed in round 2, re-verified by execution), orchestrator closed the 20-minute pre-boarding hole the honest report exposed. Derived constants: A2 74 polls / 122 PE / $0.61 list (plan wrote 72 / 120 / $0.60 under a round() slot rule), A1 84, literal 181, B 5; AeroDataBox 2 / 24 / 40 units at 3 / 14 / 30 days (plan wrote 4 / 26 / 42). 387 tests. |
 | 3. Database schema  | Fable 5.1 build and fix, Opus 5 review panel   | Fable ~900k (build 448k, fix 455k); Opus ~2.1M (two reviewers 577k, fourteen skeptics ~1.3M, re-review 232k); orchestrator close-out on top                   | ~1 h 55 min workflow plus ~50 min close-out                                                 | `packages/db`: 70 tables in 9 schema files (the plan's 61 undercounted the spec's normative list), migration 0000 plus a generated set_updated_at migration with no-op WHEN guards, embedded PostgreSQL 18.4 harness (initdb 3.2 s cold, 0.6 s warm; skipped when TEST_DATABASE_URL is set, which is how CI's postgres:18 service container is used), withDb and createNodeDb, a URL-only migrator with pooler and version guards, seed loaders with a Content-Length and SHA-256 manifest and IANA-checked timezone overrides (739 accepted, 5 rejected and listed), schema-review.md, ADR 0002, 0007, 0009. Review: 19 findings, 7 serious ones sent to two skeptics each (spec lens refuted 4 as deliberate choices, reproduction lens confirmed every physical defect), 22 items fixed, re-review confirmed each by execution and left 4 nits, all applied in the close-out along with two forward-looking columns increments 6 and 7 need. 166 tests.            |
 
+## Measurements and decisions (increment 5 review fixes)
+
+- **`better-auth/minimal` versus `better-auth` (ruling F3).** The Worker imports `betterAuth`
+  from `better-auth/minimal`, which exposes everything the Drizzle adapter, the anonymous and
+  magic-link plugins, the Expo plugin and the PlaneAhead plugin need (nothing was missing, no
+  fallback). `wrangler deploy --dry-run --env staging` on the fix-round build: minimal
+  3020.03 KiB raw / 571.04 KiB gzip; the same build with the full entry point 3739.89 KiB /
+  674.71 KiB. The minimal entry saves 719.86 KiB raw and 103.67 KiB gzipped (the Kysely
+  exclusion); the import is pinned to `minimal`.
+- **Magic-link cap keying (ruling G1).** The per-address cap is keyed by the address AND the
+  requester, where the requester is the valid `X-Install-Id` when present, else the client IP;
+  the per-requester 429 cap is keyed by the client IP when present, else the install id. The
+  split is deliberate: the address owner's own device keeps its own budget (install id), and the
+  brake on one origin mailing many addresses cannot be keyed by a value the client chooses and
+  rotates (install id), so it uses the IP. Requester caps are 20 per hour and 60 per UTC day.
+- **Magic-link landing page (ruling G3).** The emailed URL is `${API_PUBLIC_URL}/auth/magic-link`
+  outside the Better Auth mount; increment 9's universal-link prefix moves from
+  `/api/auth/magic-link/*` to `/auth/magic-link*` (the increment 9 spec is updated).
+- **Transaction test seam (ruling G4).** `createAuth` gained an optional `databaseHooks` dep used
+  only by `auth-transaction.test.ts` to make the account INSERT of a new sign-in fail after the
+  user INSERT; the Worker passes none.
+- **NUL bytes (rulings G6 and G14).** Refused with 400 at every JSON boundary (the auth mount,
+  `/v1/devices`, `/v1/me/preferences`) rather than only in the magic-link body, because Postgres
+  refuses U+0000 in any text or jsonb value and every such input was a 500 on demand.
+- **Facts settled by tests (ruling F7).** The Drizzle adapter rolls back a transaction with
+  `transaction: true` (`auth-config.test.ts`); Better Auth's `runWithTransaction` was a
+  pass-through without it (the fix-round finding); the anonymous after-hook fires for a plugin
+  endpoint reached over HTTP and receives `ctx.query` (the requester binding relies on it);
+  workerd's KV enforces the 60 second TTL floor (`used-tokens.ts` clamps to it).
+
 ## Deviations and decisions (increment 4 review fixes)
 
 Applied on top of `b824ae4` after the Opus review panel. The spike results ruling E8 asks for are

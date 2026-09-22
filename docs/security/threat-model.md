@@ -33,10 +33,14 @@ is overridden in `src/auth/create-auth.ts` and asserted by `auth-config.test.ts`
 | missing secret falls back to a published default | every cookie forgeable by anyone who reads the source                                  | `assertBetterAuthSecret` throws on missing, blank, short (under 32) or the published value, before `betterAuth()` runs                                                         |
 | client IP read from `x-forwarded-for`            | every request in one shared `no-trusted-ip` bucket, which a client can fill on purpose | `advanced.ipAddress.ipAddressHeaders: ['cf-connecting-ip']`                                                                                                                    |
 
-`trustedOrigins` lists `planeahead://`, the two localhost origins and `API_PUBLIC_URL`, plus
-`exp://` only when `ENVIRONMENT === 'local'` (the Expo plugin adds it only under
-`NODE_ENV=development`). A cookie-bearing POST from any other origin fails Better Auth's CSRF
-check.
+`trustedOrigins` lists `planeahead://` and `API_PUBLIC_URL` everywhere, plus the two localhost
+dev origins and `exp://` only when `ENVIRONMENT === 'local'` (the Expo plugin adds `exp://` only
+under `NODE_ENV=development`; a deployed Worker that trusted `http://localhost:8081` would let any
+local server on a victim's machine make credentialed requests). The CORS allow list is the same
+list. A cookie-bearing POST from any other origin fails Better Auth's CSRF check.
+
+Two more settings fail closed and are asserted by `auth-config.test.ts`: `transaction: true` on
+the Drizzle adapter (section 1.6) and `onAPIError: { throw: true }` (section 1.7).
 
 ### 1.3 Routes that exist but must not be reachable
 
@@ -50,12 +54,40 @@ check.
   A before-hook rejects any such body with 400 `ID_TOKEN_SIGN_IN_DISABLED` (tested). Native
   Google and Apple sign-in go through PlaneAhead's own endpoints under `/sign-in/*` so the nonce
   is required on both and the anonymous merge applies to both.
-- **`POST /api/auth/sign-in/magic-link` beyond the per-address cap** is answered `{ status: true }`
-  by `src/middleware/magic-link-cap.ts` without invoking Better Auth (which would otherwise write
-  a verification row and send mail on every call). The caps are 3 per hour and 10 per UTC day
-  per address, counted in `usage_counters` under a SHA-256 of the lower-cased address, never the
-  address itself. The response is the same 200 either way, so neither the cap nor a mail-provider
-  outage reveals whether an address has an account.
+- **`POST /api/auth/sign-in/magic-link` beyond the caps.** The gate in
+  `src/middleware/magic-link-cap.ts` runs for every request to the route (the idempotency
+  middleware skips the auth mount, so a replayed `Idempotency-Key` cannot answer ahead of it),
+  reads the body through Hono's cache and fails closed (415 for a non-JSON media type, 400 for
+  non-JSON or a NUL), forwards `{ email }` alone (Better Auth's schema also accepts `name`, which
+  it would write unsanitised into `users.name` at verify time, and three callback URLs) and counts
+  only a request Better Auth would accept. Two counters in `usage_counters`, subjects SHA-256 hex,
+  never an address, an install id or an IP: per ADDRESS AND REQUESTER (the valid `X-Install-Id`,
+  else the client IP; 3 per hour, 10 per UTC day) answered `{ status: true }` silently without
+  invoking Better Auth, so a stranger's requests land on their own budget and cannot lock the
+  address owner out for the day; and per REQUESTER (the client IP, else the install id; 20 per
+  hour, 60 per day across addresses) answered 429 with `Retry-After`, the brake on one origin
+  mail-bombing an inbox under rotating install ids. The 200 is the same either way, so neither the
+  cap nor a mail-provider outage reveals whether an address has an account. Residual: an attacker
+  with many IPs gets 60 mails per IP per day to one address; the per-IP Better Auth rule (3 per
+  60 s) and the address owner's own budget bound the damage. The Resend idempotency key is a
+  digest of the token, never a prefix of it.
+- **`GET /auth/magic-link` (the emailed landing page) never consumes the token.** Mail security
+  gateways (Safe Links, Mimecast, Proofpoint) fetch every link in inbound mail before the user
+  sees it; an earlier design emailed the consuming verify URL, which a scanner would burn while
+  signing itself in. The page carries no script and no external resource, is served `no-store`
+  and `no-referrer` under a CSP that allows only same-origin form posts, and its one button POSTs
+  the token to `POST /api/auth/magic-link/consume`, which refuses a cross-site Origin (403),
+  verifies server side and forwards the session cookie. `GET /api/auth/magic-link/verify` refuses
+  the callback query parameters (400), so Better Auth's redirect branch, which the Expo plugin
+  decorates with the raw cookie, is unreachable, and its failure redirect is turned into a 400
+  JSON code.
+- **`POST /api/auth/unlink-account` for an Apple row** is answered 400 `UNLINK_NOT_SUPPORTED` by
+  a before-hook: the built-in unlink deletes the row holding `refresh_token_enc` with no
+  revocation at Apple, and increment 8 wires the revocation. Google rows may still be unlinked.
+  `revokeUnprovenAccountAccess` (run by magic-link verify for a user whose `emailVerified` is
+  false) deletes every account row the same way; the Google path refuses `email_verified: false`,
+  so it can reach an Apple row only for a user whose Apple token carried `email_verified: false`.
+  Recorded as a second account-row deletion path for increment 8's revocation to cover.
 
 ### 1.4 Nonces and identity tokens
 
@@ -69,7 +101,29 @@ check.
   documented forms, `aud` in the three client ids, and the `nonce` claim REQUIRED and compared
   exactly (400 when absent, 401 on mismatch). Better Auth's stock provider was not used because it
   hardcodes the JWKS URL, refetches on every verification and skips the nonce check when the
-  claim is absent.
+  claim is absent. Two OIDC rules on top: a token with several audiences must carry `azp`, and
+  `azp`, whenever present, must be one of the three client ids (jose's audience check passes when
+  ANY entry matches, which alone would accept a token minted for another client that lists ours
+  too); and `email_verified` must be `true`, or the sign-in is 403 `EMAIL_NOT_VERIFIED` with no
+  user row (an unverified row would make the address owner's own Apple and Google sign-ins answer
+  403 ACCOUNT_NOT_LINKED for good).
+- **The Apple code exchange is bound to the identity token.** The `id_token` Apple returns with
+  the authorization-code exchange is verified with the same JWKS, issuer and audience, and its
+  `sub` (and `nonce`, when Apple includes one) must equal the identity token's. Without that
+  check a captured identity token plus the attacker's own fresh code signed the attacker in as
+  the victim and wrote the attacker's refresh token onto the victim's account row (so increment
+  8's deletion would have revoked the wrong grant). A mismatch is 401 `CODE_EXCHANGE_FAILED`
+  before any sign-in, and the refresh token is never stored.
+- **Identity tokens are single use.** The nonce binds a token to its request and nothing more:
+  a captured request body could be replayed for the token's lifetime (about an hour) and mint a
+  session each time. Both endpoints record a presented token in the `CACHE` KV namespace
+  (`src/auth/used-tokens.ts`) under `used_id_tokens:<provider>:<jti or sha256hex(token)>` for
+  its remaining lifetime (minimum 60 s, KV's floor) and refuse a second presentation with 401
+  `IDENTITY_TOKEN_REPLAYED`. Best effort by design: KV is eventually consistent and two
+  presentations racing through different colos can both pass; a KV failure is logged and does not
+  block the sign-in, because the signature, issuer, audience, expiry and nonce checks are the
+  authentication and the marker is a brake. A server-issued nonce is the stronger long-term
+  option (section 4).
 - JWKS resolvers are `createRemoteJWKSet` instances memoised per isolate (`src/auth/jwks.ts`):
   no I/O at construction, jose's own 10-minute cache with a 30 s refetch cooldown. They are never
   put in KV, so a key rotation at the provider is seen by a refetch rather than served stale from
@@ -111,13 +165,27 @@ Threats considered:
   real client replaces both cookies on upgrade, and `auth-anonymous.test.ts` pins the window.
 - **The `?cookie=` redirect.** The Expo server plugin's after-hook appends the raw `Set-Cookie`
   value as a `cookie` query parameter to any non-http redirect it trusts, which would put the
-  session cookie into a URL (logs, referrers, the OS's URL history). PlaneAhead avoids the branch
-  entirely: the magic-link email links to `GET /api/auth/magic-link/verify?token=...` with NO
-  `callbackURL`, the app extracts the token from the universal link and calls verify over its own
-  fetch, and with no `callbackURL` Better Auth answers JSON plus `Set-Cookie` instead of a
-  redirect (`auth-magic-link.test.ts` asserts the JSON-plus-cookie shape and the absence of a
-  `Location` header). Whether the anonymous cookie reaches that request on a real device is
-  still an open item for increment 9 (the Workers test attaches it by hand).
+  session cookie into a URL (logs, referrers, the OS's URL history). PlaneAhead makes the branch
+  unreachable: the magic-link email links to the landing page `GET /auth/magic-link?token=...`
+  (section 1.3), the app extracts the token from the universal link and calls
+  `GET /api/auth/magic-link/verify` over its own fetch with NO `callbackURL`, Better Auth then
+  answers JSON plus `Set-Cookie`, and the wrapper in `src/routes/auth.ts` refuses the three
+  callback query parameters with 400 (`auth-magic-link.test.ts` asserts the JSON-plus-cookie
+  shape, the absence of a `Location` header and the refusal). Whether the anonymous cookie
+  reaches that request on a real device is still an open item for increment 9 (the Workers test
+  attaches it by hand).
+- **Login CSRF through a forwarded link (the requester binding).** A verified link signs the
+  verifier in as the address owner and the after-hook then merged the VERIFIER'S anonymous
+  account into that owner. An attacker who requested a link for their own address and got the
+  victim's app to open it (the app auto-verifies universal links with its anonymous cookie
+  attached) therefore took over the victim's devices, push tokens, trips and subscriptions, and
+  everything the victim added afterwards. `sendMagicLink` now records the anonymous user whose
+  cookie rode on the request (or none) in a `verifications` row keyed by a hash of the token
+  (`src/auth/magic-link-requester.ts`), and `onLinkAccount` on `/magic-link/verify` merges only
+  when the verifying anonymous user is that requester. Otherwise the sign-in still succeeds (it
+  is a valid link for the address it was sent to), nothing is merged, and the skip is logged
+  (`merge_skipped`, reason `requester_mismatch`). Both cases are tested. Increment 9 should also
+  auto-verify only links requested on the same install.
 - **A crash between the two callers.** Both are safe to replay: the marker is set inside the
   transaction, so a retry sees `already_merged`.
 - **A lost queue message.** The rows are moved and the marker is set before the send; if the send
@@ -125,18 +193,25 @@ Threats considered:
   `status = 'deleting'` anonymous users re-enqueues. The anonymous row itself is deleted only by
   the queue consumer after it verifies nothing points at it any more (increment 8).
 
-### 1.6 The non-atomic refresh-token write
+### 1.6 The sign-in transaction and the non-atomic refresh-token write
 
-`handleOAuthUserInfo` runs the find-or-create user, link-or-create account and session creation
-inside Better Auth's own transaction, which takes no caller-supplied transaction handle. The
-Apple refresh token is therefore envelope-encrypted and written to
-`accounts.refresh_token_enc` AFTER that transaction commits, in a second statement. A crash in
-that window leaves an Apple account with a live session and a NULL `refresh_token_enc`, which
-means there is no token to revoke at account deletion. Increment 8's deletion treats NULL as
-"nothing to revoke" and logs it at warn level; the user can still delete the account, and Apple
-lets them revoke the app's access from their Apple ID settings. The authorization code is
-exchanged BEFORE the sign-in transaction (it is single use and valid for five minutes), so a
-rejected code never leaves a half-made account.
+`handleOAuthUserInfo` creates the user and the account of a new native sign-in inside Better
+Auth's `runWithTransaction`. That is a REAL transaction only because the Drizzle adapter is
+configured with `transaction: true` (its default is off, and the core then substitutes a
+pass-through): as first built, the two INSERTs autocommitted separately, and a failure between
+them left a user row with the provider's email and no account, which made every retry take the
+implicit-link path and answer 403 ACCOUNT_NOT_LINKED for good. `auth-transaction.test.ts` injects
+that failure and proves the rollback; `auth-config.test.ts` proves the adapter rolls back at all.
+
+`runWithTransaction` takes no caller-supplied handle, so the Apple refresh token is
+envelope-encrypted and written to `accounts.refresh_token_enc` AFTER that transaction commits,
+in a second statement. A crash in that window leaves an Apple account with a live session and a
+NULL `refresh_token_enc`, which means there is no token to revoke at account deletion. Increment
+8's deletion treats NULL as "nothing to revoke" and logs it at warn level; the user can still
+delete the account, and Apple lets them revoke the app's access from their Apple ID settings. The
+authorization code is exchanged BEFORE the sign-in transaction (it is single use and valid for
+five minutes) and bound to the identity token (section 1.4), so a rejected or foreign code never
+leaves a half-made account and never lands on someone else's row.
 
 ### 1.7 Logging
 
@@ -145,8 +220,35 @@ failure paths that log the most) with the console captured and searches every li
 configured secret, the PEM body in both newline encodings, the magic-link token, the Apple
 refresh token, the identity tokens, the authorization code, the session cookies and the raw
 email address. Better Auth's own logger is routed through PlaneAhead's structured logger at
-`warn` level and forwards only the message and a thrown error's name and message, never the
+`warn` level and forwards only the message and a thrown error's sanitised fields, never the
 request context it also passes.
+
+**Bound query parameters never reach a log line or Sentry.** drizzle-orm wraps every failed
+statement in a `DrizzleQueryError` whose message is `Failed query: <sql>\nparams: <every bound
+value>`, and the bound values of an INSERT are the request (an email, a session token, a push
+token, a device model). Three things close it: `errorFields` (`src/observability/log.ts`), the
+one way an error reaches a line, cuts the message at the `params:` marker, caps it at 200
+characters, keeps the stack FRAMES only (the stack's first line repeats the message), copies a
+driver `code` and the same three fields of a `cause`, and copies nothing else off the error
+(postgres.js attaches `detail` with "Failing row contains (...)", `query` and `parameters`);
+`onAPIError: { throw: true }` on Better Auth, without which better-call answered a thrown
+database error with `console.error('# SERVER_ERROR: ', error)` of the whole object; and the
+Sentry scrubber applies the same cut to `exception.values[].value` and to console breadcrumb
+messages. U+0000 is refused at every JSON boundary (400), so the statement that used to fail on
+demand (Postgres rejects a NUL in any text or jsonb value) no longer runs at all.
+`secrets-in-logs.test.ts` and `sentry-scrub.test.ts` each force a real failed statement through
+the real error handler and assert the marker value is absent from the lines and the envelope.
+
+### 1.8 Push tokens
+
+`POST /v1/devices` upserts `push_tokens` on `(kind, token)` WITHIN the calling user only. A token
+already registered to another user's device is not re-pointed: there is no proof of possession
+in the request, anonymous principals are free to create, and re-pointing let anyone who learned a
+token redirect its owner's alerts to themselves. The device row is still written, the token is
+skipped, `push_token_conflict` is logged (without the token) and the response says
+`pushTokenSkipped: 'owned_by_another_user'`. The two legitimate transfers are handled
+elsewhere: the anonymous-to-account merge re-keys the row inside its transaction, and increment
+8's deletion removes it. A silent-push possession challenge is the Phase 1 hardening item.
 
 ## 2. Envelope encryption
 
@@ -204,7 +306,16 @@ Three layers, each honest about what it is:
 
 ## 4. Open items carried to later increments
 
-- Whether the anonymous cookie reaches `GET /magic-link/verify` on a real device (increment 9).
+- Whether the anonymous cookie reaches `GET /magic-link/verify` on a real device (increment 9),
+  and the increment 9 rule that the app auto-verifies only links requested on the same install
+  (the server-side requester binding in section 1.5 is the backstop, not the whole answer).
+- A server-issued nonce for the native sign-ins (increment 9 fixes the client contract). The KV
+  replay markers in section 1.4 are best effort; a nonce the server minted and can consume
+  exactly once is the stronger design, and deciding it before the client ships avoids a second
+  contract change.
+- Mail scanners and the landing page: the two-step page in section 1.3 answers the scanner
+  prefetch risk raised in `docs/increments/09-11-mobile.facts.md`; the universal-link prefix the
+  app claims is `/auth/magic-link`, on the API host.
 - Account deletion: Apple revoke in `user.deleteUser.beforeDelete`, and the `freshAge` question
   (increment 8).
 - The Vitest Workers pool does NOT enforce the global-scope entropy restriction (a module-scope

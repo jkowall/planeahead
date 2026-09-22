@@ -5,24 +5,38 @@
  * target, for the eventual marketing site and for local tooling. The allow list is explicit: a
  * reflecting `*` with credentials is rejected by browsers anyway, and Better Auth's cookie
  * transport in increment 5 needs credentials.
+ *
+ * The same list is Better Auth's `trustedOrigins` (its CSRF check on cookie-bearing POSTs), so
+ * what is allowed here is allowed there. The two localhost origins are development tooling and
+ * are on the list ONLY when `ENVIRONMENT` is `local`: a staging or production Worker that
+ * treated `http://localhost:8081` as first-party would let any local server on a victim's
+ * machine make credentialed requests.
  */
 
 import { cors } from 'hono/cors';
 import type { Context, MiddlewareHandler } from 'hono';
-import type { AppBindings, Env } from '../env';
+import { type AppBindings, type Env, environmentName } from '../env';
 import { INSTALL_ID_HEADER } from './idempotency';
 import { REQUEST_ID_HEADER } from './request-id';
 
-/** Origins allowed in every environment. `planeahead://` is the Expo app scheme. */
-export const STATIC_ALLOWED_ORIGINS: readonly string[] = Object.freeze([
-  'planeahead://',
+/** The Expo app scheme. Allowed in every environment. */
+export const APP_SCHEME_ORIGIN = 'planeahead://';
+
+/** Expo's dev server and `wrangler dev`. Allowed in the local environment only. */
+export const LOCAL_DEV_ORIGINS: readonly string[] = Object.freeze([
   'http://localhost:8081',
   'http://localhost:8787',
 ]);
 
 export function allowedOrigins(env: Env): readonly string[] {
-  const configured = typeof env.API_PUBLIC_URL === 'string' ? [env.API_PUBLIC_URL] : [];
-  return [...STATIC_ALLOWED_ORIGINS, ...configured];
+  const origins = [APP_SCHEME_ORIGIN];
+  if (typeof env.API_PUBLIC_URL === 'string') {
+    origins.push(env.API_PUBLIC_URL);
+  }
+  if (environmentName(env) === 'local') {
+    origins.push(...LOCAL_DEV_ORIGINS);
+  }
+  return origins;
 }
 
 export function corsMiddleware(): MiddlewareHandler<AppBindings> {

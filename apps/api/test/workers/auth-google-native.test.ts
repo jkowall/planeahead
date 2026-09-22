@@ -12,12 +12,17 @@ import { accounts, users, withDb } from '@planeahead/db';
 import { describe, expect, it } from 'vitest';
 import { GOOGLE_ISSUERS } from '../../src/auth/google-verify';
 import {
+  appleNativeSignIn,
   captureLogs,
   cookiesFrom,
   googleNativeSignIn,
+  jsonRequest,
   logEvents,
   signInAnonymously,
   testEnv,
+  uniqueEmail,
+  uniqueIp,
+  worker,
 } from './helpers/auth';
 
 interface SignInBody {
@@ -134,5 +139,78 @@ describe('POST /api/auth/sign-in/google-native', () => {
         .limit(1),
     );
     expect(fromRow?.status).toBe('deleting');
+  });
+
+  it('accepts a multi-audience token only with an azp that is ours, and never one issued to another client', async () => {
+    const ours = testEnv.GOOGLE_CLIENT_ID_IOS ?? '';
+    const android = testEnv.GOOGLE_CLIENT_ID_ANDROID ?? '';
+    const foreign = 'other-app.apps.googleusercontent.com';
+
+    const androidShape = await googleNativeSignIn({
+      audience: testEnv.GOOGLE_CLIENT_ID_WEB ?? '',
+      claims: { azp: android },
+    });
+    const multiOurs = await googleNativeSignIn({
+      audience: [foreign, ours],
+      claims: { azp: ours },
+    });
+    const multiNoAzp = await googleNativeSignIn({ audience: [foreign, ours] });
+    const foreignAzp = await googleNativeSignIn({
+      audience: [foreign, ours],
+      claims: { azp: foreign },
+    });
+
+    expect(androidShape.response.status).toBe(200);
+    expect(multiOurs.response.status).toBe(200);
+    expect(multiNoAzp.response.status).toBe(401);
+    expect((await multiNoAzp.response.json<SignInBody>()).code).toBe('INVALID_IDENTITY_TOKEN');
+    expect(foreignAzp.response.status).toBe(401);
+    expect(cookiesFrom(foreignAzp.response)).toBeNull();
+  });
+
+  it('refuses email_verified=false with 403 and creates no user, so the address owner is not blocked', async () => {
+    const sub = `1${Date.now()}${Math.floor(Math.random() * 1e6)}`;
+    const email = uniqueEmail('unverified');
+    const { response } = await googleNativeSignIn({
+      sub,
+      email,
+      claims: { email_verified: false },
+    });
+    const body = await response.json<SignInBody>();
+
+    expect(response.status).toBe(403);
+    expect(body.code).toBe('EMAIL_NOT_VERIFIED');
+    expect(cookiesFrom(response)).toBeNull();
+    const rows = await withDb(testEnv, (db) =>
+      db.select({ id: users.id }).from(users).where(eq(users.email, email)),
+    );
+    expect(rows).toHaveLength(0);
+
+    // The address owner signs in with Apple afterwards without an ACCOUNT_NOT_LINKED refusal.
+    const apple = await appleNativeSignIn({ email });
+    expect(apple.response.status).toBe(200);
+  });
+
+  it('refuses the same identity token a second time (replay), from any address', async () => {
+    const first = await googleNativeSignIn();
+    expect(first.response.status).toBe(200);
+
+    const replay = await worker(
+      jsonRequest(
+        '/api/auth/sign-in/google-native',
+        'POST',
+        { identityToken: first.identityToken, rawNonce: first.rawNonce },
+        { ip: uniqueIp(), cookie: null },
+      ),
+    );
+    const body = await replay.json<SignInBody>();
+
+    expect(replay.status).toBe(401);
+    expect(body.code).toBe('IDENTITY_TOKEN_REPLAYED');
+    expect(cookiesFrom(replay)).toBeNull();
+    // The marker lives in the CACHE namespace under a digest, never the token itself.
+    const keys = await testEnv.CACHE.list({ prefix: 'used_id_tokens:google:' });
+    expect(keys.keys.length).toBeGreaterThan(0);
+    expect(keys.keys.every((key) => !key.name.includes(first.identityToken))).toBe(true);
   });
 });

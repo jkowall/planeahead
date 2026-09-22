@@ -14,7 +14,9 @@ import {
   INSTALL_ID_HEADER,
 } from '../../src/middleware/idempotency';
 import {
+  captureLogs,
   jsonRequest,
+  logEvents,
   registerDevice,
   signInAnonymously,
   testEnv,
@@ -173,6 +175,58 @@ describe('POST /v1/devices', () => {
     // keyed request by install id.
     expect(unscoped.status).toBe(400);
     expect((await unscoped.json<DeviceBody>()).error).toBe('idempotency_scope_missing');
+  });
+
+  it("does not re-point a push token that belongs to another user's device", async () => {
+    // No proof of possession in the request, and anonymous principals are free to create: a
+    // token learned from someone else must not redirect their alerts. The device row is still
+    // written; the token is skipped and the response says so.
+    const victim = await signInAnonymously();
+    const attacker = await signInAnonymously();
+    const token = `apns-${crypto.randomUUID()}`;
+    const victimInstall = uniqueInstallId('victim');
+    const attackerInstall = uniqueInstallId('attacker');
+
+    const owned = await registerDevice(victim, victimInstall, {
+      pushTokenKind: 'apns',
+      pushToken: token,
+    });
+    const { lines, result: stolen } = await captureLogs(() =>
+      registerDevice(attacker, attackerInstall, { pushTokenKind: 'apns', pushToken: token }),
+    );
+    const stolenBody = await stolen.json<DeviceBody & { pushTokenSkipped?: string }>();
+
+    expect(owned.status).toBe(200);
+    expect(stolen.status).toBe(200);
+    expect(stolenBody.device?.installId).toBe(attackerInstall);
+    expect(stolenBody.pushToken).toBeNull();
+    expect(stolenBody.pushTokenSkipped).toBe('owned_by_another_user');
+    const warnings = logEvents(lines, 'push_token_conflict');
+    expect(warnings).toHaveLength(1);
+    expect(JSON.stringify(warnings)).not.toContain(token);
+
+    const rows = await withDb(testEnv, (db) =>
+      db.select({ userId: pushTokens.userId }).from(pushTokens).where(eq(pushTokens.token, token)),
+    );
+    expect(rows).toEqual([{ userId: victim.userId }]);
+  });
+
+  it('answers 400, not 500, to a NUL byte anywhere in the body', async () => {
+    const session = await signInAnonymously();
+    const installId = uniqueInstallId('nul');
+
+    const inModel = await registerDevice(session, installId, { model: 'iPhone\u0000X' });
+    const inToken = await registerDevice(session, installId, {
+      pushTokenKind: 'apns',
+      pushToken: `apns-\u0000-${crypto.randomUUID()}`,
+    });
+
+    expect(inModel.status).toBe(400);
+    expect(inToken.status).toBe(400);
+    const rows = await withDb(testEnv, (db) =>
+      db.select({ id: devices.id }).from(devices).where(eq(devices.installId, installId)),
+    );
+    expect(rows).toHaveLength(0);
   });
 
   it('is behind the principal limiter, keyed by user id', async () => {

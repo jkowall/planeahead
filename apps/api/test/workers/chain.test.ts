@@ -84,9 +84,11 @@ describe('the deployed chain answers the shape it documents', () => {
   });
 
   it('reaches Better Auth for a keyed POST to the auth mount and gets its validation answer', async () => {
-    // The body has no `email`, so the per-email cap steps aside and Better Auth's own schema
-    // rejects it: a 400 from the handler, never a 500 from the chain. The address keeps the
-    // request out of the shared no-IP rate-limit bucket that other files could be filling.
+    // The idempotency middleware skips the auth mount (a replayed key must never answer ahead
+    // of the magic-link gate), and the body has no `email`, so the gate forwards it uncounted
+    // and Better Auth's own schema rejects it: a 400 from the handler, never a 500 from the
+    // chain. The address keeps the request out of the shared no-IP rate-limit bucket that
+    // other files could be filling.
     const init = postInit('chain-key-00000002');
     const response = await exports.default.fetch(
       'https://api.planeahead.test/api/auth/sign-in/magic-link',

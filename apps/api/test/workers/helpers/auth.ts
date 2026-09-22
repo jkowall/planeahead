@@ -24,7 +24,10 @@ export type TestEnv = Env &
   Partial<
     Pick<
       TestBindings,
-      'TEST_IDP_PRIVATE_KEY_PEM' | 'TEST_FAKE_PROVIDERS_ORIGIN' | 'TEST_DEV_VARS_EXAMPLE_KEYS'
+      | 'TEST_IDP_PRIVATE_KEY_PEM'
+      | 'TEST_FAKE_PROVIDERS_ORIGIN'
+      | 'TEST_DEV_VARS_EXAMPLE_KEYS'
+      | 'TEST_DATABASE_SOURCE'
     >
   >;
 
@@ -154,6 +157,17 @@ export async function sentEmails(to: string): Promise<RecordedEmail[]> {
   return response.json<RecordedEmail[]>();
 }
 
+/** The emailed URL (the landing page with the token) in the last email sent to `to`. */
+export async function magicLinkUrlFor(to: string): Promise<string> {
+  const emails = await sentEmails(to);
+  const last = emails.at(-1);
+  const match = /(https?:\/\/\S+[?&]token=[^&\s"]+)/.exec(last?.body.text ?? '');
+  if (match?.[1] === undefined) {
+    throw new Error(`no magic link in the mail sent to ${to}`);
+  }
+  return match[1];
+}
+
 /** The `token` query parameter of the magic link in the last email sent to `to`. */
 export async function magicLinkTokenFor(to: string): Promise<string> {
   const emails = await sentEmails(to);
@@ -165,36 +179,54 @@ export async function magicLinkTokenFor(to: string): Promise<string> {
   return decodeURIComponent(match[1]);
 }
 
-/** Requests a magic link and completes it in the app's way (JSON verify, cookie attached). */
+/** `GET /api/auth/magic-link/verify?token=...` the way the app calls it (JSON, no callbackURL). */
+export function verifyMagicLink(
+  token: string,
+  options: { readonly ip?: string; readonly cookie?: string | null } = {},
+): Promise<Response> {
+  return worker(
+    jsonRequest(
+      `/api/auth/magic-link/verify?token=${encodeURIComponent(token)}`,
+      'GET',
+      undefined,
+      { ip: options.ip ?? uniqueIp(), cookie: options.cookie ?? null, origin: null },
+    ),
+  );
+}
+
+/**
+ * Requests a magic link and completes it in the app's way (JSON verify, cookie attached). The
+ * cookie rides on the REQUEST as well as on the verify: the link is bound to the anonymous user
+ * who asked for it, and the merge runs only when the same anonymous user verifies it.
+ */
 export async function signInWithMagicLink(
   email: string,
   options: { readonly ip?: string; readonly cookie?: string | null } = {},
 ): Promise<{ readonly userId: string; readonly cookie: string; readonly response: Response }> {
   const ip = options.ip ?? uniqueIp();
+  const cookie = options.cookie ?? null;
   const requested = await worker(
-    jsonRequest('/api/auth/sign-in/magic-link', 'POST', { email }, { ip, origin: null }),
+    jsonRequest(
+      '/api/auth/sign-in/magic-link',
+      'POST',
+      { email },
+      { ip, cookie, origin: cookie === null ? null : APP_ORIGIN },
+    ),
   );
   if (requested.status !== 200) {
     throw new Error(`magic link request failed: ${requested.status} ${await requested.text()}`);
   }
   const token = await magicLinkTokenFor(email);
-  const verified = await worker(
-    jsonRequest(
-      `/api/auth/magic-link/verify?token=${encodeURIComponent(token)}`,
-      'GET',
-      undefined,
-      { ip, cookie: options.cookie ?? null, origin: null },
-    ),
-  );
+  const verified = await verifyMagicLink(token, { ip, cookie });
   if (verified.status !== 200) {
     throw new Error(`magic link verify failed: ${verified.status} ${await verified.text()}`);
   }
   const body = await verified.json<{ user: { id: string } }>();
-  const cookie = cookiesFrom(verified);
-  if (cookie === null) {
+  const sessionCookie = cookiesFrom(verified);
+  if (sessionCookie === null) {
     throw new Error('magic link verify set no cookie');
   }
-  return { userId: body.user.id, cookie, response: verified };
+  return { userId: body.user.id, cookie: sessionCookie, response: verified };
 }
 
 /** `POST /v1/devices` for a signed-in client. */
@@ -249,6 +281,18 @@ export interface NativeSignInResult {
   readonly identityToken: string;
 }
 
+/**
+ * An authorization code the fake Apple token endpoint answers with an `id_token` for `sub`
+ * (`code_<hex(sub)>_<uuid>`, see test/fake-providers.ts). Hex rather than base64url so the code
+ * is safe in a form body and in the refresh-token regex the Apple suite asserts.
+ */
+export function appleAuthorizationCode(sub: string): string {
+  const hex = [...new TextEncoder().encode(sub)]
+    .map((byte) => byte.toString(16).padStart(2, '0'))
+    .join('');
+  return `code_${hex}_${crypto.randomUUID()}`;
+}
+
 /** `POST /api/auth/sign-in/apple-native` with a token the fake Apple JWKS validates. */
 export async function appleNativeSignIn(
   options: AppleSignInOptions = {},
@@ -258,10 +302,11 @@ export async function appleNativeSignIn(
   const nonceClaim =
     options.nonceClaim === undefined ? await sha256Hex(rawNonce) : options.nonceClaim;
   const email = options.email === undefined ? uniqueEmail('apple') : options.email;
-  const authorizationCode = options.authorizationCode ?? `code-${crypto.randomUUID()}`;
+  const subject = options.sub ?? `00${crypto.randomUUID().replaceAll('-', '')}.apple`;
+  const authorizationCode = options.authorizationCode ?? appleAuthorizationCode(subject);
   const identityToken = await keys.mintApple({
     audience: options.audience ?? testEnv.APPLE_BUNDLE_ID ?? '',
-    subject: options.sub ?? `00${crypto.randomUUID().replaceAll('-', '')}.apple`,
+    subject,
     ...(options.issuedAt === undefined ? {} : { issuedAt: options.issuedAt }),
     ...(options.lifetime === undefined ? {} : { lifetime: options.lifetime }),
     claims: {
@@ -292,7 +337,8 @@ export interface GoogleSignInOptions {
   /** Overrides the `nonce` claim; `null` omits it. Defaults to rawNonce. */
   readonly nonceClaim?: string | null;
   readonly sendRawNonce?: boolean;
-  readonly audience?: string;
+  /** One audience, or several for the multi-audience (`azp`) cases. */
+  readonly audience?: string | string[];
   readonly issuer?: string;
   readonly issuedAt?: number;
   readonly lifetime?: number;

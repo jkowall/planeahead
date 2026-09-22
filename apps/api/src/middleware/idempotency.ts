@@ -37,6 +37,7 @@ import { idempotencyKeys, withDb } from '@planeahead/db';
 import type { Context, MiddlewareHandler } from 'hono';
 import { createMiddleware } from 'hono/factory';
 import type { ContentfulStatusCode } from 'hono/utils/http-status';
+import { AUTH_PATH_PREFIX } from '../auth/paths';
 import { type AppBindings, type Env, environmentName } from '../env';
 import { createLogger } from '../observability/log';
 
@@ -264,6 +265,13 @@ export function idempotency(options: IdempotencyOptions = {}): MiddlewareHandler
   const selectStore = options.store ?? storeFor;
   return createMiddleware<AppBindings>(async (c, next) => {
     if (!MUTATING_METHODS.has(c.req.method)) {
+      return next();
+    }
+    // Better Auth's mount is left alone. Its endpoints have their own replay semantics (a
+    // single-use token, a session cookie), a stored 200 replayed for `/sign-in/magic-link`
+    // would answer ahead of the per-address cap and never count, and reading the body here
+    // would consume it ahead of the handler that has to parse it.
+    if (new URL(c.req.url).pathname.startsWith(AUTH_PATH_PREFIX)) {
       return next();
     }
     const key = c.req.header(IDEMPOTENCY_KEY_HEADER);

@@ -16,8 +16,9 @@ export { NoopSender } from './noop';
 export { RESEND_MAX_RETRY_AFTER_SECONDS, ResendSender } from './resend';
 export {
   MAIL_FROM,
-  MAGIC_LINK_TOKEN_PREFIX_LENGTH,
+  MAGIC_LINK_IDEMPOTENCY_DIGEST_LENGTH,
   buildMagicLinkEmail,
+  magicLinkLandingUrl,
   type MagicLinkEmail,
   type MailMessage,
   type MailSendResult,

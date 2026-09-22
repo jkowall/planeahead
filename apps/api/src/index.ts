@@ -25,12 +25,14 @@
 
 import { withSentry } from '@sentry/cloudflare';
 import { createApp } from './app';
+import { MAGIC_LINK_LANDING_PATH } from './auth/paths';
 import type { Env } from './env';
 import { scheduled } from './cron/index';
 import { sentryOptions } from './middleware/sentry';
 import { queue } from './queues/index';
 import { authRoutes } from './routes/auth';
 import { health } from './routes/health';
+import { magicLinkLanding } from './routes/magic-link-landing';
 import { v1Routes } from './routes/v1';
 
 export { AirportState } from './do/airport-state';
@@ -45,7 +47,13 @@ const app = createApp();
  * `route()` returns the same Hono instance, so `routes` and `app` are one object at run time.
  * The two names exist because only the chained expression carries the accumulated RPC types.
  */
-const routes = app.route('/', health).route('/v1', v1Routes).route('/api/auth', authRoutes);
+const routes = app
+  .route('/', health)
+  .route('/v1', v1Routes)
+  .route('/api/auth', authRoutes)
+  // The browser landing page for the emailed magic link: outside the Better Auth mount so a
+  // GET can never consume the token (src/routes/magic-link-landing.ts).
+  .route(MAGIC_LINK_LANDING_PATH, magicLinkLanding);
 
 /** The RPC surface `hc<AppType>()` in apps/mobile is typed from. */
 export type AppType = typeof routes;

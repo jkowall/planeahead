@@ -36,6 +36,30 @@ export interface TestBindings extends Record<string, string> {
   readonly TEST_FAKE_PROVIDERS_ORIGIN: string;
   /** The uncommented key names in `.dev.vars.example`, comma separated (ruling F5). */
   readonly TEST_DEV_VARS_EXAMPLE_KEYS: string;
+  /** Where the database came from: `shell` (TEST_DATABASE_URL), `.env.test` or `embedded`. */
+  readonly TEST_DATABASE_SOURCE: string;
+}
+
+/**
+ * The harness must use the cluster the environment asked for. turbo runs the `test` task in
+ * strict env mode, and a `TEST_DATABASE_URL` that turbo did not pass through would make CI
+ * start embedded-postgres on the runner while its `postgres:18` service container sat idle,
+ * silently. Throws when the shell set the variable and the harness did not use it; the CI job
+ * additionally greps the `database source` line below so the check cannot regress quietly.
+ */
+export function assertDatabaseSource(
+  shellUrl: string | undefined,
+  source: 'shell' | '.env.test' | 'embedded',
+): void {
+  const shellSet = shellUrl !== undefined && shellUrl.trim() !== '';
+  if (shellSet && source !== 'shell') {
+    throw new Error(
+      `[api test harness] TEST_DATABASE_URL is set but the database came from ${source}`,
+    );
+  }
+  if (!shellSet && source === 'shell') {
+    throw new Error('[api test harness] the harness reports TEST_DATABASE_URL but none is set');
+  }
 }
 
 declare module 'vitest' {
@@ -78,7 +102,9 @@ export function parseDevVars(text: string): Record<string, string> {
 
 export async function setup(project: TestProject): Promise<() => Promise<void>> {
   const cluster = await provisionTestCluster();
+  assertDatabaseSource(process.env['TEST_DATABASE_URL'], cluster.source);
   process.stdout.write(`[api test harness] ${cluster.description}\n`);
+  process.stdout.write(`[api test harness] database source: ${cluster.source}\n`);
   const database = await provisionMigratedDatabase(cluster.adminUrl, 'api');
   process.stdout.write(
     `[api test harness] database ${database.name}: ${database.migration.migrations} migration(s), ` +
@@ -100,6 +126,7 @@ export async function setup(project: TestProject): Promise<() => Promise<void>> 
     TEST_IDP_PRIVATE_KEY_PEM: providers.privateKeyPem,
     TEST_FAKE_PROVIDERS_ORIGIN: providers.origin,
     TEST_DEV_VARS_EXAMPLE_KEYS: exampleKeys.join(','),
+    TEST_DATABASE_SOURCE: cluster.source,
   };
 
   project.provide('apiDatabaseUrl', database.url);

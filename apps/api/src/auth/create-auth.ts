@@ -20,16 +20,33 @@
  *     every request would share one `no-trusted-ip` rate-limit bucket. `cf-connecting-ip` is the
  *     header, always a single address.
  *
- * `trustedOrigins` are listed explicitly, including `planeahead://` (without it a deep-link
- * redirect carries no cookie) and `exp://` in the local environment only (the Expo server plugin
- * adds it under NODE_ENV=development, which again never happens on Workers).
+ * Three more settings are load bearing and easy to lose:
+ *
+ *   - `transaction: true` on the Drizzle adapter. Without it Better Auth's `runWithTransaction`
+ *     is a pass-through (`createAsIsTransaction`), and `handleOAuthUserInfo` writes the user
+ *     and the account of a new native sign-in as two autocommit statements: a failure between
+ *     them leaves a user row with the provider's email and no account, and every retry then
+ *     answers 403 ACCOUNT_NOT_LINKED for good. `auth-transaction.test.ts` proves the rollback.
+ *   - `onAPIError.throw: true`. Otherwise better-call answers a non-API error with a bare 500
+ *     AND prints the whole error object through `console.error` (`# SERVER_ERROR:`), which for
+ *     a failed statement is the SQL plus every bound value. Thrown, the error reaches Hono's
+ *     `handleError`, which logs it through `errorFields` (sanitised) and answers the house 500
+ *     with the request id. `APIError`s are unaffected: they still become their JSON responses.
+ *   - the magic-link requester binding (`magic-link-requester.ts`): the anonymous merge on
+ *     `/magic-link/verify` runs only for the anonymous user who requested the link.
+ *
+ * `trustedOrigins` are the CORS allow list (`planeahead://`, `API_PUBLIC_URL`, the localhost
+ * origins only when `ENVIRONMENT` is `local`) plus `exp://` in the local environment only (the
+ * Expo server plugin adds it under NODE_ENV=development, which again never happens on Workers).
  */
 
 import { expo } from '@better-auth/expo';
+import type { BetterAuthOptions } from 'better-auth';
 import { drizzleAdapter } from 'better-auth/adapters/drizzle';
-import { APIError, createAuthMiddleware } from 'better-auth/api';
+import { APIError, createAuthMiddleware, getSessionFromCtx } from 'better-auth/api';
 import { betterAuth } from 'better-auth/minimal';
 import { anonymous, magicLink } from 'better-auth/plugins';
+import { eq } from 'drizzle-orm';
 import { accounts, rateLimits, sessions, users, verifications, type Db } from '@planeahead/db';
 import { uuidv7 } from '@planeahead/shared';
 import type { Envelope } from '../crypto/envelope';
@@ -37,10 +54,12 @@ import { type Env, environmentName } from '../env';
 import { buildMagicLinkEmail, type MailSender } from '../mail/index';
 import { allowedOrigins } from '../middleware/cors';
 import { type Logger, errorFields } from '../observability/log';
+import { consumeMagicLinkRequester, recordMagicLinkRequester } from './magic-link-requester';
 import { type MergeQueue, type MergeSource, mergeUsers } from './merge';
+import { AUTH_BASE_PATH } from './paths';
 import { planeaheadPlugin } from './plugin';
 
-export const AUTH_BASE_PATH = '/api/auth';
+export { AUTH_BASE_PATH };
 export const MIN_SECRET_LENGTH = 32;
 export const SESSION_EXPIRES_IN_SECONDS = 30 * 24 * 60 * 60;
 export const SESSION_UPDATE_AGE_SECONDS = 24 * 60 * 60;
@@ -52,9 +71,13 @@ export const RATE_LIMIT_RULES = {
 } as const;
 export const IP_ADDRESS_HEADERS = ['cf-connecting-ip'] as const;
 export const EXPO_GO_ORIGIN = 'exp://';
+export const MAGIC_LINK_VERIFY_PATH = '/magic-link/verify';
+export const UNLINK_ACCOUNT_PATH = '/unlink-account';
 
 /** Better Auth's own fallback. Never accepted, even if someone sets it on purpose. */
 const BETTER_AUTH_DEFAULT_SECRET = 'better-auth-secret-12345678901234567890';
+
+const UUID_SHAPE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
 export class AuthConfigError extends Error {
   override readonly name = 'AuthConfigError';
@@ -95,6 +118,12 @@ export interface AuthDeps {
   readonly queue: MergeQueue;
   /** Test seam for the Apple token exchange. Defaults to the global `fetch`. */
   readonly fetch?: typeof fetch;
+  /**
+   * Test seam, and nothing else uses it: Better Auth database hooks, which
+   * `auth-transaction.test.ts` uses to make the account INSERT of a new sign-in fail after the
+   * user INSERT, so the rollback can be observed. The Worker passes none.
+   */
+  readonly databaseHooks?: BetterAuthOptions['databaseHooks'];
 }
 
 type BetterAuthLogLevel = 'info' | 'success' | 'warn' | 'error' | 'debug';
@@ -103,8 +132,9 @@ function routeBetterAuthLog(
   log: Logger,
 ): (level: BetterAuthLogLevel, message: string, ...args: unknown[]) => void {
   return (level, message, ...args) => {
-    // Only the message and a thrown error's name and message. The extra arguments Better Auth
-    // passes can be whole request contexts, which is exactly what must not reach a log line.
+    // Only the message and a thrown error's sanitised fields (`errorFields` cuts a failed
+    // statement's bound values and keeps the stack frames only). The extra arguments Better
+    // Auth passes can be whole request contexts, which is exactly what must not reach a line.
     const thrown = args.find((arg): arg is Error => arg instanceof Error);
     const fields = {
       message,
@@ -154,6 +184,8 @@ export function createAuth(env: Env, deps: AuthDeps) {
     database: drizzleAdapter(deps.db, {
       provider: 'pg',
       usePlural: true,
+      // Real transactions, so `handleOAuthUserInfo`'s user-plus-account write is atomic.
+      transaction: true,
       // The five-key subset, never the whole schema: the adapter's schema check is an in-memory
       // diff over this object (zero SQL), and the export keys are what it addresses tables by.
       schema: { users, sessions, accounts, verifications, rateLimits },
@@ -186,26 +218,51 @@ export function createAuth(env: Env, deps: AuthDeps) {
       // would add a second, independent key scheme (XChaCha20-Poly1305 keyed on the secret).
       encryptOAuthTokens: false,
     },
+    onAPIError: { throw: true },
     telemetry: { enabled: false },
     logger: { level: 'warn', log: routeBetterAuthLog(deps.log) },
+    ...(deps.databaseHooks === undefined ? {} : { databaseHooks: deps.databaseHooks }),
     hooks: {
-      // The built-in ID-token path on `/sign-in/social` skips the nonce check when the claim is
-      // absent and writes the raw ID token into `accounts.id_token`. Nothing in PlaneAhead uses
-      // it; make sure nothing can by accident.
       before: createAuthMiddleware(async (ctx) => {
-        if (ctx.path !== '/sign-in/social') {
+        const body: unknown = ctx.body;
+        // The built-in ID-token path on `/sign-in/social` skips the nonce check when the claim
+        // is absent and writes the raw ID token into `accounts.id_token`. Nothing in PlaneAhead
+        // uses it; make sure nothing can by accident.
+        if (ctx.path === '/sign-in/social') {
+          if (typeof body === 'object' && body !== null && 'idToken' in body) {
+            throw new APIError('BAD_REQUEST', {
+              code: 'ID_TOKEN_SIGN_IN_DISABLED',
+              message:
+                'ID-token sign-in is not available on this path; use /sign-in/apple-native or ' +
+                '/sign-in/google-native',
+            });
+          }
           return;
         }
-        const body: unknown = ctx.body;
-        if (typeof body === 'object' && body !== null && 'idToken' in body) {
-          throw new APIError('BAD_REQUEST', {
-            code: 'ID_TOKEN_SIGN_IN_DISABLED',
-            message:
-              'ID-token sign-in is not available on this path; use /sign-in/apple-native or ' +
-              '/sign-in/google-native',
-          });
+        // Better Auth's built-in `/unlink-account` deletes the account row, and for Apple that
+        // row holds the encrypted refresh token increment 8's deletion revokes with. Until that
+        // increment wires the revocation, an Apple row cannot be unlinked; Google can (Better
+        // Auth still refuses to unlink the last account).
+        if (ctx.path === UNLINK_ACCOUNT_PATH) {
+          const accountId =
+            typeof body === 'object' && body !== null
+              ? (body as { accountId?: unknown }).accountId
+              : undefined;
+          if (typeof accountId !== 'string' || !UUID_SHAPE.test(accountId)) {
+            return;
+          }
+          const [row] = await deps.db
+            .select({ providerId: accounts.providerId })
+            .from(accounts)
+            .where(eq(accounts.id, accountId))
+            .limit(1);
+          if (row?.providerId === 'apple') {
+            throw new APIError('BAD_REQUEST', {
+              code: 'UNLINK_NOT_SUPPORTED',
+              message: 'unlinking an Apple account is not supported yet',
+            });
+          }
         }
-        await Promise.resolve();
       }),
     },
     plugins: [
@@ -213,7 +270,24 @@ export function createAuth(env: Env, deps: AuthDeps) {
         // Fires after the new session is committed, outside any transaction. The merge is the
         // idempotent function above; the anonymous row is deleted by the queue consumer once
         // nothing references it (increment 8), never here.
-        onLinkAccount: async ({ anonymousUser, newUser }) => {
+        onLinkAccount: async ({ anonymousUser, newUser, ctx }) => {
+          if (ctx.path === MAGIC_LINK_VERIFY_PATH) {
+            // The link is bound to the anonymous user who requested it (magic-link-requester.ts).
+            // A different anonymous user verifying it (a forwarded link, a login CSRF) is signed
+            // in, and nothing of theirs is merged into the address owner's account.
+            const token = (ctx.query as { token?: unknown } | undefined)?.token;
+            const requester =
+              typeof token === 'string' ? await consumeMagicLinkRequester(deps.db, token) : null;
+            if (requester === null || requester.anonymousUserId !== anonymousUser.user.id) {
+              deps.log.info('merge_skipped', {
+                reason: 'requester_mismatch',
+                merge_from: anonymousUser.user.id,
+                merge_to: newUser.user.id,
+                had_requester: requester !== null,
+              });
+              return;
+            }
+          }
           await merge(anonymousUser.user.id, newUser.user.id, 'anonymous_hook');
         },
         disableDeleteAnonymousUser: true,
@@ -221,10 +295,23 @@ export function createAuth(env: Env, deps: AuthDeps) {
       magicLink({
         storeToken: 'hashed',
         expiresIn: MAGIC_LINK_EXPIRES_IN_SECONDS,
-        sendMagicLink: async ({ email, token }) => {
-          // Our own URL, never Better Auth's: its `url` always carries `callbackURL`, and the
-          // verify request must return JSON plus Set-Cookie, not a redirect (see sender.ts).
-          const message = buildMagicLinkEmail({ token, apiPublicUrl: env.API_PUBLIC_URL });
+        sendMagicLink: async ({ email, token }, ctx) => {
+          // Who asked: the anonymous user whose cookie rode on the request, if any. Recorded
+          // before the send so a link that reaches its owner is already bound.
+          const session =
+            ctx === undefined ? null : await getSessionFromCtx(ctx, { disableRefresh: true });
+          const anonymousUserId =
+            session !== null && session.user['isAnonymous'] === true ? session.user.id : null;
+          await recordMagicLinkRequester(
+            deps.db,
+            token,
+            { anonymousUserId },
+            new Date(Date.now() + MAGIC_LINK_EXPIRES_IN_SECONDS * 1000),
+          );
+
+          // Our own URL, never Better Auth's: its `url` always carries `callbackURL` and points
+          // at the consuming verify endpoint (see sender.ts).
+          const message = await buildMagicLinkEmail({ token, apiPublicUrl: env.API_PUBLIC_URL });
           const result = await deps.mail.send({
             to: email,
             subject: message.subject,

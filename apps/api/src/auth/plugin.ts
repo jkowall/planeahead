@@ -9,14 +9,21 @@
  * deletion revokes with it), is envelope-encrypted into `accounts.refresh_token_enc` AFTER the
  * sign-in transaction; that window is not atomic and is documented in the threat model.
  *
+ * Both endpoints refuse a token they have seen before (`used-tokens.ts`): the nonce binds a
+ * token to its request, the KV marker stops the request itself from being replayed. Apple's
+ * authorization code is bound to the identity token too: the `id_token` Apple returns with the
+ * exchange must name the same subject (`apple-native.ts`), so a captured identity token cannot
+ * be signed in with an attacker's own fresh code.
+ *
  * Body keys are `identityToken`, never `idToken`: the Expo client strips the stored session
  * cookie from any request whose body has an `idToken` key, and the anonymous merge needs that
  * cookie to find the account being upgraded.
  *
  * Every response is JSON. Errors are Better Auth `APIError`s with a stable `code`:
  *   400 NONCE_REQUIRED, EMAIL_REQUIRED, VALIDATION (from the body schema)
- *   401 INVALID_IDENTITY_TOKEN, NONCE_MISMATCH, CODE_EXCHANGE_FAILED
- *   403 ACCOUNT_NOT_LINKED (an existing account with that email that policy will not link)
+ *   401 INVALID_IDENTITY_TOKEN, NONCE_MISMATCH, CODE_EXCHANGE_FAILED, IDENTITY_TOKEN_REPLAYED
+ *   403 ACCOUNT_NOT_LINKED (an existing account with that email that policy will not link),
+ *       EMAIL_NOT_VERIFIED (Google has not verified the address; no account is created)
  *   503 PROVIDER_NOT_CONFIGURED (a missing secret; logged at error level)
  */
 
@@ -41,6 +48,7 @@ import {
 } from './apple-native';
 import { GoogleTokenError, googleJwks, verifyGoogleIdToken } from './google-verify';
 import type { MergeSource } from './merge';
+import { identityTokenReplayKey, markIdentityTokenUsed, wasIdentityTokenUsed } from './used-tokens';
 
 export const PLUGIN_ID = 'planeahead';
 export const APPLE_NATIVE_PATH = '/sign-in/apple-native';
@@ -109,6 +117,14 @@ function publicUser(user: SignedInUser) {
 export function planeaheadPlugin(deps: PlaneaheadPluginDeps): BetterAuthPlugin {
   const { env, db, envelope, log } = deps;
 
+  /** 401 when this exact token was presented before; best effort (KV failures do not block). */
+  async function refuseReplay(key: string): Promise<void> {
+    if (await wasIdentityTokenUsed(env.CACHE, key, log)) {
+      log.info('identity_token_replayed', {});
+      fail('UNAUTHORIZED', 'IDENTITY_TOKEN_REPLAYED', 'this identity token was already used');
+    }
+  }
+
   return {
     id: PLUGIN_ID,
     endpoints: {
@@ -154,10 +170,11 @@ export function planeaheadPlugin(deps: PlaneaheadPluginDeps): BetterAuthPlugin {
             fail('BAD_REQUEST', 'NONCE_REQUIRED', 'rawNonce is required');
           }
 
+          const getKey = appleJwks(env.APPLE_JWKS_URL);
           let claims;
           try {
             claims = await verifyAppleIdentityToken(identityToken, {
-              getKey: appleJwks(env.APPLE_JWKS_URL),
+              getKey,
               audience: bundleId,
               rawNonce,
             });
@@ -174,6 +191,8 @@ export function planeaheadPlugin(deps: PlaneaheadPluginDeps): BetterAuthPlugin {
             }
             throw error;
           }
+          const replayKey = await identityTokenReplayKey('apple', identityToken, claims.jti);
+          await refuseReplay(replayKey);
 
           // The account being upgraded, if the request carries an anonymous session cookie.
           // Read before the sign-in changes the context's notion of the current session.
@@ -210,7 +229,9 @@ export function planeaheadPlugin(deps: PlaneaheadPluginDeps): BetterAuthPlugin {
           }
 
           // The authorization code is single use and valid for five minutes; exchanging it
-          // before the sign-in keeps a rejected code from leaving a half-made account.
+          // before the sign-in keeps a rejected code from leaving a half-made account, and the
+          // exchanged id_token must name the identity token's subject (a mismatch is a captured
+          // token with someone else's code).
           let refreshToken: string;
           try {
             const clientSecret = await appleClientSecrets.get({
@@ -223,6 +244,12 @@ export function planeaheadPlugin(deps: PlaneaheadPluginDeps): BetterAuthPlugin {
               code: authorizationCode,
               clientId: bundleId,
               clientSecret,
+              binding: {
+                getKey,
+                audience: bundleId,
+                expectedSub: claims.sub,
+                expectedNonce: claims.nonce,
+              },
               ...(env.APPLE_TOKEN_URL === undefined ? {} : { tokenUrl: env.APPLE_TOKEN_URL }),
               ...(deps.fetch === undefined ? {} : { fetch: deps.fetch }),
             });
@@ -245,6 +272,9 @@ export function planeaheadPlugin(deps: PlaneaheadPluginDeps): BetterAuthPlugin {
             }
             throw error;
           }
+
+          // Everything about the request is verified; from here it must not be replayable.
+          await markIdentityTokenUsed(env.CACHE, replayKey, claims.expiresAt, log);
 
           const result = await handleOAuthUserInfo(ctx, {
             userInfo: { id: claims.sub, email, emailVerified, name, image: null },
@@ -381,6 +411,13 @@ export function planeaheadPlugin(deps: PlaneaheadPluginDeps): BetterAuthPlugin {
                 case 'email_required':
                   fail('BAD_REQUEST', 'EMAIL_REQUIRED', 'the identity token carries no email');
                   break;
+                case 'email_not_verified':
+                  fail(
+                    'FORBIDDEN',
+                    'EMAIL_NOT_VERIFIED',
+                    'Google has not verified this email address',
+                  );
+                  break;
                 default:
                   fail(
                     'UNAUTHORIZED',
@@ -391,10 +428,14 @@ export function planeaheadPlugin(deps: PlaneaheadPluginDeps): BetterAuthPlugin {
             }
             throw error;
           }
+          const replayKey = await identityTokenReplayKey('google', identityToken, claims.jti);
+          await refuseReplay(replayKey);
 
           const existing = await getSessionFromCtx(ctx, { disableRefresh: true });
           const anonymousUserId =
             existing !== null && existing.user['isAnonymous'] === true ? existing.user.id : null;
+
+          await markIdentityTokenUsed(env.CACHE, replayKey, claims.expiresAt, log);
 
           const result = await handleOAuthUserInfo(ctx, {
             userInfo: {

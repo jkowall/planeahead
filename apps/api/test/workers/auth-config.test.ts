@@ -23,6 +23,7 @@ import { Envelope } from '../../src/crypto/envelope';
 import { createStaticKeyProvider } from '../../src/crypto/key-provider';
 import type { Env } from '../../src/env';
 import { NoopSender } from '../../src/mail/index';
+import { LOCAL_DEV_ORIGINS, allowedOrigins } from '../../src/middleware/cors';
 import { createLogger } from '../../src/observability/log';
 import { jsonRequest, testEnv, uniqueIp, worker } from './helpers/auth';
 
@@ -81,6 +82,35 @@ describe('the options handed to betterAuth()', () => {
     expect(auth.options.secret).toBe(testEnv.BETTER_AUTH_SECRET);
   });
 
+  it('throws non-API errors to Hono instead of letting better-call print them', () => {
+    // With this unset, better-call answers a thrown database error with a bare 500 AND
+    // `console.error('# SERVER_ERROR: ', error)`, which prints the failed statement with every
+    // bound value. Thrown, the error reaches handleError and the sanitised `errorFields`.
+    expect(auth.options.onAPIError?.throw).toBe(true);
+  });
+
+  it('runs the adapter with real transactions, so a new sign-in is one atomic write', async () => {
+    // The flag is not on the options object (the adapter closes over it), so it is proven by
+    // behaviour: a transaction that throws leaves nothing behind. auth-transaction.test.ts does
+    // the same through a real sign-in; this is the one-line version.
+    const context = await auth.$context;
+    const email = `tx-${crypto.randomUUID()}@example.test`;
+    await expect(
+      context.adapter.transaction(async (trx) => {
+        await trx.create({
+          model: 'user',
+          data: { email, name: '', emailVerified: false, isAnonymous: false },
+        });
+        throw new Error('roll it back');
+      }),
+    ).rejects.toThrow('roll it back');
+    const rows = await context.adapter.findMany({
+      model: 'user',
+      where: [{ field: 'email', value: email }],
+    });
+    expect(rows).toHaveLength(0);
+  });
+
   it('registers the four plugins and the two native endpoints under /sign-in', () => {
     const ids = (auth.options.plugins ?? []).map((plugin) => plugin.id);
     expect(ids).toEqual(['anonymous', 'magic-link', 'expo', 'planeahead']);
@@ -115,6 +145,28 @@ describe('trustedOrigins', () => {
     expect(staging).not.toContain(EXPO_GO_ORIGIN);
     expect(test).not.toContain(EXPO_GO_ORIGIN);
   });
+
+  it('trusts the localhost origins in the local environment only, never in production', () => {
+    const production: Env = {
+      ...testEnv,
+      ENVIRONMENT: 'production',
+      API_PUBLIC_URL: 'https://api.planeahead.app',
+    };
+    const local = allowedOrigins({ ...testEnv, ENVIRONMENT: 'local' });
+
+    const staging: Env = {
+      ...testEnv,
+      ENVIRONMENT: 'staging',
+      API_PUBLIC_URL: 'https://api-staging.planeahead.app',
+    };
+    for (const origin of LOCAL_DEV_ORIGINS) {
+      expect(local).toContain(origin);
+      expect(allowedOrigins(production)).not.toContain(origin);
+      expect(allowedOrigins(staging)).not.toContain(origin);
+      expect(trustedOriginsFor(production)).not.toContain(origin);
+    }
+    expect(trustedOriginsFor(production)).toEqual(['planeahead://', 'https://api.planeahead.app']);
+  });
 });
 
 describe('the running Worker', () => {
@@ -147,19 +199,24 @@ describe('the running Worker', () => {
     expect(response.headers.get('location')).toBeNull();
   });
 
-  it('answers CORS preflight on the auth mount', async () => {
-    const response = await worker(
-      new Request('https://api.planeahead.test/api/auth/sign-in/anonymous', {
-        method: 'OPTIONS',
-        headers: {
-          origin: 'http://localhost:8081',
-          'access-control-request-method': 'POST',
-          'cf-connecting-ip': uniqueIp(),
-        },
-      }),
-    );
+  it('answers CORS preflight on the auth mount for an allowed origin, and not for a dev origin outside local', async () => {
+    const preflight = (origin: string) =>
+      worker(
+        new Request('https://api.planeahead.test/api/auth/sign-in/anonymous', {
+          method: 'OPTIONS',
+          headers: {
+            origin,
+            'access-control-request-method': 'POST',
+            'cf-connecting-ip': uniqueIp(),
+          },
+        }),
+      );
+    const allowed = await preflight(testEnv.API_PUBLIC_URL);
+    // ENVIRONMENT is `test` here, so the Expo dev server origin is not on the list.
+    const devOrigin = await preflight('http://localhost:8081');
 
-    expect(response.status).toBe(204);
-    expect(response.headers.get('access-control-allow-origin')).toBe('http://localhost:8081');
+    expect(allowed.status).toBe(204);
+    expect(allowed.headers.get('access-control-allow-origin')).toBe(testEnv.API_PUBLIC_URL);
+    expect(devOrigin.headers.get('access-control-allow-origin')).toBeNull();
   });
 });

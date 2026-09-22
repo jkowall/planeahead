@@ -21,6 +21,8 @@
 
 import { createExecutionContext, waitOnExecutionContext } from 'cloudflare:test';
 import { env } from 'cloudflare:workers';
+import { sql } from 'drizzle-orm';
+import { withDb } from '@planeahead/db';
 import { describe, expect, it } from 'vitest';
 import type { CloudflareOptions, ErrorEvent, Event } from '@sentry/cloudflare';
 import { createApp } from '../../src/app';
@@ -191,6 +193,38 @@ describe('scrubSentryEvent', () => {
     const event = eventWith({ message: 'something happened' });
 
     expect(scrubSentryEvent(event)).toEqual({ type: undefined, message: 'something happened' });
+  });
+
+  it('cuts the bound parameters off exception values and console breadcrumb messages', () => {
+    // The exception value is `error.message` as the SDK serialised it, so a DrizzleQueryError's
+    // `params:` tail (the request) would leave the Worker untouched by `errorFields`.
+    const event = eventWith({
+      exception: {
+        values: [
+          {
+            type: 'Error',
+            value:
+              'Failed query: insert into "devices" ("model") values ($1)\nparams: SECRET_MODEL',
+          },
+          { type: 'PostgresError', value: 'x'.repeat(500) },
+        ],
+      },
+      breadcrumbs: [
+        {
+          category: 'console',
+          message: `# SERVER_ERROR: Failed query: select 1\nparams: SECRET_PARAM`,
+        },
+      ],
+    });
+
+    const scrubbed = scrubSentryEvent(event);
+
+    expect(scrubbed.exception?.values?.[0]?.value).toBe(
+      'Failed query: insert into "devices" ("model") values ($1)',
+    );
+    expect(scrubbed.exception?.values?.[1]?.value).toHaveLength(203);
+    expect(scrubbed.breadcrumbs?.[0]?.message).toBe('# SERVER_ERROR: Failed query: select 1');
+    expect(JSON.stringify(scrubbed)).not.toContain('SECRET_');
   });
 });
 
@@ -370,5 +404,29 @@ describe('a real request through the real chain', () => {
     expect(serialised).not.toContain('http.request.body.data');
     expect(serialised).not.toContain('http.request.header.');
     expect(serialised).not.toContain('url.query');
+  });
+
+  it('carries a failed statement without its bound parameters', async () => {
+    // A real DrizzleQueryError from a real query Postgres refuses: the exception value must
+    // keep the statement and lose the values, in the envelope bytes.
+    const marker = `SENTRY_PARAM_${crypto.randomUUID().replaceAll('-', '')}`;
+    const { app, envelopes } = capturingApp();
+    app.get('/failing-query', async (c) => {
+      await withDb(c.env, (db) => db.execute(sql`select ${`${marker}\u0000`}::text as value`));
+      return c.json({ ok: true });
+    });
+    const ctx = createExecutionContext();
+    const response = await app.fetch(
+      new Request('https://api.planeahead.test/failing-query'),
+      env,
+      ctx,
+    );
+    await waitOnExecutionContext(ctx);
+    const serialised = JSON.stringify(envelopes);
+
+    expect(response.status).toBe(500);
+    expect(serialised).toContain('Failed query');
+    expect(serialised).not.toContain(marker);
+    expect(serialised).not.toContain('params:');
   });
 });
