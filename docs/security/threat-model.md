@@ -60,27 +60,50 @@ the Drizzle adapter (section 1.6) and `onAPIError: { throw: true }` (section 1.7
   reads the body through Hono's cache and fails closed (415 for a non-JSON media type, 400 for
   non-JSON or a NUL), forwards `{ email }` alone (Better Auth's schema also accepts `name`, which
   it would write unsanitised into `users.name` at verify time, and three callback URLs) and counts
-  only a request Better Auth would accept. Two counters in `usage_counters`, subjects SHA-256 hex,
-  never an address, an install id or an IP: per ADDRESS AND REQUESTER (the valid `X-Install-Id`,
-  else the client IP; 3 per hour, 10 per UTC day) answered `{ status: true }` silently without
-  invoking Better Auth, so a stranger's requests land on their own budget and cannot lock the
-  address owner out for the day; and per REQUESTER (the client IP, else the install id; 20 per
-  hour, 60 per day across addresses) answered 429 with `Retry-After`, the brake on one origin
-  mail-bombing an inbox under rotating install ids. The 200 is the same either way, so neither the
-  cap nor a mail-provider outage reveals whether an address has an account. Residual: an attacker
-  with many IPs gets 60 mails per IP per day to one address; the per-IP Better Auth rule (3 per
-  60 s) and the address owner's own budget bound the damage. The Resend idempotency key is a
-  digest of the token, never a prefix of it.
+  only a request Better Auth would accept. Three counters in `usage_counters`, subjects SHA-256
+  hex, never an address, an install id or an IP. The client address is reduced first
+  (`src/validation/client-ip.ts`: IPv6 to its /64, IPv4-mapped to IPv4, exactly as Better Auth's
+  own limiter does), because the second review's probe showed a /64 rotating /128s was a new
+  requester on every request. Per REQUESTER (the reduced client address, else the install id;
+  100 per hour, 300 per UTC day across addresses) answered 429 with `Retry-After`: NAT scale on
+  purpose, since the earlier 20-per-hour brake let one heavy user, or one attacker, on an airport
+  or hotel network, a corporate NAT, carrier CGNAT or a Private Relay egress lock everyone behind
+  that address out of email sign-in until 00:00 UTC; the burst bound behind one address is Better
+  Auth's 3 per 60 s, this brake bounds the day. Per ADDRESS (every requester combined; 10 per
+  hour, 30 per UTC day) answered `{ status: true }` silently without invoking Better Auth: the
+  bound on what one inbox can receive from this route whatever the attacker's address supply (a
+  botnet, a /48 of /64s), which no per-requester rule can give. Per ADDRESS AND REQUESTER (the
+  valid `X-Install-Id`, else the reduced client address; 3 per hour, 10 per UTC day) answered the
+  same silent 200, so a stranger's first requests land on their own rows and do not silence the
+  owner. The 200 is the same either way, so neither the cap nor a mail-provider outage reveals
+  whether an address has an account. Residuals, both deliberate: a stranger who spends an
+  address's 30 links locks its owner out of EMAIL sign-in (native sign-in is unaffected) for the
+  rest of the UTC day, at the cost of 30 mails to the inbox they are attacking, which is the trade
+  against an unbounded mail bomb (the ceiling sits three times above the owner's budget for that
+  reason); and everyone behind one shared egress address shares 300 links a day, plus Better
+  Auth's own 3 per minute, which was already the tighter shared-egress rule. The Resend
+  idempotency key is a digest of the token, never a prefix of it.
 - **`GET /auth/magic-link` (the emailed landing page) never consumes the token.** Mail security
   gateways (Safe Links, Mimecast, Proofpoint) fetch every link in inbound mail before the user
   sees it; an earlier design emailed the consuming verify URL, which a scanner would burn while
   signing itself in. The page carries no script and no external resource, is served `no-store`
-  and `no-referrer` under a CSP that allows only same-origin form posts, and its one button POSTs
-  the token to `POST /api/auth/magic-link/consume`, which refuses a cross-site Origin (403),
-  verifies server side and forwards the session cookie. `GET /api/auth/magic-link/verify` refuses
-  the callback query parameters (400), so Better Auth's redirect branch, which the Expo plugin
-  decorates with the raw cookie, is unreachable, and its failure redirect is turned into a 400
-  JSON code.
+  and `Referrer-Policy: strict-origin` under a CSP that allows only same-origin form posts, and
+  its one button POSTs the token to `POST /api/auth/magic-link/consume`, which verifies server
+  side and forwards the session cookie. `strict-origin`, not `no-referrer`: under `no-referrer` a
+  browser sends `Origin: null` on the form post, and the consume route's Origin check answered
+  the page's own button 403 (found by the second review in a real browser). `consumePostAllowed`
+  (`src/routes/auth.ts`) refuses `Sec-Fetch-Site` cross-site or same-site whatever `Origin` says,
+  accepts a listed `Origin`, accepts `Origin: null` only with `Sec-Fetch-Site: same-origin`, and
+  accepts no `Origin` at all (a non-browser client, presenting the same secret the app presents to
+  verify); the check runs before the token is touched, so a refusal burns nothing. What the page
+  is for: the universal-link target and a scanner-safe landing, plus a browser sign-in whose
+  session is inert in Phase 0 (no web surface uses it; the page says so and tells the user the app
+  needs its own link). It is NOT a hand-off to the app: a `planeahead://` link carrying the token
+  would deliver it to any app that squats the custom scheme on Android (verified App Links cannot
+  be squatted, custom schemes can), so a phone on which the universal link did not fire is told to
+  request a new link from the app. `GET /api/auth/magic-link/verify` refuses the callback query
+  parameters (400), so Better Auth's redirect branch, which the Expo plugin decorates with the
+  raw cookie, is unreachable, and its failure redirect is turned into a 400 JSON code.
 - **`POST /api/auth/unlink-account` for an Apple row** is answered 400 `UNLINK_NOT_SUPPORTED` by
   a before-hook: the built-in unlink deletes the row holding `refresh_token_enc` with no
   revocation at Apple, and increment 8 wires the revocation. Google rows may still be unlinked.
@@ -156,6 +179,19 @@ the hook DOES fire for a plugin endpoint reached over HTTP.
 
 Threats considered:
 
+- **The sliding session refresh and the `/v1` path.** Better Auth's `getSession` extends
+  `sessions.expires_at` once a day AND re-issues the `session_token` cookie with a fresh
+  `Max-Age`; the Expo client expires its SecureStore cookie by that `Max-Age` and stores cookies
+  only from responses to requests it made itself (`/api/auth/*`), and the increment 9 `/v1`
+  client keeps nothing from a `/v1` response. A `/v1` request that refreshed the row would throw
+  the cookie away and leave `/get-session` seeing a recently updated row for the rest of the day:
+  thirty days after sign-in the app would be signed out despite daily use, for an anonymous user
+  for good. The first fix forwarded the refreshed cookie on `/v1`, which the specified client
+  does not store, and would also have forwarded cookie DELETIONS, so a stale anonymous `/v1`
+  request finishing after an upgrade could tell the client to drop the NEW session. The auth
+  middleware now reads the session with `disableRefresh` and `/v1` never emits `Set-Cookie`; the
+  refresh happens on `GET /api/auth/get-session`, which the session gate calls on every launch
+  and foreground (increment 9). `auth-session-refresh.test.ts` pins both halves.
 - **Cookie theft during the upgrade.** The anonymous session is revoked in the merge
   transaction, so a stolen session token stops working the moment its owner upgrades (tested:
   the old token answers 401 afterwards). The signed `session_data` cookie cache
@@ -241,14 +277,24 @@ the real error handler and assert the marker value is absent from the lines and 
 
 ### 1.8 Push tokens
 
-`POST /v1/devices` upserts `push_tokens` on `(kind, token)` WITHIN the calling user only. A token
-already registered to another user's device is not re-pointed: there is no proof of possession
-in the request, anonymous principals are free to create, and re-pointing let anyone who learned a
-token redirect its owner's alerts to themselves. The device row is still written, the token is
-skipped, `push_token_conflict` is logged (without the token) and the response says
-`pushTokenSkipped: 'owned_by_another_user'`. The two legitimate transfers are handled
-elsewhere: the anonymous-to-account merge re-keys the row inside its transaction, and increment
-8's deletion removes it. A silent-push possession challenge is the Phase 1 hardening item.
+`POST /v1/devices` upserts `push_tokens` on `(kind, token)`. A token already registered to
+another user's device moves to the caller ONLY when the request comes from the same installation
+the token currently points at (the `install_id` of the token's `devices` row equals the body's
+`installId`, checked inside the upsert's `ON CONFLICT ... WHERE`). That is the phone itself in
+the two flows the merge and increment 8's deletion do not cover: an account switch on one install
+(sign out, sign in as someone else), where a token left on the first account kept sending that
+account's flight alerts to a phone it had signed out of; and a cross-device magic link whose
+merge was withheld (section 1.5), where the token stayed on an orphaned anonymous user and the
+signed-in user's own registration was refused. From a DIFFERENT installation the token is not
+re-pointed: there is no proof of possession in the request, anonymous principals are free to
+create, and re-pointing let anyone who learned a token redirect its owner's alerts to themselves.
+The device row is still written, the token is skipped, `push_token_conflict` is logged (without
+the token) and the response says `pushTokenSkipped: 'owned_by_another_user'`. The install id is
+client-chosen, so the rule is only as strong as the token itself: a caller who knows both a
+token and the install id of the device holding it can take the token over, which is the same
+caller who could register the device row under that install id anyway. The orphaned anonymous
+user of the cross-device flow stays `active` with an empty device row until increment 8's
+housekeeping sweeps it. A silent-push possession challenge is the Phase 1 hardening item.
 
 ## 2. Envelope encryption
 
@@ -309,6 +355,11 @@ Three layers, each honest about what it is:
 - Whether the anonymous cookie reaches `GET /magic-link/verify` on a real device (increment 9),
   and the increment 9 rule that the app auto-verifies only links requested on the same install
   (the server-side requester binding in section 1.5 is the backstop, not the whole answer).
+- The session gate's `getSession()` call on launch and foreground (section 1.5): the `/v1`
+  path no longer refreshes, so if increment 9 ships without that call a session that only ever
+  syncs in the background expires after 30 days. A Jest test in increment 9 asserts the call.
+- A paste-the-link affordance on the app's sign-in screen for a phone on which the universal
+  link did not fire (section 1.3 explains why the landing page offers no custom-scheme hand-off).
 - A server-issued nonce for the native sign-ins (increment 9 fixes the client contract). The KV
   replay markers in section 1.4 are best effort; a nonce the server minted and can consume
   exactly once is the stronger design, and deciding it before the client ships avoids a second

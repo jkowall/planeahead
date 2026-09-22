@@ -1,8 +1,10 @@
 /**
  * `POST /v1/devices` through the real Worker: the guard, the upsert on `(user_id, install_id)`,
- * the push token upsert on `(kind, token)`, the header-versus-body install id check, and (ruling
- * F2) the increment 4 idempotency contract for anonymous callers, which the route keeps: a keyed
- * request replays under `X-Install-Id`, and one without it is answered 400.
+ * the push token upsert on `(kind, token)` with its cross-user rule (a token moves between
+ * users only when the registering installation is the one the token already points at), the
+ * header-versus-body install id check, and (ruling F2) the increment 4 idempotency contract for
+ * anonymous callers, which the route keeps: a keyed request replays under `X-Install-Id`, and
+ * one without it is answered 400.
  */
 
 import { eq } from 'drizzle-orm';
@@ -15,13 +17,17 @@ import {
 } from '../../src/middleware/idempotency';
 import {
   captureLogs,
+  cookiesFrom,
   jsonRequest,
   logEvents,
+  magicLinkTokenFor,
   registerDevice,
   signInAnonymously,
   testEnv,
+  uniqueEmail,
   uniqueInstallId,
   uniqueIp,
+  verifyMagicLink,
   worker,
 } from './helpers/auth';
 
@@ -177,7 +183,89 @@ describe('POST /v1/devices', () => {
     expect((await unscoped.json<DeviceBody>()).error).toBe('idempotency_scope_missing');
   });
 
-  it("does not re-point a push token that belongs to another user's device", async () => {
+  it('moves a push token to the account that signs in on the SAME installation (account switch)', async () => {
+    // Sign out, sign in as someone else on the same phone: the token must follow, or the first
+    // account's flight alerts keep reaching a phone it signed out of.
+    const first = await signInAnonymously();
+    const second = await signInAnonymously();
+    const installId = uniqueInstallId('switch');
+    const token = `apns-${crypto.randomUUID()}`;
+
+    const owned = await registerDevice(first, installId, {
+      pushTokenKind: 'apns',
+      pushToken: token,
+    });
+    const { lines, result: moved } = await captureLogs(() =>
+      registerDevice(second, installId, { pushTokenKind: 'apns', pushToken: token }),
+    );
+    const movedBody = await moved.json<DeviceBody & { pushTokenSkipped?: string }>();
+
+    expect(owned.status).toBe(200);
+    expect(moved.status).toBe(200);
+    expect(movedBody.pushToken).not.toBeNull();
+    expect(movedBody.pushTokenSkipped).toBeUndefined();
+    expect(logEvents(lines, 'push_token_conflict')).toHaveLength(0);
+    const rows = await withDb(testEnv, (db) =>
+      db
+        .select({ userId: pushTokens.userId, deviceId: pushTokens.deviceId })
+        .from(pushTokens)
+        .where(eq(pushTokens.token, token)),
+    );
+    expect(rows).toEqual([{ userId: second.userId, deviceId: movedBody.device?.id }]);
+  });
+
+  it('moves a push token after a cross-device magic link whose merge was withheld', async () => {
+    // The link is requested on the phone and opened on the iPad: the iPad's anonymous user is
+    // signed in as the address owner but nothing of it is merged (requester mismatch). The
+    // signed-in user then registers the iPad again, same installation, same token.
+    const phone = await signInAnonymously();
+    const ipad = await signInAnonymously();
+    const email = uniqueEmail('cross-device');
+    const ipadInstall = uniqueInstallId('ipad');
+    const ipadToken = `apns-${crypto.randomUUID()}`;
+    expect(
+      (await registerDevice(ipad, ipadInstall, { pushTokenKind: 'apns', pushToken: ipadToken }))
+        .status,
+    ).toBe(200);
+    expect(
+      (
+        await worker(
+          jsonRequest(
+            '/api/auth/sign-in/magic-link',
+            'POST',
+            { email },
+            { ip: phone.ip, cookie: phone.cookie },
+          ),
+        )
+      ).status,
+    ).toBe(200);
+    const { result: verified, lines } = await captureLogs(async () =>
+      verifyMagicLink(await magicLinkTokenFor(email), { ip: ipad.ip, cookie: ipad.cookie }),
+    );
+    expect(verified.status).toBe(200);
+    expect(logEvents(lines, 'merge_skipped')).toHaveLength(1);
+    const signedIn = { cookie: cookiesFrom(verified) ?? '', ip: ipad.ip };
+    const signedInUserId = (await verified.json<{ user: { id: string } }>()).user.id;
+
+    const again = await registerDevice(signedIn, ipadInstall, {
+      pushTokenKind: 'apns',
+      pushToken: ipadToken,
+    });
+    const againBody = await again.json<DeviceBody & { pushTokenSkipped?: string }>();
+
+    expect(again.status).toBe(200);
+    expect(againBody.pushToken).not.toBeNull();
+    expect(againBody.pushTokenSkipped).toBeUndefined();
+    const rows = await withDb(testEnv, (db) =>
+      db
+        .select({ userId: pushTokens.userId, deviceId: pushTokens.deviceId })
+        .from(pushTokens)
+        .where(eq(pushTokens.token, ipadToken)),
+    );
+    expect(rows).toEqual([{ userId: signedInUserId, deviceId: againBody.device?.id }]);
+  });
+
+  it("does not re-point a push token that belongs to another user's device on a DIFFERENT installation", async () => {
     // No proof of possession in the request, and anonymous principals are free to create: a
     // token learned from someone else must not redirect their alerts. The device row is still
     // written; the token is skipped and the response says so.

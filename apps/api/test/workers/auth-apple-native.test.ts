@@ -55,6 +55,15 @@ async function tokenRequests(): Promise<RecordedTokenRequest[]> {
   return response.json<RecordedTokenRequest[]>();
 }
 
+/**
+ * Whether the fake token endpoint saw an exchange for `code`. The recorded list is shared by
+ * every test file in the run, so "the count did not change" raced with a parallel file's Apple
+ * sign-in; a request that must be refused before the exchange is asserted by its own code.
+ */
+async function exchangeAttempted(code: string): Promise<boolean> {
+  return (await tokenRequests()).some((entry) => entry.form['code'] === code);
+}
+
 async function accountFor(sub: string) {
   const [row] = await withDb(testEnv, (db) =>
     db
@@ -76,13 +85,12 @@ async function accountFor(sub: string) {
 
 describe('POST /api/auth/sign-in/apple-native', () => {
   it('rejects a body without rawNonce with 400 nonce_required, before any provider call', async () => {
-    const before = (await tokenRequests()).length;
-    const { response } = await appleNativeSignIn({ sendRawNonce: false });
+    const { response, authorizationCode } = await appleNativeSignIn({ sendRawNonce: false });
     const body = await response.json<SignInBody>();
 
     expect(response.status).toBe(400);
     expect(body.code).toBe('NONCE_REQUIRED');
-    expect((await tokenRequests()).length).toBe(before);
+    expect(await exchangeAttempted(authorizationCode)).toBe(false);
   });
 
   it('rejects a nonce that does not hash to the claim, and a token with no nonce claim, with 401', async () => {
@@ -232,12 +240,13 @@ describe('POST /api/auth/sign-in/apple-native', () => {
   });
 
   it('answers 400 to a NUL anywhere in the body, before the token is even looked at', async () => {
-    const before = (await tokenRequests()).length;
-    const { response } = await appleNativeSignIn({ fullName: { givenName: 'Ada\u0000' } });
+    const { response, authorizationCode } = await appleNativeSignIn({
+      fullName: { givenName: 'Ada\u0000' },
+    });
 
     expect(response.status).toBe(400);
     expect((await response.json<SignInBody>()).code).toBe('INVALID_BODY');
-    expect((await tokenRequests()).length).toBe(before);
+    expect(await exchangeAttempted(authorizationCode)).toBe(false);
   });
 
   it('caps and sanitises fullName rather than storing what the client sent', async () => {

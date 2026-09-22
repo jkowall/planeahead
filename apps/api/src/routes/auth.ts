@@ -20,7 +20,8 @@
  *   - `POST /magic-link/consume` is the browser fallback for the emailed landing page
  *     (src/routes/magic-link-landing.ts): it verifies the posted token server side through the
  *     same wrapper and answers a page plus the session cookie. A cross-site form post is refused
- *     by the Origin check (browsers always send Origin on a POST).
+ *     by `consumePostAllowed` before the token is touched (browsers always send `Origin` on a
+ *     POST, and `Sec-Fetch-Site` on every request).
  *   - Every body that reaches Better Auth is read through Hono's cache and checked for U+0000
  *     (400 `INVALID_BODY`): Postgres refuses a NUL in any text column, so a NUL in `name` or
  *     anywhere else would otherwise be a 500 from inside Better Auth.
@@ -31,7 +32,6 @@ import type { Context } from 'hono';
 import { AUTH_BASE_PATH } from '../auth/paths';
 import { authRuntime } from '../auth/runtime';
 import type { AppBindings } from '../env';
-import { withSetCookies } from '../middleware/auth';
 import { allowedOrigins } from '../middleware/cors';
 import { magicLinkGate } from '../middleware/magic-link-cap';
 import { createLogger } from '../observability/log';
@@ -46,6 +46,48 @@ const FORWARDED_HEADERS = ['cookie', 'cf-connecting-ip', 'user-agent', 'accept-l
 type BodyGuard =
   | { readonly ok: true; readonly body: string | null }
   | { readonly ok: false; readonly response: Response };
+
+/** Appends `Set-Cookie` lines to a response whose headers may be immutable. */
+export function withSetCookies(response: Response, cookies: readonly string[]): Response {
+  if (cookies.length === 0) {
+    return response;
+  }
+  const headers = new Headers(response.headers);
+  for (const cookie of cookies) {
+    headers.append('set-cookie', cookie);
+  }
+  return new Response(response.body, {
+    status: response.status,
+    statusText: response.statusText,
+    headers,
+  });
+}
+
+/**
+ * Whether a consume POST came from the landing page.
+ *
+ * Under the page's `strict-origin` referrer policy a browser sends the API origin as `Origin`.
+ * `Origin: null` is what a browser sends from a page under `no-referrer` (the first version of
+ * the landing page, whose own button was therefore answered 403), from a sandboxed frame and
+ * from an opaque document; it is accepted only when `Sec-Fetch-Site` says the request is
+ * same-origin, which a cross-site page cannot claim. `Sec-Fetch-Site` cross-site or same-site
+ * (another host under planeahead.app) is refused whatever `Origin` says. An absent `Origin` is
+ * a non-browser client, and the token it posts is the same secret the app presents to verify.
+ */
+export function consumePostAllowed(headers: Headers, allowed: readonly string[]): boolean {
+  const site = headers.get('sec-fetch-site');
+  if (site === 'cross-site' || site === 'same-site') {
+    return false;
+  }
+  const origin = headers.get('origin');
+  if (origin === null) {
+    return true;
+  }
+  if (origin === 'null') {
+    return site === 'same-origin';
+  }
+  return allowed.includes(origin);
+}
 
 /**
  * The request body, read through Hono's cache (so nothing ahead of this route can have consumed
@@ -190,8 +232,7 @@ async function handleMagicLinkVerify(c: Context<AppBindings>): Promise<Response>
 }
 
 async function handleMagicLinkConsume(c: Context<AppBindings>): Promise<Response> {
-  const origin = c.req.header('origin');
-  if (origin !== undefined && !allowedOrigins(c.env).includes(origin)) {
+  if (!consumePostAllowed(c.req.raw.headers, allowedOrigins(c.env))) {
     return magicLinkPageResponse(c, 'forbidden', 403);
   }
   const form = await c.req.parseBody();

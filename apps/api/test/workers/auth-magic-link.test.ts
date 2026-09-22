@@ -5,25 +5,32 @@
  * token and emails the non-consuming landing URL with a digest idempotency key; the gate in
  * front of Better Auth runs for every request (keyed or not), counts only what Better Auth would
  * accept, refuses the 4th request in an hour from the same requester with the same 200 and no
- * mail, keeps a stranger's requests off the address owner's budget, answers 429 to a requester
- * that asks too often, and forwards `{ email }` alone; the verify request, made the way the app
- * makes it, answers JSON plus Set-Cookie on success and JSON 400 on failure; the anonymous merge
- * runs only for the anonymous user who requested the link; and the browser landing page never
- * consumes the token while its consume route does.
+ * mail, keeps a stranger's requests off the address owner's budget, bounds what one inbox can
+ * receive from every requester combined (an IPv6 /64 rotating addresses and install ids is one
+ * requester and cannot get past that ceiling), answers 429 to one client address that asks too
+ * often without locking a shared NAT egress out, and forwards `{ email }` alone; the verify
+ * request, made the way the app makes it, answers JSON plus Set-Cookie on success and JSON 400
+ * on failure; the anonymous merge runs only for the anonymous user who requested the link; and
+ * the browser landing page never consumes the token while its consume route does, for the
+ * headers a browser actually sends.
  */
 
-import { and, eq, inArray } from 'drizzle-orm';
-import { devices, usageCounters, users, verifications, withDb } from '@planeahead/db';
+import { and, eq, inArray, like } from 'drizzle-orm';
+import { devices, rateLimits, usageCounters, users, verifications, withDb } from '@planeahead/db';
 import { describe, expect, it } from 'vitest';
 import { MAGIC_LINK_CONSUME_PATH, MAGIC_LINK_LANDING_PATH } from '../../src/auth/paths';
 import {
+  type CounterSubjects,
+  MAGIC_LINK_ADDRESS_HOUR_CAP,
   MAGIC_LINK_COUNTER,
   MAGIC_LINK_HOUR_CAP,
   MAGIC_LINK_REQUESTER_HOUR_CAP,
   magicLinkSubjects,
   requestersOf,
+  windowsAt,
 } from '../../src/middleware/magic-link-cap';
 import { IDEMPOTENCY_KEY_HEADER, INSTALL_ID_HEADER } from '../../src/middleware/idempotency';
+import { normaliseClientIp } from '../../src/validation/client-ip';
 import {
   API_ORIGIN,
   APP_ORIGIN,
@@ -71,7 +78,7 @@ function requestLink(email: string, options: LinkOptions = {}): Promise<Response
   );
 }
 
-/** The address rows for one (address, requester) pair, as the gate keys them. */
+/** The owner rows for one (address, requester) pair, as the gate keys them. */
 async function addressCounters(email: string, headers: Record<string, string>) {
   const subjects = await magicLinkSubjects(email, requestersOf(new Headers(headers)));
   return withDb(testEnv, (db) =>
@@ -80,12 +87,71 @@ async function addressCounters(email: string, headers: Record<string, string>) {
       .from(usageCounters)
       .where(
         and(
-          eq(usageCounters.scope, subjects.address.scope),
-          inArray(usageCounters.subject, [subjects.address.hour, subjects.address.day]),
+          eq(usageCounters.scope, subjects.owner.scope),
+          inArray(usageCounters.subject, [subjects.owner.hour, subjects.owner.day]),
           eq(usageCounters.counter, MAGIC_LINK_COUNTER),
         ),
       ),
   );
+}
+
+/** The gate's subjects for a client address alone (the requester brake ignores the email). */
+function requesterSubjects(ip: string): Promise<CounterSubjects> {
+  return magicLinkSubjects(
+    'any@example.test',
+    requestersOf(new Headers({ 'cf-connecting-ip': ip })),
+  ).then((subjects) => subjects.requester);
+}
+
+/** Writes one counter row at `count`, as if that many requests had already been made. */
+async function seedCounter(subject: CounterSubjects, window: 'hour' | 'day', count: number) {
+  const windows = windowsAt(Date.now());
+  await withDb(testEnv, (db) =>
+    db
+      .insert(usageCounters)
+      .values({
+        scope: subject.scope,
+        subject: window === 'hour' ? subject.hour : subject.day,
+        counter: MAGIC_LINK_COUNTER,
+        windowStart: window === 'hour' ? windows.hourStart : windows.dayStart,
+        count,
+      })
+      .onConflictDoUpdate({
+        target: [
+          usageCounters.scope,
+          usageCounters.subject,
+          usageCounters.counter,
+          usageCounters.windowStart,
+        ],
+        set: { count },
+      }),
+  );
+}
+
+async function counterValue(subject: string): Promise<number | undefined> {
+  const [row] = await withDb(testEnv, (db) =>
+    db
+      .select({ count: usageCounters.count })
+      .from(usageCounters)
+      .where(and(eq(usageCounters.subject, subject), eq(usageCounters.counter, MAGIC_LINK_COUNTER)))
+      .limit(1),
+  );
+  return row?.count;
+}
+
+/**
+ * Forgets Better Auth's own per-IP window (3 per 60 s, keyed by the /64) for one client, as if
+ * a minute had passed, so what is measured is the gate and not Better Auth's limiter.
+ */
+async function resetBetterAuthLimiter(ip: string) {
+  const key = normaliseClientIp(ip) ?? ip;
+  await withDb(testEnv, (db) => db.delete(rateLimits).where(like(rateLimits.key, `${key}|%`)));
+}
+
+/** A fresh documentation-range /64 for one test, so parallel files never share it. */
+function uniqueIpv6Subnet(): string {
+  const group = () => Math.floor(Math.random() * 0x10000).toString(16);
+  return `2001:db8:${group()}:${group()}`;
 }
 
 async function userStatus(userId: string): Promise<string | undefined> {
@@ -203,26 +269,76 @@ describe('POST /api/auth/sign-in/magic-link', () => {
     expect(await sentEmails(email)).toHaveLength(MAGIC_LINK_HOUR_CAP + 1);
   });
 
-  it('answers 429 with Retry-After to one client asking for too many links across addresses', async () => {
-    // Keyed by IP (not client-chosen): the install id is rotated on every request and does
-    // not help. Better Auth's own per-IP rule answers 429 from the 4th request on; the gate
-    // keeps counting those, and from the 21st on it answers before Better Auth is reached.
-    const ip = uniqueIp();
-    const sent: string[] = [];
-    let last: Response | null = null;
-    for (let attempt = 0; attempt < MAGIC_LINK_REQUESTER_HOUR_CAP + 1; attempt += 1) {
-      const email = uniqueEmail('prober');
-      sent.push(email);
-      last = await requestLink(email, { ip, installId: uniqueInstallId('rotating') });
+  it('bounds what one inbox can receive: a /64 rotating addresses AND install ids gets silence, not 25 mails', async () => {
+    // The re-review's probe: 25 requests for one victim address, each from a new /128 in one
+    // /64 with a new install id, Better Auth's own window forgotten before each. The earlier
+    // gate keyed the requester by the raw address and saw 25 requesters with a fresh budget
+    // each (25 mails). Now the /64 is one requester and, whatever the requester, the address
+    // ceiling ends the mail after MAGIC_LINK_ADDRESS_HOUR_CAP.
+    const email = uniqueEmail('ipv6-victim');
+    const subnet = uniqueIpv6Subnet();
+    const statuses: number[] = [];
+    for (let host = 1; host <= 25; host += 1) {
+      const ip = `${subnet}::${host.toString(16)}`;
+      await resetBetterAuthLimiter(ip);
+      const response = await requestLink(email, { ip, installId: uniqueInstallId('rotating') });
+      statuses.push(response.status);
     }
-    const body = await last?.json<{ code?: string }>();
 
-    expect(last?.status).toBe(429);
-    expect(body?.code).toBe('TOO_MANY_REQUESTS');
-    expect(last?.headers.get('Retry-After')).toMatch(/^\d+$/);
-    expect(Number(last?.headers.get('Retry-After'))).toBeLessThanOrEqual(3600);
-    // Nothing was mailed for the address that tripped the gate.
-    expect(await sentEmails(sent.at(-1) ?? '')).toHaveLength(0);
+    expect(statuses).toEqual(Array<number>(25).fill(200));
+    expect(await sentEmails(email)).toHaveLength(MAGIC_LINK_ADDRESS_HOUR_CAP);
+    // The brake counted all 25 against ONE requester, the /64.
+    const requester = await requesterSubjects(`${subnet}::ffff`);
+    expect(await counterValue(requester.hour)).toBe(25);
+  });
+
+  it('answers 429 with Retry-After to one client address that asked too often, whatever the install id and the /128', async () => {
+    // Keyed by the client address (not client-chosen), reduced to the /64 for IPv6; the
+    // install id is rotated and does not help. The hour row is written at the cap directly:
+    // the increment above is the same statement the owner-cap cases exercise, and a hundred
+    // real requests would only measure the mail fake.
+    const subnet = uniqueIpv6Subnet();
+    const ipv4 = uniqueIp();
+    await seedCounter(
+      await requesterSubjects(`${subnet}::1`),
+      'hour',
+      MAGIC_LINK_REQUESTER_HOUR_CAP,
+    );
+    await seedCounter(await requesterSubjects(ipv4), 'hour', MAGIC_LINK_REQUESTER_HOUR_CAP);
+    const sixEmail = uniqueEmail('braked-v6');
+    const fourEmail = uniqueEmail('braked-v4');
+
+    const six = await requestLink(sixEmail, {
+      ip: `${subnet}:1:2:3:4`,
+      installId: uniqueInstallId('rotating'),
+    });
+    const four = await requestLink(fourEmail, { ip: ipv4, installId: uniqueInstallId('rotating') });
+    const body = await six.json<{ code?: string }>();
+
+    expect(six.status).toBe(429);
+    expect(body.code).toBe('TOO_MANY_REQUESTS');
+    expect(six.headers.get('Retry-After')).toMatch(/^\d+$/);
+    expect(Number(six.headers.get('Retry-After'))).toBeLessThanOrEqual(3600);
+    expect(four.status).toBe(429);
+    // Nothing was mailed for the addresses that tripped the gate.
+    expect(await sentEmails(sixEmail)).toHaveLength(0);
+    expect(await sentEmails(fourEmail)).toHaveLength(0);
+  });
+
+  it('does not lock a shared egress out: an address that asked 60 times today is still served', async () => {
+    // Airport Wi-Fi, CGNAT, Private Relay: many users behind one IPv4. The earlier brake (20
+    // per hour, 60 per day per address) answered every one of them 429 once one of them, or one
+    // attacker among them, had used the budget. The brake is now NAT scale.
+    const ip = uniqueIp();
+    const requester = await requesterSubjects(ip);
+    await seedCounter(requester, 'hour', 20);
+    await seedCounter(requester, 'day', 60);
+    const email = uniqueEmail('nat-neighbour');
+
+    const response = await requestLink(email, { ip, installId: uniqueInstallId('neighbour') });
+
+    expect(response.status).toBe(200);
+    expect(await sentEmails(email)).toHaveLength(1);
   });
 
   it('does not count a request Better Auth would refuse: text/plain is 415 and burns nothing', async () => {
@@ -476,7 +592,10 @@ describe('the emailed landing page and the browser consume route', () => {
     expect(scanner.status).toBe(200);
     expect(scanner.headers.get('content-type')).toContain('text/html');
     expect(scanner.headers.get('cache-control')).toBe('no-store');
-    expect(scanner.headers.get('referrer-policy')).toBe('no-referrer');
+    // strict-origin, not no-referrer: the latter made browsers send `Origin: null` on the form
+    // post and the consume route refused the page's own button.
+    expect(scanner.headers.get('referrer-policy')).toBe('strict-origin');
+    expect(html).toContain('<meta name="referrer" content="strict-origin">');
     expect(scanner.headers.get('content-security-policy')).toContain("default-src 'none'");
     expect(scanner.headers.getSetCookie()).toHaveLength(0);
     expect(html).toContain(`action="${MAGIC_LINK_CONSUME_PATH}"`);
@@ -512,26 +631,32 @@ describe('the emailed landing page and the browser consume route', () => {
     expect(await malformed.text()).not.toContain('<script>');
   });
 
+  /** The form post, with exactly the request headers named (a browser adds its own). */
+  function consume(token: string, headers: Record<string, string>): Promise<Response> {
+    return worker(
+      new Request(`${API_ORIGIN}${MAGIC_LINK_CONSUME_PATH}`, {
+        method: 'POST',
+        headers: {
+          'content-type': 'application/x-www-form-urlencoded',
+          'cf-connecting-ip': uniqueIp(),
+          ...headers,
+        },
+        body: new URLSearchParams({ token }).toString(),
+      }),
+    );
+  }
+
+  /** What a current browser sends from the page under `strict-origin`. */
+  const BROWSER_HEADERS = { origin: testEnv.API_PUBLIC_URL, 'sec-fetch-site': 'same-origin' };
+
   it('POST /api/auth/magic-link/consume verifies server side, sets the session cookie, and works once', async () => {
     const email = uniqueEmail('consume');
     await requestLink(email);
     const token = await magicLinkTokenFor(email);
-    const consume = (origin: string | null) =>
-      worker(
-        new Request(`${API_ORIGIN}${MAGIC_LINK_CONSUME_PATH}`, {
-          method: 'POST',
-          headers: {
-            'content-type': 'application/x-www-form-urlencoded',
-            'cf-connecting-ip': uniqueIp(),
-            ...(origin === null ? {} : { origin }),
-          },
-          body: new URLSearchParams({ token }).toString(),
-        }),
-      );
 
-    const first = await consume(testEnv.API_PUBLIC_URL);
+    const first = await consume(token, BROWSER_HEADERS);
     const html = await first.text();
-    const second = await consume(testEnv.API_PUBLIC_URL);
+    const second = await consume(token, BROWSER_HEADERS);
 
     expect(first.status).toBe(200);
     expect(first.headers.get('content-type')).toContain('text/html');
@@ -545,25 +670,44 @@ describe('the emailed landing page and the browser consume route', () => {
     expect(cookiesFrom(second)).toBeNull();
   });
 
-  it('refuses a consume POST from a foreign origin with 403 and leaves the token intact', async () => {
+  it('accepts Origin: null from the page itself (Sec-Fetch-Site same-origin), the headers no-referrer made browsers send', async () => {
+    // The first landing page declared `no-referrer`, under which a browser sends `Origin: null`
+    // on a non-GET request; the consume route then answered the page's own button 403. The
+    // pair below was captured from Chromium against that page and must pass.
+    const email = uniqueEmail('origin-null');
+    await requestLink(email);
+    const token = await magicLinkTokenFor(email);
+
+    const response = await consume(token, { origin: 'null', 'sec-fetch-site': 'same-origin' });
+
+    expect(response.status).toBe(200);
+    expect(cookiesFrom(response)).toContain('better-auth.session_token=');
+  });
+
+  it('refuses a cross-site form post (403) whatever Origin says, and Origin: null without Sec-Fetch-Site, leaving the token intact', async () => {
     const email = uniqueEmail('csrf-consume');
     await requestLink(email);
     const token = await magicLinkTokenFor(email);
 
-    const foreign = await worker(
-      new Request(`${API_ORIGIN}${MAGIC_LINK_CONSUME_PATH}`, {
-        method: 'POST',
-        headers: {
-          'content-type': 'application/x-www-form-urlencoded',
-          'cf-connecting-ip': uniqueIp(),
-          origin: 'https://evil.example',
-        },
-        body: new URLSearchParams({ token }).toString(),
-      }),
-    );
+    const foreign = await consume(token, {
+      origin: 'https://evil.example',
+      'sec-fetch-site': 'cross-site',
+    });
+    const spoofed = await consume(token, {
+      origin: testEnv.API_PUBLIC_URL ?? '',
+      'sec-fetch-site': 'cross-site',
+    });
+    const sibling = await consume(token, {
+      origin: 'https://www.planeahead.app',
+      'sec-fetch-site': 'same-site',
+    });
+    const opaque = await consume(token, { origin: 'null' });
+    const legacy = await consume(token, { origin: 'https://evil.example' });
 
-    expect(foreign.status).toBe(403);
-    expect(cookiesFrom(foreign)).toBeNull();
+    for (const refused of [foreign, spoofed, sibling, opaque, legacy]) {
+      expect(refused.status).toBe(403);
+      expect(cookiesFrom(refused)).toBeNull();
+    }
     expect((await verifyMagicLink(token)).status).toBe(200);
   });
 });

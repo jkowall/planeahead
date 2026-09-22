@@ -7,15 +7,18 @@
  * they have to agree: a body naming a different install than the header is a client bug worth
  * a 400, not a silent second device row.
  *
- * Upserts: `devices` on `(user_id, install_id)`; `push_tokens` on `(kind, token)`, but only
- * WITHIN the calling user. A token that moves between the same user's devices (a reinstall)
- * follows the device that registered it last, with `invalidated_at` cleared. A token that is
- * already registered to ANOTHER user's device is not re-pointed: there is no proof of
- * possession in this request, anonymous principals are free to create, and re-pointing would let
- * anyone who learned a token redirect the owner's alerts to themselves. The device row is still
- * written, the token is skipped, a warning is logged, and the response says so. The two
- * legitimate transfer cases are handled elsewhere: the anonymous-to-account merge re-keys the
- * row, and increment 8's deletion path removes it.
+ * Upserts: `devices` on `(user_id, install_id)`; `push_tokens` on `(kind, token)`. A token that
+ * moves between the same user's devices (a reinstall) follows the device that registered it
+ * last, with `invalidated_at` cleared. A token registered to ANOTHER user's device moves only
+ * when this request comes from the SAME installation the token currently points at (the
+ * `install_id` of the token's `devices` row equals the body's `installId`): that is the phone
+ * itself, after an account switch (sign out, sign in as someone else) or after a cross-device
+ * magic link whose merge was withheld, and a token that stayed on the old owner would keep
+ * sending that owner's flight alerts to a phone they signed out of. From a DIFFERENT
+ * installation the token is not re-pointed: there is no proof of possession in this request,
+ * anonymous principals are free to create, and re-pointing would let anyone who learned a token
+ * redirect the owner's alerts to themselves. The device row is still written, the token is
+ * skipped, a warning is logged, and the response says so.
  *
  * Live Activity per-activity tokens are NOT device tokens and are not accepted here; Phase 0
  * stores push-to-start tokens only, and the accepted kinds are the `push_tokens.kind` check
@@ -23,7 +26,7 @@
  */
 
 import { zValidator } from '@hono/zod-validator';
-import { eq } from 'drizzle-orm';
+import { sql } from 'drizzle-orm';
 import { Hono } from 'hono';
 import {
   DEVICE_PLATFORMS,
@@ -120,15 +123,20 @@ export const devicesRoutes = new Hono<AppBindings>().post(
         invalidatedAt: null,
         lastUsedAt: now,
       };
-      // `setWhere` limits the DO UPDATE to a row this user already owns; a row owned by someone
-      // else is left untouched and the statement returns nothing.
+      // `setWhere` limits the DO UPDATE to a row this user already owns, or one whose device is
+      // this same installation (`push_tokens` here is the EXISTING row, as Postgres names it in
+      // an ON CONFLICT DO UPDATE ... WHERE); any other row is left untouched and the statement
+      // returns nothing.
       const [row] = await db
         .insert(pushTokens)
         .values({ id: uuidv7(), kind: body.pushTokenKind, token: body.pushToken, ...tokenFields })
         .onConflictDoUpdate({
           target: [pushTokens.kind, pushTokens.token],
           set: tokenFields,
-          setWhere: eq(pushTokens.userId, user.id),
+          setWhere: sql`${pushTokens.userId} = ${user.id} or exists (
+            select 1 from ${devices}
+            where ${devices.id} = ${pushTokens.deviceId} and ${devices.installId} = ${body.installId}
+          )`,
         })
         .returning({ id: pushTokens.id, kind: pushTokens.kind });
       if (row === undefined) {

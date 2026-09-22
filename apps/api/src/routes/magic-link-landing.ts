@@ -10,9 +10,20 @@
  * (src/routes/auth.ts), which calls Better Auth's verify server side and answers with the
  * session cookie plus a page that says to open the app.
  *
+ * What the page is for, decided in the second review round: it is the universal-link target
+ * (so the app, not a browser, gets the link on a phone) and a scanner-safe landing; in a
+ * browser it offers the one-button sign-in above. What it is NOT is a hand-off to the app: a
+ * `planeahead://` link carrying the token would deliver it to any app that squats the custom
+ * scheme on Android (verified App Links cannot be squatted, custom schemes can), so a phone on
+ * which the universal link did not fire is told to request a new link from the app instead.
+ * The browser session the button creates is inert in Phase 0 (no web surface uses it) and the
+ * page says so; the route stays because ruling G3 asks for it and Phase 1's web surface uses it.
+ *
  * The page carries the token in a hidden field, so it is built to leak nothing: no external
- * resources, no script, `Referrer-Policy: no-referrer`, `Cache-Control: no-store`, a CSP that
- * allows only inline styles and same-origin form posts, and the token HTML-escaped on the way in.
+ * resources, no script, `Referrer-Policy: strict-origin` (the Referer, when any, is the bare
+ * origin; `no-referrer` made browsers send `Origin: null` on the form post, and the consume
+ * route answered its own button 403), `Cache-Control: no-store`, a CSP that allows only inline
+ * styles and same-origin form posts, and the token HTML-escaped on the way in.
  */
 
 import type { Context } from 'hono';
@@ -29,7 +40,7 @@ export type MagicLinkPageKind = 'confirm' | 'signed_in' | 'invalid' | 'forbidden
 const PAGE_HEADERS: Readonly<Record<string, string>> = {
   'content-type': 'text/html; charset=utf-8',
   'cache-control': 'no-store',
-  'referrer-policy': 'no-referrer',
+  'referrer-policy': 'strict-origin',
   'x-robots-tag': 'noindex',
   'x-content-type-options': 'nosniff',
   'content-security-policy':
@@ -55,7 +66,7 @@ function shell(title: string, body: string): string {
   return (
     '<!doctype html><html lang="en"><head><meta charset="utf-8">' +
     '<meta name="viewport" content="width=device-width,initial-scale=1">' +
-    '<meta name="referrer" content="no-referrer">' +
+    '<meta name="referrer" content="strict-origin">' +
     `<title>${escapeHtml(title)}</title><style>${STYLE}</style></head>` +
     `<body><h1>${escapeHtml(title)}</h1>${body}</body></html>`
   );
@@ -67,18 +78,21 @@ export function magicLinkPage(kind: MagicLinkPageKind, token: string = ''): stri
     case 'confirm':
       return shell(
         'Sign in to PlaneAhead',
-        `<form method="post" action="${escapeHtml(MAGIC_LINK_CONSUME_PATH)}">` +
+        '<p>On your phone, this link opens the PlaneAhead app. If it did not, go back to the ' +
+          'app and request a new link from there.</p>' +
+          `<form method="post" action="${escapeHtml(MAGIC_LINK_CONSUME_PATH)}">` +
           `<input type="hidden" name="token" value="${escapeHtml(token)}">` +
-          '<p>Press the button to finish signing in. The link works once and expires ten ' +
-          'minutes after it was sent.</p>' +
-          '<button type="submit">Sign in</button></form>' +
+          '<p>To sign in on this browser instead, press the button. The link works once and ' +
+          'expires ten minutes after it was sent.</p>' +
+          '<button type="submit">Sign in on this browser</button></form>' +
           '<p class="small">If you did not ask for this link, close this page; nothing ' +
           'happens without the button.</p>',
       );
     case 'signed_in':
       return shell(
-        'You are signed in',
-        '<p>Open the PlaneAhead app on your phone to continue.</p>' +
+        'This browser is signed in',
+        '<p>The PlaneAhead app on your phone is not: it needs its own link. Open the app and ' +
+          'request one there.</p>' +
           '<p class="small">You can close this page.</p>',
       );
     case 'forbidden':

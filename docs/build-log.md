@@ -18,12 +18,35 @@ increment is reviewed.
   3020.03 KiB raw / 571.04 KiB gzip; the same build with the full entry point 3739.89 KiB /
   674.71 KiB. The minimal entry saves 719.86 KiB raw and 103.67 KiB gzipped (the Kysely
   exclusion); the import is pinned to `minimal`.
-- **Magic-link cap keying (ruling G1).** The per-address cap is keyed by the address AND the
-  requester, where the requester is the valid `X-Install-Id` when present, else the client IP;
-  the per-requester 429 cap is keyed by the client IP when present, else the install id. The
-  split is deliberate: the address owner's own device keeps its own budget (install id), and the
-  brake on one origin mailing many addresses cannot be keyed by a value the client chooses and
-  rotates (install id), so it uses the IP. Requester caps are 20 per hour and 60 per UTC day.
+- **Magic-link cap keying (ruling G1, revised in the second round).** Three counters. The
+  owner budget (3 per hour, 10 per UTC day) is keyed by the address AND the requester, the valid
+  `X-Install-Id` when present, else the client address: the owner's own device keeps its own
+  budget. The address ceiling (10 per hour, 30 per UTC day, every requester combined) bounds what
+  one inbox can receive whatever the attacker's address supply. The requester brake (429; 100
+  per hour, 300 per UTC day across addresses) is keyed by the client address, else the install
+  id, because the brake cannot be keyed by a value the client chooses and rotates. The client
+  address is reduced the way Better Auth's limiter reduces it (IPv6 to /64) before any keying:
+  the re-review's probe sent 25 requests for one inbox from 25 /128s in one /64 and got 25
+  mails, because each was a new requester; and the first round's 20-per-hour brake was found to
+  lock a whole NAT egress out, so the brake moved to NAT scale and the ceiling took over the
+  mail-bomb bound. `better-auth` does not re-export `normalizeIP`, so `src/validation/client-ip.ts`
+  carries a 40-line equivalent pinned to Better Auth's documented outputs by a unit test.
+- **Session refresh on `/v1` (ruling G7, settled in the second round).** Forwarding the refreshed
+  cookie on `/v1` only works for a client that stores it, and the increment 9 client does not
+  (the Expo client stores cookies from its own `/api/auth/*` requests only). The auth middleware
+  now reads the session with `disableRefresh` and `/v1` never emits `Set-Cookie`; the refresh
+  happens on `GET /api/auth/get-session`, and the increment 9 spec now requires the session gate
+  to call it on launch and on foreground, with a Jest test.
+- **Push tokens across users (ruling G10, amended).** A token moves to the caller when the
+  registering installation is the one the token's device row already names (account switch on
+  one phone; cross-device magic link whose merge was withheld), checked inside the upsert's
+  `ON CONFLICT ... WHERE` with a correlated subquery on `devices`; a different installation is
+  still refused with `push_token_conflict`.
+- **Landing page referrer policy.** `no-referrer` made Chromium send `Origin: null` on the
+  page's own form post, so the consume route refused its own button. The page now declares
+  `strict-origin`, and the consume route accepts `Origin: null` only with
+  `Sec-Fetch-Site: same-origin` and refuses cross-site and same-site outright. The page is
+  deliberately not a custom-scheme hand-off to the app (scheme squatting on Android).
 - **Magic-link landing page (ruling G3).** The emailed URL is `${API_PUBLIC_URL}/auth/magic-link`
   outside the Better Auth mount; increment 9's universal-link prefix moves from
   `/api/auth/magic-link/*` to `/auth/magic-link*` (the increment 9 spec is updated).

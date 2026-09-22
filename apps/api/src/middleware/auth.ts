@@ -11,14 +11,21 @@
  *   - the runtime it builds (one database client, one Better Auth instance) is kept on the
  *     context, so the route that follows reuses it instead of opening a second client.
  *
- * The session read is Better Auth's sliding refresh: once a day it extends `sessions.expires_at`
- * by another 30 days AND re-issues the `session_token` cookie with a fresh `Max-Age`. A plain
- * `auth.api.getSession()` call throws those `Set-Cookie` headers away, and the Expo client
- * expires the cookie it holds by that `Max-Age`, so a day on which `/v1` traffic came before
- * `/api/auth/get-session` would refresh the row but not the cookie, and thirty days after
- * sign-in the app would be signed out despite daily use (for an anonymous user, for good). The
- * call therefore asks for the headers back (`returnHeaders: true`) and every `Set-Cookie` Better
- * Auth produced is copied onto the response the route answered with.
+ * The session read never refreshes (`query: { disableRefresh: true }`). Better Auth's sliding
+ * refresh extends `sessions.expires_at` once a day AND re-issues the `session_token` cookie with
+ * a fresh `Max-Age`, and the two halves must reach the client together: the Expo client expires
+ * the cookie it holds by that `Max-Age`, and the only thing that writes its SecureStore cookie
+ * is the Better Auth client, for requests made through it (`/api/auth/*`). The increment 9 `/v1`
+ * client sends `Cookie` from that store and keeps nothing from a `/v1` response, so a refresh
+ * performed here would extend the row, throw the cookie away, and leave `/get-session` seeing a
+ * recently updated row for the rest of the day: thirty days after sign-in the app would be
+ * signed out despite daily use (for an anonymous user, for good). An earlier fix forwarded the
+ * refreshed cookie on the `/v1` response, which only moved the problem to a client that does not
+ * store it, and would also have forwarded cookie DELETIONS for a revoked session, so a stale
+ * anonymous `/v1` request finishing after an upgrade could wipe the new session. Refreshing
+ * here is therefore off, `/v1` never emits `Set-Cookie`, and the refresh happens on
+ * `GET /api/auth/get-session`, which the session gate calls on every launch and foreground
+ * (docs/increments/09-mobile-scaffold.md) and whose cookies the Expo client stores.
  *
  * It fails closed. A missing `BETTER_AUTH_SECRET` or `TOKEN_KEK_V1` throws out of `authRuntime`
  * on the first request that presents a cookie and answers 500; an invalid or expired cookie
@@ -42,22 +49,6 @@ export function presentsSession(headers: Headers): boolean {
   return cookie !== null && cookie.includes(SESSION_COOKIE_MARKER);
 }
 
-/** Appends `Set-Cookie` lines to a response whose headers may be immutable. */
-export function withSetCookies(response: Response, cookies: readonly string[]): Response {
-  if (cookies.length === 0) {
-    return response;
-  }
-  const headers = new Headers(response.headers);
-  for (const cookie of cookies) {
-    headers.append('set-cookie', cookie);
-  }
-  return new Response(response.body, {
-    status: response.status,
-    statusText: response.statusText,
-    headers,
-  });
-}
-
 export function authMiddleware(): MiddlewareHandler<AppBindings> {
   return createMiddleware<AppBindings>(async (c, next) => {
     c.set('user', null);
@@ -68,9 +59,9 @@ export function authMiddleware(): MiddlewareHandler<AppBindings> {
     }
 
     const runtime = authRuntime(c);
-    const { headers, response: session } = await runtime.auth.api.getSession({
+    const session = await runtime.auth.api.getSession({
       headers: c.req.raw.headers,
-      returnHeaders: true,
+      query: { disableRefresh: true },
     });
     if (session !== null) {
       const user: AuthenticatedUser = {
@@ -82,13 +73,6 @@ export function authMiddleware(): MiddlewareHandler<AppBindings> {
       c.set('user', user);
     }
     await next();
-
-    // A refreshed `session_token`, a fresh `session_data` cache, or the deletion of a cookie
-    // that no longer resolves: whichever Better Auth produced, the client gets it.
-    const cookies = headers.getSetCookie();
-    if (cookies.length > 0) {
-      c.res = withSetCookies(c.res, cookies);
-    }
   });
 }
 
