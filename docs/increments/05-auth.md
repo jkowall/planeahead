@@ -1,6 +1,6 @@
 # Increment 5: auth, envelope encryption, devices
 
-Status: spec (2026-09-19, revised 2026-09-20 against `05-auth.facts.md`). Builder: Fable 5.1. Reviewers: two Opus 5 lenses (security, Better Auth integration correctness) plus orchestrator read. Branch `inc5-auth` based on `inc4-api-bootstrap`.
+Status: complete (2026-09-22) on branch `inc5-auth`, stacked PR opened for CI. Outcome, rulings and deviations are in `docs/build-log.md`; the magic-link and session-refresh designs below were superseded by the review rulings recorded there (non-consuming landing page, requester-bound merge, three-key cap, get-session refresh). Builder: Fable 5.1. Reviewers: two Opus 5 lenses (security, Better Auth integration correctness) plus orchestrator read. Branch `inc5-auth` based on `inc4-api-bootstrap`.
 
 Read `docs/increments/05-auth.facts.md` first, then section 1 of `03-db-schema.facts.md` (Better Auth's column requirements). Several facts overrode the first draft of this spec; the rules below already incorporate them.
 
