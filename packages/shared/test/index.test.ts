@@ -10,6 +10,8 @@ import { PLANEAHEAD } from '../src/index';
 const EXPECTED_EXPORTS = [
   // index
   'PLANEAHEAD',
+  // adb-time
+  'parseAdbDateTime',
   // airports
   'AirportRefSchema',
   'IATA_AIRPORT_RE',
@@ -42,6 +44,7 @@ const EXPECTED_EXPORTS = [
   'LITERAL_EXPECTED_POLLS',
   'MAX_LIFETIME',
   'MINUTE_MS',
+  'PRE_48H_RELAXATION_REASON',
   'PRE_48H_WINDOWS',
   'SLO_EVENTS',
   'SLO_REPORT_LEAD_TIME_DAYS',
@@ -74,6 +77,7 @@ const EXPECTED_EXPORTS = [
   'ADB_UNIT_PRICE_USD_MICROS',
   'AERODATABOX_OPERATIONS',
   'AEROAPI_OPERATIONS',
+  'AEROAPI_STANDARD_MONTHLY_MINIMUM_USD_MICROS',
   'AEROAPI_STATUS_PRICE_USD_MICROS',
   'LIST_PRICE_USD_MICROS',
   'UnknownOperationError',
@@ -103,7 +107,12 @@ const EXPECTED_EXPORTS = [
   'regionalOperatorHint',
   'scheduledDepartureDateLocalOf',
   // flight-status
+  'AEROAPI_EVENT_CODES',
   'ALERT_EVENTS',
+  'AeroApiEventCodeSchema',
+  'OPERATOR_SOURCES',
+  'OperatorSourceSchema',
+  'aeroApiEventKind',
   'AircraftPositionSchema',
   'AlertEventSchema',
   'BoardRowSchema',
@@ -144,6 +153,11 @@ const EXPECTED_EXPORTS = [
   // live-activity
   'LIVE_ACTIVITY_PAYLOAD_LIMIT_BYTES',
   'LiveActivityContentStateV1',
+  // operator
+  'CODESHARE_STATUSES',
+  'CodeshareStatusSchema',
+  'callsignOperator',
+  'resolveOperator',
   // preferences
   'DEFAULT_USER_PREFERENCES',
   'DISTANCE_UNITS',
@@ -157,6 +171,10 @@ const EXPECTED_EXPORTS = [
   'TimeFormatSchema',
   'UserPreferencesPatchSchema',
   'UserPreferencesSchema',
+  // provider-call-point
+  'PROVIDER_CALL_POINT_BLOBS',
+  'PROVIDER_CALL_POINT_DOUBLES',
+  'providerCallPoint',
   // rpc
   'ForceRefreshRequestV1',
   'GetStateResponseV1',
@@ -171,6 +189,13 @@ const EXPECTED_EXPORTS = [
   // secrets
   'SECRET_PATTERNS',
   'findSecretPatterns',
+  // status-derivation
+  'ADB_STATUSES',
+  'AdbStatusSchema',
+  'adbFlags',
+  'deriveStatus',
+  'disambiguateRevisedTime',
+  'isActualAt',
   // sync
   'SYNC_CURSOR_ORIGIN',
   'SYNC_ENTITIES',

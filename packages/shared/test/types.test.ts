@@ -12,6 +12,11 @@ import {
   flightNumberToken,
   listPriceUsdMicros,
   pollEquivalents,
+  type AdbDateTime,
+  type AdbMovement,
+  type AdbStatus,
+  type AdbTimeKind,
+  type AeroApiEventCode,
   type AeroApiOperation,
   type AeroDataBoxOperation,
   type AircraftPosition,
@@ -38,7 +43,9 @@ import {
   type CarrierIataToIcaoTable,
   type CarrierRef,
   type Codeshare,
+  type CodeshareStatus,
   type CostLogger,
+  type DeriveStatusInput,
   type Exact,
   type ExpectedCalls,
   type ExpectedCallsParams,
@@ -58,6 +65,7 @@ import {
   type FlightTimeField,
   type FlightTimes,
   type ForceRefreshRequestV1,
+  type Instant,
   type IntervalWindow,
   type KeyDrift,
   type KeyReconciliation,
@@ -68,9 +76,12 @@ import {
   type NextSlot,
   type NormalizedFlightNumber,
   type OperationOf,
+  type OperatorSource,
+  type ParsedAdbDateTime,
   type ParsedDesignator,
   type ParsedFlightKey,
   type ProviderCallContext,
+  type ProviderCallPoint,
   type ProviderCallRecord,
   type ProviderCallResult,
   type ProviderCallTrigger,
@@ -85,7 +96,10 @@ import {
   type RefreshDecision,
   type RegionalOperatorRule,
   type RelaxedLeg,
+  type ResolveOperatorInput,
+  type ResolvedOperator,
   type ResolvedWindow,
+  type RevisedTime,
   type SimulationParams,
   type SloEvent,
   type SloRelaxation,
@@ -114,6 +128,9 @@ import { AA100_INPUT } from './fixtures';
  * helpers, closed enum inputs) live here for the same reason.
  */
 interface TypeSurface {
+  // adb-time
+  adbDateTime: AdbDateTime;
+  parsedAdbDateTime: ParsedAdbDateTime;
   // airports
   airportRef: AirportRef;
   airportRefInput: AirportRefInput;
@@ -163,6 +180,8 @@ interface TypeSurface {
   keyReconciliation: KeyReconciliation;
   regionalOperatorRule: RegionalOperatorRule;
   // flight-status
+  aeroApiEventCode: AeroApiEventCode;
+  operatorSource: OperatorSource;
   exact: Exact<FlightStatus>;
   providerId: ProviderId;
   flightStatusValue: FlightStatusValue;
@@ -187,6 +206,10 @@ interface TypeSurface {
   uuidv7Generator: Uuidv7Generator;
   // live-activity
   liveActivityContentStateV1: LiveActivityContentStateV1;
+  // operator
+  codeshareStatus: CodeshareStatus;
+  resolveOperatorInput: ResolveOperatorInput;
+  resolvedOperator: ResolvedOperator;
   // preferences
   preferenceSettings: PreferenceSettings;
   userPreferences: UserPreferences;
@@ -205,6 +228,8 @@ interface TypeSurface {
   flightDataProvider: FlightDataProvider;
   aircraftPositionQuery: AircraftPositionQuery;
   aircraftPositionProvider: AircraftPositionProvider;
+  // provider-call-point
+  providerCallPoint: ProviderCallPoint;
   // rpc
   subscribeRequestV1: SubscribeRequestV1;
   subscribeResponseV1: SubscribeResponseV1;
@@ -212,6 +237,13 @@ interface TypeSurface {
   getStateResponseV1: GetStateResponseV1;
   forceRefreshRequestV1: ForceRefreshRequestV1;
   providerEventV1: ProviderEventV1;
+  // status-derivation
+  adbStatus: AdbStatus;
+  adbMovement: AdbMovement;
+  adbTimeKind: AdbTimeKind;
+  instant: Instant;
+  deriveStatusInput: DeriveStatusInput;
+  revisedTime: RevisedTime;
   // sync
   syncEntity: SyncEntity;
   syncCursor: SyncCursor;

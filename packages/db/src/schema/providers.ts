@@ -68,7 +68,12 @@ export const CALL_TRIGGERS = [
 /** Mirrors PROVIDER_CALL_RESULTS in @planeahead/shared. */
 export const CALL_RESULTS = ['ok', 'not_found', 'rate_limited', 'error'] as const;
 
-/** Mirrors ALERT_EVENTS in @planeahead/shared; a test asserts the lists agree. */
+/**
+ * ALERT_EVENTS in @planeahead/shared plus `hold_start` and `hold_end`, which increment 6 removed
+ * from the shared list (AeroAPI 4.17.1 has no hold events). The check constraint in migration
+ * 0000 was generated from this list, so it stays until a schema migration drops the two; nothing
+ * writes them. The contracts test asserts that exactly those two are the difference.
+ */
 export const ALERT_EVENTS = [
   'filed',
   'departure',

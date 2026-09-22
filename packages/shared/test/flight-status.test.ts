@@ -1,6 +1,8 @@
 import { describe, expect, it } from 'vitest';
 import {
+  AEROAPI_EVENT_CODES,
   ALERT_EVENTS,
+  AeroApiEventCodeSchema,
   AircraftPositionSchema,
   AlertEventSchema,
   BoardRowSchema,
@@ -22,7 +24,10 @@ import {
   ProviderEventKindSchema,
   ProviderEventSchema,
   ProviderIdSchema,
+  OPERATOR_SOURCES,
+  OperatorSourceSchema,
   TIME_FIELDS,
+  aeroApiEventKind,
   tolerantEnum,
   normalizeIcaoHex,
 } from '../src/flight-status';
@@ -58,6 +63,60 @@ describe('enumerations', () => {
       'diverted',
       'unknown',
     ]);
+  });
+
+  it('lists exactly the nine AeroAPI alert events (increment 6: no hold_start or hold_end)', () => {
+    expect(ALERT_EVENTS).toEqual([
+      'filed',
+      'departure',
+      'arrival',
+      'cancelled',
+      'diverted',
+      'out',
+      'off',
+      'on',
+      'in',
+    ]);
+  });
+
+  it('lists the 18 AeroAPI delivery event codes in spec order and parses them tolerantly', () => {
+    expect(AEROAPI_EVENT_CODES).toHaveLength(18);
+    expect(new Set(AEROAPI_EVENT_CODES).size).toBe(18);
+    for (const code of AEROAPI_EVENT_CODES) {
+      expect(AeroApiEventCodeSchema.parse(code)).toBe(code);
+    }
+    expect(AeroApiEventCodeSchema.parse('taxi_stop')).toBe('unknown');
+    expect(AeroApiEventCodeSchema.safeParse(3).success).toBe(false);
+    expect(AeroApiEventCodeSchema.safeParse(null).success).toBe(false);
+    // Every configurable event is also a delivery code.
+    for (const event of ALERT_EVENTS) {
+      expect(AEROAPI_EVENT_CODES).toContain(event);
+    }
+  });
+
+  it.each([
+    ...ALERT_EVENTS.map((code) => [code, code] as const),
+    ['change', 'update'],
+    ['minutes_out', 'update'],
+    ['power_on', 'update'],
+    ['position_only_arrival', 'update'],
+    ['position_only_departure', 'update'],
+    ['fru_arrival', 'update'],
+    ['nonairport_arrival', 'update'],
+    ['nonairport_departure', 'update'],
+    ['nonairport_filed', 'update'],
+    ['hold_start', 'unknown'],
+    ['taxi_stop', 'unknown'],
+    ['', 'unknown'],
+  ] as const)('maps AeroAPI event_code %s to kind %s', (code, kind) => {
+    expect(aeroApiEventKind(code)).toBe(kind);
+    expect(ProviderEventKindSchema.parse(aeroApiEventKind(code))).toBe(kind);
+  });
+
+  it('lists the operator sources the key can record (ADR 0010)', () => {
+    expect(OPERATOR_SOURCES).toEqual(['provider', 'callsign', 'hint', 'marketing']);
+    expect(OperatorSourceSchema.safeParse('callsign').success).toBe(true);
+    expect(OperatorSourceSchema.safeParse('guess').success).toBe(false);
   });
 
   it('lists the call results and field qualities', () => {
@@ -187,6 +246,27 @@ describe('FlightStatusSchema', () => {
     expect(FlightStatusSchema.safeParse({ ...withoutStatus, status: 'taxiing' }).success).toBe(
       true,
     );
+  });
+
+  it('accepts the increment 6 operator fields and leaves them optional', () => {
+    const status = makeStatus({
+      operatorSource: 'callsign',
+      marketingCarrierIcao: 'BAW',
+      marketingFlightNumber: '1512',
+    });
+    expect(status.operatorSource).toBe('callsign');
+    expect(status.marketingCarrierIcao).toBe('BAW');
+    expect(status.marketingFlightNumber).toBe('1512');
+    expect(makeStatus().operatorSource).toBeUndefined();
+    expect(FlightStatusSchema.safeParse({ ...AA100_INPUT, operatorSource: 'guess' }).success).toBe(
+      false,
+    );
+    expect(
+      FlightStatusSchema.safeParse({ ...AA100_INPUT, marketingCarrierIcao: 'BA' }).success,
+    ).toBe(false);
+    expect(
+      FlightStatusSchema.safeParse({ ...AA100_INPUT, marketingFlightNumber: '01512' }).success,
+    ).toBe(false);
   });
 
   it('accepts a canonical key, a legSeq above 1 and a provider-local date', () => {

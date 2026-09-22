@@ -43,6 +43,7 @@ const mockFlightProvider: FlightDataProvider = {
     alertFields: ['status', 'times'],
     boards: false,
     maxDaysAhead: 2,
+    fidsWindowHours: 48,
     inboundLink: false,
   },
   getFlight(lookup, ctx) {
@@ -105,6 +106,25 @@ describe('provider interfaces', () => {
     expect(ALERT_EVENTS).toBe(STATUS_ALERT_EVENTS);
     expect(AlertEventSchema.safeParse('off').success).toBe(true);
     expect(AlertEventSchema.safeParse('gate').success).toBe(false);
+    // Increment 6: AeroAPI 4.17.1 has no hold events.
+    expect(AlertEventSchema.safeParse('hold_start').success).toBe(false);
+    expect(AlertEventSchema.safeParse('hold_end').success).toBe(false);
+  });
+
+  it('a budget denial for the per-second rate carries a retry hint', async () => {
+    const guard: BudgetGuard = {
+      reserve: () =>
+        Promise.resolve({ allowed: false, reason: 'provider_rate_limit', retryAfterMs: 100 }),
+      backoff: () => Promise.resolve(),
+    };
+    const decision = await guard.reserve({
+      provider: 'aerodatabox',
+      operation: 'flight_status',
+      pollEquivalents: 0.1,
+      trigger: 'alarm',
+    });
+    expect(decision).toEqual({ allowed: false, reason: 'provider_rate_limit', retryAfterMs: 100 });
+    await expect(guard.backoff?.('aerodatabox', 1_000)).resolves.toBeUndefined();
   });
 
   it('every call returns its data next to a cost record stamped with the injected clock', async () => {

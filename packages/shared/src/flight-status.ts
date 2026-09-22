@@ -110,7 +110,12 @@ export const FLIGHT_STATUS_VALUES = [
 export const FlightStatusValueSchema = tolerantEnum(FLIGHT_STATUS_VALUES, 'unknown');
 export type FlightStatusValue = z.infer<typeof FlightStatusValueSchema>;
 
-/** AeroAPI alert event codes. `filed` through `in` are the OOOI and ETA family. */
+/**
+ * The events an AeroAPI alert can be configured for: exactly the nine booleans of the `events`
+ * object in AeroAPI 4.17.1 (`POST /alerts`). `hold_start` and `hold_end`, which the plan listed,
+ * do not exist in the spec and were removed in increment 6 (facts sheet section 2). This is the
+ * CONFIGURATION vocabulary; what a delivery reports is the wider `AEROAPI_EVENT_CODES` below.
+ */
 export const ALERT_EVENTS = [
   'filed',
   'departure',
@@ -121,11 +126,51 @@ export const ALERT_EVENTS = [
   'off',
   'on',
   'in',
-  'hold_start',
-  'hold_end',
 ] as const;
 export const AlertEventSchema = z.enum(ALERT_EVENTS);
 export type AlertEvent = z.infer<typeof AlertEventSchema>;
+
+/**
+ * The `event_code` of an AeroAPI alert DELIVERY (the `deliver_alert` callback in AeroAPI
+ * 4.17.1), in the spec's order. Wider than `ALERT_EVENTS`: a departure or arrival bundle can
+ * deliver `change`, `minutes_out` or `power_on`, and position-only and non-airport flights have
+ * their own codes. FlightAware can add a code at any time, so the schema is tolerant: a code
+ * this build does not know parses as `unknown` instead of failing the webhook.
+ */
+export const AEROAPI_EVENT_CODES = [
+  'filed',
+  'departure',
+  'arrival',
+  'out',
+  'off',
+  'on',
+  'in',
+  'diverted',
+  'cancelled',
+  'position_only_arrival',
+  'position_only_departure',
+  'fru_arrival',
+  'nonairport_arrival',
+  'nonairport_departure',
+  'nonairport_filed',
+  'minutes_out',
+  'power_on',
+  'change',
+] as const;
+export type AeroApiEventCode = (typeof AEROAPI_EVENT_CODES)[number];
+/** A delivery `event_code` this build does not know parses as `unknown`; a non-string is rejected. */
+export const AeroApiEventCodeSchema = tolerantEnum([...AEROAPI_EVENT_CODES, 'unknown'], 'unknown');
+
+/**
+ * Where the operating carrier in a flight key came from (ADR 0010). AeroDataBox never names an
+ * operator, so the key carries the best-known operator at creation and records how it was
+ * decided: `provider` (the provider says the marketing carrier operates it), `callsign` (the ATC
+ * callsign's three-letter prefix on a codeshare), `hint` (the regional operator hint table) or
+ * `marketing` (nothing better was known). Mirrored by `flight_instances.operator_source`.
+ */
+export const OPERATOR_SOURCES = ['provider', 'callsign', 'hint', 'marketing'] as const;
+export const OperatorSourceSchema = z.enum(OPERATOR_SOURCES);
+export type OperatorSource = z.infer<typeof OperatorSourceSchema>;
 
 export const PROVIDER_CALL_TRIGGERS = [
   'alarm',
@@ -236,6 +281,12 @@ export const FlightStatusSchema = z.looseObject({
   destination: AirportRefSchema,
   actualDestination: AirportRefSchema.optional(),
   status: FlightStatusValueSchema,
+  /** How `operatingCarrierIcao` was decided (ADR 0010); absent on snapshots older than increment 6. */
+  operatorSource: OperatorSourceSchema.optional(),
+  /** The marketing carrier the provider was asked about, when it differs or may differ. */
+  marketingCarrierIcao: z.string().regex(ICAO_CARRIER_RE).optional(),
+  /** The marketing flight number that goes with `marketingCarrierIcao`. */
+  marketingFlightNumber: z.string().regex(FLIGHT_NUMBER_RE).optional(),
   times: FlightTimesSchema,
   departureDelaySec: z.int().optional(),
   arrivalDelaySec: z.int().optional(),
@@ -301,6 +352,23 @@ export const PROVIDER_EVENT_KINDS = [...ALERT_EVENTS, 'update', 'unknown'] as co
 /** A kind this build does not know parses as `unknown`; the field stays required. */
 export const ProviderEventKindSchema = tolerantEnum(PROVIDER_EVENT_KINDS, 'unknown');
 export type ProviderEventKind = z.infer<typeof ProviderEventKindSchema>;
+
+const ALERT_EVENT_SET: ReadonlySet<string> = new Set(ALERT_EVENTS);
+const AEROAPI_EVENT_CODE_SET: ReadonlySet<string> = new Set(AEROAPI_EVENT_CODES);
+
+/**
+ * The `ProviderEvent.kind` of an AeroAPI delivery `event_code`. A code that names one of the
+ * nine configurable events keeps its name; every other code the spec lists (`change`,
+ * `minutes_out`, `power_on`, the position-only and non-airport variants) is an `update` the
+ * tracker merges and re-reads; anything else, including a code FlightAware adds later, is
+ * `unknown`. Never throws: a webhook must not fail on a vocabulary it has not seen.
+ */
+export function aeroApiEventKind(code: string): ProviderEventKind {
+  if (ALERT_EVENT_SET.has(code)) {
+    return code as AlertEvent;
+  }
+  return AEROAPI_EVENT_CODE_SET.has(code) ? 'update' : 'unknown';
+}
 
 /**
  * How a webhook payload names the flight it is about: a key, a provider ref, or a marketing

@@ -8,7 +8,12 @@ import {
   markdownTable,
   renderCadenceSection,
 } from '../scripts/gen-cadence-table';
-import { A1_EXPECTED_POLLS, A2_EXPECTED_POLLS, LITERAL_EXPECTED_POLLS } from '../src/cadence';
+import {
+  A1_EXPECTED_POLLS,
+  A2_EXPECTED_POLLS,
+  LITERAL_EXPECTED_POLLS,
+  PRE_48H_RELAXATION_REASON,
+} from '../src/cadence';
 
 function committedBlock(doc: string): string {
   const start = doc.indexOf(CADENCE_START_MARKER);
@@ -54,6 +59,12 @@ describe('docs/architecture.md cadence block', () => {
     expect(rendered).toContain(
       'literal 2 min (out+178min to in); A1 10 min (out+170min to in); A2 10 min (out+170min to in); B 3 h (out+15min to in+15min)',
     );
+    // Increment 6: the weekly pre-48 h window and its recorded relaxation on every cadence.
+    expect(rendered).toContain('weekly from creation to T-48h, end-anchored on T-48h');
+    expect(rendered).toContain('1 / 2 / 4 calls at 3 / 14 / 30 days');
+    expect(rendered).toMatch(/\| A2 +\| > 7 d +\| T-30d to T-23d +\| 7 d +\| 2 d/);
+    expect(rendered).toMatch(/\| B +\| 7 d to 48 h +\| T-9d to T-48h +\| 7 d +\| 1 d/);
+    expect(rendered.split(PRE_48H_RELAXATION_REASON).length - 1).toBe(9);
     expect(rendered).toContain('Do not edit between the markers');
     expect(rendered).toContain('<!-- prettier-ignore-start -->');
     expect(rendered).toContain('<!-- prettier-ignore-end -->');

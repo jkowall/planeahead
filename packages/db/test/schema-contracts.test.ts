@@ -5,6 +5,7 @@ import {
   DISTANCE_UNITS,
   FLIGHT_STATUS_VALUES,
   IsoInstantSchema,
+  OPERATOR_SOURCES,
   PROVIDER_CALL_RESULTS,
   PROVIDER_CALL_TRIGGERS,
   PROVIDER_IDS,
@@ -401,10 +402,24 @@ describe('agreement with @planeahead/shared', () => {
     expect([...schema.CALL_TRIGGERS]).toEqual([...PROVIDER_CALL_TRIGGERS]);
     expect([...schema.CALL_RESULTS]).toEqual([...PROVIDER_CALL_RESULTS]);
     expect([...schema.SYNC_CHANGE_ENTITIES]).toEqual([...SYNC_ENTITIES]);
-    expect([...schema.ALERT_EVENTS]).toEqual([...ALERT_EVENTS]);
+    expect([...schema.OPERATOR_SOURCES]).toEqual([...OPERATOR_SOURCES]);
     for (const provider of PROVIDER_IDS) {
       expect(schema.EVENT_SOURCES).toContain(provider);
     }
+  });
+
+  it('alert events: the check constraint accepts every shared event, plus the two increment 6 retired', () => {
+    // Increment 6 removed hold_start and hold_end from the shared vocabulary (AeroAPI 4.17.1 has
+    // no such events). A closed vocabulary shrinks producer-first: nothing writes them any more,
+    // and the constraint in migration 0000 keeps accepting them until a later schema migration
+    // drops them. Only those two may differ.
+    for (const event of ALERT_EVENTS) {
+      expect(schema.ALERT_EVENTS).toContain(event);
+    }
+    expect(schema.ALERT_EVENTS.filter((event) => !ALERT_EVENTS.includes(event as never))).toEqual([
+      'hold_start',
+      'hold_end',
+    ]);
   });
 
   it('user preference enumerations match the shared UserPreferencesSchema', () => {
