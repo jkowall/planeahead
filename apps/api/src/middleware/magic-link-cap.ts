@@ -36,7 +36,9 @@
  *      burst bound behind one address is Better Auth's own 3 per 60 s; this brake bounds the
  *      day. Residual: everyone behind one egress shares 300 links a day.
  *
- *      The ADDRESS ceiling (10 per hour, 30 per UTC day, all requesters combined) is what bounds
+ *      The ADDRESS ceiling (10 per hour, 30 per UTC day, all requesters combined) counts mail the
+ *      provider ACCEPTED, bumped by the sender and only read here, keyed by the canonical
+ *      mailbox (plus-tags dropped, Gmail dots folded; see magic-link-ceiling.ts), and is what bounds
  *      the mail an inbox can receive from this route whatever the attacker's address supply: a
  *      botnet, a /48 of /64s. Over it the caller still gets the `{ status: true }` 200 Better
  *      Auth would have answered, and Better Auth is not invoked: nothing is written, nothing is
@@ -76,36 +78,44 @@ import { createLogger } from '../observability/log';
 import { normaliseClientIp } from '../validation/client-ip';
 import { NUL, containsNul } from '../validation/nul';
 import { INSTALL_ID_HEADER, isValidInstallId } from './idempotency';
+import {
+  type CounterSubjects,
+  MAGIC_LINK_ADDRESS_DAY_CAP,
+  MAGIC_LINK_ADDRESS_HOUR_CAP,
+  MAGIC_LINK_COUNTER,
+  MAGIC_LINK_SCOPE,
+  type MagicLinkWindows,
+  addressCeilingSubjects,
+  canonicalMailbox,
+  normaliseEmail,
+  readAddressCeiling,
+  windowsAt,
+} from './magic-link-ceiling';
+
+export {
+  type CounterSubjects,
+  MAGIC_LINK_ADDRESS_DAY_CAP,
+  MAGIC_LINK_ADDRESS_HOUR_CAP,
+  MAGIC_LINK_COUNTER,
+  MAGIC_LINK_SCOPE,
+  type MagicLinkWindows,
+  canonicalMailbox,
+  normaliseEmail,
+  windowsAt,
+};
 
 /** The owner budget: one (address, requester) pair. */
 export const MAGIC_LINK_HOUR_CAP = 3;
 export const MAGIC_LINK_DAY_CAP = 10;
-/** The address ceiling: one address, every requester combined. */
-export const MAGIC_LINK_ADDRESS_HOUR_CAP = 10;
-export const MAGIC_LINK_ADDRESS_DAY_CAP = 30;
 /** The requester brake: one client address (IPv6 /64), every address combined. */
 export const MAGIC_LINK_REQUESTER_HOUR_CAP = 100;
 export const MAGIC_LINK_REQUESTER_DAY_CAP = 300;
-export const MAGIC_LINK_COUNTER = 'magic_links';
-export const MAGIC_LINK_SCOPE = 'email';
 
 const HOUR_MS = 60 * 60 * 1000;
 const DAY_MS = 24 * HOUR_MS;
 
 /** The same rule Better Auth's body schema applies, so what is counted is what it would send. */
 const emailSchema = z.email();
-
-export interface MagicLinkWindows {
-  readonly hourStart: string;
-  readonly dayStart: string;
-}
-
-export function windowsAt(nowMs: number): MagicLinkWindows {
-  return {
-    hourStart: new Date(Math.floor(nowMs / HOUR_MS) * HOUR_MS).toISOString(),
-    dayStart: new Date(Math.floor(nowMs / DAY_MS) * DAY_MS).toISOString(),
-  };
-}
 
 /** Seconds until the window that overflowed rolls over, for `Retry-After`. */
 export function secondsUntilWindowEnd(nowMs: number, window: 'hour' | 'day'): number {
@@ -145,16 +155,6 @@ export function requestersOf(headers: Headers): {
   };
 }
 
-export function normaliseEmail(email: string): string {
-  return email.trim().toLowerCase();
-}
-
-export interface CounterSubjects {
-  readonly scope: string;
-  readonly hour: string;
-  readonly day: string;
-}
-
 export interface MagicLinkSubjects {
   /** (address, requester): the owner budget. */
   readonly owner: CounterSubjects;
@@ -164,12 +164,12 @@ export interface MagicLinkSubjects {
   readonly requester: CounterSubjects;
 }
 
-/** The six `usage_counters` rows one request touches. */
+/** The four `usage_counters` rows one request bumps, plus the two ceiling rows it reads. */
 export async function magicLinkSubjects(
   email: string,
   requesters: ReturnType<typeof requestersOf>,
 ): Promise<MagicLinkSubjects> {
-  const address = await sha256Hex(normaliseEmail(email));
+  const address = await sha256Hex(canonicalMailbox(email));
   const forAddress = await sha256Hex(`${requesters.forAddress.kind}:${requesters.forAddress.id}`);
   const forRequester = await sha256Hex(
     `${requesters.forRequester.kind}:${requesters.forRequester.id}`,
@@ -180,11 +180,7 @@ export async function magicLinkSubjects(
       hour: `${address}:${forAddress}:hour`,
       day: `${address}:${forAddress}:day`,
     },
-    address: {
-      scope: MAGIC_LINK_SCOPE,
-      hour: `${address}:hour`,
-      day: `${address}:day`,
-    },
+    address: await addressCeilingSubjects(email),
     requester: {
       scope: requesters.forRequester.kind === 'install' ? 'install' : 'ip',
       hour: `${forRequester}:hour`,
@@ -259,11 +255,7 @@ export async function magicLinkGate(c: Context<AppBindings>): Promise<MagicLinkG
   ];
   const counts = await db
     .insert(usageCounters)
-    .values([
-      ...rowsFor(subjects.requester),
-      ...rowsFor(subjects.address),
-      ...rowsFor(subjects.owner),
-    ])
+    .values([...rowsFor(subjects.requester), ...rowsFor(subjects.owner)])
     .onConflictDoUpdate({
       target: [
         usageCounters.scope,
@@ -281,10 +273,11 @@ export async function magicLinkGate(c: Context<AppBindings>): Promise<MagicLinkG
     counts.find((row) => row.subject === subject)?.count ?? 0;
   const requesterHour = countOf(subjects.requester.hour);
   const requesterDay = countOf(subjects.requester.day);
-  const addressHour = countOf(subjects.address.hour);
-  const addressDay = countOf(subjects.address.day);
   const ownerHour = countOf(subjects.owner.hour);
   const ownerDay = countOf(subjects.owner.day);
+  // Read, never bumped here: the ceiling counts mail the provider accepted (bumped in the
+  // sender), so a stranger's requests cannot lock the owner out with zero mail sent.
+  const ceiling = await readAddressCeiling(db, email.data);
   const log = createLogger({ request_id: c.var.requestId });
 
   if (
@@ -311,12 +304,12 @@ export async function magicLinkGate(c: Context<AppBindings>): Promise<MagicLinkG
       ),
     };
   }
-  if (addressHour > MAGIC_LINK_ADDRESS_HOUR_CAP || addressDay > MAGIC_LINK_ADDRESS_DAY_CAP) {
+  if (ceiling.reached) {
     log.info('magic_link_capped', {
       cap: 'address',
       requester_kind: requesters.forAddress.kind,
-      hour_count: addressHour,
-      day_count: addressDay,
+      hour_count: ceiling.hour,
+      day_count: ceiling.day,
     });
     return { kind: 'respond', response: c.json({ status: true }) };
   }

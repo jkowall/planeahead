@@ -30,6 +30,11 @@ import {
   windowsAt,
 } from '../../src/middleware/magic-link-cap';
 import { IDEMPOTENCY_KEY_HEADER, INSTALL_ID_HEADER } from '../../src/middleware/idempotency';
+import {
+  MAGIC_LINK_ADDRESS_DAY_CAP,
+  addressCeilingSubjects,
+  canonicalMailbox,
+} from '../../src/middleware/magic-link-ceiling';
 import { normaliseClientIp } from '../../src/validation/client-ip';
 import {
   API_ORIGIN,
@@ -290,6 +295,45 @@ describe('POST /api/auth/sign-in/magic-link', () => {
     // The brake counted all 25 against ONE requester, the /64.
     const requester = await requesterSubjects(`${subnet}::ffff`);
     expect(await counterValue(requester.hour)).toBe(25);
+  });
+
+  it('counts the address ceiling by mail sent, not by request: 31 stranger requests (3 mails) do not lock the owner out', async () => {
+    // The second re-review's probe: before this, every request bumped the ceiling before any
+    // check, so a stranger locked an address out of email sign-in for the day with 31 requests
+    // and zero mail. The ceiling is now bumped by the sender for accepted mail only.
+    const email = uniqueEmail('ceiling-victim');
+    const stranger = uniqueInstallId('stranger');
+    for (let attempt = 0; attempt < MAGIC_LINK_ADDRESS_DAY_CAP + 1; attempt += 1) {
+      expect((await requestLink(email, { installId: stranger })).status).toBe(200);
+    }
+    expect(await sentEmails(email)).toHaveLength(MAGIC_LINK_HOUR_CAP);
+    const ceiling = await addressCeilingSubjects(email);
+    expect(await counterValue(ceiling.hour)).toBe(MAGIC_LINK_HOUR_CAP);
+    expect(await counterValue(ceiling.day)).toBe(MAGIC_LINK_HOUR_CAP);
+
+    const own = await requestLink(email, { installId: uniqueInstallId('owner') });
+
+    expect(own.status).toBe(200);
+    expect(await sentEmails(email)).toHaveLength(MAGIC_LINK_HOUR_CAP + 1);
+  });
+
+  it('keys the ceiling by the canonical mailbox: plus-tags and Gmail dots share one inbox', async () => {
+    expect(canonicalMailbox('Vic.Tim+news@GoogleMail.com')).toBe('victim@gmail.com');
+    expect(canonicalMailbox('victim+a@example.test')).toBe('victim@example.test');
+    expect(canonicalMailbox('vic.tim@example.test')).toBe('vic.tim@example.test');
+    const base = uniqueEmail('plus');
+    const [local, domain] = base.split('@') as [string, string];
+    const tagged = (tag: string) => `${local}+${tag}@${domain.toUpperCase()}`;
+    // Seed the inbox's ceiling at the cap under one tag; a request under another tag from a
+    // fresh requester answers 200 and sends nothing.
+    const ceiling = await addressCeilingSubjects(tagged('a'));
+    expect(ceiling.hour).toBe((await addressCeilingSubjects(tagged('b'))).hour);
+    await seedCounter(ceiling, 'hour', MAGIC_LINK_ADDRESS_HOUR_CAP);
+
+    const response = await requestLink(tagged('b'), { installId: uniqueInstallId('tagged') });
+
+    expect(response.status).toBe(200);
+    expect(await sentEmails(tagged('b'))).toHaveLength(0);
   });
 
   it('answers 429 with Retry-After to one client address that asked too often, whatever the install id and the /128', async () => {

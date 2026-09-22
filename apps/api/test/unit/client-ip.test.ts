@@ -38,6 +38,16 @@ describe('normaliseClientIp', () => {
     expect(normaliseClientIp('::ffff:c000:0201')).toBe('192.0.2.1');
   });
 
+  it('does not treat a dotted quad behind a non-zero prefix as IPv4-mapped (Better Auth parity)', () => {
+    // Only ::ffff:a.b.c.d is mapped. A dotted quad after any other prefix is an ordinary IPv6
+    // address and keys by its /64 (or, if the parser rejects the spelling, counts as absent).
+    const value = normaliseClientIp('2001:db8::ffff:192.0.2.1');
+    expect(value).not.toBe('192.0.2.1');
+    expect(value === null || value === '2001:0db8:0000:0000:0000:0000:0000:0000').toBe(true);
+    expect(normaliseClientIp('::ffff:192.0.2.1')).toBe('192.0.2.1');
+    expect(normaliseClientIp('::ffff:999.0.2.1')).toBeNull();
+  });
+
   it('treats anything that is not an address as absent', () => {
     expect(normaliseClientIp(null)).toBeNull();
     expect(normaliseClientIp(undefined)).toBeNull();

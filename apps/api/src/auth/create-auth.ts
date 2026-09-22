@@ -53,6 +53,7 @@ import type { Envelope } from '../crypto/envelope';
 import { type Env, environmentName } from '../env';
 import { buildMagicLinkEmail, type MailSender } from '../mail/index';
 import { allowedOrigins } from '../middleware/cors';
+import { recordMagicLinkSent } from '../middleware/magic-link-ceiling';
 import { type Logger, errorFields } from '../observability/log';
 import { consumeMagicLinkRequester, recordMagicLinkRequester } from './magic-link-requester';
 import { type MergeQueue, type MergeSource, mergeUsers } from './merge';
@@ -323,7 +324,10 @@ export function createAuth(env: Env, deps: AuthDeps) {
             // Already logged by the sender with the reason. The caller still gets 200: a
             // provider outage must not tell a prober which addresses have accounts.
             deps.log.warn('magic_link_not_sent', { reason: result.reason });
+            return;
           }
+          // The address ceiling counts accepted mail only (magic-link-ceiling.ts).
+          await recordMagicLinkSent(deps.db, email, Date.now());
         },
       }),
       expo(),

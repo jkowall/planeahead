@@ -34,14 +34,24 @@ function expandIpv6(address: string): string[] {
   );
 }
 
-/** `::ffff:192.0.2.1`, `0:0:0:0:0:ffff:192.0.2.1` or `::ffff:c000:0201` as `192.0.2.1`. */
+/**
+ * `::ffff:192.0.2.1`, `0:0:0:0:0:ffff:192.0.2.1` or `::ffff:c000:0201` as `192.0.2.1`. A trailing
+ * dotted quad is rewritten as its two hex groups first, so the mapped-prefix check (groups 0 to
+ * 4 zero, group 5 ffff) applies to both spellings; `2001:db8::ffff:192.0.2.1` is NOT mapped.
+ */
 function mappedIpv4(address: string): string | null {
   const lower = address.toLowerCase();
-  const dotted = /(?:^::ffff:|:ffff:)(\d{1,3}(?:\.\d{1,3}){3})$/.exec(lower);
-  if (dotted?.[1] !== undefined && ipv4.safeParse(dotted[1]).success) {
-    return dotted[1];
+  const dotted = /^(.*:)(\d{1,3}(?:\.\d{1,3}){3})$/.exec(lower);
+  let hexForm = lower;
+  if (dotted?.[1] !== undefined && dotted[2] !== undefined) {
+    if (!ipv4.safeParse(dotted[2]).success) {
+      return null;
+    }
+    const octets = dotted[2].split('.').map((part) => Number(part));
+    const hex = (a: number, b: number) => ((a << 8) | b).toString(16).padStart(4, '0');
+    hexForm = `${dotted[1]}${hex(octets[0] ?? 0, octets[1] ?? 0)}:${hex(octets[2] ?? 0, octets[3] ?? 0)}`;
   }
-  const groups = expandIpv6(address);
+  const groups = expandIpv6(hexForm);
   const prefixIsMapped =
     groups.slice(0, 5).every((group) => group === '0000') && groups[5] === 'ffff';
   const [high, low] = [groups[6], groups[7]];
