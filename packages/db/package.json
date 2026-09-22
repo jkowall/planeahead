@@ -22,6 +22,10 @@
       "types": "./src/seed/index.ts",
       "default": "./src/seed/index.ts"
     },
+    "./test-harness": {
+      "types": "./test/harness.ts",
+      "default": "./test/harness.ts"
+    },
     "./package.json": "./package.json"
   },
   "scripts": {

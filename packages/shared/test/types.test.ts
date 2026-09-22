@@ -62,6 +62,9 @@ import {
   type KeyDrift,
   type KeyReconciliation,
   type LiveActivityContentStateV1,
+  type PreferenceSettings,
+  type UserPreferences,
+  type UserPreferencesPatch,
   type NextSlot,
   type NormalizedFlightNumber,
   type OperationOf,
@@ -184,6 +187,10 @@ interface TypeSurface {
   uuidv7Generator: Uuidv7Generator;
   // live-activity
   liveActivityContentStateV1: LiveActivityContentStateV1;
+  // preferences
+  preferenceSettings: PreferenceSettings;
+  userPreferences: UserPreferences;
+  userPreferencesPatch: UserPreferencesPatch;
   // providers
   flightLookup: FlightLookup;
   providerCapabilities: ProviderCapabilities;

@@ -2,12 +2,15 @@ import { readFileSync, readdirSync, statSync } from 'node:fs';
 import { join, relative, resolve } from 'node:path';
 import {
   ALERT_EVENTS,
+  DISTANCE_UNITS,
   FLIGHT_STATUS_VALUES,
   IsoInstantSchema,
   PROVIDER_CALL_RESULTS,
   PROVIDER_CALL_TRIGGERS,
   PROVIDER_IDS,
   SYNC_ENTITIES,
+  TEMPERATURE_UNITS,
+  TIME_FORMATS,
 } from '@planeahead/shared';
 import { Table, getTableColumns, getTableName, is } from 'drizzle-orm';
 import type { PgColumn } from 'drizzle-orm/pg-core';
@@ -402,6 +405,15 @@ describe('agreement with @planeahead/shared', () => {
     for (const provider of PROVIDER_IDS) {
       expect(schema.EVENT_SOURCES).toContain(provider);
     }
+  });
+
+  it('user preference enumerations match the shared UserPreferencesSchema', () => {
+    // `PATCH /v1/me/preferences` validates with the shared schema and writes into columns guarded
+    // by these check constraints; a value added on one side without the other fails here, not
+    // on a request.
+    expect([...schema.DISTANCE_UNITS]).toEqual([...DISTANCE_UNITS]);
+    expect([...schema.TEMPERATURE_UNITS]).toEqual([...TEMPERATURE_UNITS]);
+    expect([...schema.TIME_FORMATS]).toEqual([...TIME_FORMATS]);
   });
 });
 

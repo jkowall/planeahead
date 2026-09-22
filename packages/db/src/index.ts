@@ -13,6 +13,7 @@ export { schema };
 export * from './schema/index';
 export {
   createNodeDb,
+  openDb,
   withDb,
   WORKER_CLIENT_OPTIONS,
   type Db,

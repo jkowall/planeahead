@@ -85,7 +85,7 @@ describe('GET /health', () => {
 
     expect(response.status).toBe(501);
     expect(body.error).toBe('not_implemented');
-    expect(body.increment).toContain('05');
+    expect(body.increment).toContain('08');
   });
 
   it('answers 404 with a request id for an unknown path', async () => {

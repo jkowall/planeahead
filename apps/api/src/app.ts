@@ -15,12 +15,13 @@
  *   3. cors         answer a preflight before anything that can reject it
  *   4. rate-limit   cheap abuse brake ahead of anything that reads a body
  *   5. idempotency  reads the body, so it must precede the handler that parses it
- *   6. auth         sets c.var.user; a placeholder until increment 5
+ *   6. auth         resolves the Better Auth session and sets c.var.user
  *
  * Note what follows from 5 running before 6: nothing in the idempotency middleware may assume
  * `c.var.user` has been assigned. It reads the variable as `?? null`, scopes anonymous keys by the
  * `X-Install-Id` header because there is no user to scope them by, and so must anything else that
- * lands in a slot ahead of auth (the principal limiter increment 5 adds is the next one).
+ * lands in a slot ahead of auth. The principal limiter is therefore mounted under `/v1`
+ * (src/routes/v1.ts), behind this chain, where the user is resolved.
  *
  * `app.onError` and `app.notFound` are registered BEFORE the Sentry middleware on purpose:
  * `withSentry` wraps whatever `app.errorHandler` is at the moment it runs, and a later
@@ -32,7 +33,7 @@ import type { CloudflareOptions } from '@sentry/cloudflare';
 import type { Context, MiddlewareHandler } from 'hono';
 import { HTTPException } from 'hono/http-exception';
 import type { AppBindings } from './env';
-import { authPlaceholder } from './middleware/auth';
+import { authMiddleware } from './middleware/auth';
 import { corsMiddleware } from './middleware/cors';
 import { type IdempotencyStore, idempotency } from './middleware/idempotency';
 import { type LimiterSelector, ipLimiter } from './middleware/rate-limit';
@@ -137,7 +138,7 @@ export function registerChain(
         options.idempotencyStore === undefined ? {} : { store: options.idempotencyStore },
       ),
     ],
-    ['auth', authPlaceholder()],
+    ['auth', authMiddleware()],
   ];
   for (const [, handler] of slots) {
     app.use(handler);
