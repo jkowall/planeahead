@@ -1,31 +1,58 @@
 /**
- * app.config.ts (ruling P8): the three variants, the entitlements and associated domains, the
- * magic-link intent filter, the privacy manifest, the plugin order with the reserved
- * withApsEnvironment slot LAST, scene support in expo-build-properties, the fingerprint runtime
- * version, and the React Compiler off.
+ * app.config.ts (ruling P8, fix-round rulings S2 and S8): the three variants, the entitlements
+ * with the APNs environment from the EAS profile, one universal-link host per variant, the
+ * privacy manifest, the blocked Android permissions, the plugin order with the reserved
+ * withApsEnvironment slot LAST and no MapLibre plugin, scene support in expo-build-properties,
+ * the fingerprint runtime version and the React Compiler off. Also the files that must agree with
+ * it: eas.json, the preview update workflow, react-native.config.js and the package scripts.
  */
 
 import type { ConfigContext, ExpoConfig } from 'expo/config';
-import appConfig, { appVariant, reversedClientId } from '../app.config';
+import appConfig, {
+  apnsEnvironment,
+  appVariant,
+  BLOCKED_ANDROID_PERMISSIONS,
+  reversedClientId,
+} from '../app.config';
+
+// Jest's CommonJS wrapper provides it; the app's tsconfig carries no Node types.
+declare const __dirname: string;
+declare function require(id: string): unknown;
+
+const fs = jest.requireActual<{ readFileSync(path: string, encoding: 'utf8'): string }>('fs');
+const path = jest.requireActual<{ resolve(...parts: string[]): string }>('path');
+const APP_ROOT = path.resolve(__dirname, '..');
 
 const env = (process as unknown as { env: Record<string, string | undefined> }).env;
 
-function configFor(variant: string | undefined): ExpoConfig {
-  const previous = env['APP_VARIANT'];
+function configFor(variant: string | undefined, extra: Record<string, string> = {}): ExpoConfig {
+  const names = ['APP_VARIANT', ...Object.keys(extra)];
+  const previous = new Map(names.map((name) => [name, env[name]]));
   if (variant === undefined) {
     delete env['APP_VARIANT'];
   } else {
     env['APP_VARIANT'] = variant;
   }
+  Object.assign(env, extra);
   try {
     return appConfig({ config: {} } as ConfigContext);
   } finally {
-    if (previous === undefined) {
-      delete env['APP_VARIANT'];
-    } else {
-      env['APP_VARIANT'] = previous;
+    for (const [name, value] of previous) {
+      if (value === undefined) {
+        delete env[name];
+      } else {
+        env[name] = value;
+      }
     }
   }
+}
+
+interface EasJson {
+  build: Record<string, { environment?: string; env?: Record<string, string> }>;
+}
+
+function easJson(): EasJson {
+  return JSON.parse(fs.readFileSync(path.resolve(APP_ROOT, 'eas.json'), 'utf8')) as EasJson;
 }
 
 function pluginNames(config: ExpoConfig): string[] {
@@ -37,10 +64,11 @@ function pluginNames(config: ExpoConfig): string[] {
 describe('app.config.ts', () => {
   it.each([
     ['production', 'app.planeahead.mobile', 'PlaneAhead', 'production'],
-    ['preview', 'app.planeahead.mobile.preview', 'PlaneAhead Preview', 'development'],
+    ['preview', 'app.planeahead.mobile.preview', 'PlaneAhead Preview', 'production'],
     ['development', 'app.planeahead.mobile.dev', 'PlaneAhead Dev', 'development'],
-  ])('builds the %s variant', (variant, bundleId, name, aps) => {
-    const config = configFor(variant);
+  ])('builds the %s variant as its EAS profile does', (variant, bundleId, name, aps) => {
+    const profileEnv = easJson().build[variant]?.env ?? {};
+    const config = configFor(variant, { ...profileEnv, EAS_BUILD: 'true' });
     expect(config.name).toBe(name);
     expect(config.ios?.bundleIdentifier).toBe(bundleId);
     expect(config.android?.package).toBe(bundleId);
@@ -49,6 +77,63 @@ describe('app.config.ts', () => {
       'aps-environment': aps,
     });
     expect(config.extra?.['variant']).toBe(variant);
+    expect(config.extra?.['apnsEnvironment']).toBe(aps);
+    const plugins = config.plugins ?? [];
+    expect(plugins).toContainEqual(['expo-notifications', { mode: aps }]);
+    expect(plugins.at(-1)).toEqual(['./plugins/withApsEnvironment.ts', { apsEnvironment: aps }]);
+  });
+
+  it('takes the APNs environment from the signing, not the variant', () => {
+    // A local build is development signed, whatever the variant.
+    expect(configFor('production').ios?.entitlements?.['aps-environment']).toBe('development');
+    // An ad hoc preview build registers with production APNs.
+    expect(
+      configFor('preview', { APNS_ENVIRONMENT: 'production' }).ios?.entitlements?.[
+        'aps-environment'
+      ],
+    ).toBe('production');
+    // On an EAS builder the profile must say which.
+    expect(() => apnsEnvironment(undefined, true)).toThrow(/APNS_ENVIRONMENT/);
+    expect(() => apnsEnvironment('sandbox', false)).toThrow(/APNS_ENVIRONMENT/);
+    expect(apnsEnvironment(undefined, false)).toBe('development');
+  });
+
+  it('gives every EAS profile its EAS environment and APNS_ENVIRONMENT by distribution', () => {
+    const { build } = easJson();
+    expect(build['development']).toMatchObject({
+      environment: 'development',
+      env: { APP_VARIANT: 'development', APNS_ENVIRONMENT: 'development' },
+    });
+    expect(build['preview']).toMatchObject({
+      environment: 'preview',
+      env: { APP_VARIANT: 'preview', APNS_ENVIRONMENT: 'production' },
+    });
+    expect(build['production']).toMatchObject({
+      environment: 'production',
+      env: { APP_VARIANT: 'production', APNS_ENVIRONMENT: 'production' },
+    });
+  });
+
+  it('publishes preview updates with the preview build inputs, to the preview branch', () => {
+    const workflow = fs.readFileSync(
+      path.resolve(APP_ROOT, '..', '..', '.github', 'workflows', 'mobile-preview.yml'),
+      'utf8',
+    );
+    for (const [name, value] of Object.entries(easJson().build['preview']?.env ?? {})) {
+      expect(workflow).toMatch(new RegExp(`^ {6}${name}: '?${value}'?$`, 'm'));
+    }
+    expect(workflow).toMatch(
+      /run: eas update --auto --branch preview --environment preview --non-interactive/,
+    );
+  });
+
+  it('runs the development variant from the local package scripts', () => {
+    const { scripts } = JSON.parse(
+      fs.readFileSync(path.resolve(APP_ROOT, 'package.json'), 'utf8'),
+    ) as { scripts: Record<string, string> };
+    for (const name of ['start', 'ios', 'android', 'prebuild']) {
+      expect(scripts[name]).toMatch(/^APP_VARIANT=development expo /);
+    }
   });
 
   it('defaults to production and refuses an unknown variant', () => {
@@ -57,27 +142,53 @@ describe('app.config.ts', () => {
     expect(() => appVariant('staging')).toThrow(/APP_VARIANT/);
   });
 
-  it('claims the magic-link path on both API hosts, as universal links and verified App Links', () => {
-    const config = configFor('development');
-    expect(config.ios?.associatedDomains).toEqual([
-      'applinks:api.planeahead.app',
-      'applinks:api-staging.planeahead.app',
+  it.each([
+    ['production', 'api.planeahead.app'],
+    ['preview', 'api.planeahead.app'],
+    ['development', 'api-staging.planeahead.app'],
+  ])(
+    'the %s variant claims the magic-link path on %s only, and talks to that API',
+    (variant, host) => {
+      const config = configFor(variant);
+      expect(config.ios?.associatedDomains).toEqual([`applinks:${host}`]);
+      expect(config.android?.intentFilters).toEqual([
+        {
+          action: 'VIEW',
+          autoVerify: true,
+          data: [{ scheme: 'https', host, pathPrefix: '/auth/magic-link' }],
+          category: ['BROWSABLE', 'DEFAULT'],
+        },
+      ]);
+      expect(config.extra?.['universalLinkHosts']).toEqual([host]);
+      expect(config.extra?.['apiUrl']).toBe(`https://${host}`);
+    },
+  );
+
+  it('blocks the Android permissions the app never uses and drops the Face ID string', () => {
+    const config = configFor('production');
+    expect(config.android?.blockedPermissions).toEqual([...BLOCKED_ANDROID_PERMISSIONS]);
+    expect(BLOCKED_ANDROID_PERMISSIONS).toEqual([
+      'android.permission.SYSTEM_ALERT_WINDOW',
+      'android.permission.READ_EXTERNAL_STORAGE',
+      'android.permission.WRITE_EXTERNAL_STORAGE',
+      'android.permission.USE_BIOMETRIC',
+      'android.permission.USE_FINGERPRINT',
     ]);
-    expect(config.android?.intentFilters).toEqual([
-      {
-        action: 'VIEW',
-        autoVerify: true,
-        data: [
-          { scheme: 'https', host: 'api.planeahead.app', pathPrefix: '/auth/magic-link' },
-          { scheme: 'https', host: 'api-staging.planeahead.app', pathPrefix: '/auth/magic-link' },
-        ],
-        category: ['BROWSABLE', 'DEFAULT'],
-      },
-    ]);
+    expect(config.plugins).toContainEqual(['expo-secure-store', { faceIDPermission: false }]);
   });
 
-  it('keeps the plugin order with withApsEnvironment last and scene support in build properties', () => {
-    const config = configFor('production');
+  it('keeps MapLibre a dependency that is not linked (no location permission, no pod)', () => {
+    const rnConfig = require(path.resolve(APP_ROOT, 'react-native.config.js')) as {
+      dependencies: Record<string, { platforms: Record<string, null> }>;
+    };
+    expect(rnConfig.dependencies['@maplibre/maplibre-react-native']).toEqual({
+      platforms: { ios: null, android: null },
+    });
+    expect(pluginNames(configFor('production'))).not.toContain('@maplibre/maplibre-react-native');
+  });
+
+  it('keeps the spec plugin order with withApsEnvironment last and scene support in build properties', () => {
+    const config = configFor('production', { APNS_ENVIRONMENT: 'production' });
     expect(pluginNames(config)).toEqual([
       'expo-router',
       'expo-build-properties',
@@ -87,7 +198,6 @@ describe('app.config.ts', () => {
       'react-native-nitro-google-signin',
       '@sentry/react-native/expo',
       'expo-notifications',
-      '@maplibre/maplibre-react-native',
       './plugins/withApsEnvironment.ts',
     ]);
     const buildProperties = config.plugins?.[1] as [string, { ios: Record<string, unknown> }];
@@ -118,7 +228,7 @@ describe('app.config.ts', () => {
     expect(config.scheme).toBe('planeahead');
   });
 
-  it('declares the required-reason APIs and the install id in the privacy manifest', () => {
+  it('declares the required-reason APIs and the collected data in the privacy manifest', () => {
     const manifest = configFor('production').ios?.privacyManifests;
     const reasons = Object.fromEntries(
       (manifest?.NSPrivacyAccessedAPITypes ?? []).map((entry) => [
@@ -133,11 +243,26 @@ describe('app.config.ts', () => {
       NSPrivacyAccessedAPICategorySystemBootTime: ['35F9.1'],
     });
     expect(manifest?.NSPrivacyTracking).toBe(false);
-    expect(manifest?.NSPrivacyCollectedDataTypes).toContainEqual({
-      NSPrivacyCollectedDataType: 'NSPrivacyCollectedDataTypeDeviceID',
-      NSPrivacyCollectedDataTypeLinked: false,
-      NSPrivacyCollectedDataTypeTracking: false,
-      NSPrivacyCollectedDataTypePurposes: ['NSPrivacyCollectedDataTypePurposeAnalytics'],
+    const collected = Object.fromEntries(
+      (manifest?.NSPrivacyCollectedDataTypes ?? []).map((entry) => [
+        entry.NSPrivacyCollectedDataType.replace('NSPrivacyCollectedDataType', ''),
+        {
+          linked: entry.NSPrivacyCollectedDataTypeLinked,
+          tracking: entry.NSPrivacyCollectedDataTypeTracking,
+          purposes: entry.NSPrivacyCollectedDataTypePurposes.map((purpose) =>
+            purpose.replace('NSPrivacyCollectedDataTypePurpose', ''),
+          ),
+        },
+      ]),
+    );
+    const functionality = { linked: true, tracking: false, purposes: ['AppFunctionality'] };
+    expect(collected).toEqual({
+      // The install id is registered under the account: the Device ID type is Linked.
+      DeviceID: { linked: true, tracking: false, purposes: ['AppFunctionality', 'Analytics'] },
+      EmailAddress: functionality,
+      UserID: functionality,
+      Name: functionality,
+      CrashData: { linked: false, tracking: false, purposes: ['AppFunctionality'] },
     });
   });
 

@@ -20,6 +20,8 @@
       ]
     },
     "test": {
+      // app-config.test.ts also reads eas.json, react-native.config.js and the preview update
+      // workflow, whose inputs must stay equal to the preview build profile's.
       "inputs": [
         "src/**",
         "__tests__/**",
@@ -27,7 +29,10 @@
         "*.ts",
         "jest.config.js",
         "babel.config.js",
-        "package.json"
+        "react-native.config.js",
+        "eas.json",
+        "package.json",
+        "../../.github/workflows/mobile-preview.yml"
       ],
       "outputs": []
     }

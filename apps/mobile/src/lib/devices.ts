@@ -43,10 +43,14 @@ export async function registerDevice(api: ApiClient, push?: PushRegistration): P
       ...(locale === undefined ? {} : { locale }),
       ...(timezone === undefined ? {} : { timezone }),
       ...(push === undefined ? {} : { pushTokenKind: push.kind, pushToken: push.token }),
-      // APNs only: the sandbox for every build but production (the aps-environment entitlement).
-      // FCM has no environment.
+      // APNs only, from the build's `aps-environment` entitlement, which follows its signing:
+      // development builds register with the sandbox, ad hoc preview and store builds with
+      // production (app.config.ts). FCM has no environment.
       ...(push?.kind === 'apns'
-        ? { pushEnvironment: runtimeConfig().variant === 'production' ? 'production' : 'sandbox' }
+        ? {
+            pushEnvironment:
+              runtimeConfig().apnsEnvironment === 'production' ? 'production' : 'sandbox',
+          }
         : {}),
     },
   });

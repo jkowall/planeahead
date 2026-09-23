@@ -3,14 +3,16 @@
  * machine's simulator (apps/mobile/README.md, device acceptance): the sign-in screen offers the
  * providers, anonymous sign-in happens once on first launch, a magic link is requested with
  * `{ email }` only plus `X-Install-Id`, and the universal-link screen verifies in the app with
- * `magicLink.verify({ query: { token } })` (no `callbackURL`), automatically only for a link this
- * install asked for.
+ * `magicLink.verify({ query: { token } })` (no `callbackURL`): automatically only for a link this
+ * install asked for that arrived as a universal link on this build's host, and undone when it
+ * signs in to an address this install did not ask for (ruling S9 item 3, threat model 1.5).
+ * `auth-transport.test.tsx` runs the same flows on the real Better Auth client.
  */
 
 import { fireEvent, render, renderHook, screen, waitFor } from '@testing-library/react-native';
 import SignInScreen from '../src/app/(auth)/sign-in';
 import MagicLinkScreen from '../src/app/auth/magic-link';
-import { authClient } from '../src/lib/auth-client';
+import { authClient, restoreAuthCookies, snapshotAuthCookies } from '../src/lib/auth-client';
 import { KV_KEYS, kv } from '../src/lib/db/kv';
 import { recordMagicLinkRequest } from '../src/lib/magic-link';
 import { signInWithApple } from '../src/lib/native-signin/apple';
@@ -20,11 +22,15 @@ import { useBootstrap, useFirstLaunchAnonymousSignIn } from '../src/lib/session'
 const mockRouter = { replace: jest.fn(), push: jest.fn() };
 let mockSearchParams: Record<string, string> = {};
 let mockSession: unknown = null;
+let mockLinkingUrl: string | null = null;
+const mockGateOrder: string[] = [];
 
 jest.mock('expo-router', () => ({
   useRouter: () => mockRouter,
   useLocalSearchParams: () => mockSearchParams,
 }));
+
+jest.mock('expo-linking', () => ({ useLinkingURL: () => mockLinkingUrl }));
 
 jest.mock('react-native-safe-area-context', () => {
   const { View } = jest.requireActual<typeof import('react-native')>('react-native');
@@ -54,8 +60,15 @@ jest.mock('../src/lib/auth-client', () => ({
       anonymous: jest.fn(() => Promise.resolve({ data: {}, error: null })),
       magicLink: jest.fn(() => Promise.resolve({ data: { status: true }, error: null })),
     },
-    magicLink: { verify: jest.fn(() => Promise.resolve({ data: {}, error: null })) },
+    magicLink: {
+      verify: jest.fn(() =>
+        Promise.resolve({ data: { user: { email: 'ada@example.com' } }, error: null }),
+      ),
+    },
+    signOut: jest.fn(() => Promise.resolve({ data: { success: true }, error: null })),
   },
+  snapshotAuthCookies: jest.fn(() => Promise.resolve('{"anonymous-cookie":{"value":"anon"}}')),
+  restoreAuthCookies: jest.fn(() => Promise.resolve()),
 }));
 
 jest.mock('../src/lib/native-signin/apple', () => ({
@@ -78,8 +91,24 @@ jest.mock('../src/lib/config', () => ({
 
 jest.mock('../src/lib/identity', () => ({ installId: () => 'install-test-0001' }));
 
-// session.ts imports the services graph; nothing in these tests reaches it.
-jest.mock('../src/lib/services', () => ({ services: jest.fn(), forgetAccount: jest.fn() }));
+// The services graph needs the store; the magic link only uses the apply gate, recorded here.
+jest.mock('../src/lib/services', () => ({
+  services: jest.fn(() =>
+    Promise.resolve({
+      gate: {
+        async hold<T>(work: () => Promise<T>): Promise<T> {
+          mockGateOrder.push('hold');
+          try {
+            return await work();
+          } finally {
+            mockGateOrder.push('release');
+          }
+        },
+      },
+    }),
+  ),
+  forgetAccount: jest.fn(),
+}));
 
 jest.mock('../src/lib/db/kv', () => {
   const store = new Map<string, string>();
@@ -105,10 +134,13 @@ jest.mock('../src/lib/db/kv', () => {
 });
 
 const TOKEN = 'AbCdEfGhIjKlMnOpQrStUvWxYzAbCdEf';
+const UNIVERSAL_LINK = `https://api.planeahead.app/auth/magic-link?token=${TOKEN}`;
 
 beforeEach(() => {
   mockSession = null;
   mockSearchParams = {};
+  mockLinkingUrl = null;
+  mockGateOrder.length = 0;
   kv.removeItemSync(KV_KEYS.pendingMagicLink);
   kv.removeItemSync(KV_KEYS.firstLaunchDone);
 });
@@ -151,9 +183,9 @@ describe('the sign-in screen', () => {
     expect(body).not.toHaveProperty('callbackURL');
     expect(options.headers).toEqual({ 'X-Install-Id': 'install-test-0001' });
     // This install now expects the link: the universal-link screen will verify it at once.
-    expect(JSON.parse(kv.getItemSync(KV_KEYS.pendingMagicLink) ?? '{}')).toMatchObject({
-      email: 'ada@example.com',
-    });
+    expect(JSON.parse(kv.getItemSync(KV_KEYS.pendingMagicLink) ?? '[]')).toMatchObject([
+      { email: 'ada@example.com' },
+    ]);
   });
 
   it('does not send a link for something that is not an address', async () => {
@@ -221,6 +253,7 @@ describe('the magic-link universal link', () => {
   it('verifies in the app, with the token only, when this install asked for the link', async () => {
     recordMagicLinkRequest('ada@example.com');
     mockSearchParams = { token: TOKEN };
+    mockLinkingUrl = UNIVERSAL_LINK;
     await render(<MagicLinkScreen />);
     await waitFor(() => {
       expect(mockRouter.replace).toHaveBeenCalledWith('/');
@@ -229,10 +262,88 @@ describe('the magic-link universal link', () => {
     expect(verify).toHaveBeenCalledTimes(1);
     expect(verify.mock.calls[0]?.[0]).toEqual({ query: { token: TOKEN } });
     expect(kv.getItemSync(KV_KEYS.pendingMagicLink)).toBeNull();
+    // The outbox was held around the verify and the account check.
+    expect(mockGateOrder).toEqual(['hold', 'release']);
+    expect(authClient.signOut).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    ['the custom scheme', `planeahead://auth/magic-link?token=${TOKEN}`],
+    [
+      'a host this build does not claim',
+      `https://api-staging.planeahead.app/auth/magic-link?token=${TOKEN}`,
+    ],
+    ['plain http', `http://api.planeahead.app/auth/magic-link?token=${TOKEN}`],
+    ['another path', `https://api.planeahead.app/api/auth/magic-link/verify?token=${TOKEN}`],
+    [
+      'a different token in the URL',
+      UNIVERSAL_LINK.replace(TOKEN, 'ZyXwVuTsRqPoNmLkJiHgFeDcBaZyXwVu'),
+    ],
+    ['no linking URL at all', null],
+  ])('asks first for a link delivered on %s, even with a request pending', async (_label, url) => {
+    recordMagicLinkRequest('ada@example.com');
+    mockSearchParams = { token: TOKEN };
+    mockLinkingUrl = url;
+    await render(<MagicLinkScreen />);
+    expect(screen.getByText('Sign in with this link?')).toBeOnTheScreen();
+    expect(authClient.magicLink.verify).not.toHaveBeenCalled();
+  });
+
+  it('signs out of an account another address owns and restores the anonymous session', async () => {
+    // The attacker's link for the attacker's own address, opened while the user waits for theirs.
+    recordMagicLinkRequest('Ada@Example.com');
+    jest.mocked(authClient.magicLink.verify).mockResolvedValueOnce({
+      data: { user: { email: 'attacker@example.com' } },
+      error: null,
+    });
+    mockSearchParams = { token: TOKEN };
+    mockLinkingUrl = UNIVERSAL_LINK;
+    await render(<MagicLinkScreen />);
+    await waitFor(() => {
+      expect(screen.getByTestId('magic-link-mismatch')).toBeOnTheScreen();
+    });
+    expect(authClient.signOut).toHaveBeenCalledTimes(1);
+    expect(restoreAuthCookies).toHaveBeenCalledWith('{"anonymous-cookie":{"value":"anon"}}');
+    expect(jest.mocked(snapshotAuthCookies).mock.invocationCallOrder[0]).toBeLessThan(
+      jest.mocked(authClient.magicLink.verify).mock.invocationCallOrder[0] ?? 0,
+    );
+    expect(mockRouter.replace).not.toHaveBeenCalled();
+    // The user's own link may still arrive.
+    expect(kv.getItemSync(KV_KEYS.pendingMagicLink)).not.toBeNull();
+    expect(mockGateOrder).toEqual(['hold', 'release']);
+  });
+
+  it('accepts the requested address in any letter case, and any of several requests', async () => {
+    recordMagicLinkRequest('first@example.com');
+    recordMagicLinkRequest('Ada@Example.COM');
+    mockSearchParams = { token: TOKEN };
+    mockLinkingUrl = UNIVERSAL_LINK;
+    await render(<MagicLinkScreen />);
+    await waitFor(() => {
+      expect(mockRouter.replace).toHaveBeenCalledWith('/');
+    });
+    expect(authClient.signOut).not.toHaveBeenCalled();
+  });
+
+  it('checks the address after a confirmed tap too, while a request is pending', async () => {
+    recordMagicLinkRequest('ada@example.com');
+    jest.mocked(authClient.magicLink.verify).mockResolvedValueOnce({
+      data: { user: { email: 'attacker@example.com' } },
+      error: null,
+    });
+    mockSearchParams = { token: TOKEN };
+    mockLinkingUrl = `planeahead://auth/magic-link?token=${TOKEN}`;
+    await render(<MagicLinkScreen />);
+    await fireEvent.press(screen.getByTestId('magic-link-confirm'));
+    await waitFor(() => {
+      expect(screen.getByTestId('magic-link-mismatch')).toBeOnTheScreen();
+    });
+    expect(authClient.signOut).toHaveBeenCalledTimes(1);
   });
 
   it('asks before verifying a link this install did not request', async () => {
     mockSearchParams = { token: TOKEN };
+    mockLinkingUrl = UNIVERSAL_LINK;
     await render(<MagicLinkScreen />);
     expect(screen.getByText('Sign in with this link?')).toBeOnTheScreen();
     expect(authClient.magicLink.verify).not.toHaveBeenCalled();
@@ -243,9 +354,10 @@ describe('the magic-link universal link', () => {
     });
   });
 
-  it('does not ask for an expired request window either', async () => {
+  it('asks when the request window has expired', async () => {
     recordMagicLinkRequest('ada@example.com', Date.now() - 16 * 60 * 1000);
     mockSearchParams = { token: TOKEN };
+    mockLinkingUrl = UNIVERSAL_LINK;
     await render(<MagicLinkScreen />);
     expect(screen.getByTestId('magic-link-confirm')).toBeOnTheScreen();
     expect(authClient.magicLink.verify).not.toHaveBeenCalled();
@@ -266,6 +378,7 @@ describe('the magic-link universal link', () => {
       error: { status: 400, statusText: 'Bad Request', code: 'INVALID_TOKEN' },
     });
     mockSearchParams = { token: TOKEN };
+    mockLinkingUrl = UNIVERSAL_LINK;
     await render(<MagicLinkScreen />);
     await waitFor(() => {
       expect(screen.getByText('This link does not work')).toBeOnTheScreen();

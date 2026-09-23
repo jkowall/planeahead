@@ -6,13 +6,22 @@
 import Constants from 'expo-constants';
 
 export type AppVariant = 'production' | 'preview' | 'development';
+export type ApnsEnvironment = 'development' | 'production';
 
 export interface AppRuntimeConfig {
   readonly variant: AppVariant;
   /** The API Worker's origin, no trailing slash: `/v1/*` and `/api/auth/*` hang off it. */
   readonly apiUrl: string;
-  /** The hosts the universal link may arrive on (the magic link's landing page). */
+  /**
+   * The host this variant claims universal links on (the magic link's landing page); a link on
+   * any other host, or on the custom scheme, is never verified without asking.
+   */
   readonly universalLinkHosts: readonly string[];
+  /**
+   * The APNs environment this build's signing registers with (app.config.ts, from the EAS
+   * profile): an ad hoc preview build is `production`, like a store build.
+   */
+  readonly apnsEnvironment: ApnsEnvironment;
   readonly googleIosClientId: string;
   readonly googleWebClientId: string | null;
   readonly sentryDsn: string | null;
@@ -33,12 +42,17 @@ export function parseRuntimeConfig(extra: Record<string, unknown> | undefined): 
     throw new Error(`app config extra.apiUrl must be an origin; got ${String(apiUrl)}`);
   }
   const hosts = extra?.['universalLinkHosts'];
+  const apnsEnvironment = asString(extra?.['apnsEnvironment']) ?? 'development';
+  if (apnsEnvironment !== 'development' && apnsEnvironment !== 'production') {
+    throw new Error(`app config extra.apnsEnvironment is unknown: ${apnsEnvironment}`);
+  }
   return Object.freeze({
     variant,
     apiUrl: apiUrl.replace(/\/+$/, ''),
     universalLinkHosts: Object.freeze(
       Array.isArray(hosts) ? hosts.filter((host): host is string => typeof host === 'string') : [],
     ),
+    apnsEnvironment,
     googleIosClientId: asString(extra?.['googleIosClientId']) ?? '',
     googleWebClientId: asString(extra?.['googleWebClientId']),
     sentryDsn: asString(extra?.['sentryDsn']),

@@ -7,8 +7,9 @@
  *   scopes an anonymous caller's idempotency keys.
  * - `analyticsId` is the install-scoped id of `POST /v1/events`. It is a separate value on
  *   purpose: the install id is joined to the account in `devices`, and an analytics id equal to it
- *   would make every event linkable to a person. Declared in App Privacy as Device ID, not linked,
- *   purpose Analytics.
+ *   would make every event linkable to a person. The App Privacy label declares the Device ID
+ *   type once, as Linked (the install id makes it so), for App Functionality and Analytics
+ *   (ADR 0005, app.config.ts privacy manifest).
  */
 
 import { randomUUID } from 'expo-crypto';

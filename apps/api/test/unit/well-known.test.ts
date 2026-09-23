@@ -1,12 +1,15 @@
 /**
  * The association files (increment 9, ruling P4): what Apple's CDN and Android's App Links
- * verifier read, built from the environment, served as JSON at the exact paths they fetch.
+ * verifier read, built from the environment, served as JSON at the exact paths they fetch. Each
+ * host names only the variants that claim it (ruling S2): production the production and preview
+ * builds, staging (and a local Worker) the development build.
  */
 
 import { Hono } from 'hono';
 import { describe, expect, it } from 'vitest';
 import type { AppBindings } from '../../src/env';
 import {
+  BUNDLE_IDS_BY_ENVIRONMENT,
   DEFAULT_APP_BUNDLE_IDS,
   androidFingerprints,
   appBundleIds,
@@ -28,12 +31,12 @@ function request(path: string, env: Record<string, string>) {
 }
 
 describe('GET /.well-known/apple-app-site-association', () => {
-  const env = { APPLE_TEAM_ID: 'A1B2C3D4E5' };
+  const env = { APPLE_TEAM_ID: 'A1B2C3D4E5', ENVIRONMENT: 'production' };
 
   it.each([
     '/.well-known/apple-app-site-association',
     '/.well-known/apple-app-site-association.json',
-  ])('%s names the three app ids and the magic-link path, as JSON', async (path) => {
+  ])("%s names production's app ids and the magic-link path, as JSON", async (path) => {
     const response = await request(path, env);
     expect(response.status).toBe(200);
     expect(response.headers.get('content-type')).toBe('application/json');
@@ -45,7 +48,6 @@ describe('GET /.well-known/apple-app-site-association', () => {
             appIDs: [
               'A1B2C3D4E5.app.planeahead.mobile',
               'A1B2C3D4E5.app.planeahead.mobile.preview',
-              'A1B2C3D4E5.app.planeahead.mobile.dev',
             ],
             components: [
               {
@@ -57,6 +59,18 @@ describe('GET /.well-known/apple-app-site-association', () => {
         ],
       },
     });
+  });
+
+  it.each([
+    ['staging', ['A1B2C3D4E5.app.planeahead.mobile.dev']],
+    ['local', ['A1B2C3D4E5.app.planeahead.mobile.dev']],
+  ])('on %s names the development build only', async (environment, appIDs) => {
+    const response = await request('/.well-known/apple-app-site-association', {
+      APPLE_TEAM_ID: 'A1B2C3D4E5',
+      ENVIRONMENT: environment,
+    });
+    const body = await response.json<{ applinks: { details: { appIDs: string[] }[] } }>();
+    expect(body.applinks.details[0]?.appIDs).toEqual(appIDs);
   });
 
   it('takes the bundle ids from APP_BUNDLE_IDS when set', async () => {
@@ -81,9 +95,12 @@ describe('GET /.well-known/apple-app-site-association', () => {
 });
 
 describe('GET /.well-known/assetlinks.json', () => {
-  it('names each package with its signing and upload fingerprints, as JSON', async () => {
+  const ALL_PACKAGES = `app.planeahead.mobile=${FP_A},${FP_B.toLowerCase()};app.planeahead.mobile.preview=${FP_A};app.planeahead.mobile.dev=${FP_B}`;
+
+  it('names each package this host serves with its signing and upload fingerprints, as JSON', async () => {
     const response = await request('/.well-known/assetlinks.json', {
-      ANDROID_SHA256_FINGERPRINTS: `app.planeahead.mobile=${FP_A},${FP_B.toLowerCase()};app.planeahead.mobile.dev=${FP_B}`,
+      ENVIRONMENT: 'production',
+      ANDROID_SHA256_FINGERPRINTS: ALL_PACKAGES,
     });
     expect(response.status).toBe(200);
     expect(response.headers.get('content-type')).toBe('application/json');
@@ -100,11 +117,36 @@ describe('GET /.well-known/assetlinks.json', () => {
         relation: ['delegate_permission/common.handle_all_urls'],
         target: {
           namespace: 'android_app',
+          package_name: 'app.planeahead.mobile.preview',
+          sha256_cert_fingerprints: [FP_A],
+        },
+      },
+    ]);
+  });
+
+  it('on staging names the development package only, whatever else is configured', async () => {
+    const response = await request('/.well-known/assetlinks.json', {
+      ENVIRONMENT: 'staging',
+      ANDROID_SHA256_FINGERPRINTS: ALL_PACKAGES,
+    });
+    expect(await response.json()).toEqual([
+      {
+        relation: ['delegate_permission/common.handle_all_urls'],
+        target: {
+          namespace: 'android_app',
           package_name: 'app.planeahead.mobile.dev',
           sha256_cert_fingerprints: [FP_B],
         },
       },
     ]);
+  });
+
+  it('answers 404 when none of the configured packages claims this host', async () => {
+    const response = await request('/.well-known/assetlinks.json', {
+      ENVIRONMENT: 'staging',
+      ANDROID_SHA256_FINGERPRINTS: `app.planeahead.mobile=${FP_A}`,
+    });
+    expect(response.status).toBe(404);
   });
 
   it('answers 404 when no fingerprint is configured', async () => {
@@ -119,8 +161,16 @@ describe('the parsers', () => {
     expect(appleTeamId(undefined)).toBeNull();
   });
 
-  it('default the bundle ids to the three variants', () => {
-    expect(appBundleIds(undefined)).toEqual([...DEFAULT_APP_BUNDLE_IDS]);
+  it("default the bundle ids to the variants that claim the environment's host", () => {
+    expect(appBundleIds(undefined, 'production')).toEqual([
+      'app.planeahead.mobile',
+      'app.planeahead.mobile.preview',
+    ]);
+    expect(appBundleIds('', 'staging')).toEqual(['app.planeahead.mobile.dev']);
+    // Every variant is claimed by exactly one deployed host.
+    expect(
+      [...BUNDLE_IDS_BY_ENVIRONMENT.production, ...BUNDLE_IDS_BY_ENVIRONMENT.staging].sort(),
+    ).toEqual([...DEFAULT_APP_BUNDLE_IDS].sort());
   });
 
   it('drop malformed fingerprint entries instead of publishing them', () => {

@@ -2,6 +2,11 @@
  * The write side of the offline store: mutations queued locally and drained, oldest first, to
  * the API with an `Idempotency-Key` (and, through the API client, `X-Install-Id`).
  *
+ * "Oldest" is insertion order, the `seq` column (one more than the largest queued `seq`), never
+ * the uuidv7 id: its monotonic counter lives in process memory, so a clock stepped backwards
+ * between two launches (an NTP correction, a manual time change while travelling) would sort a
+ * later mutation before an earlier one (increment 9 review, auth-and-store-7).
+ *
  * Replay semantics are the API's (increment 8, IETF idempotency draft): the same key and body
  * answer the stored response with `Idempotent-Replayed: true`, which is success; the same key
  * with a different body answers 422 `idempotency_payload_mismatch`, a client bug, so the item gets
@@ -12,12 +17,18 @@
  *
  * FIFO is strict: a retryable failure stops the drain, so a later mutation never overtakes an
  * earlier one it may depend on (a subscribe and its unsubscribe). The drain waits for the apply
- * gate before every item: it is suspended while a sync pull applies pages.
+ * gate before every item: it is suspended while a sync pull applies pages, and while a magic
+ * link is verified and its account checked (src/lib/magic-link.ts).
+ *
+ * Every drain write signals `outbox` after it commits (src/lib/db/store-signal.ts). A caller that
+ * queues a mutation runs `enqueueMutation` inside `commitWrite(db, ['outbox', ...], fn)` with its
+ * optimistic row, so both commit and signal together.
  */
 
 import { uuidv7 } from '@planeahead/shared';
 import { errorCode, type RawRequest, type RawResponse } from '../api-client';
 import type { SqliteLike, SqlValue } from '../db/sqlite-like';
+import { notifyTablesChanged } from '../db/store-signal';
 import type { ApplyGate } from './gate';
 import { wipeLocalStore } from './store';
 
@@ -82,7 +93,10 @@ export function backoffMs(attempts: number): number {
   return Math.min(MAX_BACKOFF_MS, 1000 * 2 ** Math.min(attempts, 16));
 }
 
-/** Queues a mutation; the caller writes its optimistic local row in the same transaction. */
+/**
+ * Queues a mutation at the tail. The caller writes its optimistic local row in the same
+ * transaction (`commitWrite`), which also signals the tables after the commit.
+ */
 export function enqueueMutation(
   db: SqliteLike,
   mutation: NewMutation,
@@ -105,8 +119,8 @@ export function enqueueMutation(
     (options.now ?? new Date()).toISOString(),
   ];
   db.run(
-    'INSERT INTO outbox (id, method, path, body, idempotency_key, attempts, next_attempt_at, created_at) ' +
-      'VALUES (?, ?, ?, ?, ?, 0, 0, ?)',
+    'INSERT INTO outbox (id, method, path, body, idempotency_key, attempts, next_attempt_at, created_at, seq) ' +
+      'VALUES (?, ?, ?, ?, ?, 0, 0, ?, (SELECT coalesce(max(seq), 0) + 1 FROM outbox))',
     params,
   );
   return item;
@@ -124,17 +138,16 @@ function toItem(row: OutboxDbRow): OutboxItem {
 }
 
 /**
- * The oldest item after `after`, due or not: an item still in its backoff blocks everything
- * queued behind it, so a later mutation can never overtake an earlier one.
+ * The head of the queue, due or not: an item still in its backoff blocks everything queued
+ * behind it, so a later mutation can never overtake an earlier one. Rows queued before `seq`
+ * existed all hold 0 and go first, in rowid (insertion) order.
  */
 function oldest(
   db: SqliteLike,
-  after: string | null,
 ): { readonly item: OutboxItem; readonly nextAttemptAt: number } | null {
   const row = db.get<OutboxDbRow>(
     'SELECT id, method, path, body, idempotency_key, attempts, next_attempt_at FROM outbox ' +
-      'WHERE id > ? ORDER BY id LIMIT 1',
-    [after ?? ''],
+      'ORDER BY seq, rowid LIMIT 1',
   );
   return row === null ? null : { item: toItem(row), nextAttemptAt: row.next_attempt_at };
 }
@@ -145,6 +158,7 @@ export function pendingCount(db: SqliteLike): number {
 
 function remove(db: SqliteLike, id: string): void {
   db.run('DELETE FROM outbox WHERE id = ?', [id]);
+  notifyTablesChanged(['outbox']);
 }
 
 function defer(
@@ -159,6 +173,7 @@ function defer(
       'WHERE id = ?',
     [now + backoffMs(item.attempts), status, error, item.id],
   );
+  notifyTablesChanged(['outbox']);
 }
 
 function isRetryable(status: number): boolean {
@@ -174,11 +189,12 @@ export function createOutbox(deps: OutboxDeps): { drain(): Promise<DrainResult> 
   const pass = async (): Promise<DrainResult> => {
     let sent = 0;
     let dropped = 0;
-    let after: string | null = null;
     const rekeyed = new Set<string>();
+    // Every path that goes round again has removed the head, except the 422 re-key, which sends
+    // the same head once more (and only once: `rekeyed`).
     for (;;) {
       await deps.gate.idle();
-      const head = oldest(deps.db, after);
+      const head = oldest(deps.db);
       if (head === null) {
         return { kind: 'drained', sent, dropped };
       }
@@ -215,12 +231,12 @@ export function createOutbox(deps: OutboxDeps): { drain(): Promise<DrainResult> 
             "last_error = 'idempotency_payload_mismatch' WHERE id = ?",
           [fresh, item.id],
         );
+        notifyTablesChanged(['outbox']);
         deps.onKeyRegenerated?.({ ...item, idempotencyKey: fresh });
-        // Not advancing `after`: the same item goes again, now, with the fresh key, so nothing
-        // queued behind it overtakes it.
+        // The same item goes again, now, with the fresh key, so nothing queued behind it
+        // overtakes it.
         continue;
       }
-      after = item.id;
       if (response.status >= 200 && response.status < 300) {
         remove(deps.db, item.id);
         sent += 1;

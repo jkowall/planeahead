@@ -4,12 +4,32 @@ name: Mobile preview
 # Sentry source maps for that update (increment 9). EAS Update bundles do not get source maps
 # automatically: `sentry-expo-upload-sourcemaps` uploads the `dist/` that `eas update` exported.
 #
+# Which builds receive these updates: the INTERNAL PREVIEW builds, and only them. Preview builds
+# are made with the `preview` profile (eas.json), whose channel `preview` points at the update
+# branch `preview`, so every pull request publishes to that one branch (`--branch preview`, not
+# a branch named after the git branch) and the last pull request published is what every
+# preview build runs on its next launch. Production builds (channel `production`) and development
+# builds (channel `development`, which load JavaScript from Metro) never receive them.
+#
+# An update only reaches a build with the same runtime version, and the runtime version is the
+# fingerprint of the whole resolved app config, `extra` and plugin props included. So the update
+# is resolved from exactly the build's inputs:
+#   - `--environment preview`: the EAS environment variables the preview build profile uses
+#     (eas.json `environment: preview`): SENTRY_DSN, SENTRY_ORG, SENTRY_PROJECT,
+#     GOOGLE_WEB_CLIENT_ID, GOOGLE_IOS_CLIENT_ID and EAS_PROJECT_ID, set once in EAS by the owner;
+#   - the preview profile's own `env` (APP_VARIANT, APNS_ENVIRONMENT), which `eas update` does not
+#     read from eas.json, repeated in the job env below (__tests__/app-config.test.ts asserts they
+#     stay equal);
+#   - EAS_PROJECT_ID also from the GitHub variable, because eas-cli needs the project id from the
+#     config before it can fetch the environment (same value as the EAS variable).
+# A missing input changes the fingerprint and the update silently never applies (increment 9
+# review, expo-correctness-1).
+#
 # Skipped, with a notice, until the owner has created the Expo project and set the secrets
 # (apps/mobile/README.md, owner tasks):
 #   - EXPO_TOKEN          an Expo robot token with access to the project
 #   - vars.EAS_PROJECT_ID the project id `eas init` prints (app.config.ts reads EAS_PROJECT_ID)
-#   - SENTRY_AUTH_TOKEN, vars.SENTRY_ORG, vars.SENTRY_PROJECT for the source-map step (skipped
-#     on its own when the token is absent)
+#   - SENTRY_AUTH_TOKEN   for the source-map step (skipped on its own when the token is absent)
 #
 # Never an EAS build: native builds run on GitHub runners in increment 11's nightly job, not on
 # EAS credit (Starter plan).
@@ -24,8 +44,9 @@ on:
       - '.github/workflows/mobile-preview.yml'
 
 concurrency:
-  group: mobile-preview-${{ github.ref }}
-  cancel-in-progress: true
+  # One branch receives every pull request's update, so publishes run one at a time.
+  group: mobile-preview
+  cancel-in-progress: false
 
 permissions:
   contents: read
@@ -38,7 +59,9 @@ jobs:
       EXPO_TOKEN: ${{ secrets.EXPO_TOKEN }}
       SENTRY_AUTH_TOKEN: ${{ secrets.SENTRY_AUTH_TOKEN }}
       EAS_PROJECT_ID: ${{ vars.EAS_PROJECT_ID }}
+      # eas.json build.preview.env, exactly.
       APP_VARIANT: preview
+      APNS_ENVIRONMENT: production
       EXPO_NO_GIT_STATUS: '1'
     steps:
       - name: Skip without an Expo token
@@ -64,17 +87,17 @@ jobs:
           eas-version: latest
           token: ${{ secrets.EXPO_TOKEN }}
 
-      # `--auto` names the update branch after the git branch and the message after the commit.
-      # The update exports the bundle into apps/mobile/dist, which the next step uploads from.
-      - name: Publish the EAS Update
+      # `--auto` takes the update message from the commit; `--branch preview` is the branch the
+      # preview channel serves (see the header). The update exports the bundle into
+      # apps/mobile/dist, which the next step uploads from.
+      - name: Publish the EAS Update to the preview builds
         if: env.EXPO_TOKEN != ''
         working-directory: apps/mobile
-        run: eas update --auto --non-interactive
+        run: eas update --auto --branch preview --environment preview --non-interactive
 
+      # SENTRY_ORG and SENTRY_PROJECT come from the same EAS environment the build and the update
+      # used, so the maps land in the project the DSN reports to.
       - name: Upload the update's source maps to Sentry
         if: env.EXPO_TOKEN != '' && env.SENTRY_AUTH_TOKEN != ''
         working-directory: apps/mobile
-        env:
-          SENTRY_ORG: ${{ vars.SENTRY_ORG }}
-          SENTRY_PROJECT: ${{ vars.SENTRY_PROJECT }}
-        run: pnpm exec sentry-expo-upload-sourcemaps dist
+        run: eas env:exec preview "pnpm exec sentry-expo-upload-sourcemaps dist" --non-interactive

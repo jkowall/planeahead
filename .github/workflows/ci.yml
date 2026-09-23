@@ -157,10 +157,12 @@ jobs:
       - run: pnpm turbo run test --filter=!@planeahead/api --filter=!@planeahead/mobile
 
   # The Expo app (increment 9): the Jest suite on the plain jest-expo preset (one project, ADR
-  # 0001), and the guard that a committed offline-store migration never changes (devices that
-  # already applied it would never see the edit). The full history is fetched so the guard can
-  # compare with the pull request's base, or with the commit before a push. The native compiles
-  # (expo prebuild, xcodebuild, gradle) stay out of CI until increment 11's nightly native-smoke.
+  # 0001), the guard that a committed offline-store migration never changes (devices that
+  # already applied it would never see the edit), and Expo's own check that every SDK package is
+  # on the SDK 57 manifest's version (scripts/toolchain-guard.mjs asserts the same manifest and
+  # the exact pins outside it). The full history is fetched so the migrations guard can compare
+  # with the pull request's base, or with the commit before a push. The native compiles (expo
+  # prebuild, xcodebuild, gradle) stay out of CI until increment 11's nightly native-smoke.
   test-mobile:
     runs-on: ubuntu-latest
     steps:
@@ -177,6 +179,12 @@ jobs:
         env:
           BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.before }}
         run: node scripts/mobile-migrations-guard.mjs --base "${BASE_SHA}"
+      - name: SDK packages match the Expo SDK 57 manifest
+        working-directory: apps/mobile
+        env:
+          EXPO_NO_GIT_STATUS: '1'
+          APP_VARIANT: development
+        run: pnpm exec expo install --check
       - run: pnpm turbo run test --filter=@planeahead/mobile
 
   # Proves that a failing test fails the run. embedded-postgres registers async-exit-hook at

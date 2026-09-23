@@ -3,18 +3,20 @@
  * driver `expo`) turns it into the SQL files and the bundled `migrations/migrations.js`; a
  * committed migration never changes (scripts/mobile-migrations-guard.mjs), a new one is appended.
  *
- * Shape rules, each forced by a fact about SQLite's update hook, which is what drives
- * `useLiveQuery` (docs/increments/08-flight-routes-and-sync.facts.md section 4):
+ * Shape rules. The app's live queries refresh on an explicit per-table signal sent after each
+ * commit (src/lib/db/store-signal.ts), not on SQLite's per-row update hook, but the store keeps
+ * the hook's rules anyway (ruling P6), so a hook-driven reader (Drizzle's own `useLiveQuery`,
+ * a debugging session) never sees a silent write
+ * (docs/increments/08-flight-routes-and-sync.facts.md section 4):
  *
- * - Every table is a rowid table. `WITHOUT ROWID` tables never fire the update hook, so a live
- *   query on one would never refresh.
+ * - Every table is a rowid table. `WITHOUT ROWID` tables never fire the update hook.
  * - Writes are `INSERT ... ON CONFLICT (id) DO UPDATE`, never `INSERT OR REPLACE`: the REPLACE
  *   conflict path deletes the old row without firing the hook.
  * - Deletes always carry a WHERE clause: an unqualified `DELETE FROM t` takes the truncate
  *   optimisation and fires no hook at all (src/lib/sync/store.ts qualifies the reset too).
- * - `useLiveQuery` re-runs only when the change names the query's ROOT table, so the flight
- *   snapshot is denormalised onto `flight_subscriptions` (the list's root table) instead of
- *   living in a joined `flights` table the list would never hear about.
+ * - A live query is keyed by its ROOT table, so the flight snapshot is denormalised onto
+ *   `flight_subscriptions` (the list's root table) instead of living in a joined `flights`
+ *   table whose signal the list would not listen to.
  *
  * Booleans are integers (0/1) and instants are ISO-8601 UTC strings, as the sync feed sends them.
  * JSON-shaped fields are stored as TEXT and parsed at the edge.
@@ -133,9 +135,23 @@ export const syncState = sqliteTable(
   'sync_state',
   {
     id: integer('id').primaryKey(),
-    /** Opaque; sent back unchanged as `?cursor=`. NULL means "I have nothing". */
+    /** Opaque; sent back unchanged as `?cursor=`. NULL means "pull the no-cursor snapshot". */
     cursor: text('cursor'),
     lastPulledAt: text('last_pulled_at'),
+    /**
+     * Set when the server refused the cursor (410 `resync_required`, 400 `invalid_cursor`): the
+     * rows are kept and still shown, and the next page (the no-cursor snapshot) replaces them in
+     * its own transaction. Cleared by that page.
+     */
+    resetPending: integer('reset_pending', { mode: 'boolean' }).notNull().default(false),
+    /** The user whose session pulled the rows. A different session user empties the store first. */
+    ownerUserId: text('owner_user_id'),
+    /**
+     * The store schema version of the build that wrote the rows (src/lib/sync/version.ts). A
+     * build with a different one pulls the no-cursor snapshot, so rows an older build skipped
+     * (a value it could not parse) come back.
+     */
+    storeVersion: text('store_version'),
   },
   (table) => [check('sync_state_single_row', sql`${table.id} = 1`)],
 );
@@ -147,7 +163,7 @@ export const syncState = sqliteTable(
 export const outbox = sqliteTable(
   'outbox',
   {
-    /** UUIDv7: sorts in creation order. */
+    /** UUIDv7. Never the drain order: its clock can step backwards across a restart. */
     id: text('id').primaryKey(),
     method: text('method').notNull(),
     /** Path under the API origin, e.g. `/v1/flights`. */
@@ -161,8 +177,17 @@ export const outbox = sqliteTable(
     lastStatus: integer('last_status'),
     lastError: text('last_error'),
     createdAt: text('created_at').notNull(),
+    /**
+     * The drain order: one more than the largest queued `seq` at insert time, so it only grows
+     * while anything is queued. Rows queued before this column existed keep 0 and drain first,
+     * in rowid (insertion) order (src/lib/sync/outbox.ts).
+     */
+    seq: integer('seq').notNull().default(0),
   },
-  (table) => [index('outbox_next_attempt_idx').on(table.nextAttemptAt, table.id)],
+  (table) => [
+    index('outbox_next_attempt_idx').on(table.nextAttemptAt, table.id),
+    index('outbox_seq_idx').on(table.seq),
+  ],
 );
 
 export const schema = {

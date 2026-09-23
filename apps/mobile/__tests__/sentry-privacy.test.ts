@@ -1,7 +1,9 @@
 /**
  * Sentry's privacy configuration (docs/increments/09 acceptance, ruling P8): `Sentry.init` gets
- * `sendDefaultPii: false` and no replay, and `beforeSend`, `beforeSendTransaction` and
- * `beforeBreadcrumb` strip the magic-link token from URLs, query strings and `Referer`.
+ * `sendDefaultPii: false`, no replay and no native network breadcrumbs, and `beforeSend`,
+ * `beforeSendTransaction` and `beforeBreadcrumb` strip the magic-link token from URLs, query
+ * strings, fragments, request bodies and `Referer`, including in the native-shaped breadcrumbs
+ * (`http.query`, `http.fragment`) the device context merges into JavaScript events.
  */
 
 import * as Sentry from '@sentry/react-native';
@@ -12,6 +14,27 @@ const TOKEN = 'mAgIcLiNkToKeNmAgIcLiNkToKeN1234';
 const LANDING = `https://api.planeahead.app/auth/magic-link?token=${TOKEN}`;
 const VERIFY = `https://api.planeahead.app/api/auth/magic-link/verify?token=${TOKEN}`;
 const APP_LINK = `planeahead://auth/magic-link?token=${TOKEN}#frag`;
+/** A fragment and no query: a scrubber that only cut at `?` would keep it. */
+const FRAGMENT_LINK = `https://api.planeahead.app/auth/magic-link#token=${TOKEN}`;
+/** A relative path with a fragment: no scheme, so the free-text URL pass never sees it. */
+const RELATIVE_FRAGMENT = '/auth/magic-link#secret-fragment-value';
+/** What sentry-cocoa's NSURLSession breadcrumb looks like (SentryNetworkTracker.m). */
+const CURSOR = 'MTIzNDU2Nzg6YWJjZGVmMDEyMzQ1Njc4OQ';
+const SEARCH = 'number=AA100&date=2026-09-24&origin=KMIA';
+function nativeHttpCrumb(url: string, query: string, fragment?: string): Breadcrumb {
+  return {
+    type: 'http',
+    category: 'http',
+    level: 'info',
+    data: {
+      url,
+      method: 'GET',
+      status_code: 200,
+      'http.query': query,
+      ...(fragment === undefined ? {} : { 'http.fragment': fragment }),
+    },
+  };
+}
 
 type Options = ReturnType<typeof sentryOptions>;
 
@@ -23,7 +46,8 @@ function initialisedOptions(): Options {
   if (options === undefined) {
     throw new Error('Sentry.init was not called with options');
   }
-  return options;
+  // What the app passed, native-only keys included (the SDK's type does not declare them).
+  return options as Options;
 }
 
 function hint() {
@@ -52,6 +76,10 @@ describe('Sentry.init', () => {
     expect(
       integrations(defaults as Parameters<typeof integrations>[0]).map((entry) => entry.name),
     ).toEqual(['Breadcrumbs']);
+  });
+
+  it('turns the native NSURLSession network breadcrumbs off', () => {
+    expect(options.enableNetworkBreadcrumbs).toBe(false);
   });
 
   it('attaches no screenshots or view hierarchy and records no performance data', () => {
@@ -140,11 +168,71 @@ describe('Sentry.init', () => {
       data: { url: 'https://api.planeahead.app/api/auth/magic-link/verify', method: 'GET' },
     });
   });
+  it('beforeSend drops the raw query and fragment of native breadcrumbs merged into the event', () => {
+    const event: ErrorEvent = {
+      type: undefined,
+      message: 'sync failed',
+      breadcrumbs: [
+        nativeHttpCrumb('https://api.planeahead.app/v1/sync', `cursor=${CURSOR}`),
+        nativeHttpCrumb('https://api.planeahead.app/v1/flights/search', SEARCH),
+        nativeHttpCrumb(
+          'https://api.planeahead.app/api/auth/magic-link/verify',
+          `token=${TOKEN}`,
+          'frag',
+        ),
+      ],
+    };
+    const scrubbed = options.beforeSend?.(event, hint()) as ErrorEvent;
+    const serialised = JSON.stringify(scrubbed);
+    for (const secret of [TOKEN, CURSOR, 'AA100', 'KMIA', 'frag', 'http.query', 'http.fragment']) {
+      expect(serialised).not.toContain(secret);
+    }
+    expect(scrubbed.breadcrumbs?.[0]?.data).toEqual({
+      url: 'https://api.planeahead.app/v1/sync',
+      method: 'GET',
+      status_code: 200,
+    });
+  });
+
+  it('beforeBreadcrumb drops a native-shaped breadcrumb query as well', () => {
+    const scrubbed = options.beforeBreadcrumb?.(
+      nativeHttpCrumb('https://api.planeahead.app/v1/sync', `cursor=${CURSOR}`),
+      hint(),
+    );
+    expect(JSON.stringify(scrubbed)).not.toContain(CURSOR);
+    expect(scrubbed?.data).not.toHaveProperty('http.query');
+  });
+
+  it('removes a fragment-only token and a relative URL fragment', () => {
+    const scrubbed = options.beforeBreadcrumb?.(
+      { category: 'navigation', data: { from: RELATIVE_FRAGMENT, to: FRAGMENT_LINK } },
+      hint(),
+    );
+    expect(scrubbed?.data).toEqual({
+      from: '/auth/magic-link',
+      to: 'https://api.planeahead.app/auth/magic-link',
+    });
+  });
+
+  it('beforeSend drops the request body, which can carry the token or the address', () => {
+    const event: ErrorEvent = {
+      type: undefined,
+      request: {
+        url: 'https://api.planeahead.app/api/auth/sign-in/magic-link',
+        data: `token=${TOKEN}&email=ada%40example.com`,
+      },
+    };
+    const scrubbed = options.beforeSend?.(event, hint()) as ErrorEvent;
+    expect(scrubbed.request).not.toHaveProperty('data');
+    expect(JSON.stringify(scrubbed)).not.toContain('ada%40example.com');
+  });
 });
 
 describe('the scrubbers', () => {
   it('scrubUrl drops the query and the fragment and nothing else', () => {
     expect(scrubUrl(APP_LINK)).toBe('planeahead://auth/magic-link');
+    expect(scrubUrl(FRAGMENT_LINK)).toBe('https://api.planeahead.app/auth/magic-link');
+    expect(scrubUrl(RELATIVE_FRAGMENT)).toBe('/auth/magic-link');
     expect(scrubUrl('https://api.planeahead.app/v1/flights')).toBe(
       'https://api.planeahead.app/v1/flights',
     );

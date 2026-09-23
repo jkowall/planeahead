@@ -25,7 +25,7 @@ export const KV_KEYS = {
   analyticsId: 'planeahead.analytics_id',
   /** The zustand settings store (src/lib/settings.ts). */
   settings: 'planeahead.settings',
-  /** The address and time of the last magic link THIS install asked for. */
+  /** The addresses and times of the magic links THIS install asked for (a short JSON list). */
   pendingMagicLink: 'planeahead.magic_link_pending',
   /** Set once the first-launch anonymous sign-in has been attempted. */
   firstLaunchDone: 'planeahead.first_launch_done',

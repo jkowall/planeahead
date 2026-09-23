@@ -2,12 +2,15 @@
  * First-party analytics: `POST /v1/events` with the install-scoped analytics id (ADR 0005).
  *
  * The request carries NO session cookie and NO `X-Install-Id`: the analytics id is never joined
- * to an account (App Privacy: Device ID, not linked, purpose Analytics; no ATT prompt, because
- * first-party analytics to our own endpoint is not tracking). Events are queued in memory and
- * flushed in batches; the queue is bounded and nothing is persisted, so a lost batch is lost.
+ * to an account on our side. The App Privacy label still says Device ID, Linked, because the
+ * label shows a data type in one section and the OTHER per-install id, the install id, is
+ * registered under the account (ADR 0005). No ATT prompt: first-party analytics to our own
+ * endpoint is not tracking. Events are queued in memory and flushed in batches; the queue is
+ * bounded and nothing is persisted, so a lost batch is lost.
  *
- * The endpoint is still the API's 501 stub (no increment schedules it yet): a 501 turns the
- * client off for the rest of the process instead of retrying into it.
+ * `POST /v1/events` is still the API's 501 stub; the orchestrator assigned the endpoint to
+ * increment 12 (fix-round ruling S6). Until then a 501 turns the client off for the rest of the
+ * process instead of retrying into it.
  */
 
 export interface AnalyticsEvent {

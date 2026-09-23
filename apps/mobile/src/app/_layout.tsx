@@ -15,7 +15,7 @@ import { Stack } from 'expo-router';
 import { SQLiteProvider } from 'expo-sqlite';
 import { useEffect } from 'react';
 import { Appearance } from 'react-native';
-import { authClient } from '../lib/auth-client';
+import { authClient, refreshSession } from '../lib/auth-client';
 import { runtimeConfig } from '../lib/config';
 import { DATABASE_NAME, DATABASE_OPTIONS, onInitDatabase } from '../lib/db/client';
 import { queryClient, wireQueryManagers } from '../lib/query';
@@ -27,8 +27,11 @@ import { useSettings } from '../lib/settings';
 initSentry({ dsn: runtimeConfig().sentryDsn, environment: runtimeConfig().variant });
 wireQueryManagers();
 
-/** Module scope: one throttle for the life of the process. */
-const sessionRefresher = createSessionRefresher(() => authClient.getSession());
+/**
+ * Module scope: one throttle for the life of the process. It refetches the session atom, so the
+ * launch call shares the atom's own mount request (src/lib/auth-client.ts).
+ */
+const sessionRefresher = createSessionRefresher(refreshSession);
 
 function RootLayout() {
   const { data: session, isPending } = authClient.useSession();

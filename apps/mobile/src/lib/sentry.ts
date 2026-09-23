@@ -11,8 +11,17 @@
  * `/auth/magic-link?token=...` (the universal link the app opens) and of
  * `/api/auth/magic-link/verify?token=...` (the fetch that consumes it). `beforeSend`,
  * `beforeSendTransaction` and `beforeBreadcrumb` therefore strip query strings and fragments
- * from every URL, drop `Referer`, `Cookie` and `Authorization`, and mask any `token=` left in
- * free text. `__tests__/sentry-privacy.test.ts` proves it on hand-built events.
+ * from every URL, drop `Referer`, `Cookie`, `Authorization`, request bodies and the native
+ * breadcrumb keys `http.query` and `http.fragment`, and mask any `token=` left in free text.
+ * `__tests__/sentry-privacy.test.ts` proves it on hand-built events.
+ *
+ * Native network breadcrumbs are OFF (`enableNetworkBreadcrumbs: false`). sentry-cocoa records a
+ * breadcrumb for every NSURLSession task, React Native's `fetch` included, with the raw query in
+ * `http.query`; a native crash or app-hang event is sent by sentry-cocoa directly and never passes
+ * through the JavaScript `beforeSend`, so its breadcrumbs would carry the magic-link token of a
+ * verify that failed, the sync cursor (a stable pseudonymous user id) and, from increment 10, the
+ * flight search query (an itinerary). The JavaScript fetch and XHR breadcrumbs remain, and they
+ * pass `beforeBreadcrumb` (increment 9 review, finding auth-and-store-1).
  *
  * Source maps are uploaded by a separate CI step after `eas update`
  * (.github/workflows/mobile-preview.yml), never from the app.
@@ -31,6 +40,11 @@ const DROPPED_KEYS: ReadonlySet<string> = new Set([
   'referer',
   'referrer',
   'query_string',
+  'query',
+  // sentry-cocoa's network breadcrumb keeps the raw query and fragment beside the scrubbed URL;
+  // the device context integration merges native breadcrumbs into every JavaScript event.
+  'http.query',
+  'http.fragment',
   'set-cookie',
   'x-install-id',
   'idempotency-key',
@@ -50,7 +64,7 @@ const REPLAY_INTEGRATIONS: ReadonlySet<string> = new Set([
 
 const MAX_DEPTH = 10;
 
-/** `https://host/path?token=x#y` becomes `https://host/path`. */
+/** Cuts at the first `?` or `#`: `.../path?token=x#y` and `.../path#token=x` become `.../path`. */
 export function scrubUrl(url: string): string {
   const cut = url.search(/[?#]/);
   return cut === -1 ? url : url.slice(0, cut);
@@ -119,12 +133,23 @@ export interface SentryConfig {
   readonly environment: string;
 }
 
+/**
+ * `Sentry.init`'s options plus the one native option the React Native types do not declare:
+ * `initNativeSdk` forwards every option except the callbacks to sentry-cocoa, which reads
+ * `enableNetworkBreadcrumbs` (SentyOptionsInternal.m).
+ */
+export type AppSentryOptions = Sentry.ReactNativeOptions & {
+  readonly enableNetworkBreadcrumbs: false;
+};
+
 /** The exact options passed to `Sentry.init`; exported so the privacy test can inspect them. */
-export function sentryOptions(config: SentryConfig): Sentry.ReactNativeOptions {
+export function sentryOptions(config: SentryConfig): AppSentryOptions {
   return {
     ...(config.dsn === null ? { enabled: false } : { dsn: config.dsn }),
     environment: config.environment,
     sendDefaultPii: false,
+    // See the file header: no native NSURLSession breadcrumbs, whose `http.query` is raw.
+    enableNetworkBreadcrumbs: false,
     // replaysSessionSampleRate and replaysOnErrorSampleRate stay UNSET: see the file header.
     attachScreenshot: false,
     attachViewHierarchy: false,

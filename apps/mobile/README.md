@@ -18,11 +18,13 @@ pnpm --filter @planeahead/mobile lint
 pnpm --filter @planeahead/mobile db:generate   # a NEW migration after a schema.ts change
 node scripts/mobile-migrations-guard.mjs --base origin/main   # what CI checks (from the root)
 
-# Development builds (no Expo Go). From apps/mobile:
-APP_VARIANT=development pnpm exec expo prebuild          # writes ios/ and android/
-APP_VARIANT=development pnpm exec expo run:ios --device "iPhone 17 Pro"
-APP_VARIANT=development pnpm exec expo run:android       # needs ANDROID_HOME, see below
-APP_VARIANT=development pnpm exec expo start --dev-client
+# Development builds (no Expo Go). The package scripts set APP_VARIANT=development; production
+# and preview are built only through their EAS profiles. From apps/mobile:
+pnpm prebuild                                  # writes ios/ and android/ (CocoaPods needs a
+                                               # UTF-8 locale: LANG=en_US.UTF-8)
+pnpm ios --device "iPhone 17 Pro"
+pnpm android                                   # needs ANDROID_HOME, see below
+pnpm start                                     # Metro for an installed development build
 ```
 
 `expo run:*` builds, installs and starts Metro. With a build already installed, point the dev
@@ -40,16 +42,29 @@ token.
 Read by `app.config.ts` at prebuild and bundle time. Nothing here is a secret: everything in
 `extra` ships inside the app.
 
-| Variable                       | Meaning                                                                    | Unset                                                                                |
-| ------------------------------ | -------------------------------------------------------------------------- | ------------------------------------------------------------------------------------ |
-| `APP_VARIANT`                  | `production`, `preview` or `development`: bundle id, name, icon, App Group | `production`                                                                         |
-| `PLANEAHEAD_API_URL`           | API origin override, e.g. `http://localhost:8787` for `wrangler dev`       | production: `api.planeahead.app`; preview, development: `api-staging.planeahead.app` |
-| `GOOGLE_IOS_CLIENT_ID`         | iOS OAuth client id; its reverse is the iOS URL scheme                     | a placeholder that keeps prebuild working                                            |
-| `GOOGLE_WEB_CLIENT_ID`         | Web OAuth client id (the `aud` the API accepts from Android too)           | the Google button is hidden                                                          |
-| `GOOGLE_SERVICES_JSON`         | path to the variant's `google-services.json` (an EAS file variable)        | no FCM token on Android (spike 3)                                                    |
-| `SENTRY_DSN`                   | the mobile project's DSN                                                   | Sentry stays disabled                                                                |
-| `SENTRY_ORG`, `SENTRY_PROJECT` | for the native build phases and source maps                                | the Sentry plugin falls back to the environment                                      |
-| `EAS_PROJECT_ID`               | from `eas init`; enables EAS Update (`updates.url`)                        | no update URL                                                                        |
+| Variable                       | Meaning                                                                                                                                     | Unset                                                                                |
+| ------------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------ |
+| `APP_VARIANT`                  | `production`, `preview` or `development`: bundle id, name, icon, App Group, API host                                                        | `production` (the package scripts pass `development`)                                |
+| `APNS_ENVIRONMENT`             | `aps-environment` and the push token's environment; set by each EAS profile (development: `development`; preview, production: `production`) | `development` (a local, development-signed build); an error on an EAS builder        |
+| `PLANEAHEAD_API_URL`           | API origin override, e.g. `http://localhost:8787` for `wrangler dev`                                                                        | production, preview: `api.planeahead.app`; development: `api-staging.planeahead.app` |
+| `GOOGLE_IOS_CLIENT_ID`         | iOS OAuth client id; its reverse is the iOS URL scheme                                                                                      | a placeholder that keeps prebuild working                                            |
+| `GOOGLE_WEB_CLIENT_ID`         | Web OAuth client id (the `aud` the API accepts from Android too)                                                                            | the Google button is hidden                                                          |
+| `GOOGLE_SERVICES_JSON`         | path to the variant's `google-services.json` (an EAS file variable)                                                                         | no FCM token on Android (spike 3)                                                    |
+| `SENTRY_DSN`                   | the mobile project's DSN                                                                                                                    | Sentry stays disabled                                                                |
+| `SENTRY_ORG`, `SENTRY_PROJECT` | for the native build phases and source maps                                                                                                 | the Sentry plugin falls back to the environment                                      |
+| `EAS_PROJECT_ID`               | from `eas init`; enables EAS Update (`updates.url`)                                                                                         | no update URL                                                                        |
+
+On EAS, `SENTRY_DSN`, `SENTRY_ORG`, `SENTRY_PROJECT`, `GOOGLE_WEB_CLIENT_ID`,
+`GOOGLE_IOS_CLIENT_ID` and `EAS_PROJECT_ID` are EAS environment variables of the environment each
+profile names (eas.json `environment`), and `APP_VARIANT` and `APNS_ENVIRONMENT` are the profile's
+own `env`. `mobile-preview.yml` publishes with the same inputs (`eas update --environment preview`
+plus the preview profile's `env`), because the fingerprint runtime version hashes the whole config:
+an update resolved from different values would target a runtime no build has (ADR 0001).
+
+Which API each variant talks to, and whose magic links it opens (ADR 0005): the development build
+owns staging (`api-staging.planeahead.app`, including Sign in with Apple against staging); the
+production build and the preview build (the pre-release build of the store app) share
+`api.planeahead.app`, so a tester with both installed gets whichever app iOS picks for a link.
 
 ## Device acceptance (increment 9)
 
@@ -61,25 +76,28 @@ sign-in screen. Everything past the sign-in screen needs a reachable API, and ne
 `apps/api/README.md`) exists here, so the auth flows are proven in Jest with mocked transports
 (`__tests__/sign-in.test.tsx`, `apple-body-shape.test.ts`, `session-refresh.test.tsx`) and the
 device acceptance below is the owner's run. The one Android attempt stopped at adb authorization:
-accept "Allow USB debugging?" on the `Pixel_10_Pro_Fold_-_EMU` AVD once (its Play Store image
-asks), then run the Android steps.
+the owner's Android acceptance run uses the existing Play Store AVD `Pixel_10_Pro_Fold_-_EMU` and
+accepts its "Allow USB debugging?" prompt once on the emulator screen, then runs the Android
+steps.
 
 Once staging is deployed (or `wrangler dev` has a database and `PLANEAHEAD_API_URL` points at it,
 `http://localhost:8787` on the simulator, `http://10.0.2.2:8787` on the emulator):
 
-1. `APP_VARIANT=development pnpm exec expo run:ios --device "iPhone 17 Pro"`: the app opens on
-   the home screen with an anonymous session (first launch). Settings shows "Using PlaneAhead
-   without an account".
+1. `pnpm ios --device "iPhone 17 Pro"` (the development variant): the app opens on the home
+   screen with an anonymous session (first launch). Settings shows "Using PlaneAhead without an
+   account".
 2. Magic link: Settings, Sign in, enter an address you can read on the simulator; open the mail on
-   the same simulator and tap the link. The universal link opens the app on `auth/magic-link`,
-   which verifies in the app and returns home signed in; the flights added anonymously are still
-   there (the merge). Needs the API's `/.well-known/apple-app-site-association` live with
-   `APPLE_TEAM_ID` set, and the build signed with that team.
+   the same simulator and tap the link. The universal link (on `api-staging.planeahead.app`, the
+   development build's host) opens the app on `auth/magic-link`, which verifies in the app and
+   returns home signed in; the flights added anonymously are still there (the merge). Needs the
+   staging API's `/.well-known/apple-app-site-association` live with `APPLE_TEAM_ID` set, and the
+   build signed with that team. A link opened any other way (the `planeahead://` scheme, a link
+   requested on another device) asks before it signs in, and a link that signs in to an address
+   this phone did not request is signed out again (threat model 1.5).
 3. Native Apple on the simulator (signed in to an Apple Account in the simulator's Settings): the
    sign-in succeeds; `getCredentialStateAsync` is skipped on the simulator by design.
-4. Native Google on the AVD: `APP_VARIANT=development pnpm exec expo run:android`, then Continue
-   with Google; a fresh emulator walks Play Services, the silent sign-in, account creation and
-   the explicit sheet.
+4. Native Google on the AVD: `pnpm android`, then Continue with Google; a fresh emulator walks
+   Play Services, the silent sign-in, account creation and the explicit sheet.
 5. Settings offline: pick Dark, enable airplane mode, kill and relaunch the app: Dark is applied
    on the first frame.
 
@@ -90,29 +108,36 @@ Before the first device build that signs in (copied into the build log by the or
 - Apple: register the three App IDs `app.planeahead.mobile`, `.preview`, `.dev` with the Sign in
   with Apple capability, the three App Groups `group.app.planeahead.mobile`, `.preview`, `.dev`,
   and Associated Domains; provide the Team ID, the Sign in with Apple `.p8` key and its key id.
-  Set `APPLE_TEAM_ID` on the API per environment (the AASA 404s without it).
-- Decide which variant signs in with Apple against staging: the API accepts ONE
-  `APPLE_BUNDLE_ID` per environment (ADR 0005).
+  Set `APPLE_TEAM_ID` on the API per environment (the AASA 404s without it). Leave
+  `APP_BUNDLE_IDS` unset: staging serves the development id, production the production and
+  preview ids.
+- Sign in with Apple against staging belongs to the development build: set staging's
+  `APPLE_BUNDLE_ID` to `app.planeahead.mobile.dev` and production's to `app.planeahead.mobile`.
+  The preview build's Apple sign-in waits for increment 12, which makes the variable a list.
 - Google: create the OAuth client ids (web, iOS, Android per variant with the signing SHA-1) and
-  set `GOOGLE_WEB_CLIENT_ID` and `GOOGLE_IOS_CLIENT_ID` for the builds and the three
-  `GOOGLE_CLIENT_ID_*` secrets on the API.
+  set `GOOGLE_WEB_CLIENT_ID` and `GOOGLE_IOS_CLIENT_ID` as EAS environment variables and the
+  three `GOOGLE_CLIENT_ID_*` secrets on the API.
 - Firebase: a project with the three Android apps, and each variant's `google-services.json` as
   the EAS file variable `GOOGLE_SERVICES_JSON` (the FCM token needs it, spike 3).
 - Google Play: register as an Organization (a personal account created after November 2023
   faces a 12-tester, 14-day gate), then provide the Play upload and app signing SHA-256
   fingerprints per package and set `ANDROID_SHA256_FINGERPRINTS` on the API
-  (`package=FP,FP;package=FP`).
-- Sentry: a mobile project; `SENTRY_DSN`, `SENTRY_ORG`, `SENTRY_PROJECT` for builds, and
-  `SENTRY_AUTH_TOKEN` as an EAS secret and a GitHub secret (source maps).
+  (`package=FP,FP;package=FP`; each host lists only its own packages, whatever else is set).
+- Sentry: a mobile project; `SENTRY_DSN`, `SENTRY_ORG`, `SENTRY_PROJECT` as EAS environment
+  variables in `development`, `preview` and `production`, and `SENTRY_AUTH_TOKEN` as an EAS
+  secret and a GitHub secret (source maps).
 - Expo: an account on the Starter plan, `eas init` in `apps/mobile` (its project id becomes the
-  `EAS_PROJECT_ID` variable in EAS and the GitHub variable `EAS_PROJECT_ID`), and a robot token as
-  the GitHub secret `EXPO_TOKEN` (mobile-preview.yml skips without it).
+  `EAS_PROJECT_ID` variable in all three EAS environments and the GitHub variable
+  `EAS_PROJECT_ID`), the EAS environment variables above, and a robot token as the GitHub secret
+  `EXPO_TOKEN` (mobile-preview.yml skips without it). Every pull request's update goes to the
+  `preview` branch, which the preview builds' channel serves.
 
 ## Layout
 
 ```
 index.ts                     entry: polyfillWebCrypto() first, then expo-router
 app.config.ts                variants, entitlements, links, privacy manifest, plugin order
+react-native.config.js       keeps @maplibre/maplibre-react-native unlinked until the maps increment
 plugins/withApsEnvironment.ts  reserved last plugin slot (increment 11 implements it)
 src/app/_layout.tsx          Sentry, SQLiteProvider (migrations before any screen), Query,
                              session refresh, first-launch anonymous sign-in
@@ -122,8 +147,9 @@ src/app/auth/magic-link.tsx  the universal-link target; verifies in the app
 src/lib/auth-client.ts       Better Auth Expo client over SecureStore
 src/lib/native-signin/       Apple and Google native sign-in bodies and nonces
 src/lib/api-client.ts        the typed /v1 client (pre-compiled Client from @planeahead/api/client)
-src/lib/db/                  schema, bundled migrations, SqliteLike seam, kv-store, live query
-src/lib/sync/                page apply, pull client, outbox, apply gate, reset
+src/lib/db/                  schema, bundled migrations, SqliteLike seam, kv-store, live query,
+                             store-signal (the per-commit change signal live queries re-run on)
+src/lib/sync/                page apply, pull client, outbox, apply gate, reset, store version
 src/lib/sentry.ts            init options and the scrubbers
 src/lib/analytics.ts         POST /v1/events with the analytics id only
 __tests__/                   Jest; support/memory-sqlite.ts is the in-memory SqliteLike
@@ -141,9 +167,19 @@ libraries get their config plugin in `app.config.ts` and Expo's version in the c
 **The store is written through `SqliteLike`, synchronously.** A sync page is one
 `BEGIN IMMEDIATE` transaction on the app's one connection with its cursor; never
 `withExclusiveTransactionAsync` (a second connection with a deferred BEGIN). No `WITHOUT ROWID`,
-no `INSERT OR REPLACE`, no DELETE without a WHERE clause: each silences the update hook that live
-queries depend on. Use `useLiveQuery` from `src/lib/db/live-query.ts` (it coalesces), never
-Drizzle's directly, and denormalise onto the root table a list queries.
+no `INSERT OR REPLACE`, no DELETE without a WHERE clause (each silences SQLite's update hook).
+
+**Live queries re-run on the store's signal, once per commit.** Use `useLiveQuery` from
+`src/lib/db/live-query.ts`, never Drizzle's: it listens to `src/lib/db/store-signal.ts`, which
+every writer bumps once after its transaction commits, not to the update hook (one JavaScript task
+per changed row on a device). A new writer goes through `commitWrite(db, tables, fn)`; a write
+that does not signal leaves lists stale. Denormalise onto the root table a list queries.
+
+**The server refusing the cursor keeps the rows.** A 410 `resync_required` or 400
+`invalid_cursor` only clears the cursor; the no-cursor snapshot replaces the rows in its own
+transaction, so a failed snapshot request leaves the last known flights. The store empties at once
+only when the session user is not the store's owner. The outbox drains by insertion order (`seq`),
+never by its uuidv7 ids.
 
 **Migrations are append only.** A committed file under `src/lib/db/migrations/` never changes;
 devices that applied it would never see the edit. CI's `test-mobile` job fails otherwise.

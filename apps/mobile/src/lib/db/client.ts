@@ -1,10 +1,14 @@
 /**
  * The app's one SQLite connection and everything built on it.
  *
- * `SQLiteProvider` (src/app/_layout.tsx) opens `planeahead.db` with the change listener on (the
- * update hook `useLiveQuery` needs) and calls `onInitDatabase` before any child mounts. The
- * provider's memo compares `onInit` by reference, so it is this module-scope function, never an
- * inline closure (a new closure would reopen the database on every render of the root layout).
+ * `SQLiteProvider` (src/app/_layout.tsx) opens `planeahead.db` and calls `onInitDatabase` before
+ * any child mounts. The provider's memo compares `onInit` by reference, so it is this module-scope
+ * function, never an inline closure (a new closure would reopen the database on every render of
+ * the root layout).
+ *
+ * The change listener stays OFF: live queries refresh on the store's explicit per-commit signal
+ * (src/lib/db/store-signal.ts), and with the listener on expo-sqlite would send one JavaScript
+ * event per changed row that nothing reads.
  *
  * The sync apply, the outbox and the store reset see the same connection through `SqliteLike`,
  * whose `transaction` is Drizzle's synchronous `db.transaction(cb, { behavior: 'immediate' })`
@@ -21,8 +25,8 @@ import { sqliteLikeFromExpo, type SqliteLike } from './sqlite-like';
 
 export const DATABASE_NAME = 'planeahead.db';
 
-/** `enableChangeListener` is what makes the update hook reach `useLiveQuery`. */
-export const DATABASE_OPTIONS: SQLiteOpenOptions = { enableChangeListener: true };
+/** No per-row change events: see the file header. */
+export const DATABASE_OPTIONS: SQLiteOpenOptions = { enableChangeListener: false };
 
 export type StoreOrm = ExpoSQLiteDatabase<typeof schema>;
 

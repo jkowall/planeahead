@@ -6,40 +6,86 @@
  * the store at the last committed page with that page's cursor, never with rows past the cursor
  * or a cursor past the rows. The transaction is synchronous (expo-sqlite `*Sync`, Drizzle's Expo
  * session), so nothing else JavaScript does can interleave with it: no outbox write, no
- * live-query read (a live query's refresh is deferred to a trailing microtask, see
- * src/lib/db/live-query.ts).
+ * live-query read. After the COMMIT the page signals the tables it touched, once
+ * (src/lib/db/store-signal.ts), which is what the live queries re-run on: a 200-row page is one
+ * re-run, not 200.
+ *
+ * A page fetched WITHOUT a cursor is the snapshot of everything the user owns (increment 8 serves
+ * it as one page): it replaces the synced rows, and the delete, the snapshot and its cursor are
+ * the same transaction (increment 9 review, auth-and-store-4). Rows an optimistic writer added
+ * whose outbox mutation has not reached the server yet are not in the snapshot; increment 10's
+ * writer re-applies them from the outbox.
+ *
+ * Forward compatibility (auth-and-store-5): the page's shell (`rpcVersion`, `serverTime`,
+ * `cursor`, `hasMore`) is parsed strictly by the caller, but `changes[]` and `flights[]` arrive
+ * as arrays of unknown and each element is parsed here on its own. An element this build cannot
+ * read (a provider id, an entity or an op a newer server added) is skipped and reported by
+ * entity, id and the failing field, never by value; the rest of the page and the cursor still
+ * commit, because refusing the page would stall the feed on one value for ever. The store's
+ * schema version (src/lib/sync/version.ts) is written with the cursor, and a build with a
+ * different one pulls the snapshot again, which brings the skipped rows back.
  *
  * Writes follow the schema's hook rules (src/lib/db/schema.ts): `INSERT ... ON CONFLICT (id) DO
  * UPDATE` and `DELETE ... WHERE id = ?`, never `INSERT OR REPLACE`, never an unqualified delete.
  * A subscription upsert never touches the snapshot columns; the page's `flights` array is what
- * writes them, onto every subscription naming that flight key (the denormalisation `useLiveQuery`
- * needs, because it only hears about the root table).
+ * writes them, onto every subscription naming that flight key (the denormalisation the live
+ * query needs, because it is keyed by its root table).
  */
 
 import {
   FlightSubscriptionRowV1,
   PreferenceSettingsSchema,
+  SyncChangeV1,
+  SyncEnvelopeV1,
+  SyncFlightV1,
   UserPreferencesSchema,
-  type SyncChangeV1,
-  type SyncEnvelopeV1,
-  type SyncFlightV1,
   type UserPreferences,
 } from '@planeahead/shared';
 import { z } from 'zod';
 import { sqlBoolean, type SqliteLike } from '../db/sqlite-like';
-import { writeCursor } from './store';
+import { notifyTablesChanged, type StoreTable } from '../db/store-signal';
+import { deleteSyncedRows, SYNCED_TABLES, writeSyncState } from './store';
+
+/**
+ * The page as the client parses it: the shell strictly, the elements as unknown. `SyncEnvelopeV1`
+ * itself would refuse the whole page over one element it cannot read.
+ */
+export const SyncPageShell = SyncEnvelopeV1.extend({
+  changes: z.array(z.unknown()),
+  flights: z.array(z.unknown()),
+});
+export type SyncPageShell = z.infer<typeof SyncPageShell>;
+
+/** An element that was not applied: named by entity, id and the failing field, never by value. */
+export interface SkippedElement {
+  readonly entity: string;
+  readonly id: string;
+  /** The path of the first field that did not parse, e.g. `source` or `entity`. */
+  readonly field: string;
+}
 
 export interface ApplyOutcome {
   readonly changes: number;
   readonly flights: number;
-  /** Changes whose row did not parse; reported (without the row) and skipped. */
-  readonly skipped: readonly { readonly entity: string; readonly id: string }[];
+  readonly skipped: readonly SkippedElement[];
   readonly cursor: string;
   /** The last `user_preferences` upsert of the page, for the settings store. */
   readonly preferences: UserPreferences | null;
+  /** True when the page was a snapshot that replaced the synced rows. */
+  readonly replaced: boolean;
 }
 
-const PreferencesRow = UserPreferencesSchema.extend({
+export interface ApplyOptions {
+  /** The page was pulled without a cursor: it replaces every synced row, in the same transaction. */
+  readonly replace?: boolean;
+  /** The session user the page was pulled for; recorded as the store's owner. */
+  readonly ownerUserId?: string | null;
+  /** The build's store version (src/lib/sync/version.ts), recorded with the cursor. */
+  readonly storeVersion?: string | null;
+  readonly now?: () => Date;
+}
+
+export const PreferencesRow = UserPreferencesSchema.extend({
   id: z.string().min(1),
   settings: PreferenceSettingsSchema,
   createdAt: z.string(),
@@ -140,7 +186,7 @@ function upsertOpaque(db: SqliteLike, table: string, change: SyncChangeV1): void
   );
 }
 
-function tableFor(entity: SyncChangeV1['entity']): string {
+function tableFor(entity: SyncChangeV1['entity']): StoreTable {
   switch (entity) {
     case 'flight_subscriptions':
       return 'flight_subscriptions';
@@ -193,40 +239,81 @@ function applySnapshot(db: SqliteLike, flight: SyncFlightV1): void {
   );
 }
 
+const UUID_SHAPE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+function firstField(error: z.ZodError): string {
+  const path = error.issues[0]?.path ?? [];
+  return path.length === 0 ? '(root)' : path.map(String).join('.');
+}
+
+/** What a report may say about an element it could not parse: a known entity and a uuid, or less. */
+function describe(raw: unknown): { entity: string; id: string } {
+  const record = typeof raw === 'object' && raw !== null ? (raw as Record<string, unknown>) : {};
+  const entity = typeof record['entity'] === 'string' ? record['entity'].slice(0, 64) : 'unknown';
+  const id = typeof record['id'] === 'string' && UUID_SHAPE.test(record['id']) ? record['id'] : '?';
+  return { entity, id };
+}
+
 /**
- * Applies `page` in one immediate transaction and returns what it did. A row that does not parse
- * is skipped and named in `skipped` (the caller reports it without the row's contents); the rest
- * of the page and the cursor still commit, because refusing the page would stall the feed on one
- * bad row for ever.
+ * Applies `page` in one immediate transaction and returns what it did; signals the touched tables
+ * after the commit. A row or a flight that does not parse is skipped and named in `skipped`.
  */
 export function applySyncPage(
   db: SqliteLike,
-  page: SyncEnvelopeV1,
-  now: () => Date = () => new Date(),
+  page: SyncPageShell,
+  options: ApplyOptions = {},
 ): ApplyOutcome {
-  return db.transaction(
-    () => {
-      const skipped: { entity: string; id: string }[] = [];
+  const replace = options.replace ?? false;
+  const touched = new Set<StoreTable>(['sync_state']);
+  if (replace) {
+    for (const table of SYNCED_TABLES) {
+      touched.add(table);
+    }
+  }
+  const outcome = db.transaction(
+    (): ApplyOutcome => {
+      const skipped: SkippedElement[] = [];
       let preferences: UserPreferences | null = null;
       let changes = 0;
+      let flights = 0;
 
-      for (const change of page.changes) {
+      if (replace) {
+        deleteSyncedRows(db);
+      }
+
+      for (const raw of page.changes) {
+        const parsed = SyncChangeV1.safeParse(raw);
+        if (!parsed.success) {
+          skipped.push({ ...describe(raw), field: firstField(parsed.error) });
+          continue;
+        }
+        const change = parsed.data;
+        const table = tableFor(change.entity);
         if (change.op === 'delete') {
-          db.run(`DELETE FROM ${tableFor(change.entity)} WHERE id = ?`, [change.id]);
+          db.run(`DELETE FROM ${table} WHERE id = ?`, [change.id]);
+          touched.add(table);
           changes += 1;
           continue;
         }
         if (change.entity === 'flight_subscriptions') {
           const row = FlightSubscriptionRowV1.safeParse(change.row);
           if (!row.success || row.data.id !== change.id) {
-            skipped.push({ entity: change.entity, id: change.id });
+            skipped.push({
+              entity: change.entity,
+              id: change.id,
+              field: row.success ? 'row.id' : `row.${firstField(row.error)}`,
+            });
             continue;
           }
           upsertSubscription(db, row.data);
         } else if (change.entity === 'user_preferences') {
           const row = PreferencesRow.safeParse(change.row);
           if (!row.success || row.data.id !== change.id) {
-            skipped.push({ entity: change.entity, id: change.id });
+            skipped.push({
+              entity: change.entity,
+              id: change.id,
+              field: row.success ? 'row.id' : `row.${firstField(row.error)}`,
+            });
             continue;
           }
           upsertPreferences(db, row.data);
@@ -235,16 +322,36 @@ export function applySyncPage(
         } else {
           upsertOpaque(db, OPAQUE_TABLES[change.entity], change);
         }
+        touched.add(table);
         changes += 1;
       }
 
-      for (const flight of page.flights) {
-        applySnapshot(db, flight);
-      }
+      page.flights.forEach((raw, index) => {
+        const flight = SyncFlightV1.safeParse(raw);
+        if (!flight.success) {
+          // The flight key names an itinerary, so a report carries the position only.
+          skipped.push({
+            entity: 'flight',
+            id: `#${String(index)}`,
+            field: firstField(flight.error),
+          });
+          return;
+        }
+        applySnapshot(db, flight.data);
+        touched.add('flight_subscriptions');
+        flights += 1;
+      });
 
-      writeCursor(db, page.cursor, now().toISOString());
-      return { changes, flights: page.flights.length, skipped, cursor: page.cursor, preferences };
+      writeSyncState(db, {
+        cursor: page.cursor,
+        pulledAt: (options.now ?? (() => new Date()))().toISOString(),
+        ownerUserId: options.ownerUserId ?? null,
+        storeVersion: options.storeVersion ?? null,
+      });
+      return { changes, flights, skipped, cursor: page.cursor, preferences, replaced: replace };
     },
     { behavior: 'immediate' },
   );
+  notifyTablesChanged(touched);
+  return outcome;
 }

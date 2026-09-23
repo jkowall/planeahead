@@ -15,6 +15,26 @@
  * applied before every plugin, `expo-notifications` then writes `aps-environment` from its `mode`,
  * and increment 11's expo-widgets writes the literal `development` again, which is why the local
  * `withApsEnvironment` plugin is reserved as the LAST entry.
+ *
+ * Which API each variant talks to, and which host's universal links it claims (ruling S2, ADR
+ * 0005): each host is claimed by exactly one kind of build, so a link opens a predictable app.
+ * The development variant owns staging (`api-staging.planeahead.app`: its links, its AASA entry
+ * and its single `APPLE_BUNDLE_ID`, so Sign in with Apple against staging is the development
+ * build's). Production and preview share `api.planeahead.app`: preview is the pre-release build
+ * of the store app, talks to the production API, and a tester with both installed gets whichever
+ * app iOS picks for a link. Preview's Sign in with Apple waits for increment 12, which makes the
+ * API's `APPLE_BUNDLE_ID` a list.
+ *
+ * The APNs environment follows the build's SIGNING, not the variant: an internal (ad hoc) preview
+ * build registers with production APNs like a store build. `APNS_ENVIRONMENT` comes from the EAS
+ * profile (eas.json: `development` for the development profile, `production` for preview and
+ * production); local builds, which are development signed, default to `development`.
+ *
+ * `@maplibre/maplibre-react-native` is a pinned dependency that is NOT linked in Phase 0
+ * (react-native.config.js disables its native platforms, and its config plugin is not listed):
+ * linked, it merged ACCESS_FINE_LOCATION and ACCESS_COARSE_LOCATION into the Android manifest and
+ * a location-requesting pod into iOS, which the privacy answers deny (increment 9 review,
+ * expo-correctness-2). The maps increment links it and declares location honestly.
  */
 
 import type { ConfigContext, ExpoConfig } from 'expo/config';
@@ -23,13 +43,20 @@ import type { ApsEnvironmentProps } from './plugins/withApsEnvironment';
 export const APP_VARIANTS = ['production', 'preview', 'development'] as const;
 export type AppVariant = (typeof APP_VARIANTS)[number];
 
+export const PRODUCTION_API_HOST = 'api.planeahead.app';
+export const STAGING_API_HOST = 'api-staging.planeahead.app';
+
 interface VariantIdentity {
   readonly bundleIdentifier: string;
   readonly name: string;
   readonly icon: string;
   readonly adaptiveBackground: string;
-  /** Where the app's API lives unless `PLANEAHEAD_API_URL` overrides it (a local wrangler dev). */
-  readonly apiUrl: string;
+  /**
+   * The API host this variant talks to and whose magic links it claims (applinks, the App Link
+   * intent filter, and the AASA/assetlinks entry that host's Worker serves). `PLANEAHEAD_API_URL`
+   * overrides the API origin for a local wrangler dev, never the claimed host.
+   */
+  readonly apiHost: string;
 }
 
 export const VARIANT_IDENTITIES: Readonly<Record<AppVariant, VariantIdentity>> = {
@@ -38,26 +65,39 @@ export const VARIANT_IDENTITIES: Readonly<Record<AppVariant, VariantIdentity>> =
     name: 'PlaneAhead',
     icon: './assets/icon-production.png',
     adaptiveBackground: '#1C4FD6',
-    apiUrl: 'https://api.planeahead.app',
+    apiHost: PRODUCTION_API_HOST,
   },
   preview: {
     bundleIdentifier: 'app.planeahead.mobile.preview',
     name: 'PlaneAhead Preview',
     icon: './assets/icon-preview.png',
     adaptiveBackground: '#6D28D9',
-    apiUrl: 'https://api-staging.planeahead.app',
+    apiHost: PRODUCTION_API_HOST,
   },
   development: {
     bundleIdentifier: 'app.planeahead.mobile.dev',
     name: 'PlaneAhead Dev',
     icon: './assets/icon-development.png',
     adaptiveBackground: '#B45309',
-    apiUrl: 'https://api-staging.planeahead.app',
+    apiHost: STAGING_API_HOST,
   },
 };
 
-/** The hosts whose `/.well-known` files the API Worker serves (apps/api/src/routes/well-known.ts). */
-export const UNIVERSAL_LINK_HOSTS = ['api.planeahead.app', 'api-staging.planeahead.app'] as const;
+export const APNS_ENVIRONMENTS = ['development', 'production'] as const;
+export type ApnsEnvironment = (typeof APNS_ENVIRONMENTS)[number];
+
+/**
+ * Android permissions the template or a dependency adds and the app never uses: the overlay and
+ * external-storage entries of the template, and the biometric ones androidx.biometric brings in
+ * through expo-secure-store (the app never asks for `requireAuthentication`).
+ */
+export const BLOCKED_ANDROID_PERMISSIONS = [
+  'android.permission.SYSTEM_ALERT_WINDOW',
+  'android.permission.READ_EXTERNAL_STORAGE',
+  'android.permission.WRITE_EXTERNAL_STORAGE',
+  'android.permission.USE_BIOMETRIC',
+  'android.permission.USE_FINGERPRINT',
+] as const;
 
 /**
  * The path the emailed magic link opens (apps/api/src/auth/paths.ts MAGIC_LINK_LANDING_PATH).
@@ -75,6 +115,25 @@ export function appVariant(value: string | undefined): AppVariant {
     throw new Error(`APP_VARIANT must be one of ${APP_VARIANTS.join(', ')}; got "${variant}"`);
   }
   return variant as AppVariant;
+}
+
+/**
+ * `APNS_ENVIRONMENT`, set by every EAS profile. Unset means a local, development-signed build; on
+ * an EAS builder (`EAS_BUILD`) it must be set, or a store build could ship a sandbox entitlement.
+ */
+export function apnsEnvironment(value: string | undefined, onEasBuilder: boolean): ApnsEnvironment {
+  if (value === undefined || value === '') {
+    if (onEasBuilder) {
+      throw new Error('APNS_ENVIRONMENT must be set by the EAS build profile (eas.json)');
+    }
+    return 'development';
+  }
+  if (!(APNS_ENVIRONMENTS as readonly string[]).includes(value)) {
+    throw new Error(
+      `APNS_ENVIRONMENT must be one of ${APNS_ENVIRONMENTS.join(', ')}; got "${value}"`,
+    );
+  }
+  return value as ApnsEnvironment;
 }
 
 export function reversedClientId(clientId: string): string {
@@ -97,7 +156,7 @@ export default ({ config }: ConfigContext): ExpoConfig => {
   const variant = appVariant(env('APP_VARIANT'));
   const identity = VARIANT_IDENTITIES[variant];
   const appGroup = `group.${identity.bundleIdentifier}`;
-  const apsEnvironment = variant === 'production' ? 'production' : 'development';
+  const apsEnvironment = apnsEnvironment(env('APNS_ENVIRONMENT'), env('EAS_BUILD') === 'true');
   const googleIosClientId = env('GOOGLE_IOS_CLIENT_ID') ?? PLACEHOLDER_GOOGLE_IOS_CLIENT_ID;
   const easProjectId = env('EAS_PROJECT_ID');
   const sentryOrganization = env('SENTRY_ORG');
@@ -129,7 +188,8 @@ export default ({ config }: ConfigContext): ExpoConfig => {
       bundleIdentifier: identity.bundleIdentifier,
       supportsTablet: false,
       usesAppleSignIn: true,
-      associatedDomains: UNIVERSAL_LINK_HOSTS.map((host) => `applinks:${host}`),
+      // One host per variant (see the file header).
+      associatedDomains: [`applinks:${identity.apiHost}`],
       entitlements: {
         // Declared explicitly per variant: increment 11's expo-widgets and apple-targets read
         // the group at config-evaluation time, and the owner registers all three with Apple.
@@ -165,14 +225,48 @@ export default ({ config }: ConfigContext): ExpoConfig => {
             NSPrivacyAccessedAPITypeReasons: ['35F9.1'],
           },
         ],
+        // What the app collects, as the App Privacy label will say it (ADR 0005). Nothing is
+        // used for tracking, so no ATT prompt.
         NSPrivacyCollectedDataTypes: [
           {
-            // The install-scoped analytics id (src/lib/analytics.ts): a Device ID, never joined
-            // to the account, used for first-party analytics only; no ATT prompt.
+            // Two per-install random ids (src/lib/identity.ts): the install id is registered under
+            // the account with POST /v1/devices (App Functionality), the analytics id goes to
+            // POST /v1/events alone (Analytics). One entry, because the label shows a data type
+            // in one section: the install id makes it Linked.
             NSPrivacyCollectedDataType: 'NSPrivacyCollectedDataTypeDeviceID',
-            NSPrivacyCollectedDataTypeLinked: false,
+            NSPrivacyCollectedDataTypeLinked: true,
             NSPrivacyCollectedDataTypeTracking: false,
-            NSPrivacyCollectedDataTypePurposes: ['NSPrivacyCollectedDataTypePurposeAnalytics'],
+            NSPrivacyCollectedDataTypePurposes: [
+              'NSPrivacyCollectedDataTypePurposeAppFunctionality',
+              'NSPrivacyCollectedDataTypePurposeAnalytics',
+            ],
+          },
+          {
+            // The magic-link address and the account's address from Apple or Google.
+            NSPrivacyCollectedDataType: 'NSPrivacyCollectedDataTypeEmailAddress',
+            NSPrivacyCollectedDataTypeLinked: true,
+            NSPrivacyCollectedDataTypeTracking: false,
+            NSPrivacyCollectedDataTypePurposes: [
+              'NSPrivacyCollectedDataTypePurposeAppFunctionality',
+            ],
+          },
+          {
+            // The account's user id (the session, every /v1 request).
+            NSPrivacyCollectedDataType: 'NSPrivacyCollectedDataTypeUserID',
+            NSPrivacyCollectedDataTypeLinked: true,
+            NSPrivacyCollectedDataTypeTracking: false,
+            NSPrivacyCollectedDataTypePurposes: [
+              'NSPrivacyCollectedDataTypePurposeAppFunctionality',
+            ],
+          },
+          {
+            // The name Apple sends on the first native sign-in (`fullName`), kept on the account.
+            NSPrivacyCollectedDataType: 'NSPrivacyCollectedDataTypeName',
+            NSPrivacyCollectedDataTypeLinked: true,
+            NSPrivacyCollectedDataTypeTracking: false,
+            NSPrivacyCollectedDataTypePurposes: [
+              'NSPrivacyCollectedDataTypePurposeAppFunctionality',
+            ],
           },
           {
             NSPrivacyCollectedDataType: 'NSPrivacyCollectedDataTypeCrashData',
@@ -193,16 +287,13 @@ export default ({ config }: ConfigContext): ExpoConfig => {
         backgroundColor: identity.adaptiveBackground,
       },
       predictiveBackGestureEnabled: false,
+      blockedPermissions: [...BLOCKED_ANDROID_PERMISSIONS],
       intentFilters: [
         {
           action: 'VIEW',
-          // Android verifies every host in a filter with autoVerify against its assetlinks.json.
+          // Android verifies the host against its assetlinks.json; one host per variant.
           autoVerify: true,
-          data: UNIVERSAL_LINK_HOSTS.map((host) => ({
-            scheme: 'https',
-            host,
-            pathPrefix: MAGIC_LINK_PATH,
-          })),
+          data: [{ scheme: 'https', host: identity.apiHost, pathPrefix: MAGIC_LINK_PATH }],
           category: ['BROWSABLE', 'DEFAULT'],
         },
       ],
@@ -221,7 +312,8 @@ export default ({ config }: ConfigContext): ExpoConfig => {
         },
       ],
       'expo-sqlite',
-      'expo-secure-store',
+      // No Face ID purpose string: the app never stores an item with `requireAuthentication`.
+      ['expo-secure-store', { faceIDPermission: false }],
       'expo-apple-authentication',
       ['react-native-nitro-google-signin', { iosUrlScheme: reversedClientId(googleIosClientId) }],
       [
@@ -233,11 +325,6 @@ export default ({ config }: ConfigContext): ExpoConfig => {
         },
       ],
       ['expo-notifications', { mode: apsEnvironment }],
-      // Not in the spec's list, placed here so that list's relative order is unchanged: without
-      // it the MapLibre pod has no MapLibre SDK to compile against (it adds the SDK's Swift
-      // package in a Podfile post_install) and the iOS build fails, although Phase 0 only pins
-      // the dependency (spike 1, ADR 0001).
-      '@maplibre/maplibre-react-native',
       // Reserved last (increment 11 makes it real): it will force `aps-environment` after
       // expo-widgets writes its literal `development`. Named by path with its extension: Expo's
       // plugin resolver transpiles a TypeScript plugin file, while an `import` from this config
@@ -248,12 +335,15 @@ export default ({ config }: ConfigContext): ExpoConfig => {
       // Off for Phase 0: it changes memoisation for every component, the live-query list
       // included, and nothing here has been profiled with it (facts decision 15).
       reactCompiler: false,
+      // Still beta and opt-in in SDK 57; the app's few routes are named by hand (ADR 0001).
       typedRoutes: false,
     },
     extra: {
       variant,
-      apiUrl: env('PLANEAHEAD_API_URL') ?? identity.apiUrl,
-      universalLinkHosts: [...UNIVERSAL_LINK_HOSTS],
+      apiUrl: env('PLANEAHEAD_API_URL') ?? `https://${identity.apiHost}`,
+      // The magic-link screen verifies automatically only for a link that arrived on this host.
+      universalLinkHosts: [identity.apiHost],
+      apnsEnvironment: apsEnvironment,
       appGroup,
       googleIosClientId,
       googleWebClientId: env('GOOGLE_WEB_CLIENT_ID') ?? null,

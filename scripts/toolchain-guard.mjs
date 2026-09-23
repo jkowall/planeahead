@@ -22,6 +22,14 @@
  *   - @better-auth/expo not exactly better-auth (the server plugin and client move together)
  *   - @sentry/react-native off the 7.x line Expo SDK 57 pins, or an @sentry/cli that is not the
  *     exact version @sentry/react-native depends on (its Xcode phase resolves it from apps/mobile)
+ *   - any apps/mobile dependency that Expo's own manifest (expo/bundledNativeModules.json, read
+ *     from the installed expo) lists, resolved outside that manifest's range: a Renovate bump of
+ *     expo-sqlite to the SDK 58 line, or of @sentry/react-native past ~7.11.0, reaches a native
+ *     build unchecked otherwise (increment 9 review, expo-correctness-3)
+ *   - the facts sheet's exact mobile pins, which Expo's manifest does not cover:
+ *     react-native-nitro-google-signin 2.3.0, react-native-nitro-modules 0.37.1,
+ *     @maplibre/maplibre-react-native 11.4.0, jest 29.7.0, and @sentry/react-native ~7.11.0
+ *   The CI test-mobile job also runs `expo install --check`, Expo's own view of the same manifest.
  *
  * The wrangler assertion is a PAIR check, not a frozen constant. @cloudflare/vitest-plugin
  * declares `wrangler` as an ordinary dependency at an exact version (1.1.13 declares 4.135.0),
@@ -277,6 +285,127 @@ if (resolved.has('expo')) {
   }
 }
 
+// ---------------------------------------------------------------------------------------------
+// The apps/mobile dependency set against Expo's manifest and the exact pins (increment 9 review).
+// ---------------------------------------------------------------------------------------------
+
+/**
+ * The versions pnpm resolved for one importer's direct dependencies, from the lockfile's
+ * `importers:` section (the peer suffix `(...)` stripped).
+ *
+ * @returns {Map<string, string>}
+ */
+function importerVersions(contents, importer) {
+  const versions = new Map();
+  let inside = false;
+  let current = null;
+  for (const line of contents.split('\n')) {
+    if (line === `  ${importer}:`) {
+      inside = true;
+      continue;
+    }
+    if (!inside) {
+      continue;
+    }
+    if (/^ {2}\S/.test(line) || /^\S/.test(line)) {
+      break;
+    }
+    const name = /^ {6}'?([^':\s]+)'?:$/.exec(line);
+    if (name !== null) {
+      current = name[1];
+      continue;
+    }
+    const version = /^ {8}version: (\S+)$/.exec(line);
+    if (version !== null && current !== null) {
+      versions.set(current, version[1].replace(/\(.*$/, ''));
+      current = null;
+    }
+  }
+  return versions;
+}
+
+/** `[major, minor, patch]`, or null for anything that is not plain x.y.z. */
+function triple(version) {
+  const match = /^(\d+)\.(\d+)\.(\d+)$/.exec(version);
+  return match === null ? null : match.slice(1).map((part) => Number.parseInt(part, 10));
+}
+
+/**
+ * The three range shapes Expo's manifest uses: `~x.y.z`, `^x.y.z` and an exact `x.y.z`.
+ *
+ * @returns {boolean | null} null for a range this guard does not understand
+ */
+function satisfiesRange(version, range) {
+  const got = triple(version);
+  const operator = range.startsWith('~') || range.startsWith('^') ? range[0] : '';
+  const want = triple(range.slice(operator.length));
+  if (got === null || want === null) {
+    return null;
+  }
+  const [major, minor, patch] = got;
+  const [wantMajor, wantMinor, wantPatch] = want;
+  const atLeast =
+    major > wantMajor ||
+    (major === wantMajor && (minor > wantMinor || (minor === wantMinor && patch >= wantPatch)));
+  if (operator === '') {
+    return major === wantMajor && minor === wantMinor && patch === wantPatch;
+  }
+  if (operator === '~') {
+    return atLeast && major === wantMajor && minor === wantMinor;
+  }
+  // `^`: same major, or for 0.x the same minor.
+  return atLeast && major === wantMajor && (wantMajor !== 0 || minor === wantMinor);
+}
+
+/** The facts sheet's pins that Expo's manifest does not hold (docs/increments/09-11-mobile.facts.md). */
+const MOBILE_EXACT_PINS = {
+  'react-native-nitro-google-signin': '2.3.0',
+  'react-native-nitro-modules': '0.37.1',
+  '@maplibre/maplibre-react-native': '11.4.0',
+  jest: '29.7.0',
+  '@sentry/react-native': '~7.11.0',
+};
+
+const mobileVersions = lockfile === null ? new Map() : importerVersions(lockfile, 'apps/mobile');
+let manifestChecked = 'not installed';
+if (mobileVersions.size > 0) {
+  for (const [name, range] of Object.entries(MOBILE_EXACT_PINS)) {
+    const version = mobileVersions.get(name);
+    if (version === undefined) {
+      failures.push(`apps/mobile does not declare ${name} (pinned ${range})`);
+    } else if (satisfiesRange(version, range) !== true) {
+      failures.push(`apps/mobile resolves ${name}@${version}, outside the pin ${range}`);
+    }
+  }
+
+  const manifest = read('apps/mobile/node_modules/expo/bundledNativeModules.json');
+  if (manifest === null) {
+    // Before install there is no manifest to read; CI runs this after `pnpm install`.
+    console.warn(
+      'toolchain-guard: warning: apps/mobile/node_modules/expo is not installed, the Expo manifest check was skipped',
+    );
+  } else {
+    const bundled = JSON.parse(manifest);
+    let count = 0;
+    for (const [name, version] of mobileVersions) {
+      const range = bundled[name];
+      if (range === undefined || version.startsWith('link:')) {
+        continue;
+      }
+      count += 1;
+      const ok = satisfiesRange(version, range);
+      if (ok === null) {
+        failures.push(`cannot compare ${name}@${version} with Expo's range "${range}"`);
+      } else if (!ok) {
+        failures.push(
+          `apps/mobile resolves ${name}@${version}, outside Expo SDK's manifest range ${range}`,
+        );
+      }
+    }
+    manifestChecked = `${String(count)} in range`;
+  }
+}
+
 const checked = [
   'typescript',
   'vitest',
@@ -302,4 +431,6 @@ if (failures.length > 0) {
   process.exit(1);
 }
 
-console.log(`toolchain-guard: ok  node=${(nodeVersion ?? '').trim()}  ${checked}`);
+console.log(
+  `toolchain-guard: ok  node=${(nodeVersion ?? '').trim()}  ${checked}  expo-manifest=${manifestChecked}`,
+);

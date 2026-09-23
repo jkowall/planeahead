@@ -71,10 +71,11 @@ function build(store: Store): Services {
       useSettings.getState().applyServerPreferences(preferences);
     },
     onSkipped: (skipped) => {
-      // Entity and id only: never the row.
+      // Entity, id (a uuid, or a flight's position in the page) and the failing field: never a
+      // value, never a flight key (it names an itinerary).
       Sentry.captureMessage('sync_rows_skipped', {
         level: 'warning',
-        extra: { skipped: skipped.map(({ entity, id }) => `${entity}:${id}`) },
+        extra: { skipped: skipped.map(({ entity, id, field }) => `${entity}:${id}:${field}`) },
       });
     },
   });

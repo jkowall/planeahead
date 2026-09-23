@@ -8,8 +8,9 @@
  *
  * With a session: register this installation (`POST /v1/devices`), pull the sync feed, drain the
  * outbox, and on iOS devices check that an Apple credential behind the session still stands. All
- * of it again when the user changes (an anonymous user signing in is a new user id: the sync
- * cursor answers 410 and the store resets), on every foreground, and when the network returns.
+ * of it again when the user changes (an anonymous user signing in is a new user id: the store's
+ * owner no longer matches, so the synced rows go and the snapshot is pulled), on every
+ * foreground, and when the network returns.
  */
 
 import * as Sentry from '@sentry/react-native';
@@ -79,12 +80,12 @@ export function useAppAnalytics(): void {
   }, []);
 }
 
-/** One round of background work for the signed-in user. */
-export async function syncNow(): Promise<void> {
+/** One round of background work for the session user `userId`. */
+export async function syncNow(userId: string): Promise<void> {
   const { sync, outbox } = await services();
   try {
     await outbox.drain();
-    await sync.sync();
+    await sync.sync(userId);
     await outbox.drain();
   } catch (error) {
     Sentry.captureException(error);
@@ -116,17 +117,17 @@ export function useSessionWork(userId: string | null): void {
       } catch (error) {
         Sentry.captureException(error);
       }
-      await syncNow();
+      await syncNow(userId);
     })();
 
     const appState = AppState.addEventListener('change', (next) => {
       if (next === 'active') {
-        void syncNow();
+        void syncNow(userId);
       }
     });
     const network = addNetworkStateListener((state) => {
       if (state.isInternetReachable === true) {
-        void syncNow();
+        void syncNow(userId);
       }
     });
     return () => {

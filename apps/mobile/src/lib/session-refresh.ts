@@ -5,8 +5,13 @@
  * (increment 5 ruling G7): the only request that extends the session is
  * `GET /api/auth/get-session`, whose cookies the Better Auth Expo client stores. A user who only
  * ever triggered `/v1` calls would therefore be signed out 30 days after sign-in however often
- * they opened the app. So: `getSession()` on every launch, and on every transition to the
+ * they opened the app. So: `get-session` on every launch, and on every transition to the
  * foreground, throttled to once per hour (the server extends at most once a day anyway).
+ *
+ * This is the ONLY foreground refresh: the Better Auth client's own focus refetch is off
+ * (src/lib/auth-client.ts), and the refresh goes through the session atom, so the launch call and
+ * the atom's mount fetch are one request. `__tests__/auth-transport.test.tsx` counts them on the
+ * real client.
  */
 
 import { useEffect, useRef } from 'react';
