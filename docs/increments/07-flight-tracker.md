@@ -1,6 +1,6 @@
 # Increment 7: FlightTracker and DesignatorResolver Durable Objects
 
-Status: spec (2026-09-20). Builder: Fable 5.1. Reviewers: two Opus 5 lenses (alarm and transaction correctness, outbox and data flow) plus orchestrator read. Branch `inc7-flight-tracker` based on `inc6-provider-layer`.
+Status: complete (2026-09-23) on branch `inc7-flight-tracker`, stacked PR opened for CI. Outcome, rulings and deviations are in `docs/build-log.md` and ADR 0011; where the text below disagrees with the review rulings recorded there (retry decisions from the committed schedule, every refresh path finishing a flight, no `deleteAll` while outbox rows remain, lifetimes identified in Postgres by `do_lifetime_epoch_ms` with a per-lifetime R2 archive key, dead-lettered rows re-sent with a doubling spacing rather than confirmed, the 60 s refresh freshness window, the 30 s provider fetch timeout, migration 0002 for the lifetime column), the build log wins. Builder: Fable 5.1. Reviewers: two Opus 5 lenses (alarm and transaction correctness, outbox and data flow) plus orchestrator read. Branch `inc7-flight-tracker` based on `inc6-provider-layer`.
 
 Read `docs/increments/06-07-providers-and-trackers.facts.md` sections 3, 4 and 5 and `04-api-bootstrap.facts.md` first. The alarm-inside-transaction question is resolved from workerd source: `setAlarm()` inside `transactionSync()` is covered by rollback. Everything below is written against that.
 

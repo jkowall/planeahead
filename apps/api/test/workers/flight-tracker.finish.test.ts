@@ -553,10 +553,17 @@ describe('an alarm delivered while another path finishes the flight', () => {
     while (!archiving) {
       archiving = await runInDurableObject(tracker.stub, () => gate.archiving);
     }
-    // The alarm is delivered while the finish is in progress, and the latch opens behind it:
-    // calls into one object are delivered in order, and the handler parks at step 0 before the
-    // release can be delivered.
+    // The alarm is delivered while the finish is in progress, and the latch opens only once the
+    // handler is provably inside the object. The two calls are NOT ordered: the plugin's object
+    // wrapper awaits a runner round trip (plain I/O, input gate open) before it dispatches either
+    // one, so a release started right after the alarm can overtake it about once in two hundred
+    // runs under load. The plugin's runAlarm deletes the alarm before it calls the handler, and
+    // the finish path's own setAlarm runs only after the latch, so a null alarm means the
+    // handler has been entered; each poll is a yield, never a sleep.
     const ran = tracker.runAlarm();
+    while ((await tracker.alarmAt()) !== null) {
+      // yield until the handler has been entered
+    }
     await runInDurableObject(tracker.stub, () => release?.());
     expect(await refresh).toMatchObject({ outcome: 'refreshed', phase: 'finished' });
     expect(await ran).toBe(true);

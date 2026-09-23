@@ -121,23 +121,23 @@ We will make the alarm handler idempotent per cadence slot with these mechanisms
    and the tracker stamps the rows (`dead_letter_count + 1`, `last_dead_lettered_at_ms`;
    migration 002, `SCHEMA_VERSION` 2) and keeps them; a notice for an unknown row or an absent
    tracker is ignored (the absent cleanup still armed), and a notice that fails is logged, not
-   retried. The flush re-sends a stamped row after `DEAD_LETTER_RESEND_MS x 2^(dead_letter_count
-   - 1)`, from one hour, capped at `DEAD_LETTER_RESEND_MAX_MS`(24 hours; both shared constants,
-the spacing in`deadLetterResendSpacingMs`), measured from the later of
-`last_dead_lettered_at_ms`and the row's last send (so a flush inside the consumer's retry
-window does not send it twice); a row never dead-lettered keeps the 10 s grace. A transient
-outage therefore heals on the first re-send after recovery (persist succeeds, the consumer
-confirms, the row is deleted), and a poison row produces a bounded, decaying stream of
-dead-letter events that settles at one per day per row, while the stuck alert (item 6, the
-sixth deferral) still fires and now says how many of the rows are dead-lettered. The finished
-object stays alive while rows remain, and the R2 copy under`dlq/persist/`remains the
-durable record. Accepted Phase 0 residual: the DesignatorResolver's cost records are deleted
-on send, not on confirmation, so after a dead-lettering they exist only in R2; the increment
-12 housekeeping replay of`dlq/persist/`objects is the planned closer. The`IN (...)`lists of the
-confirmation delete and of the sent-marking update run in chunks of`SQL_BIND_CHUNK` (90)
-     through one shared helper, inside one transaction, because Durable Object SQLite binds at most
-     100 parameters per statement; the DesignatorResolver's flush uses the same helper (a backlog
-     of 100 failed searches once made its every flush throw after the send).
+   retried. The flush re-sends a stamped row after `DEAD_LETTER_RESEND_MS` times
+   `2^(dead_letter_count-1)`, from one hour, capped at `DEAD_LETTER_RESEND_MAX_MS` (24 hours;
+   both shared constants, the spacing in `deadLetterResendSpacingMs`), measured from the later of
+   `last_dead_lettered_at_ms` and the row's last send (so a flush inside the consumer's retry
+   window does not send it twice); a row never dead-lettered keeps the 10 s grace. A transient
+   outage therefore heals on the first re-send after recovery (persist succeeds, the consumer
+   confirms, the row is deleted), and a poison row produces a bounded, decaying stream of
+   dead-letter events that settles at one per day per row, while the stuck alert (item 6, the
+   sixth deferral) still fires and now says how many of the rows are dead-lettered. The finished
+   object stays alive while rows remain, and the R2 copy under `dlq/persist/` remains the
+   durable record. Accepted Phase 0 residual: the DesignatorResolver's cost records are deleted
+   on send, not on confirmation, so after a dead-lettering they exist only in R2; the increment
+   12 housekeeping replay of `dlq/persist/` objects is the planned closer. The `IN (...)` lists
+   of the confirmation delete and of the sent-marking update run in chunks of `SQL_BIND_CHUNK`
+   (90) through one shared helper, inside one transaction, because Durable Object SQLite binds
+   at most 100 parameters per statement; the DesignatorResolver's flush uses the same helper (a
+   backlog of 100 failed searches once made its every flush throw after the send).
 6. **The finish path and the +22 h alarm.** Every path that learns the flight is done (the alarm,
    a user refresh, a reconcile poll, a merged alert, a re-seed) runs the same finish path: flush,
    archive the events to R2 under a per-lifetime key (`events/{key}@{epochMs}.json`, written with
