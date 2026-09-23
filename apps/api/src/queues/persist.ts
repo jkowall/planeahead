@@ -36,10 +36,16 @@
  * client per batch (Hyperdrive closes it when the invocation ends); `max_concurrency` is 10 in
  * every environment, the Neon connection budget.
  *
- * After the batch, the seqs this invocation wrote are grouped by the FlightTracker lifetime that
- * sent them and confirmed with one `confirmPersisted` RPC each, at `locationHint: 'enam'`. A
+ * After the batch, the seqs this invocation acknowledged are grouped by the FlightTracker lifetime
+ * that sent them and confirmed with one `confirmPersisted` RPC each, at `locationHint: 'enam'`. A
  * failed confirmation is logged and not retried: the tracker re-sends every unconfirmed row on
- * its next flush, and these writes are idempotent.
+ * its next flush, and these writes are idempotent. EVERY acknowledged message is confirmed, a
+ * message this build cannot read included: its `origin` and `seq` are read with the minimal
+ * `PersistMessageIdentityV1` before the full validation, because no retry and no build will ever
+ * write it, and an unconfirmed row would pin its finished tracker (hourly re-sends, for ever). The
+ * dead-letter consumer confirms the same way once a message that exhausted its retries is archived
+ * (src/queues/dlq.ts), so a finished tracker's hourly retry covers only rows that never reached
+ * the queue. The helpers below are what both consumers share.
  */
 
 import { eq, sql } from 'drizzle-orm';
@@ -58,6 +64,7 @@ import {
 import {
   ADB_UNIT_PRICE_USD_MICROS,
   AEROAPI_STATUS_PRICE_USD_MICROS,
+  PersistMessageIdentityV1,
   PersistMessageV1,
   RPC_SCHEMA_VERSION,
   parseFlightTrackerOrigin,
@@ -69,9 +76,9 @@ import {
   type ProviderBudgetDailyMessageV1,
   type ProviderCallRecord,
 } from '@planeahead/shared';
-import { environmentName } from '../env';
+import { environmentName, type Env } from '../env';
 import { raiseOpsAlert, type CaptureMessage } from '../observability/ops-alert';
-import { errorFields } from '../observability/log';
+import { errorFields, type Logger } from '../observability/log';
 import { providerCallRow } from '../providers/cost-log';
 import { AnalyticsBudget } from './analytics';
 import { consumeBatch } from './consume';
@@ -356,10 +363,65 @@ export async function upsertProviderCallDaily(
     });
 }
 
-interface Confirmation {
+/** The seqs one tracker lifetime sent, confirmed in one RPC. */
+export interface Confirmation {
   readonly flightKey: FlightKey;
   readonly epochMs: number;
   readonly seqs: number[];
+}
+
+/** Confirmations grouped by origin, one tracker lifetime each. */
+export type Confirmations = Map<string, Confirmation>;
+
+/** `FLIGHT_TRACKER.getByName` at the one location hint every tracker call site uses. */
+export function defaultTrackerFor(env: Env): (flightKey: FlightKey) => ConfirmingTracker {
+  return (flightKey) => env.FLIGHT_TRACKER.getByName(flightKey, { locationHint: 'enam' });
+}
+
+/**
+ * Records an acknowledged message for the confirmation push when its origin names a tracker
+ * lifetime; a ProviderBudget's or a DesignatorResolver's message is confirmed to no one.
+ */
+export function noteConfirmation(confirmations: Confirmations, origin: string, seq: number): void {
+  const parsed = parseFlightTrackerOrigin(origin);
+  if (parsed === null) {
+    return;
+  }
+  const entry = confirmations.get(origin) ?? { ...parsed, seqs: [] };
+  entry.seqs.push(seq);
+  confirmations.set(origin, entry);
+}
+
+/**
+ * One `confirmPersisted` per tracker lifetime. A failure is logged and not retried: the tracker
+ * re-sends every unconfirmed row on its next flush, and the consumers' writes are idempotent.
+ */
+export async function confirmPersistedSeqs(
+  confirmations: Confirmations,
+  trackerFor: (flightKey: FlightKey) => ConfirmingTracker,
+  log: Logger,
+): Promise<void> {
+  for (const confirmation of confirmations.values()) {
+    try {
+      const result = await trackerFor(confirmation.flightKey).confirmPersisted({
+        rpcVersion: RPC_SCHEMA_VERSION,
+        epochMs: confirmation.epochMs,
+        seqs: confirmation.seqs,
+      });
+      log.debug('persist_confirmed', {
+        flight_key: confirmation.flightKey,
+        seqs: confirmation.seqs.length,
+        deleted: result.deleted,
+        matched: result.matched,
+      });
+    } catch (error) {
+      log.error('persist_confirm_failed', {
+        flight_key: confirmation.flightKey,
+        seqs: confirmation.seqs.length,
+        ...errorFields(error),
+      });
+    }
+  }
 }
 
 export async function handlePersistBatch(
@@ -375,7 +437,7 @@ export async function handlePersistBatch(
     db ??= openDb(env);
     return db;
   };
-  const confirmations = new Map<string, Confirmation>();
+  const confirmations: Confirmations = new Map();
   /** Flight keys already alerted for a rejected lifetime in this batch (one alert per key). */
   const rejected = new Set<string>();
   const lifetimeOutcome = (
@@ -410,12 +472,19 @@ export async function handlePersistBatch(
     async (message) => {
       const parsed = PersistMessageV1.safeParse(message.body);
       if (!parsed.success) {
-        // A message this build cannot read can never succeed on retry: acknowledge it, loudly.
+        // A message this build cannot read can never succeed on retry: acknowledge it, loudly,
+        // with the body on the log line (this is its only trace), and confirm it to the tracker
+        // lifetime it came from when the envelope says which, or that row is re-sent for ever.
         log.error('persist_message_invalid', {
           message_id: message.id,
           attempts: message.attempts,
           issue: parsed.error.issues[0]?.message,
+          body: message.body,
         });
+        const identity = PersistMessageIdentityV1.safeParse(message.body);
+        if (identity.success) {
+          noteConfirmation(confirmations, identity.data.origin, identity.data.seq);
+        }
         return;
       }
       const body = parsed.data;
@@ -461,41 +530,12 @@ export async function handlePersistBatch(
           });
           break;
       }
-      if (origin !== null) {
-        const entry = confirmations.get(body.origin) ?? { ...origin, seqs: [] };
-        entry.seqs.push(body.seq);
-        confirmations.set(body.origin, entry);
-      }
+      noteConfirmation(confirmations, body.origin, body.seq);
     },
     log,
   );
 
-  const trackerFor =
-    deps.trackerFor ??
-    ((flightKey: FlightKey): ConfirmingTracker =>
-      env.FLIGHT_TRACKER.getByName(flightKey, { locationHint: 'enam' }));
-  for (const confirmation of confirmations.values()) {
-    try {
-      const result = await trackerFor(confirmation.flightKey).confirmPersisted({
-        rpcVersion: RPC_SCHEMA_VERSION,
-        epochMs: confirmation.epochMs,
-        seqs: confirmation.seqs,
-      });
-      log.debug('persist_confirmed', {
-        flight_key: confirmation.flightKey,
-        seqs: confirmation.seqs.length,
-        deleted: result.deleted,
-        matched: result.matched,
-      });
-    } catch (error) {
-      // Not retried: the tracker re-sends unconfirmed rows and the writes above are idempotent.
-      log.error('persist_confirm_failed', {
-        flight_key: confirmation.flightKey,
-        seqs: confirmation.seqs.length,
-        ...errorFields(error),
-      });
-    }
-  }
+  await confirmPersistedSeqs(confirmations, deps.trackerFor ?? defaultTrackerFor(env), log);
 
   analytics.report('persist_analytics');
   log.info('persist_batch_done', {

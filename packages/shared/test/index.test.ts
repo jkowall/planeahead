@@ -170,6 +170,7 @@ const EXPECTED_EXPORTS = [
   'FlightTrackingStateSchema',
   'OUTBOX_KINDS',
   'OUTBOX_SCHEMA_VERSION',
+  'PersistMessageIdentityV1',
   'PersistMessageV1',
   'ProviderBudgetDailyMessageV1',
   'ProviderBudgetDailyPayloadV1',

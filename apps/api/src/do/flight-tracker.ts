@@ -48,11 +48,17 @@
  * merged alert, a re-seed) runs the same finish path: flush, archive the events to R2 under a
  * per-lifetime key (`events/{key}@{epochMs}.json`, never overwritten), set phase `finished`,
  * write the final KV snapshot itself, and arm one alarm 22 hours out. That alarm calls
- * `deleteAll()` ONLY once the outbox is empty, every row confirmed by the persist consumer; while
- * rows remain it re-arms hourly, bounded by nothing but the rows draining, and raises the ops
- * alert once after the sixth deferral. A finish reason of `arrived` means the cadence's tail poll
- * after arrival ran (the cadence module is normative); a hard-capped flight finishes with
- * `hard_cap` unless its one reconciliation poll saw it in.
+ * `deleteAll()` ONLY once the outbox is empty, every row confirmed; while rows remain it re-arms
+ * hourly, bounded by nothing but the rows draining, and raises the ops alert once after the sixth
+ * deferral. Every acknowledged persist message is confirmed, an unreadable one and a
+ * dead-lettered one included (the persist and dead-letter consumers confirm by origin and seq,
+ * the latter once the raw message is archived under `dlq/persist/`), so that hourly retry covers
+ * only rows that never reached the queue. The finish alarm's due time is derived (the finish
+ * instant plus 22 hours plus an hour per deferral): a delivery that arrives before it, such as
+ * the cadence alarm already in flight while a user refresh finished the flight, re-asserts that
+ * time and counts nothing. A finish reason of `arrived` means the cadence's tail poll after
+ * arrival ran (the cadence module is normative); a hard-capped flight finishes with `hard_cap`
+ * unless its one reconciliation poll saw it in.
  *
  * Rows written are a budgeted number (ruling J5): every statement runs through `#exec`, which
  * sums the cursor's `rowsRead` and `rowsWritten`; each `setAlarm` adds one; the migration DDL an
@@ -159,7 +165,7 @@ import {
   runSqlMigrations,
 } from './migrate';
 import { FLIGHT_TRACKER_MIGRATION_001 } from './migrations/flight-tracker/001';
-import { chunkOutbox, sendOutboxChunks } from './outbox';
+import { chunkOutbox, forEachBindChunk, markOutboxSent, sendOutboxChunks } from './outbox';
 
 // ---------------------------------------------------------------------------------------------
 // Constants. Every one is a design number from the spec, the facts sheet or a review ruling.
@@ -209,8 +215,6 @@ export const PROVIDER_FETCH_TIMEOUT_MS = 30_000;
 const ABSENT_CLEANUP_MS = 60_000;
 /** The tier interval assumed for a fixed-slot window when deciding whether a slot is fresh. */
 const FIXED_SLOT_TIER_MS = FIXED_SLOT_TIER_MS_DEFAULT;
-/** Durable Object SQLite binds at most 100 parameters per statement; `IN (...)` lists chunk here. */
-const SQL_BIND_CHUNK = 90;
 
 // ---------------------------------------------------------------------------------------------
 // Row shapes.
@@ -1004,15 +1008,11 @@ export class FlightTracker extends DurableObject<Env> {
     }
     const deleted = this.#tx((): number => {
       let removed = 0;
-      for (let i = 0; i < request.seqs.length; i += SQL_BIND_CHUNK) {
-        const chunk = request.seqs.slice(i, i + SQL_BIND_CHUNK);
+      forEachBindChunk(request.seqs, (placeholders, chunk) => {
         const before = this.#count('outbox');
-        this.#exec(
-          `DELETE FROM outbox WHERE seq IN (${chunk.map(() => '?').join(', ')})`,
-          ...chunk,
-        );
+        this.#exec(`DELETE FROM outbox WHERE seq IN (${placeholders})`, ...chunk);
         removed += before - this.#count('outbox');
-      }
+      });
       return removed;
     });
     this.#scheduleKv(now, false);
@@ -1164,6 +1164,19 @@ export class FlightTracker extends DurableObject<Env> {
         );
         this.#setAlarm(now + FINISH_RETRY_MS);
         return { kind: 'deferred', path: 'finish_alarm' };
+      }
+      // The finish alarm's own time: 22 hours from the finish plus an hour per deferral so far.
+      // An alarm that arrives before it is the cadence alarm that was already being delivered
+      // while a refresh, an alert or a seed finished the flight (the finish path's `setAlarm`
+      // replaced the pending alarm, not the delivery in progress), or a duplicate delivery. It
+      // only re-asserts the due time and counts no deferral; running the finish logic 22 hours
+      // early deferred once, deleted the object an hour later, and answered `not seeded` for the
+      // 21 hours in which `archived` was promised.
+      const due =
+        (row.finished_at_ms ?? now) + FINISH_ALARM_MS + row.finish_alarm_attempts * FINISH_RETRY_MS;
+      if (now + EARLY_ALARM_TOLERANCE_MS < due) {
+        this.#setAlarm(due);
+        return { kind: 'rearm', at: due };
       }
       return { kind: 'finish_alarm' };
     }
@@ -2040,14 +2053,11 @@ export class FlightTracker extends DurableObject<Env> {
     };
     if (outcome.sentSeqs.length > 0) {
       this.#tx(() => {
-        for (let i = 0; i < outcome.sentSeqs.length; i += SQL_BIND_CHUNK) {
-          const chunk = outcome.sentSeqs.slice(i, i + SQL_BIND_CHUNK);
-          this.#exec(
-            `UPDATE outbox SET sent_at_ms = ? WHERE seq IN (${chunk.map(() => '?').join(', ')})`,
-            now,
-            ...chunk,
-          );
-        }
+        markOutboxSent(
+          (query, ...bindings) => this.#exec(query, ...bindings),
+          outcome.sentSeqs,
+          now,
+        );
       });
     }
   }

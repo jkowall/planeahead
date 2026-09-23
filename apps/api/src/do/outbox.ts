@@ -13,6 +13,12 @@
  * `bytes` is the UTF-8 length of the JSON, which is at or above `JSON.stringify(...).length`
  * (a multi-byte character is one UTF-16 unit but two to four bytes), so a chunk that fits by this
  * measure fits the platform's.
+ *
+ * The bookkeeping after a send is shared too: Durable Object SQLite binds at most 100 parameters
+ * per statement, so marking the accepted rows sent (`markOutboxSent`) and deleting confirmed rows
+ * run their `IN (...)` lists in `SQL_BIND_CHUNK` pieces. The resolver once bound every sent seq in
+ * one statement: with 100 or more unsent rows every flush sent the whole backlog and then threw
+ * `too many SQL variables` before marking any of it sent, for ever.
  */
 
 import { createLogger, errorFields, type Logger } from '../observability/log';
@@ -83,6 +89,33 @@ export function chunkOutbox<R extends OutboxRowLike>(
     current.bytes += bytes;
   }
   return { chunks, oversize };
+}
+
+/** Durable Object SQLite binds at most 100 parameters per statement; `IN (...)` lists chunk here. */
+export const SQL_BIND_CHUNK = 90;
+
+/** Calls `run` once per chunk of at most `SQL_BIND_CHUNK` values, with the matching `?` list. */
+export function forEachBindChunk<T extends string | number>(
+  values: readonly T[],
+  run: (placeholders: string, chunk: T[]) => void,
+): void {
+  for (let i = 0; i < values.length; i += SQL_BIND_CHUNK) {
+    const chunk = values.slice(i, i + SQL_BIND_CHUNK);
+    run(chunk.map(() => '?').join(', '), chunk);
+  }
+}
+
+/** A statement runner: the object's `sql.exec`, or the tracker's metered wrapper around it. */
+export type SqlRunner = (query: string, ...bindings: (string | number | null)[]) => unknown;
+
+/**
+ * Marks the rows the queue accepted as sent, in bind-safe chunks. The caller wraps the call in
+ * ONE `transactionSync`, so a list longer than a chunk is marked all or nothing.
+ */
+export function markOutboxSent(exec: SqlRunner, seqs: readonly number[], sentAtMs: number): void {
+  forEachBindChunk(seqs, (placeholders, chunk) => {
+    exec(`UPDATE outbox SET sent_at_ms = ? WHERE seq IN (${placeholders})`, sentAtMs, ...chunk);
+  });
 }
 
 export interface SendOutcome {

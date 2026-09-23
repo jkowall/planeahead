@@ -9,11 +9,21 @@
  *   - a user refresh whose answer says the flight is over finishes it there and then, +22 h
  *     alarm included, replacing the cadence alarm;
  *   - a finished flight never gets a second lifetime: a re-seed after `deleteAll()` archives
- *     under its own key and leaves the first archive untouched, and the persist consumer
- *     refuses its rows with the `flight_lifetime_rejected` alert.
+ *     under its own key and leaves the first archive untouched, the persist consumer refuses
+ *     its rows with the `flight_lifetime_rejected` alert, and the resolver seeds nothing for a
+ *     flight whose cadence has nothing left, whatever its status says;
+ *   - the +22 h alarm keeps its time when the cadence alarm is delivered while another path is
+ *     finishing the flight (an early delivery re-arms, and counts no deferral);
+ *   - every acknowledged persist message is confirmed, an unreadable one and a dead-lettered one
+ *     included, so the finished tracker can delete itself.
  */
 
-import { createExecutionContext, createMessageBatch, runInDurableObject } from 'cloudflare:test';
+import {
+  createExecutionContext,
+  createMessageBatch,
+  getQueueResult,
+  runInDurableObject,
+} from 'cloudflare:test';
 import { eq } from 'drizzle-orm';
 import { flightEvents, flightInstances, openDb } from '@planeahead/db';
 import { afterEach, describe, expect, it } from 'vitest';
@@ -26,8 +36,9 @@ import {
 } from '../../src/do/flight-tracker';
 import { snapshotKvKey, type SnapshotKvValue } from '../../src/kv/snapshot';
 import { createLogger } from '../../src/observability/log';
+import { handleDeadLetterBatch } from '../../src/queues/dlq';
 import { handlePersistBatch } from '../../src/queues/persist';
-import { eventsArchiveKey } from '../../src/r2/archive';
+import { deadLetterArchiveKey, eventsArchiveKey } from '../../src/r2/archive';
 import {
   HOUR_MS,
   MINUTE_MS,
@@ -48,6 +59,12 @@ import {
 afterEach(drainTouched);
 
 const quietLog = createLogger({}, () => undefined);
+
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => {
+    setTimeout(resolve, ms);
+  });
+}
 
 async function seeded(flight: TestFlight, clock: number): Promise<TrackerHarness> {
   await scriptAdb(flight, [adbOk(flight, { phase: onTimePhaseAt(flight, clock) })]);
@@ -275,11 +292,15 @@ describe('a refresh that learns the flight is over finishes it (L12)', () => {
     expect(row).toMatchObject({ phase: 'finished', finish_reason: 'arrived' });
     expect(row?.events_r2_key).not.toBeNull();
     expect(await tracker.alarmAt()).toBe(late + FINISH_ALARM_MS);
-    // The old cadence alarm is gone with it: running what is pending is the finish alarm, which
-    // finds the outbox unconfirmed and defers.
+    // The old cadence alarm is gone with it: what is pending is the +22 h alarm. Delivered now,
+    // 22 hours early, it re-asserts its time without a call and without a deferral; at its time
+    // it finds the outbox unconfirmed and defers an hour.
     expect(await tracker.runAlarm()).toBe(true);
     expect(await adbCalls(flight)).toBe(2);
-    expect(await tracker.alarmAt()).toBe(late + FINISH_RETRY_MS);
+    expect(await tracker.alarmAt()).toBe(late + FINISH_ALARM_MS);
+    await tracker.setClock(late + FINISH_ALARM_MS);
+    expect(await tracker.runAlarm()).toBe(true);
+    expect(await tracker.alarmAt()).toBe(late + FINISH_ALARM_MS + FINISH_RETRY_MS);
   });
 
   it('finishes from a cancellation seen by a user refresh', async () => {
@@ -417,5 +438,155 @@ describe('a finished flight never gets a second lifetime (L9)', () => {
     });
     expect(again).toMatchObject({ cached: true, tracker: 'none' });
     expect(await adbCalls(flight)).toBe(1);
+  });
+
+  it('a diverted flight past its lifetime is over too, whatever its status says', async () => {
+    const flight = uniqueFlight();
+    // Diverted after take-off and never `arrived`: the lifetime is actualOff + 2 x block, so five
+    // hours after the scheduled arrival the cadence has nothing left. A gate on `arrived` or
+    // `cancelled` once seeded a tracker here that finished on the spot, and a day later a second
+    // lifetime the persist consumer refused.
+    const late = flight.scheduledIn.getTime() + 5 * HOUR_MS;
+    const enRoute = adbOk(flight, { phase: 'en_route' });
+    const body = (enRoute.body as Record<string, unknown>[])[0] ?? {};
+    await scriptAdb(flight, [{ status: 200, body: [{ ...body, status: 'Diverted' }] }]);
+    await resolvedWithoutTracker(flight, late);
+  });
+
+  it('an expected record on a past date is over too: no live coverage, nothing to schedule', async () => {
+    const flight = uniqueFlight();
+    // The provider still says Expected 30 hours after the scheduled arrival.
+    const late = flight.scheduledIn.getTime() + 30 * HOUR_MS;
+    await scriptAdb(flight, [adbOk(flight, { phase: 'expected' })]);
+    await resolvedWithoutTracker(flight, late);
+  });
+});
+
+/** Resolves at `clock` and asserts the search was answered from the status alone. */
+async function resolvedWithoutTracker(flight: TestFlight, clock: number): Promise<void> {
+  const tracker = await trackerHarness(flight.flightKey, clock);
+  await openBudgetFor(flight, clock);
+  const resolver = await resolverHarness(flight, clock);
+  const resolved = await resolver.stub.resolve({
+    rpcVersion: RPC_SCHEMA_VERSION,
+    designator: flight.designator,
+    dateLocal: flight.dateLocal,
+  });
+  expect(resolved).toMatchObject({
+    outcome: 'resolved',
+    flightKey: flight.flightKey,
+    created: false,
+    tracker: 'none',
+  });
+  expect(await adbCalls(flight)).toBe(1);
+  expect((await tracker.stub.health()).phase).toBe('absent');
+  const [row] = await tracker.rows<{ n: number }>('SELECT COUNT(*) AS n FROM flight');
+  expect(row).toEqual({ n: 0 });
+}
+
+describe('an alarm delivered while another path finishes the flight', () => {
+  it('leaves the +22 h alarm in place when the cadence alarm lands during a slow-archive refresh finish', async () => {
+    const flight = uniqueFlight();
+    const clock = flight.scheduledOut.getTime() - 2 * HOUR_MS;
+    const tracker = await seeded(flight, clock);
+    expect(await tracker.alarmAt()).not.toBeNull();
+    const at = clock + 10 * MINUTE_MS;
+    await tracker.setClock(at);
+    const expected = adbOk(flight, { phase: 'expected' });
+    const body = (expected.body as Record<string, unknown>[])[0] ?? {};
+    await scriptAdb(flight, [{ status: 200, body: [{ ...body, status: 'Canceled' }] }]);
+    // The archive put takes a while, and the cadence alarm is delivered while it is pending.
+    await runInDurableObject(tracker.stub, (instance: FlightTracker) => {
+      const bucket = instance.bucket;
+      instance.bucket = {
+        put: async (key: string, ...rest: unknown[]) => {
+          await scheduler.wait(800);
+          return (bucket.put as (...args: unknown[]) => Promise<R2Object | null>)(key, ...rest);
+        },
+      } as unknown as Pick<R2Bucket, 'put'>;
+    });
+
+    const refresh = tracker.stub.forceRefresh({
+      rpcVersion: RPC_SCHEMA_VERSION,
+      reason: 'user_refresh',
+      userId: 'user-cancel',
+    });
+    await sleep(200);
+    const ran = await tracker.runAlarm();
+    expect(await refresh).toMatchObject({ outcome: 'refreshed', phase: 'finished' });
+    expect(ran).toBe(true);
+
+    // The early delivery re-armed to the finish's own time and counted no deferral; the finish
+    // logic did not run 22 hours early.
+    const [row] = await tracker.rows<{
+      phase: string;
+      finish_reason: string;
+      finish_alarm_attempts: number;
+      finished_at_ms: number;
+    }>('SELECT phase, finish_reason, finish_alarm_attempts, finished_at_ms FROM flight');
+    expect(row).toEqual({
+      phase: 'finished',
+      finish_reason: 'cancelled',
+      finish_alarm_attempts: 0,
+      finished_at_ms: at,
+    });
+    expect(await tracker.alarmAt()).toBe(at + FINISH_ALARM_MS);
+    expect(await adbCalls(flight)).toBe(2);
+  });
+});
+
+describe('every acknowledged persist message is confirmed', () => {
+  /**
+   * The distinct rows a tracker sent (the finish re-sends rows unconfirmed past the grace), with
+   * one `flight_event` row picked out: an instance row is the prerequisite for the events behind
+   * it, so losing one of those would leave the rest retrying, which is not what is under test.
+   */
+  function distinctSent(tracker: TrackerHarness) {
+    const unique = [...new Map(tracker.outbox.sent.splice(0).map((m) => [m.seq, m])).values()];
+    const index = unique.findIndex((m) => m.kind === 'flight_event');
+    const picked = unique[index];
+    expect(picked).toBeDefined();
+    return { unique, index, picked, rest: unique.filter((_m, i) => i !== index) };
+  }
+
+  it('a message the consumer cannot read is confirmed, and the finished tracker deletes itself', async () => {
+    const flight = uniqueFlight();
+    const { tracker, at } = await finished(flight);
+    const { unique, index } = distinctSent(tracker);
+    // One row is gibberish to this build; its envelope still says which lifetime sent it.
+    const bodies = unique.map((m, i) => (i === index ? { ...m, kind: 'no_such_kind' } : m));
+
+    await persist(bodies);
+
+    expect((await tracker.stub.health()).unconfirmedOutbox).toBe(0);
+    await tracker.setClock(at + FINISH_ALARM_MS);
+    expect(await tracker.runAlarm()).toBe(true);
+    expect(await tracker.tables()).toEqual([]);
+    expect(await tracker.alarmAt()).toBeNull();
+  });
+
+  it('a dead-lettered message is confirmed once archived, and the finished tracker deletes itself', async () => {
+    const flight = uniqueFlight();
+    const { tracker, at } = await finished(flight);
+    const { picked, rest } = distinctSent(tracker);
+    await persist(rest);
+    expect((await tracker.stub.health()).unconfirmedOutbox).toBe(1);
+
+    // The remaining row exhausted its retries: the dead-letter consumer archives it, confirms it.
+    const id = `dlq-${crypto.randomUUID()}`;
+    const batch = createMessageBatch('planeahead-persist-dlq-local', [
+      { id, timestamp: new Date(), attempts: 6, body: picked },
+    ]);
+    const ctx = createExecutionContext();
+    await handleDeadLetterBatch(batch, 'persist', { env: testEnv, ctx, log: quietLog });
+    const result = await getQueueResult(batch, ctx);
+    expect(result.explicitAcks).toEqual([id]);
+    expect(await testEnv.PRIVATE_BUCKET.get(deadLetterArchiveKey('persist', id))).not.toBeNull();
+
+    expect((await tracker.stub.health()).unconfirmedOutbox).toBe(0);
+    await tracker.setClock(at + FINISH_ALARM_MS);
+    expect(await tracker.runAlarm()).toBe(true);
+    expect(await tracker.tables()).toEqual([]);
+    expect(await tracker.alarmAt()).toBeNull();
   });
 });

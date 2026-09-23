@@ -289,7 +289,9 @@ describe('FlightTracker lifecycle (A2, created at T-48 h)', () => {
         `max_batch_messages=${String(walk.maxBatchMessages)} max_message_bytes=${String(walk.maxMessageBytes)} ` +
         `instance_message_bytes_median=${String(walk.instanceBytes.sort((a, b) => a - b)[Math.floor(walk.instanceBytes.length / 2)] ?? 0)}`,
     );
-  });
+    // 74 alarms, each an RPC round trip into the object plus a fake-gateway call: past the 60 s
+    // file default under full host parallelism, so the walk carries its own budget.
+  }, 180_000);
 
   it('stores the per-alarm row counters on the attempts rows and holds them under budget', async () => {
     const flight = uniqueFlight();

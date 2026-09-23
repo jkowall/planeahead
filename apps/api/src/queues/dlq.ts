@@ -10,13 +10,27 @@
  * `max_retries: 2` every `-dlq` consumer declares in wrangler.jsonc allows (a transient R2
  * failure must not discard the only copy), and acknowledged on the last attempt with the body on
  * the log line: a dead letter message must never loop.
+ *
+ * A `persist` message archived here is also CONFIRMED to the FlightTracker lifetime that sent it,
+ * by `origin` and `seq`, exactly as the persist consumer confirms what it wrote: the raw message is
+ * under `dlq/persist/`, so nothing is lost, and an unconfirmed row would otherwise be re-sent by
+ * its finished tracker every hour for ever (six consumer attempts, a new archive and a fatal alert
+ * each time). A confirmation failure is logged, not retried.
  */
 
+import { PersistMessageIdentityV1, type FlightKey } from '@planeahead/shared';
 import { deadLetterArchiveKey, putJsonArchive } from '../r2/archive';
 import { raiseOpsAlert, type CaptureMessage } from '../observability/ops-alert';
 import { errorFields } from '../observability/log';
 import { backoffSeconds } from './consume';
 import type { QueueContext, QueueKind } from './index';
+import {
+  confirmPersistedSeqs,
+  defaultTrackerFor,
+  noteConfirmation,
+  type ConfirmingTracker,
+  type Confirmations,
+} from './persist';
 
 /** `max_retries` on every `-dlq` consumer in wrangler.jsonc; the last attempt is one past it. */
 export const DEAD_LETTER_MAX_RETRIES = 2;
@@ -25,6 +39,8 @@ export interface DeadLetterDeps {
   readonly capture?: CaptureMessage | undefined;
   /** Where the raw messages go; the default is `PRIVATE_BUCKET`. */
   readonly bucket?: Pick<R2Bucket, 'put'> | undefined;
+  /** Resolves a flight key to its tracker; the default is `FLIGHT_TRACKER.getByName`. */
+  readonly trackerFor?: ((flightKey: FlightKey) => ConfirmingTracker) | undefined;
 }
 
 export interface DeadLetterRecord {
@@ -46,6 +62,7 @@ export async function handleDeadLetterBatch(
   const archived: string[] = [];
   const failed: string[] = [];
   const retried: string[] = [];
+  const confirmations: Confirmations = new Map();
   for (const message of batch.messages) {
     const key = deadLetterArchiveKey(kind, message.id);
     const record: DeadLetterRecord = {
@@ -66,6 +83,12 @@ export async function handleDeadLetterBatch(
         attempts: message.attempts,
         archive_key: key,
       });
+      if (kind === 'persist') {
+        const identity = PersistMessageIdentityV1.safeParse(message.body);
+        if (identity.success) {
+          noteConfirmation(confirmations, identity.data.origin, identity.data.seq);
+        }
+      }
     } catch (error) {
       if (message.attempts <= DEAD_LETTER_MAX_RETRIES) {
         const delaySeconds = backoffSeconds(message.attempts);
@@ -93,6 +116,8 @@ export async function handleDeadLetterBatch(
     }
     message.ack();
   }
+  // Only archived persist messages are noted above, so this confirms nothing that is not in R2.
+  await confirmPersistedSeqs(confirmations, deps.trackerFor ?? defaultTrackerFor(env), log);
   if (archived.length === 0 && failed.length === 0) {
     // Every message is coming back: the alert belongs to the attempt that settles them.
     return;

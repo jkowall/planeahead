@@ -90,6 +90,7 @@ import {
   type ProviderCallMessageV1,
   type ProviderBudgetKillSwitchMessageV1,
   type ProviderBudgetDailyMessageV1,
+  type PersistMessageIdentityV1,
   type PersistMessageV1,
   type PersistMessageV1Input,
   type ReconcileMessageV1,
@@ -250,6 +251,7 @@ interface TypeSurface {
   providerCallMessageV1: ProviderCallMessageV1;
   providerBudgetKillSwitchMessageV1: ProviderBudgetKillSwitchMessageV1;
   providerBudgetDailyMessageV1: ProviderBudgetDailyMessageV1;
+  persistMessageIdentityV1: PersistMessageIdentityV1;
   persistMessageV1: PersistMessageV1;
   persistMessageV1Input: PersistMessageV1Input;
   reconcileMessageV1: ReconcileMessageV1;

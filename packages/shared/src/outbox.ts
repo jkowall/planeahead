@@ -153,6 +153,19 @@ const envelope = {
   origin: z.string().min(1),
 };
 
+/**
+ * The two envelope fields a consumer needs to CONFIRM a message it cannot otherwise read. Every
+ * acknowledged persist message is confirmed to the tracker lifetime that sent it, an unreadable
+ * one included (no build will ever write it, and an unconfirmed row would pin its finished
+ * tracker for ever), so the persist and dead-letter consumers parse this before, or instead of,
+ * the full `PersistMessageV1`.
+ */
+export const PersistMessageIdentityV1 = z.looseObject({
+  seq: envelope.seq,
+  origin: envelope.origin,
+});
+export type PersistMessageIdentityV1 = z.infer<typeof PersistMessageIdentityV1>;
+
 export const FlightInstanceMessageV1 = z.looseObject({
   ...envelope,
   kind: z.literal('flight_instance'),

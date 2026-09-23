@@ -17,6 +17,7 @@
     "src/**/*.json",
     "test/**/*.ts",
     "vitest.config.ts",
+    "vitest.exit-guard.config.ts",
     "worker-configuration.d.ts"
   ],
   "references": [{ "path": "../../packages/shared" }, { "path": "../../packages/db" }]

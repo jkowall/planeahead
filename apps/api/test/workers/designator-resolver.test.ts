@@ -405,6 +405,55 @@ describe('DesignatorResolver', () => {
     expect(await adbCalls(flight)).toBe(1);
   });
 
+  it('marks a backlog of 120 sent rows in bind-safe chunks, inside one transaction', async () => {
+    const flight = uniqueFlight();
+    const clock = flight.scheduledOut.getTime() - 48 * HOUR_MS;
+    // Nothing scripted: a cached not-found keeps the object alive with its resolution row while
+    // the queue is down, and its three billed misses are the first unsent rows.
+    await openBudgetFor(flight, clock);
+    const resolver = await resolverHarness(flight, clock);
+    resolver.outbox.failSends = true;
+    const resolved = await resolver.stub.resolve({
+      rpcVersion: RPC_SCHEMA_VERSION,
+      designator: flight.designator,
+      dateLocal: flight.dateLocal,
+    });
+    expect(resolved.outcome).toBe('not_found');
+    // The records of 117 more failed searches pile up behind them.
+    await runInDurableObject(resolver.stub, (_instance, state) => {
+      for (let i = 0; i < 117; i += 1) {
+        state.storage.sql.exec(
+          'INSERT INTO outbox (kind, payload, created_at_ms) VALUES (?, ?, ?)',
+          'provider_call',
+          JSON.stringify({ kind: 'provider_call', payload: { id: `backlog-${String(i)}` } }),
+          clock,
+        );
+      }
+    });
+    const unsent = () =>
+      runInDurableObject(
+        resolver.stub,
+        (_instance, state) =>
+          state.storage.sql
+            .exec<{ n: number }>('SELECT COUNT(*) AS n FROM outbox WHERE sent_at_ms IS NULL')
+            .one().n,
+      );
+    expect(await unsent()).toBe(120);
+
+    // The queue is back: the retry alarm sends every row and marks all 120 sent, more seqs than
+    // one statement can bind (this once threw `too many SQL variables` after the send, every
+    // time, and re-sent the whole backlog on each later resolve).
+    resolver.outbox.failSends = false;
+    await resolver.setClock(clock + RESOLVER_FLUSH_RETRY_MS);
+    await runInDurableObject(resolver.stub, (instance: DesignatorResolver) => instance.alarm());
+
+    expect(resolver.outbox.batches).toEqual([100, 20]);
+    expect(resolver.outbox.sent).toHaveLength(120);
+    expect(await unsent()).toBe(0);
+    // Before expiry the schedule is kept, nothing left to retry.
+    expect(await resolver.alarmAt()).toBe(clock + RESOLUTION_TTL_MS);
+  });
+
   it('records a provider that is not configured as a zero-cost error and alerts once (L17)', async () => {
     const flight = uniqueFlight();
     const clock = flight.scheduledOut.getTime() - 48 * HOUR_MS;

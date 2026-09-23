@@ -18,9 +18,6 @@ export const DEFAULT_BLOCK_MS = 3 * 60 * 60_000;
 /** The tier interval assumed for a fixed-slot window when a freshness rule needs one. */
 export const FIXED_SLOT_TIER_MS_DEFAULT = 15 * 60_000;
 
-/** A flight whose status says it is over: the resolver seeds no tracker for one past its tail. */
-export const TERMINAL_FLIGHT_STATUSES: readonly string[] = ['arrived', 'cancelled'];
-
 export interface FlightInstants {
   readonly scheduledOutMs: number | null;
   readonly scheduledInMs: number | null;
@@ -80,18 +77,21 @@ export function cadenceContextFor(instants: FlightInstants, now: number): Cadenc
 }
 
 /**
- * True when the status is terminal AND the cadence has no slot left after `now` (the tail poll
- * included): the flight is over, and a tracker seeded from it would only finish and wait 22
- * hours to delete itself. The resolver answers such a search from the status instead (L9).
+ * True when the cadence has no slot left after `now` (the tail poll included): the flight is
+ * over, whatever its status says. This is exactly the decision the tracker's seed takes when it
+ * finishes on the spot (`refreshIntervalFor` null, finish reason `lifetime`), so a resolver that
+ * seeds only when this is false never loses a poll, and never creates a tracker that would only
+ * finish and wait 22 hours to delete itself (ruling L9). The status is deliberately not
+ * consulted: a `diverted` flight (which never reports `arrived`) past its lifetime, and an
+ * `expected` or `unknown` record on a past date (no live coverage), are over too. A gate on
+ * `arrived`/`cancelled` let each of them seed a second lifetime, which the persist consumer then
+ * refused as the bug it is (`flight_lifetime_rejected`).
  */
 export function flightIsOver(
   cadence: CadenceDefinition,
   status: FlightStatus,
   now: number,
 ): boolean {
-  if (!TERMINAL_FLIGHT_STATUSES.includes(status.status)) {
-    return false;
-  }
   const context = cadenceContextFor(instantsOf(status), now);
   return context === null || refreshIntervalFor(cadence, context) === null;
 }

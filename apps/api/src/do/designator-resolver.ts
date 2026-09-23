@@ -86,7 +86,7 @@ import {
 } from './migrate';
 import { DESIGNATOR_RESOLVER_MIGRATION_001 } from './migrations/designator-resolver/001';
 import { DESIGNATOR_RESOLVER_MIGRATION_002 } from './migrations/designator-resolver/002';
-import { chunkOutbox, sendOutboxChunks } from './outbox';
+import { chunkOutbox, markOutboxSent, sendOutboxChunks } from './outbox';
 
 /** A stored resolution lives this long; the object deletes itself at the end. */
 export const RESOLUTION_TTL_MS = 24 * 60 * 60_000;
@@ -400,7 +400,8 @@ export class DesignatorResolver extends DurableObject<Env> {
     const status: FlightStatus = { ...chosen, key };
 
     if (flightIsOver(CADENCE_A2, status, after)) {
-      // Ruling L9: the flight is over, so nothing would ever poll it again. The search is
+      // Ruling L9: the cadence has nothing left to schedule, whatever the status says, so a
+      // tracker would only finish on the spot and wait 22 hours to delete itself. The search is
       // answered from the status and no tracker is created; a finished flight never gets a
       // second lifetime.
       const over = this.ctx.storage.transactionSync((): ResolutionRow => {
@@ -595,11 +596,15 @@ export class DesignatorResolver extends DurableObject<Env> {
     }));
     const outcome = await sendOutboxChunks(this.outboxSink, chunks, this.#log);
     if (outcome.sentSeqs.length > 0) {
-      this.ctx.storage.sql.exec(
-        `UPDATE outbox SET sent_at_ms = ? WHERE seq IN (${outcome.sentSeqs.map(() => '?').join(', ')})`,
-        now,
-        ...outcome.sentSeqs,
-      );
+      // Bind-safe chunks inside one transaction, the helper the tracker uses: a backlog of 100
+      // or more failed searches once made this statement throw after every send.
+      this.ctx.storage.transactionSync(() => {
+        markOutboxSent(
+          (query, ...bindings) => this.ctx.storage.sql.exec(query, ...bindings),
+          outcome.sentSeqs,
+          now,
+        );
+      });
     }
     if (outcome.error !== null) {
       // Nothing else would ever retry the send: the alarm does, so make sure there is one, and

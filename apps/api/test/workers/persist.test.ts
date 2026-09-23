@@ -29,7 +29,7 @@ import {
   type ProviderCallRecord,
 } from '@planeahead/shared';
 import { createLogger } from '../../src/observability/log';
-import { handlePersistBatch } from '../../src/queues/persist';
+import { handlePersistBatch, type ConfirmingTracker } from '../../src/queues/persist';
 import { makeStatus } from '../../../../packages/shared/test/fixtures';
 import {
   HOUR_MS,
@@ -122,7 +122,11 @@ function callRecord(
 
 async function run(
   bodies: readonly unknown[],
-  options: { env?: typeof testEnv; capture?: (text: string, context: unknown) => void } = {},
+  options: {
+    env?: typeof testEnv;
+    capture?: (text: string, context: unknown) => void;
+    trackerFor?: (flightKey: FlightKey) => ConfirmingTracker;
+  } = {},
 ) {
   const batch = createMessageBatch(
     'planeahead-persist-local',
@@ -137,7 +141,7 @@ async function run(
   await handlePersistBatch(
     batch,
     { env: options.env ?? testEnv, ctx, log: quietLog },
-    { capture: options.capture },
+    { capture: options.capture, trackerFor: options.trackerFor },
   );
   return getQueueResult(batch, ctx);
 }
@@ -262,9 +266,39 @@ describe('persist consumer', () => {
     expect(result.retryMessages).toEqual([]);
   });
 
-  it('acknowledges a message it cannot read rather than retrying it for ever', async () => {
-    const result = await run([{ kind: 'flight_upsert', seq: 1 }, 'not even an object']);
-    expect(result.explicitAcks).toEqual(['m-0', 'm-1']);
+  it('acknowledges a message it cannot read rather than retrying it for ever, and confirms it', async () => {
+    const flight = uniqueFlight();
+    const confirmed: unknown[] = [];
+    const trackerFor = (flightKey: FlightKey): ConfirmingTracker => ({
+      confirmPersisted: (input) => {
+        confirmed.push({ flightKey, input });
+        return Promise.resolve({
+          rpcVersion: RPC_SCHEMA_VERSION,
+          deleted: 1,
+          remaining: 0,
+          matched: true,
+        });
+      },
+    });
+
+    const result = await run(
+      [
+        { kind: 'flight_upsert', seq: 1, origin: flightTrackerOrigin(flight.flightKey, EPOCH) },
+        'not even an object',
+        { kind: 'flight_event', seq: 2, origin: 'nobody' },
+      ],
+      { trackerFor },
+    );
+
+    expect(result.explicitAcks).toEqual(['m-0', 'm-1', 'm-2']);
+    // Only the envelope that names a tracker lifetime is confirmed; nothing will ever write that
+    // row, and unconfirmed it would pin its finished tracker for ever.
+    expect(confirmed).toEqual([
+      {
+        flightKey: flight.flightKey,
+        input: { rpcVersion: RPC_SCHEMA_VERSION, epochMs: EPOCH, seqs: [1] },
+      },
+    ]);
   });
 
   it('confirms the seqs it wrote back to the tracker, which deletes them from its outbox', async () => {

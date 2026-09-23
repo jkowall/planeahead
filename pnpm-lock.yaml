@@ -191,6 +191,9 @@ catalogs:
     '@vitest/snapshot':
       specifier: 4.1.11
       version: 4.1.11
+    async-exit-hook:
+      specifier: ^2.0.1
+      version: 2.0.1
     better-auth:
       specifier: 1.7.5
       version: 1.7.5
@@ -360,6 +363,9 @@ importers:
       '@types/node':
         specifier: 'catalog:'
         version: 24.13.6
+      async-exit-hook:
+        specifier: 'catalog:'
+        version: 2.0.1
       drizzle-kit:
         specifier: 'catalog:'
         version: 0.31.10

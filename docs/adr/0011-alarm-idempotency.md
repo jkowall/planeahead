@@ -106,7 +106,17 @@ We will make the alarm handler idempotent per cadence slot with these mechanisms
    Engine point written only when the `provider_calls` row was inserted), so a re-send is
    harmless and a failed confirmation is logged and not retried. Outbox seqs are allocated from a
    counter on the flight row rather than the rowid, because SQLite reuses a rowid once the rows
-   above it are deleted, and a confirmed outbox row is exactly that.
+   above it are deleted, and a confirmed outbox row is exactly that. EVERY acknowledged message
+   is confirmed: a message the consumer cannot read (acknowledged loudly, its body on the log
+   line) is confirmed by the `origin` and `seq` of its envelope, read with the minimal
+   `PersistMessageIdentityV1` before the full validation, and the dead-letter consumer confirms a
+   `persist` message the same way once its raw body is archived under `dlq/persist/`, so the
+   finished object's hourly retry (item 6) covers only rows that never reached the queue; a row
+   that no build will ever write must not pin its tracker for ever. The `IN (...)` lists of the
+   confirmation delete and of the sent-marking update run in chunks of `SQL_BIND_CHUNK` (90)
+   through one shared helper, inside one transaction, because Durable Object SQLite binds at most
+   100 parameters per statement; the DesignatorResolver's flush uses the same helper (a backlog
+   of 100 failed searches once made its every flush throw after the send).
 6. **The finish path and the +22 h alarm.** Every path that learns the flight is done (the alarm,
    a user refresh, a reconcile poll, a merged alert, a re-seed) runs the same finish path: flush,
    archive the events to R2 under a per-lifetime key (`events/{key}@{epochMs}.json`, written with
@@ -119,10 +129,21 @@ We will make the alarm handler idempotent per cadence slot with these mechanisms
    expiry alarm follows the same rule for its provider call records, deleting only once every row
    is sent, with `designator_resolver_outbox_stuck` after its sixth failed attempt. No
    `deleteAll()` ever discards a row that has not reached the queue: storage for one small object
-   is cheaper than losing a flight's events or a billed search's cost record.
+   is cheaper than losing a flight's events or a billed search's cost record. The finish alarm's
+   due time is derived, never taken from the delivery: `finished_at + 22 h + deferrals x 1 h`. A
+   delivery that arrives before it (beyond the five-second early tolerance) is the cadence alarm
+   that was already being delivered while a user refresh, a merged alert or a re-seed finished the
+   flight (the finish path's `setAlarm` replaces the pending alarm, not a delivery in progress),
+   or a duplicate; it re-asserts the due time and counts no deferral. Running the finish logic on
+   that early delivery deferred once, deleted the object an hour after the finish, and answered
+   `not seeded` where `archived` was promised for the remaining 21 hours.
 7. **One lifetime per flight.** A finished flight never gets a second lifetime: the resolver seeds
-   no tracker when the fetched status is terminal and the cadence has nothing left to schedule
-   (it answers the search from the status, `tracker: 'none'`), `flight_instances` records the
+   no tracker when the cadence has nothing left to schedule for the fetched status, whatever that
+   status says (it answers the search from the status, `tracker: 'none'`). That is the decision
+   the tracker's seed takes when it finishes on the spot, so no poll is ever lost; a gate on
+   `arrived`/`cancelled` was tried first and seeded a second lifetime for a `diverted` flight past
+   its lifetime and for an `expected` record on a past date, each refused a day later by the
+   persist consumer. `flight_instances` records the
    lifetime it was written from (`do_lifetime_epoch_ms`), the persist consumer ignores rows from
    an older lifetime and refuses a newer one for a terminal instance with the
    `flight_lifetime_rejected` alert (a reborn finished flight is a bug, not data), and the archive
@@ -160,7 +181,9 @@ slot; the hard cap's own finish reason; the ProviderBudget's daily row under ope
   and finished by the reconcile path.
 - Harder: the outbox holds rows until the consumer confirms them, so a consumer outage grows
   every active tracker's storage, and a finished object whose rows never confirm lives on at
-  storage cost (alerted after six hours, deleted only when the rows drain); the alarm handler is
+  storage cost (alerted after six hours, deleted only when the rows drain; since every
+  acknowledged message is confirmed, only rows that never reached the queue can do that); the
+  alarm handler is
   five steps with two transactions, not one function; every RPC that reads the snapshot has to
   know about `#inflight` and `#finishing`; and a new lifetime for a flight that is still active in
   Postgres (a recovery, never a rebirth) is applied under the lifetime rule and its events keep

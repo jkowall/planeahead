@@ -227,7 +227,9 @@ describe('ProviderBudget: reserve', () => {
     expect(granted).toBe(5);
     // A rate refusal never spends units.
     expect((await stub.snapshot()).units).toBe(10);
-  });
+    // Some 670 clock-set and reserve round trips: past the 60 s file default under full host
+    // parallelism, so the test carries its own budget. The code under test is unchanged.
+  }, 180_000);
 
   it('backs the bucket off on a provider push-back', async () => {
     const { stub, setClock, nowMs: start } = await budget('aerodatabox');
