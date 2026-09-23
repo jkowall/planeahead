@@ -503,70 +503,75 @@ tombstone and its `user_sync_changes` row), the subscribe restore path (the tomb
 then its change row), `PATCH /v1/me/preferences` on an existing row, the persist consumer's
 `live_tracked` pass and `mergeUsers`. The change row's foreign-key check needs FOR KEY SHARE on the
 user row, which the deletion holds FOR UPDATE, while the deletion's DELETE waits for the row the
-writer holds. Postgres breaks the deadlock after `deadlock_timeout` (1 s) by aborting, with 40P01,
-the waiter whose timeout runs out first, normally the one that began waiting first. The writers
-take no root-first lock; the deletion's transaction is retried instead, and that retry is what
-makes the inversion safe: up to three attempts on 40P01 or 40001, after a short jittered pause
-(`scheduler.wait`). The transaction is fast and idempotent (an aborted attempt leaves nothing
-behind), and the retry's `delete ... returning` names the row the surviving writer committed, so
-the post-commit unsubscribe still sees it; the audit row and the deletion report count the retries
-(`transaction_retries`). When Postgres aborts the writer instead, it fails as any failed transaction
-does: rolled back whole, a route answers 500 and the client's retry meets 401 `account_deleted`, a
-queue message is redelivered. `me.delete.test.ts` holds a `DELETE /v1/flights/:id` inside its row
-lock until the deletion waits on it, and asserts one retry, no row and no subscriber left.
+writer holds. Postgres would break the deadlock after `deadlock_timeout` (1 s) by aborting, with
+40P01, the waiter whose timeout runs out first, and in natural timing that is the writer (the
+deletion runs some twenty leaf deletes before it reaches the writer's table, so the writer's
+foreign-key wait starts first; the final re-review's 108 unforced trials aborted the writer in all
+17 natural deadlocks). The deletion is therefore made the side that always loses: right after the
+lock it runs `set local lock_timeout = '300ms'` (a user-settable parameter, unlike
+`deadlock_timeout`), a statement that meets a held row gives up with 55P03 before the writer's timer
+fires, the writer commits, and the transaction is retried: up to three attempts on 55P03, 40P01 or
+40001, after a short jittered pause (`scheduler.wait`). The writers take no root-first lock. The
+transaction is fast and idempotent (an aborted attempt leaves nothing behind), and the retry's
+`delete ... returning` names the row the surviving writer committed, so the post-commit unsubscribe
+still sees it; the audit row and the deletion report count the retries (`transaction_retries`).
+The trade-off is a writer that holds a leaf row for longer than about three lock timeouts, which
+fails the deletion (500, the client retries). `me.delete.test.ts` holds a `DELETE /v1/flights/:id`
+inside its row lock until the deletion waits on it, and asserts one retry, no row and no subscriber
+left.
 
 Once `trips` get writers, step 4 must also append change rows for OTHER users' entities it
 changes: a delete for every `trip_members` row of the user's trips (the members' feeds), and an
 upsert for every other user's `flight_subscriptions` row whose `trip_id` the trip delete sets to
 null (`ON DELETE SET NULL`). Phase 0 has no trip, so no such row exists today.
 
-| Table                                   | How the user's rows go                                      | Note                                                                                                                            |
-| --------------------------------------- | ----------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------- |
-| `import_rows`                           | explicit statement (`user_id`)                              | before `imports`                                                                                                                |
-| `imports`                               | explicit statement                                          |                                                                                                                                 |
-| `email_extractions`                     | explicit statement                                          |                                                                                                                                 |
-| `email_messages_processed`              | explicit statement                                          | before `email_accounts`                                                                                                         |
-| `email_accounts`                        | explicit statement                                          |                                                                                                                                 |
-| `inbound_messages`                      | explicit statement                                          | before `inbound_addresses`                                                                                                      |
-| `inbound_addresses`                     | explicit statement                                          |                                                                                                                                 |
-| `calendar_events`                       | explicit statement                                          | before `calendar_connections`                                                                                                   |
-| `calendar_connections`                  | explicit statement                                          |                                                                                                                                 |
-| `ics_feed_tokens`                       | explicit statement                                          |                                                                                                                                 |
-| `share_link_views`                      | cascade from `share_links`                                  | no user column                                                                                                                  |
-| `share_links`                           | explicit statement                                          |                                                                                                                                 |
-| `meet_me_sessions`                      | explicit statement                                          |                                                                                                                                 |
-| `live_activities`                       | explicit statement                                          | before `devices`                                                                                                                |
-| `push_tokens`                           | explicit statement                                          | before `devices`                                                                                                                |
-| `notifications`                         | explicit statement                                          |                                                                                                                                 |
-| `notification_preferences`              | explicit statement                                          |                                                                                                                                 |
-| `logbook_entries`                       | explicit statement                                          |                                                                                                                                 |
-| `user_stats_yearly`                     | explicit statement                                          |                                                                                                                                 |
-| `flight_subscriptions`                  | explicit statement                                          | tombstones included; the instance side is RESTRICT and untouched                                                                |
-| `trip_members`                          | explicit statement                                          | the user as a member, and every member of the user's own trips                                                                  |
-| `trips`                                 | explicit statement                                          |                                                                                                                                 |
-| `entitlements`                          | explicit statement                                          |                                                                                                                                 |
-| `api_tokens`                            | explicit statement                                          |                                                                                                                                 |
-| `data_export_jobs`                      | explicit statement                                          |                                                                                                                                 |
-| `idempotency_keys`                      | explicit statement                                          |                                                                                                                                 |
-| `user_sync_changes`                     | explicit statement (`user_id`)                              | ruling K8                                                                                                                       |
-| `user_consents`                         | explicit statement                                          |                                                                                                                                 |
-| `user_preferences`                      | explicit statement                                          |                                                                                                                                 |
-| `devices`                               | explicit statement                                          |                                                                                                                                 |
-| `user_keys`                             | explicit statement                                          | the DEK: every ciphertext of the user is unreadable from here                                                                   |
-| `accounts`                              | explicit statement                                          |                                                                                                                                 |
-| `sessions`                              | explicit statement                                          | revokes every session                                                                                                           |
-| `usage_counters`                        | explicit statement (`scope = 'user' and subject = user id`) | no FK                                                                                                                           |
-| `usage_counters` (magic link)           | explicit statement (`scope = 'email'`, subject prefix)      | no FK; the ceiling and owner counters start with the SHA-256 of the canonical mailbox, an unkeyed hash reversible by dictionary |
-| `verifications`                         | explicit statement (identifier or value names the email)    | no FK; not for an anonymous user                                                                                                |
-| `rate_limits`                           | explicit statement (key embeds the email)                   | no FK; IP rows age out                                                                                                          |
-| `users`                                 | explicit statement, last                                    | locked `FOR UPDATE` first: a subscribe that inserted is waited for (its row RETURNED), a deadlock retries the transaction       |
-| `audit_log`                             | survives                                                    | pseudonymous `subject_id`; the deletion appends its own row                                                                     |
-| `notification_deliveries`               | survives                                                    | pseudonymous `subject_id`                                                                                                       |
-| `revenuecat_events`                     | survives                                                    | keyed by RevenueCat's random app user id                                                                                        |
-| `subscriptions`                         | survives                                                    | finance ledger, pseudonymous                                                                                                    |
-| `provider_calls`, `provider_call_daily` | survive                                                     | no user linkage                                                                                                                 |
-| `deleted_subjects`                      | survives                                                    | written by the deletion; HMAC-SHA-256 subjects; purged at `expires_at`                                                          |
-| `account_deletion_requests`             | not written in Phase 0                                      | the synchronous path needs no request row; written once deletion becomes a queued job (Phases 5 to 7)                           |
+| Table                                   | How the user's rows go                                      | Note                                                                                                                                      |
+| --------------------------------------- | ----------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------- |
+| `import_rows`                           | explicit statement (`user_id`)                              | before `imports`                                                                                                                          |
+| `imports`                               | explicit statement                                          |                                                                                                                                           |
+| `email_extractions`                     | explicit statement                                          |                                                                                                                                           |
+| `email_messages_processed`              | explicit statement                                          | before `email_accounts`                                                                                                                   |
+| `email_accounts`                        | explicit statement                                          |                                                                                                                                           |
+| `inbound_messages`                      | explicit statement                                          | before `inbound_addresses`                                                                                                                |
+| `inbound_addresses`                     | explicit statement                                          |                                                                                                                                           |
+| `calendar_events`                       | explicit statement                                          | before `calendar_connections`                                                                                                             |
+| `calendar_connections`                  | explicit statement                                          |                                                                                                                                           |
+| `ics_feed_tokens`                       | explicit statement                                          |                                                                                                                                           |
+| `share_link_views`                      | cascade from `share_links`                                  | no user column                                                                                                                            |
+| `share_links`                           | explicit statement                                          |                                                                                                                                           |
+| `meet_me_sessions`                      | explicit statement                                          |                                                                                                                                           |
+| `live_activities`                       | explicit statement                                          | before `devices`                                                                                                                          |
+| `push_tokens`                           | explicit statement                                          | before `devices`                                                                                                                          |
+| `notifications`                         | explicit statement                                          |                                                                                                                                           |
+| `notification_preferences`              | explicit statement                                          |                                                                                                                                           |
+| `logbook_entries`                       | explicit statement                                          |                                                                                                                                           |
+| `user_stats_yearly`                     | explicit statement                                          |                                                                                                                                           |
+| `flight_subscriptions`                  | explicit statement                                          | tombstones included; the instance side is RESTRICT and untouched                                                                          |
+| `trip_members`                          | explicit statement                                          | the user as a member, and every member of the user's own trips                                                                            |
+| `trips`                                 | explicit statement                                          |                                                                                                                                           |
+| `entitlements`                          | explicit statement                                          |                                                                                                                                           |
+| `api_tokens`                            | explicit statement                                          |                                                                                                                                           |
+| `data_export_jobs`                      | explicit statement                                          |                                                                                                                                           |
+| `idempotency_keys`                      | explicit statement                                          |                                                                                                                                           |
+| `user_sync_changes`                     | explicit statement (`user_id`)                              | ruling K8                                                                                                                                 |
+| `user_consents`                         | explicit statement                                          |                                                                                                                                           |
+| `user_preferences`                      | explicit statement                                          |                                                                                                                                           |
+| `devices`                               | explicit statement                                          |                                                                                                                                           |
+| `user_keys`                             | explicit statement                                          | the DEK: every ciphertext of the user is unreadable from here                                                                             |
+| `accounts`                              | explicit statement                                          |                                                                                                                                           |
+| `sessions`                              | explicit statement                                          | revokes every session                                                                                                                     |
+| `usage_counters`                        | explicit statement (`scope = 'user' and subject = user id`) | no FK                                                                                                                                     |
+| `usage_counters` (magic link)           | explicit statement (`scope = 'email'`, subject prefix)      | no FK; the ceiling and owner counters start with the SHA-256 of the canonical mailbox, an unkeyed hash reversible by dictionary           |
+| `verifications`                         | explicit statement (identifier or value names the email)    | no FK; not for an anonymous user                                                                                                          |
+| `rate_limits`                           | explicit statement (key embeds the email)                   | no FK; IP rows age out                                                                                                                    |
+| `users`                                 | explicit statement, last                                    | locked `FOR UPDATE` first: a subscribe that inserted is waited for (its row RETURNED); `lock_timeout` 300 ms then retries the transaction |
+| `audit_log`                             | survives                                                    | pseudonymous `subject_id`; the deletion appends its own row                                                                               |
+| `notification_deliveries`               | survives                                                    | pseudonymous `subject_id`                                                                                                                 |
+| `revenuecat_events`                     | survives                                                    | keyed by RevenueCat's random app user id                                                                                                  |
+| `subscriptions`                         | survives                                                    | finance ledger, pseudonymous                                                                                                              |
+| `provider_calls`, `provider_call_daily` | survive                                                     | no user linkage                                                                                                                           |
+| `deleted_subjects`                      | survives                                                    | written by the deletion; HMAC-SHA-256 subjects; purged at `expires_at`                                                                    |
+| `account_deletion_requests`             | not written in Phase 0                                      | the synchronous path needs no request row; written once deletion becomes a queued job (Phases 5 to 7)                                     |
 
 The disclosure that follows: deleted immediately from the live database; encrypted change history
 (Neon's history window, set to 1 day explicitly) retained up to 24 hours.

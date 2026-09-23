@@ -48,15 +48,20 @@
  * check needs FOR KEY SHARE on the user row, which step 4 holds FOR UPDATE, while step 4's DELETE
  * waits for the row the writer holds: a deadlock, which Postgres breaks after `deadlock_timeout`
  * (1 s) by aborting the waiter whose timeout runs out first, normally the one that began waiting
- * first, with 40P01. The writers take no root-first lock; step 4 is run again instead, up to
- * `DELETION_TRANSACTION_ATTEMPTS` times on 40P01 or 40001, after a short jittered pause through
- * `scheduler.wait`. That is safe because the transaction is fast and idempotent (an aborted
- * attempt leaves nothing behind, and every statement finds the user's rows afresh), and the
- * retry's `delete ... returning` names the row the surviving writer committed, so step 5 still
- * sees it. When Postgres aborts the writer instead, that request fails as any failed transaction
- * does (rolled back whole; a route answers 500 and the client's retry meets 401
- * `account_deleted`; a queue message is redelivered). `me.delete.test.ts` holds a
- * `DELETE /v1/flights/:id` inside its row lock until step 4 waits on it.
+ * first, and in natural timing that is the WRITER (step 4 runs some twenty leaf deletes before it
+ * reaches the writer's table, so the writer's foreign-key wait starts first): 17 of 17 natural
+ * deadlocks in the final re-review's 108 trials aborted the writer with a 500. So the deletion is
+ * made the side that always loses: right after the lock it runs `set local lock_timeout`
+ * (`DELETION_LOCK_TIMEOUT`, 300 ms, well under `deadlock_timeout`), a statement that meets a held
+ * row gives up with 55P03 before the writer's timer fires, the writer commits, and step 4 is run
+ * again, up to `DELETION_TRANSACTION_ATTEMPTS` times on 55P03, 40P01 or 40001, after a short
+ * jittered pause through `scheduler.wait`. The writers take no root-first lock. That is safe
+ * because the transaction is fast and idempotent (an aborted attempt leaves nothing behind, and
+ * every statement finds the user's rows afresh), and the retry's `delete ... returning` names the
+ * row the surviving writer committed, so step 5 still sees it. The trade-off is a writer that
+ * holds a leaf row for longer than about three lock timeouts, which fails the deletion (the route
+ * answers 500 and the client retries). `me.delete.test.ts` holds a `DELETE /v1/flights/:id`
+ * inside its row lock until step 4 waits on it.
  *
  * Step 4 also removes the magic-link counters keyed by the account's address (`usage_counters`,
  * scope `email`, subjects that start with the SHA-256 of the canonical mailbox, known from step
@@ -101,8 +106,17 @@ import { unsubscribeTracker, type TrackerFor } from './trackers';
 /** Step 4 runs at most this many times (module comment: why step 4 retries). */
 export const DELETION_TRANSACTION_ATTEMPTS = 3;
 
-/** `deadlock_detected` and `serialization_failure`: the attempt was aborted whole. */
-const RETRYABLE_SQLSTATES: ReadonlySet<string> = new Set(['40P01', '40001']);
+/**
+ * `deadlock_detected`, `serialization_failure` and `lock_not_available`: the attempt was aborted
+ * whole. 55P03 is what `lock_timeout` raises, and it is the common case (below).
+ */
+const RETRYABLE_SQLSTATES: ReadonlySet<string> = new Set(['40P01', '40001', '55P03']);
+
+/**
+ * How long one step 4 statement waits for a row a writer holds before the attempt gives up and
+ * is retried. Well under `deadlock_timeout` (1 s), so the deletion is always the side that loses.
+ */
+export const DELETION_LOCK_TIMEOUT = '300ms';
 
 /** 20 to 60 ms after the first abort, 40 to 120 ms after the second: the survivor commits. */
 function retryPauseMs(retry: number): number {
@@ -497,6 +511,10 @@ export async function deleteAccount(
         // A concurrent deletion committed while this one waited: nothing left to delete.
         return null;
       }
+      // From here every statement gives up on a held row long before a writer's deadlock timer
+      // fires (the writer commits, this attempt is retried and its DELETE ... RETURNING then names
+      // the writer's row). `lock_timeout` is a user-settable parameter, `deadlock_timeout` is not.
+      await tx.execute(sql.raw(`set local lock_timeout = '${DELETION_LOCK_TIMEOUT}'`));
       let deleted: { id: string; flight_instance_id: string; live: boolean }[] = [];
       for (const step of DELETION_ORDER) {
         const statement = step.statement?.(subject) ?? null;

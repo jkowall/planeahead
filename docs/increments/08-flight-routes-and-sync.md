@@ -1,6 +1,6 @@
 # Increment 8: flight routes, sync feed, caps, account deletion
 
-Status: spec (2026-09-20). Builder: Opus 5. Reviewers: two Opus 5 lenses (concurrency and data correctness, API contract) plus orchestrator read. Branch `inc8-flight-routes` based on `inc7-flight-tracker`.
+Status: complete (2026-09-23) on branch `inc8-flight-routes`, stacked PR opened for CI. Outcome, rulings and deviations are in `docs/build-log.md` and ADR 0012; where the text below disagrees with the review rulings recorded there (the cursor bound to the user hash and a database epoch, an exact 410 horizon from a stored purge horizon rather than the oldest retained row, `live_tracked` charged where a flight enters its window, the anonymous merge writing change rows and re-pointing tracker subscriber lists, the cookie cache disabled under `/v1`, no unsubscribe after a lost refresh deadline except when the account is gone, migration 0003, 404 `flight_not_found` with `triedDates`), the build log wins. Builder: Opus 5. Reviewers: two Opus 5 lenses (concurrency and data correctness, API contract) plus orchestrator read. Branch `inc8-flight-routes` based on `inc7-flight-tracker`.
 
 Read `docs/increments/08-flight-routes-and-sync.facts.md` first. It settles the sync cursor safety rule, the idempotency semantics, the cap enforcement point, why the refresh coalescer must be the Durable Object, and the deletion ordering Hyperdrive requires.
 
