@@ -1,0 +1,1085 @@
+// Jest Snapshot v1, https://goo.gl/fbAQLP
+
+exports[`the detail in light and dark renders the seeded timeline in dark 1`] = `
+{
+  "children": [
+    {
+      "children": [
+        {
+          "type": "RCTRefreshControl",
+        },
+        {
+          "children": [
+            {
+              "children": [
+                {
+                  "children": [
+                    "Back",
+                  ],
+                  "style": {
+                    "color": "#F2F4F8",
+                  },
+                  "type": "Text",
+                },
+              ],
+              "style": {
+                "backgroundColor": "#171B22",
+                "borderColor": "#2A303A",
+              },
+              "testID": "detail-back",
+              "type": "View",
+            },
+            {
+              "children": [
+                {
+                  "children": [
+                    {
+                      "children": [
+                        "AA100",
+                      ],
+                      "style": {
+                        "color": "#F2F4F8",
+                      },
+                      "type": "Text",
+                    },
+                    {
+                      "children": [
+                        {
+                          "children": [
+                            "Scheduled",
+                          ],
+                          "style": {
+                            "color": "#E4E8EF",
+                          },
+                          "type": "Text",
+                        },
+                      ],
+                      "label": "Status: Scheduled",
+                      "style": {
+                        "backgroundColor": "#2A303A",
+                      },
+                      "testID": "detail-status",
+                      "type": "View",
+                    },
+                  ],
+                  "type": "View",
+                },
+                {
+                  "children": [
+                    "JFK → LHR",
+                  ],
+                  "style": {
+                    "color": "#F2F4F8",
+                  },
+                  "type": "Text",
+                },
+                {
+                  "children": [
+                    "Wed 23 Sep",
+                  ],
+                  "style": {
+                    "color": "#A3ACB8",
+                  },
+                  "type": "Text",
+                },
+                {
+                  "children": [
+                    "Departure 25 min late",
+                  ],
+                  "style": {
+                    "color": "#FFB866",
+                  },
+                  "type": "Text",
+                },
+              ],
+              "type": "View",
+            },
+            {
+              "children": [
+                {
+                  "children": [
+                    "Timeline",
+                  ],
+                  "style": {
+                    "color": "#A3ACB8",
+                  },
+                  "type": "Text",
+                },
+                {
+                  "children": [
+                    {
+                      "children": [
+                        {
+                          "children": [
+                            {
+                              "style": {
+                                "backgroundColor": "#0B0E13",
+                                "borderColor": "#7C9DFF",
+                              },
+                              "type": "View",
+                            },
+                            {
+                              "style": {
+                                "backgroundColor": "#4A5261",
+                              },
+                              "type": "View",
+                            },
+                          ],
+                          "type": "View",
+                        },
+                        {
+                          "children": [
+                            {
+                              "children": [
+                                {
+                                  "children": [
+                                    "Gate departure",
+                                  ],
+                                  "style": {
+                                    "color": "#F2F4F8",
+                                  },
+                                  "type": "Text",
+                                },
+                                {
+                                  "children": [
+                                    "6:25 PM",
+                                  ],
+                                  "style": {
+                                    "color": "#F2F4F8",
+                                  },
+                                  "testID": "timeline-out-time",
+                                  "type": "Text",
+                                },
+                              ],
+                              "type": "View",
+                            },
+                            {
+                              "children": [
+                                "estimated, scheduled 6:00 PM, 25 min late, Terminal 8, gate B22",
+                              ],
+                              "style": {
+                                "color": "#A3ACB8",
+                              },
+                              "type": "Text",
+                            },
+                          ],
+                          "type": "View",
+                        },
+                      ],
+                      "label": "Gate departure, 6:25 PM, estimated, Terminal 8, gate B22",
+                      "testID": "timeline-out",
+                      "type": "View",
+                    },
+                    {
+                      "children": [
+                        {
+                          "children": [
+                            {
+                              "style": {
+                                "backgroundColor": "#0B0E13",
+                                "borderColor": "#4A5261",
+                              },
+                              "type": "View",
+                            },
+                            {
+                              "style": {
+                                "backgroundColor": "#4A5261",
+                              },
+                              "type": "View",
+                            },
+                          ],
+                          "type": "View",
+                        },
+                        {
+                          "children": [
+                            {
+                              "children": [
+                                {
+                                  "children": [
+                                    "Takeoff",
+                                  ],
+                                  "style": {
+                                    "color": "#F2F4F8",
+                                  },
+                                  "type": "Text",
+                                },
+                                {
+                                  "children": [
+                                    "6:20 PM",
+                                  ],
+                                  "style": {
+                                    "color": "#F2F4F8",
+                                  },
+                                  "testID": "timeline-off-time",
+                                  "type": "Text",
+                                },
+                              ],
+                              "type": "View",
+                            },
+                            {
+                              "children": [
+                                "scheduled",
+                              ],
+                              "style": {
+                                "color": "#A3ACB8",
+                              },
+                              "type": "Text",
+                            },
+                          ],
+                          "type": "View",
+                        },
+                      ],
+                      "label": "Takeoff, 6:20 PM, scheduled",
+                      "testID": "timeline-off",
+                      "type": "View",
+                    },
+                    {
+                      "children": [
+                        {
+                          "children": [
+                            {
+                              "style": {
+                                "backgroundColor": "#0B0E13",
+                                "borderColor": "#4A5261",
+                              },
+                              "type": "View",
+                            },
+                            {
+                              "style": {
+                                "backgroundColor": "#4A5261",
+                              },
+                              "type": "View",
+                            },
+                          ],
+                          "type": "View",
+                        },
+                        {
+                          "children": [
+                            {
+                              "children": [
+                                {
+                                  "children": [
+                                    "Landing",
+                                  ],
+                                  "style": {
+                                    "color": "#F2F4F8",
+                                  },
+                                  "type": "Text",
+                                },
+                                {
+                                  "children": [
+                                    "6:55 AM",
+                                  ],
+                                  "style": {
+                                    "color": "#F2F4F8",
+                                  },
+                                  "testID": "timeline-on-time",
+                                  "type": "Text",
+                                },
+                              ],
+                              "type": "View",
+                            },
+                            {
+                              "children": [
+                                "scheduled",
+                              ],
+                              "style": {
+                                "color": "#A3ACB8",
+                              },
+                              "type": "Text",
+                            },
+                          ],
+                          "type": "View",
+                        },
+                      ],
+                      "label": "Landing, 6:55 AM, scheduled",
+                      "testID": "timeline-on",
+                      "type": "View",
+                    },
+                    {
+                      "children": [
+                        {
+                          "children": [
+                            {
+                              "style": {
+                                "backgroundColor": "#0B0E13",
+                                "borderColor": "#4A5261",
+                              },
+                              "type": "View",
+                            },
+                          ],
+                          "type": "View",
+                        },
+                        {
+                          "children": [
+                            {
+                              "children": [
+                                {
+                                  "children": [
+                                    "Gate arrival",
+                                  ],
+                                  "style": {
+                                    "color": "#F2F4F8",
+                                  },
+                                  "type": "Text",
+                                },
+                                {
+                                  "children": [
+                                    "7:10 AM",
+                                  ],
+                                  "style": {
+                                    "color": "#F2F4F8",
+                                  },
+                                  "testID": "timeline-in-time",
+                                  "type": "Text",
+                                },
+                              ],
+                              "type": "View",
+                            },
+                            {
+                              "children": [
+                                "estimated, Terminal 3",
+                              ],
+                              "style": {
+                                "color": "#A3ACB8",
+                              },
+                              "type": "Text",
+                            },
+                          ],
+                          "type": "View",
+                        },
+                      ],
+                      "label": "Gate arrival, 7:10 AM, estimated, Terminal 3",
+                      "testID": "timeline-in",
+                      "type": "View",
+                    },
+                  ],
+                  "testID": "flight-timeline",
+                  "type": "View",
+                },
+              ],
+              "style": {
+                "backgroundColor": "#171B22",
+                "borderColor": "#2A303A",
+              },
+              "testID": "detail-timeline-section",
+              "type": "View",
+            },
+            {
+              "children": [
+                {
+                  "children": [
+                    "Details",
+                  ],
+                  "style": {
+                    "color": "#A3ACB8",
+                  },
+                  "type": "Text",
+                },
+                {
+                  "children": [
+                    {
+                      "children": [
+                        "Departs from",
+                      ],
+                      "style": {
+                        "color": "#A3ACB8",
+                      },
+                      "type": "Text",
+                    },
+                    {
+                      "children": [
+                        "Terminal 8, gate B22",
+                      ],
+                      "style": {
+                        "color": "#F2F4F8",
+                      },
+                      "testID": "detail-origin-gate",
+                      "type": "Text",
+                    },
+                  ],
+                  "type": "View",
+                },
+                {
+                  "children": [
+                    {
+                      "children": [
+                        "Arrives at",
+                      ],
+                      "style": {
+                        "color": "#A3ACB8",
+                      },
+                      "type": "Text",
+                    },
+                    {
+                      "children": [
+                        "Terminal 3",
+                      ],
+                      "style": {
+                        "color": "#F2F4F8",
+                      },
+                      "testID": "detail-destination-gate",
+                      "type": "Text",
+                    },
+                  ],
+                  "type": "View",
+                },
+                {
+                  "children": [
+                    {
+                      "children": [
+                        "Aircraft",
+                      ],
+                      "style": {
+                        "color": "#A3ACB8",
+                      },
+                      "type": "Text",
+                    },
+                    {
+                      "children": [
+                        "B77W",
+                      ],
+                      "style": {
+                        "color": "#F2F4F8",
+                      },
+                      "testID": "detail-aircraft",
+                      "type": "Text",
+                    },
+                  ],
+                  "type": "View",
+                },
+                {
+                  "children": [
+                    {
+                      "children": [
+                        "Distance",
+                      ],
+                      "style": {
+                        "color": "#A3ACB8",
+                      },
+                      "type": "Text",
+                    },
+                    {
+                      "children": [
+                        "3,442 mi",
+                      ],
+                      "style": {
+                        "color": "#F2F4F8",
+                      },
+                      "testID": "detail-distance",
+                      "type": "Text",
+                    },
+                  ],
+                  "type": "View",
+                },
+              ],
+              "style": {
+                "backgroundColor": "#171B22",
+                "borderColor": "#2A303A",
+              },
+              "testID": "detail-details",
+              "type": "View",
+            },
+            {
+              "children": [
+                "Flight data: AeroDataBox, updated 4 min ago. Times are 12-hour, local to each airport.",
+              ],
+              "style": {
+                "color": "#A3ACB8",
+              },
+              "testID": "detail-attribution",
+              "type": "Text",
+            },
+            {
+              "children": [
+                {
+                  "children": [
+                    "Refresh",
+                  ],
+                  "style": {
+                    "color": "#F2F4F8",
+                  },
+                  "type": "Text",
+                },
+              ],
+              "style": {
+                "backgroundColor": "#171B22",
+                "borderColor": "#2A303A",
+              },
+              "testID": "detail-refresh",
+              "type": "View",
+            },
+            {
+              "children": [
+                {
+                  "children": [
+                    "Stop tracking this flight",
+                  ],
+                  "style": {
+                    "color": "#FF8A80",
+                  },
+                  "type": "Text",
+                },
+              ],
+              "style": {
+                "borderColor": "#2A303A",
+              },
+              "testID": "detail-remove",
+              "type": "View",
+            },
+          ],
+          "type": "View",
+        },
+      ],
+      "testID": "flight-detail",
+      "type": "RCTScrollView",
+    },
+  ],
+  "style": {
+    "backgroundColor": "#0B0E13",
+  },
+  "type": "View",
+}
+`;
+
+exports[`the detail in light and dark renders the seeded timeline in light 1`] = `
+{
+  "children": [
+    {
+      "children": [
+        {
+          "type": "RCTRefreshControl",
+        },
+        {
+          "children": [
+            {
+              "children": [
+                {
+                  "children": [
+                    "Back",
+                  ],
+                  "style": {
+                    "color": "#101418",
+                  },
+                  "type": "Text",
+                },
+              ],
+              "style": {
+                "backgroundColor": "#F2F4F8",
+                "borderColor": "#D6DAE1",
+              },
+              "testID": "detail-back",
+              "type": "View",
+            },
+            {
+              "children": [
+                {
+                  "children": [
+                    {
+                      "children": [
+                        "AA100",
+                      ],
+                      "style": {
+                        "color": "#101418",
+                      },
+                      "type": "Text",
+                    },
+                    {
+                      "children": [
+                        {
+                          "children": [
+                            "Scheduled",
+                          ],
+                          "style": {
+                            "color": "#27303B",
+                          },
+                          "type": "Text",
+                        },
+                      ],
+                      "label": "Status: Scheduled",
+                      "style": {
+                        "backgroundColor": "#E4E8EF",
+                      },
+                      "testID": "detail-status",
+                      "type": "View",
+                    },
+                  ],
+                  "type": "View",
+                },
+                {
+                  "children": [
+                    "JFK → LHR",
+                  ],
+                  "style": {
+                    "color": "#101418",
+                  },
+                  "type": "Text",
+                },
+                {
+                  "children": [
+                    "Wed 23 Sep",
+                  ],
+                  "style": {
+                    "color": "#525B67",
+                  },
+                  "type": "Text",
+                },
+                {
+                  "children": [
+                    "Departure 25 min late",
+                  ],
+                  "style": {
+                    "color": "#8A4B00",
+                  },
+                  "type": "Text",
+                },
+              ],
+              "type": "View",
+            },
+            {
+              "children": [
+                {
+                  "children": [
+                    "Timeline",
+                  ],
+                  "style": {
+                    "color": "#525B67",
+                  },
+                  "type": "Text",
+                },
+                {
+                  "children": [
+                    {
+                      "children": [
+                        {
+                          "children": [
+                            {
+                              "style": {
+                                "backgroundColor": "#FFFFFF",
+                                "borderColor": "#1C4FD6",
+                              },
+                              "type": "View",
+                            },
+                            {
+                              "style": {
+                                "backgroundColor": "#B8BFCA",
+                              },
+                              "type": "View",
+                            },
+                          ],
+                          "type": "View",
+                        },
+                        {
+                          "children": [
+                            {
+                              "children": [
+                                {
+                                  "children": [
+                                    "Gate departure",
+                                  ],
+                                  "style": {
+                                    "color": "#101418",
+                                  },
+                                  "type": "Text",
+                                },
+                                {
+                                  "children": [
+                                    "6:25 PM",
+                                  ],
+                                  "style": {
+                                    "color": "#101418",
+                                  },
+                                  "testID": "timeline-out-time",
+                                  "type": "Text",
+                                },
+                              ],
+                              "type": "View",
+                            },
+                            {
+                              "children": [
+                                "estimated, scheduled 6:00 PM, 25 min late, Terminal 8, gate B22",
+                              ],
+                              "style": {
+                                "color": "#525B67",
+                              },
+                              "type": "Text",
+                            },
+                          ],
+                          "type": "View",
+                        },
+                      ],
+                      "label": "Gate departure, 6:25 PM, estimated, Terminal 8, gate B22",
+                      "testID": "timeline-out",
+                      "type": "View",
+                    },
+                    {
+                      "children": [
+                        {
+                          "children": [
+                            {
+                              "style": {
+                                "backgroundColor": "#FFFFFF",
+                                "borderColor": "#B8BFCA",
+                              },
+                              "type": "View",
+                            },
+                            {
+                              "style": {
+                                "backgroundColor": "#B8BFCA",
+                              },
+                              "type": "View",
+                            },
+                          ],
+                          "type": "View",
+                        },
+                        {
+                          "children": [
+                            {
+                              "children": [
+                                {
+                                  "children": [
+                                    "Takeoff",
+                                  ],
+                                  "style": {
+                                    "color": "#101418",
+                                  },
+                                  "type": "Text",
+                                },
+                                {
+                                  "children": [
+                                    "6:20 PM",
+                                  ],
+                                  "style": {
+                                    "color": "#101418",
+                                  },
+                                  "testID": "timeline-off-time",
+                                  "type": "Text",
+                                },
+                              ],
+                              "type": "View",
+                            },
+                            {
+                              "children": [
+                                "scheduled",
+                              ],
+                              "style": {
+                                "color": "#525B67",
+                              },
+                              "type": "Text",
+                            },
+                          ],
+                          "type": "View",
+                        },
+                      ],
+                      "label": "Takeoff, 6:20 PM, scheduled",
+                      "testID": "timeline-off",
+                      "type": "View",
+                    },
+                    {
+                      "children": [
+                        {
+                          "children": [
+                            {
+                              "style": {
+                                "backgroundColor": "#FFFFFF",
+                                "borderColor": "#B8BFCA",
+                              },
+                              "type": "View",
+                            },
+                            {
+                              "style": {
+                                "backgroundColor": "#B8BFCA",
+                              },
+                              "type": "View",
+                            },
+                          ],
+                          "type": "View",
+                        },
+                        {
+                          "children": [
+                            {
+                              "children": [
+                                {
+                                  "children": [
+                                    "Landing",
+                                  ],
+                                  "style": {
+                                    "color": "#101418",
+                                  },
+                                  "type": "Text",
+                                },
+                                {
+                                  "children": [
+                                    "6:55 AM",
+                                  ],
+                                  "style": {
+                                    "color": "#101418",
+                                  },
+                                  "testID": "timeline-on-time",
+                                  "type": "Text",
+                                },
+                              ],
+                              "type": "View",
+                            },
+                            {
+                              "children": [
+                                "scheduled",
+                              ],
+                              "style": {
+                                "color": "#525B67",
+                              },
+                              "type": "Text",
+                            },
+                          ],
+                          "type": "View",
+                        },
+                      ],
+                      "label": "Landing, 6:55 AM, scheduled",
+                      "testID": "timeline-on",
+                      "type": "View",
+                    },
+                    {
+                      "children": [
+                        {
+                          "children": [
+                            {
+                              "style": {
+                                "backgroundColor": "#FFFFFF",
+                                "borderColor": "#B8BFCA",
+                              },
+                              "type": "View",
+                            },
+                          ],
+                          "type": "View",
+                        },
+                        {
+                          "children": [
+                            {
+                              "children": [
+                                {
+                                  "children": [
+                                    "Gate arrival",
+                                  ],
+                                  "style": {
+                                    "color": "#101418",
+                                  },
+                                  "type": "Text",
+                                },
+                                {
+                                  "children": [
+                                    "7:10 AM",
+                                  ],
+                                  "style": {
+                                    "color": "#101418",
+                                  },
+                                  "testID": "timeline-in-time",
+                                  "type": "Text",
+                                },
+                              ],
+                              "type": "View",
+                            },
+                            {
+                              "children": [
+                                "estimated, Terminal 3",
+                              ],
+                              "style": {
+                                "color": "#525B67",
+                              },
+                              "type": "Text",
+                            },
+                          ],
+                          "type": "View",
+                        },
+                      ],
+                      "label": "Gate arrival, 7:10 AM, estimated, Terminal 3",
+                      "testID": "timeline-in",
+                      "type": "View",
+                    },
+                  ],
+                  "testID": "flight-timeline",
+                  "type": "View",
+                },
+              ],
+              "style": {
+                "backgroundColor": "#F2F4F8",
+                "borderColor": "#D6DAE1",
+              },
+              "testID": "detail-timeline-section",
+              "type": "View",
+            },
+            {
+              "children": [
+                {
+                  "children": [
+                    "Details",
+                  ],
+                  "style": {
+                    "color": "#525B67",
+                  },
+                  "type": "Text",
+                },
+                {
+                  "children": [
+                    {
+                      "children": [
+                        "Departs from",
+                      ],
+                      "style": {
+                        "color": "#525B67",
+                      },
+                      "type": "Text",
+                    },
+                    {
+                      "children": [
+                        "Terminal 8, gate B22",
+                      ],
+                      "style": {
+                        "color": "#101418",
+                      },
+                      "testID": "detail-origin-gate",
+                      "type": "Text",
+                    },
+                  ],
+                  "type": "View",
+                },
+                {
+                  "children": [
+                    {
+                      "children": [
+                        "Arrives at",
+                      ],
+                      "style": {
+                        "color": "#525B67",
+                      },
+                      "type": "Text",
+                    },
+                    {
+                      "children": [
+                        "Terminal 3",
+                      ],
+                      "style": {
+                        "color": "#101418",
+                      },
+                      "testID": "detail-destination-gate",
+                      "type": "Text",
+                    },
+                  ],
+                  "type": "View",
+                },
+                {
+                  "children": [
+                    {
+                      "children": [
+                        "Aircraft",
+                      ],
+                      "style": {
+                        "color": "#525B67",
+                      },
+                      "type": "Text",
+                    },
+                    {
+                      "children": [
+                        "B77W",
+                      ],
+                      "style": {
+                        "color": "#101418",
+                      },
+                      "testID": "detail-aircraft",
+                      "type": "Text",
+                    },
+                  ],
+                  "type": "View",
+                },
+                {
+                  "children": [
+                    {
+                      "children": [
+                        "Distance",
+                      ],
+                      "style": {
+                        "color": "#525B67",
+                      },
+                      "type": "Text",
+                    },
+                    {
+                      "children": [
+                        "3,442 mi",
+                      ],
+                      "style": {
+                        "color": "#101418",
+                      },
+                      "testID": "detail-distance",
+                      "type": "Text",
+                    },
+                  ],
+                  "type": "View",
+                },
+              ],
+              "style": {
+                "backgroundColor": "#F2F4F8",
+                "borderColor": "#D6DAE1",
+              },
+              "testID": "detail-details",
+              "type": "View",
+            },
+            {
+              "children": [
+                "Flight data: AeroDataBox, updated 4 min ago. Times are 12-hour, local to each airport.",
+              ],
+              "style": {
+                "color": "#525B67",
+              },
+              "testID": "detail-attribution",
+              "type": "Text",
+            },
+            {
+              "children": [
+                {
+                  "children": [
+                    "Refresh",
+                  ],
+                  "style": {
+                    "color": "#101418",
+                  },
+                  "type": "Text",
+                },
+              ],
+              "style": {
+                "backgroundColor": "#F2F4F8",
+                "borderColor": "#D6DAE1",
+              },
+              "testID": "detail-refresh",
+              "type": "View",
+            },
+            {
+              "children": [
+                {
+                  "children": [
+                    "Stop tracking this flight",
+                  ],
+                  "style": {
+                    "color": "#B42318",
+                  },
+                  "type": "Text",
+                },
+              ],
+              "style": {
+                "borderColor": "#D6DAE1",
+              },
+              "testID": "detail-remove",
+              "type": "View",
+            },
+          ],
+          "type": "View",
+        },
+      ],
+      "testID": "flight-detail",
+      "type": "RCTScrollView",
+    },
+  ],
+  "style": {
+    "backgroundColor": "#FFFFFF",
+  },
+  "type": "View",
+}
+`;

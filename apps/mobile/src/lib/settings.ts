@@ -6,6 +6,11 @@
  *
  * Preferences ONLY. Anything the server owns (subscriptions, flights) lives in the offline store
  * and reaches screens through live queries, never through here.
+ *
+ * Increment 10: the units (metric or imperial) and time-format (12 h or 24 h) toggles change the
+ * mirrored preferences here at once (`updatePreferences`) and queue the account's
+ * `PATCH /v1/me/preferences` through the outbox (src/lib/preference-mutations.ts); the flight
+ * screens read `preferences` for every time and distance they show (src/lib/format.ts).
  */
 
 import { DEFAULT_USER_PREFERENCES, type UserPreferences } from '@planeahead/shared';
@@ -20,6 +25,8 @@ export interface SettingsState {
   readonly appearance: Appearance;
   readonly preferences: UserPreferences;
   readonly setAppearance: (appearance: Appearance) => void;
+  /** A local choice (the settings toggles): applied now, sent to the account by the caller. */
+  readonly updatePreferences: (patch: Partial<UserPreferences>) => void;
   /** Called after a sync page carrying `user_preferences` committed. */
   readonly applyServerPreferences: (preferences: UserPreferences) => void;
   /** Sign-out and account deletion: back to the defaults. */
@@ -39,6 +46,9 @@ export const useSettings = create<SettingsState>()(
       ...INITIAL,
       setAppearance: (appearance) => {
         set({ appearance });
+      },
+      updatePreferences: (patch) => {
+        set((state) => ({ preferences: { ...state.preferences, ...patch } }));
       },
       applyServerPreferences: (preferences) => {
         set({ preferences });

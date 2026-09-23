@@ -1,4 +1,5 @@
 import { Redirect, Stack } from 'expo-router';
+import { seededHomeRequested } from '../../dev/seeded-launch';
 import { authClient, isAnonymousSession } from '../../lib/auth-client';
 
 /**
@@ -7,6 +8,10 @@ import { authClient, isAnonymousSession } from '../../lib/auth-client';
  */
 export default function AuthLayout() {
   const { data: session } = authClient.useSession();
+  // Development builds only: the simulator check's launch argument (src/dev/seeded-launch.ts).
+  if (seededHomeRequested()) {
+    return <Redirect href="/dev/seeded-home" />;
+  }
   if (session !== null && !isAnonymousSession(session)) {
     return <Redirect href="/" />;
   }

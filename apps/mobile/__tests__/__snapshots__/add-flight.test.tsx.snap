@@ -1,0 +1,417 @@
+// Jest Snapshot v1, https://goo.gl/fbAQLP
+
+exports[`the sheet in light and dark renders with its validation errors in dark 1`] = `
+{
+  "children": [
+    {
+      "children": [
+        {
+          "children": [
+            {
+              "children": [
+                "Add a flight",
+              ],
+              "style": {
+                "color": "#F2F4F8",
+              },
+              "type": "Text",
+            },
+            {
+              "children": [
+                "The flight number and the date it departs, in the departure airport's time.",
+              ],
+              "style": {
+                "color": "#A3ACB8",
+              },
+              "type": "Text",
+            },
+            {
+              "children": [
+                {
+                  "children": [
+                    "Flight number",
+                  ],
+                  "style": {
+                    "color": "#A3ACB8",
+                  },
+                  "type": "Text",
+                },
+                {
+                  "label": "Flight number",
+                  "style": {
+                    "backgroundColor": "#1F242D",
+                    "borderColor": "#FF8A80",
+                    "color": "#F2F4F8",
+                  },
+                  "testID": "add-flight-number",
+                  "type": "TextInput",
+                },
+                {
+                  "children": [
+                    "Enter the flight number, e.g. AA100.",
+                  ],
+                  "style": {
+                    "color": "#FF8A80",
+                  },
+                  "testID": "add-flight-number-error",
+                  "type": "Text",
+                },
+              ],
+              "type": "View",
+            },
+            {
+              "children": [
+                {
+                  "children": [
+                    "Departure date",
+                  ],
+                  "style": {
+                    "color": "#A3ACB8",
+                  },
+                  "type": "Text",
+                },
+                {
+                  "label": "Departure date",
+                  "style": {
+                    "backgroundColor": "#1F242D",
+                    "borderColor": "#FF8A80",
+                    "color": "#F2F4F8",
+                  },
+                  "testID": "add-flight-date",
+                  "type": "TextInput",
+                },
+                {
+                  "children": [
+                    "Enter the departure date.",
+                  ],
+                  "style": {
+                    "color": "#FF8A80",
+                  },
+                  "testID": "add-flight-date-error",
+                  "type": "Text",
+                },
+              ],
+              "type": "View",
+            },
+            {
+              "children": [
+                {
+                  "children": [
+                    {
+                      "children": [
+                        "Today",
+                      ],
+                      "style": {
+                        "color": "#F2F4F8",
+                      },
+                      "type": "Text",
+                    },
+                  ],
+                  "style": {
+                    "backgroundColor": "#171B22",
+                    "borderColor": "#2A303A",
+                  },
+                  "testID": "add-flight-date-0",
+                  "type": "View",
+                },
+                {
+                  "children": [
+                    {
+                      "children": [
+                        "Tomorrow",
+                      ],
+                      "style": {
+                        "color": "#F2F4F8",
+                      },
+                      "type": "Text",
+                    },
+                  ],
+                  "style": {
+                    "backgroundColor": "#171B22",
+                    "borderColor": "#2A303A",
+                  },
+                  "testID": "add-flight-date-1",
+                  "type": "View",
+                },
+                {
+                  "children": [
+                    {
+                      "children": [
+                        "Fri 25 Sep",
+                      ],
+                      "style": {
+                        "color": "#F2F4F8",
+                      },
+                      "type": "Text",
+                    },
+                  ],
+                  "style": {
+                    "backgroundColor": "#171B22",
+                    "borderColor": "#2A303A",
+                  },
+                  "testID": "add-flight-date-2",
+                  "type": "View",
+                },
+              ],
+              "type": "View",
+            },
+            {
+              "children": [
+                {
+                  "children": [
+                    "Add flight",
+                  ],
+                  "style": {
+                    "color": "#0B0E13",
+                  },
+                  "type": "Text",
+                },
+              ],
+              "style": {
+                "backgroundColor": "#7C9DFF",
+                "borderColor": "#2A303A",
+              },
+              "testID": "add-flight-submit",
+              "type": "View",
+            },
+            {
+              "children": [
+                {
+                  "children": [
+                    "Cancel",
+                  ],
+                  "style": {
+                    "color": "#F2F4F8",
+                  },
+                  "type": "Text",
+                },
+              ],
+              "style": {
+                "backgroundColor": "#171B22",
+                "borderColor": "#2A303A",
+              },
+              "testID": "add-flight-close",
+              "type": "View",
+            },
+          ],
+          "type": "View",
+        },
+      ],
+      "testID": "add-flight-sheet",
+      "type": "RCTScrollView",
+    },
+  ],
+  "style": {
+    "backgroundColor": "#0B0E13",
+  },
+  "type": "View",
+}
+`;
+
+exports[`the sheet in light and dark renders with its validation errors in light 1`] = `
+{
+  "children": [
+    {
+      "children": [
+        {
+          "children": [
+            {
+              "children": [
+                "Add a flight",
+              ],
+              "style": {
+                "color": "#101418",
+              },
+              "type": "Text",
+            },
+            {
+              "children": [
+                "The flight number and the date it departs, in the departure airport's time.",
+              ],
+              "style": {
+                "color": "#525B67",
+              },
+              "type": "Text",
+            },
+            {
+              "children": [
+                {
+                  "children": [
+                    "Flight number",
+                  ],
+                  "style": {
+                    "color": "#525B67",
+                  },
+                  "type": "Text",
+                },
+                {
+                  "label": "Flight number",
+                  "style": {
+                    "backgroundColor": "#FFFFFF",
+                    "borderColor": "#B42318",
+                    "color": "#101418",
+                  },
+                  "testID": "add-flight-number",
+                  "type": "TextInput",
+                },
+                {
+                  "children": [
+                    "Enter the flight number, e.g. AA100.",
+                  ],
+                  "style": {
+                    "color": "#B42318",
+                  },
+                  "testID": "add-flight-number-error",
+                  "type": "Text",
+                },
+              ],
+              "type": "View",
+            },
+            {
+              "children": [
+                {
+                  "children": [
+                    "Departure date",
+                  ],
+                  "style": {
+                    "color": "#525B67",
+                  },
+                  "type": "Text",
+                },
+                {
+                  "label": "Departure date",
+                  "style": {
+                    "backgroundColor": "#FFFFFF",
+                    "borderColor": "#B42318",
+                    "color": "#101418",
+                  },
+                  "testID": "add-flight-date",
+                  "type": "TextInput",
+                },
+                {
+                  "children": [
+                    "Enter the departure date.",
+                  ],
+                  "style": {
+                    "color": "#B42318",
+                  },
+                  "testID": "add-flight-date-error",
+                  "type": "Text",
+                },
+              ],
+              "type": "View",
+            },
+            {
+              "children": [
+                {
+                  "children": [
+                    {
+                      "children": [
+                        "Today",
+                      ],
+                      "style": {
+                        "color": "#101418",
+                      },
+                      "type": "Text",
+                    },
+                  ],
+                  "style": {
+                    "backgroundColor": "#F2F4F8",
+                    "borderColor": "#D6DAE1",
+                  },
+                  "testID": "add-flight-date-0",
+                  "type": "View",
+                },
+                {
+                  "children": [
+                    {
+                      "children": [
+                        "Tomorrow",
+                      ],
+                      "style": {
+                        "color": "#101418",
+                      },
+                      "type": "Text",
+                    },
+                  ],
+                  "style": {
+                    "backgroundColor": "#F2F4F8",
+                    "borderColor": "#D6DAE1",
+                  },
+                  "testID": "add-flight-date-1",
+                  "type": "View",
+                },
+                {
+                  "children": [
+                    {
+                      "children": [
+                        "Fri 25 Sep",
+                      ],
+                      "style": {
+                        "color": "#101418",
+                      },
+                      "type": "Text",
+                    },
+                  ],
+                  "style": {
+                    "backgroundColor": "#F2F4F8",
+                    "borderColor": "#D6DAE1",
+                  },
+                  "testID": "add-flight-date-2",
+                  "type": "View",
+                },
+              ],
+              "type": "View",
+            },
+            {
+              "children": [
+                {
+                  "children": [
+                    "Add flight",
+                  ],
+                  "style": {
+                    "color": "#FFFFFF",
+                  },
+                  "type": "Text",
+                },
+              ],
+              "style": {
+                "backgroundColor": "#1C4FD6",
+                "borderColor": "#D6DAE1",
+              },
+              "testID": "add-flight-submit",
+              "type": "View",
+            },
+            {
+              "children": [
+                {
+                  "children": [
+                    "Cancel",
+                  ],
+                  "style": {
+                    "color": "#101418",
+                  },
+                  "type": "Text",
+                },
+              ],
+              "style": {
+                "backgroundColor": "#F2F4F8",
+                "borderColor": "#D6DAE1",
+              },
+              "testID": "add-flight-close",
+              "type": "View",
+            },
+          ],
+          "type": "View",
+        },
+      ],
+      "testID": "add-flight-sheet",
+      "type": "RCTScrollView",
+    },
+  ],
+  "style": {
+    "backgroundColor": "#FFFFFF",
+  },
+  "type": "View",
+}
+`;

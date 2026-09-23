@@ -26,12 +26,23 @@
  * snapshot that replaces the synced rows keeps every subscription a queued `POST /v1/flights`
  * names, because the server has not seen it yet (src/lib/sync/store.ts; increment 9 re-review,
  * auth-and-store-4).
+ *
+ * Settling hooks (increment 10, ruling T2). An item the server answered for good leaves the queue
+ * in ONE immediate transaction together with what its writer needs done to the local rows:
+ * `onSent(item, response)` for a 2xx (the add-flight writer replaces its optimistic row with the
+ * server's, whose id differs when the account already held the flight) and
+ * `onRefused(item, response)` for a terminal 4xx (the writer removes its optimistic row). Each
+ * hook runs synchronously inside that transaction, never opens its own, and returns the tables
+ * it wrote so the one signal after the COMMIT names them. A hook that throws rolls its writes
+ * back; the item is then removed on its own (the server's answer stands, the next pull
+ * reconciles the rows) and `onHookError` reports it, so a broken hook can never wedge the queue.
+ * `onDropped` still fires after a refusal commits, for the user-facing message and the report.
  */
 
 import { uuidv7 } from '@planeahead/shared';
 import { errorCode, type RawRequest, type RawResponse } from '../api-client';
 import type { SqliteLike, SqlValue } from '../db/sqlite-like';
-import { notifyTablesChanged } from '../db/store-signal';
+import { notifyTablesChanged, type StoreTable } from '../db/store-signal';
 import type { ApplyGate } from './gate';
 import { wipeLocalStore } from './store';
 
@@ -65,7 +76,18 @@ export interface DroppedMutation {
   readonly item: OutboxItem;
   readonly status: number;
   readonly code: string | null;
+  /**
+   * The refusal's body (the error envelope: `cap` and `limit`, `triedDates`), for the message the
+   * user sees. Never sent to Sentry: a report names the method, path, status and code only.
+   */
+  readonly body: unknown;
 }
+
+/**
+ * A settling hook: runs inside the transaction that removes the item and returns the tables it
+ * wrote (or nothing). Synchronous; must not open a transaction of its own.
+ */
+export type SettleHook = (item: OutboxItem, response: RawResponse) => readonly StoreTable[] | void;
 
 export interface OutboxDeps {
   readonly db: SqliteLike;
@@ -76,6 +98,12 @@ export interface OutboxDeps {
   readonly onDropped?: (dropped: DroppedMutation) => void;
   /** A 422 key/body mismatch: reported without the body; the item is re-keyed. */
   readonly onKeyRegenerated?: (item: OutboxItem) => void;
+  /** A 2xx: runs in the transaction that removes the item (see the header). */
+  readonly onSent?: SettleHook;
+  /** A terminal refusal: runs in the transaction that removes the item (see the header). */
+  readonly onRefused?: SettleHook;
+  /** A settling hook threw; its writes rolled back and the item was removed without it. */
+  readonly onHookError?: (item: OutboxItem, error: unknown) => void;
   readonly now?: () => number;
   readonly newKey?: () => string;
 }
@@ -170,9 +198,31 @@ export function pendingCount(db: SqliteLike): number {
   return db.get<{ n: number }>('SELECT count(*) AS n FROM outbox WHERE id IS NOT NULL')?.n ?? 0;
 }
 
-function remove(db: SqliteLike, id: string): void {
-  db.run('DELETE FROM outbox WHERE id = ?', [id]);
-  notifyTablesChanged(['outbox']);
+/**
+ * Removes a settled item and runs its hook in the same immediate transaction, then signals the
+ * outbox and whatever the hook wrote, once. A throwing hook rolls back; the item goes on its own.
+ */
+function settle(
+  deps: OutboxDeps,
+  item: OutboxItem,
+  response: RawResponse,
+  hook: SettleHook | undefined,
+): void {
+  let tables: readonly StoreTable[] = [];
+  try {
+    tables = deps.db.transaction(
+      (): readonly StoreTable[] => {
+        deps.db.run('DELETE FROM outbox WHERE id = ?', [item.id]);
+        return hook?.(item, response) ?? [];
+      },
+      { behavior: 'immediate' },
+    );
+  } catch (error) {
+    deps.onHookError?.(item, error);
+    deps.db.run('DELETE FROM outbox WHERE id = ?', [item.id]);
+    tables = [];
+  }
+  notifyTablesChanged(['outbox', ...tables]);
 }
 
 function defer(
@@ -252,7 +302,7 @@ export function createOutbox(deps: OutboxDeps): { drain(): Promise<DrainResult> 
         continue;
       }
       if (response.status >= 200 && response.status < 300) {
-        remove(deps.db, item.id);
+        settle(deps, item, response, deps.onSent);
         sent += 1;
         continue;
       }
@@ -268,9 +318,9 @@ export function createOutbox(deps: OutboxDeps): { drain(): Promise<DrainResult> 
         defer(deps.db, item, now(), response.status, code ?? `http_${String(response.status)}`);
         return { kind: 'deferred', sent, dropped };
       }
-      remove(deps.db, item.id);
+      settle(deps, item, response, deps.onRefused);
       dropped += 1;
-      deps.onDropped?.({ item, status: response.status, code });
+      deps.onDropped?.({ item, status: response.status, code, body: response.body });
     }
   };
 

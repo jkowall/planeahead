@@ -11,7 +11,10 @@ import { authClient } from './auth-client';
 import { runtimeConfig } from './config';
 import { whenStoreReady, type Store } from './db/client';
 import { KV_KEYS, kv } from './db/kv';
+import { useFlightNotices } from './flight-notices';
+import { flightOutboxHooks } from './flights';
 import { analyticsId, installId } from './identity';
+import { withPendingPatches } from './preference-mutations';
 import { queryClient } from './query';
 import { useSettings } from './settings';
 import { createSyncClient, type SyncClient } from './sync/client';
@@ -41,6 +44,7 @@ export async function forgetAccount(store: Store | null): Promise<void> {
   }
   await authClient.signOut().catch(() => undefined);
   useSettings.getState().reset();
+  useFlightNotices.getState().clear();
   kv.removeItemSync(KV_KEYS.appleUserId);
   kv.removeItemSync(KV_KEYS.pendingMagicLink);
   queryClient.clear();
@@ -68,7 +72,8 @@ function build(store: Store): Services {
     },
     onAccountDeleted,
     onPreferences: (preferences) => {
-      useSettings.getState().applyServerPreferences(preferences);
+      // A toggle whose PATCH is still queued stays as the user set it (preference-mutations.ts).
+      useSettings.getState().applyServerPreferences(withPendingPatches(store.sqlite, preferences));
     },
     onSkipped: (skipped) => {
       // Entity, id (a uuid, or a flight's position in the page) and the failing field: never a
@@ -79,16 +84,27 @@ function build(store: Store): Services {
       });
     },
   });
+  const flightHooks = flightOutboxHooks(store.sqlite);
   const outbox = createOutbox({
     db: store.sqlite,
     gate,
     transport: { send: (request) => api.request(request) },
     onAccountDeleted,
-    onDropped: ({ item, status, code }) => {
+    onSent: flightHooks.onSent,
+    onRefused: flightHooks.onRefused,
+    onHookError: (item, error) => {
+      Sentry.captureException(error, {
+        extra: { hook: 'outbox_settle', method: item.method, path: item.path },
+      });
+    },
+    onDropped: (dropped) => {
+      // Method, path, status and code only: never the body (it names the flight).
+      const { item, status, code } = dropped;
       Sentry.captureMessage('outbox_mutation_dropped', {
         level: 'warning',
         extra: { method: item.method, path: item.path, status, code },
       });
+      flightHooks.notifyDropped(dropped);
     },
     onKeyRegenerated: (item) => {
       // A client bug by definition (the same key was sent with a different body); no body here.

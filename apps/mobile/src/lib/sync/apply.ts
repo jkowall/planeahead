@@ -102,7 +102,11 @@ const OPAQUE_TABLES = {
   logbook_entries: 'logbook_entries',
 } as const;
 
-function upsertSubscription(db: SqliteLike, row: FlightSubscriptionRowV1): void {
+/**
+ * Writes a server subscription row; the snapshot columns and `finished_at` are left alone. Also
+ * the outbox's success hook for `POST /v1/flights` (src/lib/flights.ts), inside its transaction.
+ */
+export function upsertSubscription(db: SqliteLike, row: FlightSubscriptionRowV1): void {
   db.run(
     `INSERT INTO flight_subscriptions (
        id, flight_key, flight_instance_id, trip_id, label, seat, cabin, muted,
@@ -198,9 +202,23 @@ function tableFor(entity: SyncChangeV1['entity']): StoreTable {
   }
 }
 
-function applySnapshot(db: SqliteLike, flight: SyncFlightV1): void {
+/**
+ * Writes a flight snapshot onto every subscription naming its key. `onlyIfNewer` (a snapshot from
+ * a route answer rather than the ordered feed: refresh, subscribe) skips a row whose stored
+ * snapshot was fetched later, so an answer that lost a race with a sync page never rolls the row
+ * back; `julianday` compares instants whatever their fractional-second spelling.
+ */
+export function applySnapshot(
+  db: SqliteLike,
+  flight: SyncFlightV1,
+  options: { readonly onlyIfNewer?: boolean } = {},
+): number {
   const { times } = flight;
-  db.run(
+  const guard =
+    options.onlyIfNewer === true
+      ? ' AND (snapshot_fetched_at IS NULL OR julianday(snapshot_fetched_at) <= julianday(?))'
+      : '';
+  return db.run(
     `UPDATE flight_subscriptions SET
        flight_status = ?, scheduled_out = ?, estimated_out = ?, actual_out = ?,
        scheduled_in = ?, estimated_in = ?, actual_in = ?,
@@ -209,7 +227,7 @@ function applySnapshot(db: SqliteLike, flight: SyncFlightV1): void {
        origin_terminal = ?, origin_gate = ?, destination_terminal = ?, destination_gate = ?,
        baggage_claim = ?, aircraft_type_icao = ?, departure_delay_sec = ?, arrival_delay_sec = ?,
        snapshot_json = ?, snapshot_fetched_at = ?, snapshot_source = ?
-     WHERE flight_key = ?`,
+     WHERE flight_key = ?${guard}`,
     [
       flight.status,
       times.scheduledOut ?? null,
@@ -236,8 +254,9 @@ function applySnapshot(db: SqliteLike, flight: SyncFlightV1): void {
       flight.fetchedAt,
       flight.source,
       flight.key,
+      ...(options.onlyIfNewer === true ? [flight.fetchedAt] : []),
     ],
-  );
+  ).changes;
 }
 
 const UUID_SHAPE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;

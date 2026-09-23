@@ -1,0 +1,420 @@
+/**
+ * The flight detail (increment 10): the timeline from a seeded snapshot (ruling T4) in the user's
+ * time format and units, the gates, baggage, aircraft, distance and the provider attribution; the
+ * refresh (ruling T3) through the real typed client to a scripted `fetch`: at most one
+ * `POST /v1/flights/:id/refresh` per gesture, the 504 that applies the last known flight and says
+ * the refresh is still running, the 410 that marks the flight finished here, a null or older
+ * snapshot that never replaces the stored one, and the 8 s deadline UX; unsubscribe through the
+ * outbox; light and dark snapshots.
+ */
+
+import { fireEvent, render, screen, waitFor, act, within } from '@testing-library/react-native';
+import type { ReactElement } from 'react';
+import { Alert } from 'react-native';
+import FlightDetailScreen from '../src/app/(app)/flight/[id]';
+import { createApiClient } from '../src/lib/api-client';
+import { StoreProvider } from '../src/lib/db/store-context';
+import { readFlight } from '../src/lib/flight-queries';
+import { addFlight, flightOutboxHooks, REFRESH_GRACE_MS } from '../src/lib/flights';
+import { useSettings } from '../src/lib/settings';
+import { ApplyGate } from '../src/lib/sync/gate';
+import { createOutbox } from '../src/lib/sync/outbox';
+import { compactTree } from './support/compact-tree';
+import { createMemorySqlite, type MemorySqlite } from './support/memory-sqlite';
+import {
+  AA100_ID,
+  AA100_KEY,
+  DL1_ID,
+  NOW,
+  aa100Snapshot,
+  json,
+  scriptedFetch,
+  seedStore,
+} from './support/flight-fixtures';
+
+const mockRouter = { push: jest.fn(), back: jest.fn(), replace: jest.fn() };
+const mockParams: { id: string } = { id: AA100_ID };
+const mockServices: { current: unknown } = { current: null };
+
+jest.mock('expo-router', () => ({
+  useRouter: () => mockRouter,
+  useLocalSearchParams: () => mockParams,
+}));
+
+jest.mock('react-native-safe-area-context', () => {
+  const { View } = jest.requireActual<typeof import('react-native')>('react-native');
+  return { SafeAreaView: View };
+});
+
+jest.mock('../src/lib/db/kv', () =>
+  jest.requireActual<typeof import('./support/memory-kv')>('./support/memory-kv').memoryKvModule(),
+);
+
+jest.mock('../src/lib/services', () => ({
+  services: () => Promise.resolve(mockServices.current),
+}));
+
+interface Harness {
+  readonly db: MemorySqlite;
+  readonly network: ReturnType<typeof scriptedFetch>;
+}
+
+/** The services the screen uses, over this test's store and network, built like services.ts. */
+function harness(aa100: Record<string, unknown> = {}): Harness {
+  const db = createMemorySqlite();
+  seedStore(db, aa100);
+  const network = scriptedFetch();
+  const api = createApiClient({
+    baseUrl: 'https://api.planeahead.test',
+    getCookie: () => Promise.resolve('better-auth.session_token=session-abc'),
+    getInstallId: () => 'install-0123456789',
+    fetch: network.fetchMock,
+  });
+  const outbox = createOutbox({
+    db,
+    gate: new ApplyGate(),
+    transport: { send: (request) => api.request(request) },
+    onAccountDeleted: jest.fn(),
+    ...flightOutboxHooks(db),
+  });
+  mockServices.current = { store: { sqlite: db }, api, outbox };
+  return { db, network };
+}
+
+async function renderDetail(db: MemorySqlite, id: string = AA100_ID) {
+  mockParams.id = id;
+  await render(
+    <StoreProvider value={db}>
+      <FlightDetailScreen />
+    </StoreProvider>,
+  );
+  await screen.findByTestId(/^flight-detail/);
+}
+
+function refreshView(snapshot: Record<string, unknown> | null) {
+  return { key: AA100_KEY, phase: 'scheduled', version: 7, snapshot, source: 'tracker' };
+}
+
+function pull(): void {
+  const scroll = screen.getByTestId('flight-detail');
+  const control = scroll.props.refreshControl as ReactElement<{ onRefresh: () => void }>;
+  control.props.onRefresh();
+}
+
+function snapshotRow(db: MemorySqlite): {
+  origin_gate: string | null;
+  snapshot_fetched_at: string;
+} {
+  return db.raw
+    .prepare('SELECT origin_gate, snapshot_fetched_at FROM flight_subscriptions WHERE id = ?')
+    .get(AA100_ID) as { origin_gate: string | null; snapshot_fetched_at: string };
+}
+
+beforeEach(() => {
+  jest.spyOn(Date, 'now').mockReturnValue(NOW);
+  useSettings.getState().reset();
+});
+
+describe('the detail timeline, from a seeded snapshot', () => {
+  it('shows out, off, on and in with their best times, the scheduled time and the delay', async () => {
+    const { db } = harness();
+    await renderDetail(db);
+    const timeline = within(screen.getByTestId('flight-timeline'));
+    expect(timeline.getByTestId('timeline-out-time')).toHaveTextContent('6:25 PM');
+    expect(timeline.getByTestId('timeline-off-time')).toHaveTextContent('6:20 PM');
+    expect(timeline.getByTestId('timeline-on-time')).toHaveTextContent('6:55 AM');
+    expect(timeline.getByTestId('timeline-in-time')).toHaveTextContent('7:10 AM');
+    expect(timeline.getByTestId('timeline-out')).toHaveTextContent(
+      /estimated, scheduled 6:00 PM, 25 min late, Terminal 8, gate B22/,
+    );
+    expect(timeline.getByTestId('timeline-in')).toHaveTextContent(/Terminal 3/);
+    expect(timeline.queryByTestId('timeline-baggage')).toBeNull();
+  });
+
+  it('follows the 24 h format and the metric units from the settings store', async () => {
+    useSettings.getState().updatePreferences({ timeFormat: '24h', distanceUnit: 'km' });
+    const { db } = harness();
+    await renderDetail(db);
+    expect(screen.getByTestId('timeline-out-time')).toHaveTextContent('18:25');
+    expect(screen.getByTestId('timeline-in-time')).toHaveTextContent('07:10');
+    expect(screen.getByTestId('detail-distance')).toHaveTextContent('5,540 km');
+  });
+
+  it('shows the header, the details and the provider attribution', async () => {
+    const { db } = harness();
+    await renderDetail(db);
+    expect(screen.getByText('AA100')).toBeOnTheScreen();
+    expect(screen.getByText('JFK → LHR')).toBeOnTheScreen();
+    expect(screen.getByTestId('detail-status')).toHaveProp(
+      'accessibilityLabel',
+      'Status: Scheduled',
+    );
+    expect(screen.getByTestId('detail-origin-gate')).toHaveTextContent('Terminal 8, gate B22');
+    expect(screen.getByTestId('detail-destination-gate')).toHaveTextContent('Terminal 3');
+    expect(screen.getByTestId('detail-aircraft')).toHaveTextContent('B77W');
+    expect(screen.getByTestId('detail-distance')).toHaveTextContent('3,442 mi');
+    expect(screen.getByTestId('detail-attribution')).toHaveTextContent(
+      'Flight data: AeroDataBox, updated 4 min ago. Times are 12-hour, local to each airport.',
+    );
+  });
+
+  it('shows a finished trip with its baggage claim and every step done', async () => {
+    const { db } = harness();
+    await renderDetail(db, DL1_ID);
+    expect(screen.getByTestId('timeline-baggage')).toHaveTextContent(/Baggage claim 4/);
+    expect(screen.getByTestId('timeline-in-time')).toHaveTextContent('9:41 AM');
+    expect(screen.getByTestId('timeline-in')).toHaveTextContent(
+      /actual, scheduled 9:50 AM, 9 min early/,
+    );
+    expect(screen.getByTestId('detail-baggage')).toHaveTextContent('4');
+    expect(screen.getByTestId('detail-over')).toHaveTextContent('This flight is over.');
+  });
+
+  it('says so for a flight that is no longer in the list', async () => {
+    const { db } = harness();
+    await renderDetail(db, '0199a000-0000-7000-8000-00000000dead');
+    expect(screen.getByText('Flight not found')).toBeOnTheScreen();
+  });
+
+  it('shows a pending add without a refresh', async () => {
+    const { db } = harness();
+    const added = addFlight(db, { designator: 'UA901', date: '2026-09-24' });
+    await renderDetail(db, added.subscriptionId);
+    expect(screen.getByTestId('detail-pending')).toBeOnTheScreen();
+    expect(screen.queryByTestId('detail-refresh')).toBeNull();
+    expect(screen.getByTestId('flight-detail').props.refreshControl).toBeUndefined();
+  });
+});
+
+describe('refresh (ruling T3)', () => {
+  it('calls the refresh route at most once per gesture and applies the answer', async () => {
+    const { db, network } = harness();
+    let answer: (response: Response) => void = () => undefined;
+    network.answer(
+      () =>
+        new Promise<Response>((resolve) => {
+          answer = resolve;
+        }),
+    );
+    await renderDetail(db);
+    await act(async () => {
+      pull();
+      pull();
+      await fireEvent.press(screen.getByTestId('detail-refresh'));
+    });
+    await waitFor(() => {
+      expect(network.requests).toHaveLength(1);
+    });
+    expect(network.requests[0]).toMatchObject({
+      method: 'POST',
+      url: `https://api.planeahead.test/v1/flights/${AA100_ID}/refresh`,
+    });
+    expect(network.requests[0]?.headers.get('idempotency-key')).toBeNull();
+    expect(screen.getByTestId('detail-refreshing')).toHaveTextContent('Refreshing…');
+
+    await act(async () => {
+      answer(
+        json(200, {
+          outcome: 'refreshed',
+          reason: null,
+          flight: refreshView(
+            aa100Snapshot({ originGate: 'C5', fetchedAt: '2026-09-23T14:00:00Z' }),
+          ),
+        }),
+      );
+      await Promise.resolve();
+    });
+    expect(await screen.findByTestId('detail-message')).toHaveTextContent(/^Updated\./);
+    expect(screen.getByTestId('detail-origin-gate')).toHaveTextContent('Terminal 8, gate C5');
+
+    // The gesture is over: the next pull is a new request.
+    network.answer(() =>
+      json(200, { outcome: 'coalesced', reason: 'fresh', flight: refreshView(aa100Snapshot()) }),
+    );
+    await act(async () => {
+      pull();
+      await Promise.resolve();
+    });
+    await waitFor(() => {
+      expect(network.requests).toHaveLength(2);
+    });
+    expect(await screen.findByText('Already up to date.')).toBeOnTheScreen();
+  });
+
+  it('504: applies the last known flight from the payload and says the refresh is still running', async () => {
+    const { db, network } = harness();
+    network.answer(() =>
+      json(504, {
+        error: 'refresh_timeout',
+        message: 'the refresh is still running; showing the last known state',
+        requestId: 'req-1',
+        flight: refreshView(
+          aa100Snapshot({ originGate: 'B30', fetchedAt: '2026-09-23T13:59:00Z' }),
+        ),
+      }),
+    );
+    await renderDetail(db);
+    await act(async () => {
+      pull();
+      await Promise.resolve();
+    });
+    expect(await screen.findByTestId('detail-message')).toHaveTextContent(
+      /The refresh is still running\. Showing the last known state/,
+    );
+    expect(snapshotRow(db).origin_gate).toBe('B30');
+    expect(screen.getByTestId('detail-origin-gate')).toHaveTextContent('Terminal 8, gate B30');
+  });
+
+  it('504 upstream_timeout with a null snapshot never replaces the stored one', async () => {
+    const { db, network } = harness();
+    network.answer(() =>
+      json(504, { error: 'upstream_timeout', requestId: 'req-2', flight: refreshView(null) }),
+    );
+    await renderDetail(db);
+    const before = snapshotRow(db);
+    await act(async () => {
+      pull();
+      await Promise.resolve();
+    });
+    expect(await screen.findByTestId('detail-message')).toHaveTextContent(/still running/);
+    expect(snapshotRow(db)).toEqual(before);
+    expect(readFlight(db, AA100_ID)?.snapshot).not.toBeNull();
+  });
+
+  it('never rolls the row back to an older snapshot than it holds', async () => {
+    const { db, network } = harness();
+    network.answer(() =>
+      json(200, {
+        outcome: 'coalesced',
+        reason: 'inflight',
+        flight: refreshView(
+          aa100Snapshot({ originGate: 'OLD', fetchedAt: '2026-09-23T10:00:00Z' }),
+        ),
+      }),
+    );
+    await renderDetail(db);
+    await act(async () => {
+      pull();
+      await Promise.resolve();
+    });
+    await screen.findByTestId('detail-message');
+    expect(snapshotRow(db).origin_gate).toBe('B22');
+  });
+
+  it('410 flight_archived: marks the flight finished here and stops offering a refresh', async () => {
+    const { db, network } = harness();
+    network.answer(() =>
+      json(410, {
+        error: 'flight_archived',
+        message: 'this flight is over and no longer tracked',
+        requestId: 'req-3',
+        flight: refreshView(
+          aa100Snapshot({ status: 'arrived', fetchedAt: '2026-09-23T14:00:00Z' }),
+        ),
+      }),
+    );
+    await renderDetail(db);
+    await act(async () => {
+      pull();
+      await Promise.resolve();
+    });
+    expect(await screen.findByTestId('detail-over')).toHaveTextContent(
+      'This flight is over and no longer tracked.',
+    );
+    expect(readFlight(db, AA100_ID)).toMatchObject({ status: 'arrived' });
+    expect(readFlight(db, AA100_ID)?.finishedAt).toBe(new Date(NOW).toISOString());
+    expect(screen.queryByTestId('detail-refresh')).toBeNull();
+  });
+
+  it('403 refresh cap: says the free-tier limit', async () => {
+    const { db, network } = harness();
+    network.answer(() =>
+      json(403, { error: 'cap_exceeded', cap: 'refresh', limit: 10, requestId: 'req-4' }),
+    );
+    await renderDetail(db);
+    await act(async () => {
+      pull();
+      await Promise.resolve();
+    });
+    expect(await screen.findByTestId('detail-message')).toHaveTextContent(
+      /^The free plan refreshes a flight up to 10 times a day\. It keeps updating on its own\./,
+    );
+  });
+
+  it('the 8 s deadline UX: still checking past 8 s, then gives up waiting after the grace', async () => {
+    jest.restoreAllMocks();
+    jest.useFakeTimers({ now: NOW, doNotFake: ['queueMicrotask', 'nextTick', 'setImmediate'] });
+    try {
+      const { db, network } = harness();
+      network.answer(
+        (request) =>
+          new Promise<Response>((_resolve, reject) => {
+            request.signal?.addEventListener('abort', () => {
+              reject(new DOMException('aborted', 'AbortError'));
+            });
+          }),
+      );
+      await renderDetail(db);
+      await act(async () => {
+        pull();
+        await Promise.resolve();
+      });
+      await act(async () => {
+        await Promise.resolve();
+        jest.advanceTimersByTime(7_999);
+      });
+      expect(screen.getByTestId('detail-refreshing')).toHaveTextContent('Refreshing…');
+      await act(async () => {
+        jest.advanceTimersByTime(1);
+        await Promise.resolve();
+      });
+      expect(screen.getByTestId('detail-refreshing')).toHaveTextContent(
+        'Still checking with the flight data provider…',
+      );
+      await act(async () => {
+        jest.advanceTimersByTime(REFRESH_GRACE_MS);
+        await Promise.resolve();
+      });
+      await waitFor(() => {
+        expect(screen.getByTestId('detail-message')).toHaveTextContent(/taking longer than usual/);
+      });
+      expect(screen.queryByTestId('detail-refreshing')).toBeNull();
+    } finally {
+      jest.useRealTimers();
+    }
+  });
+});
+
+describe('unsubscribe', () => {
+  it('tombstones the row now, queues DELETE /v1/flights/:id and drains it', async () => {
+    const { db, network } = harness();
+    network.answer(() => json(200, { deleted: true }));
+    const alert = jest.spyOn(Alert, 'alert');
+    await renderDetail(db);
+    await fireEvent.press(screen.getByTestId('detail-remove'));
+    const buttons = alert.mock.calls[0]?.[2] ?? [];
+    const confirm = buttons.find((button) => button.style === 'destructive');
+    await act(async () => {
+      confirm?.onPress?.();
+      await Promise.resolve();
+    });
+    await waitFor(() => {
+      expect(network.requests).toHaveLength(1);
+    });
+    expect(mockRouter.back).toHaveBeenCalled();
+    expect(readFlight(db, AA100_ID)).toBeNull();
+    expect(`${network.requests[0]?.method ?? ''} ${network.requests[0]?.url ?? ''}`).toBe(
+      `DELETE https://api.planeahead.test/v1/flights/${AA100_ID}`,
+    );
+    expect(network.requests[0]?.headers.get('idempotency-key')).toMatch(/^[0-9a-f-]{36}$/);
+  });
+});
+
+describe('the detail in light and dark', () => {
+  it.each(['light', 'dark'] as const)('renders the seeded timeline in %s', async (appearance) => {
+    useSettings.getState().setAppearance(appearance);
+    const { db } = harness();
+    await renderDetail(db);
+    expect(compactTree(screen.toJSON())).toMatchSnapshot();
+  });
+});

@@ -11,7 +11,7 @@ import {
 } from 'expo-apple-authentication';
 import { useRouter } from 'expo-router';
 import { useState } from 'react';
-import { Platform, StyleSheet, TextInput, useColorScheme } from 'react-native';
+import { Platform, StyleSheet, TextInput } from 'react-native';
 import { Body, Button, Screen, Section, Title, usePalette } from '../../components/ui';
 import { authClient, isAnonymousSession } from '../../lib/auth-client';
 import { runtimeConfig } from '../../lib/config';
@@ -19,6 +19,7 @@ import { requestMagicLink } from '../../lib/magic-link';
 import { signInWithApple } from '../../lib/native-signin/apple';
 import { signInWithGoogle } from '../../lib/native-signin/google';
 import type { NativeSignInResult } from '../../lib/native-signin/nonce';
+import { useTheme } from '../../theme/useTheme';
 
 type Busy = 'apple' | 'google' | 'email' | 'anonymous' | null;
 
@@ -27,7 +28,7 @@ const EMAIL_SHAPE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
 export default function SignInScreen() {
   const router = useRouter();
   const palette = usePalette();
-  const scheme = useColorScheme();
+  const { scheme } = useTheme();
   const { data: session } = authClient.useSession();
   const anonymous = isAnonymousSession(session);
   const [email, setEmail] = useState('');

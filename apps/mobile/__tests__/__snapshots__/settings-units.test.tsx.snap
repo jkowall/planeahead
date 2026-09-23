@@ -1,0 +1,699 @@
+// Jest Snapshot v1, https://goo.gl/fbAQLP
+
+exports[`settings in light and dark renders in dark 1`] = `
+{
+  "children": [
+    {
+      "children": [
+        {
+          "children": [
+            {
+              "children": [
+                "Settings",
+              ],
+              "style": {
+                "color": "#F2F4F8",
+              },
+              "type": "Text",
+            },
+            {
+              "children": [
+                {
+                  "children": [
+                    "Appearance",
+                  ],
+                  "style": {
+                    "color": "#A3ACB8",
+                  },
+                  "type": "Text",
+                },
+                {
+                  "children": [
+                    {
+                      "children": [
+                        "System",
+                      ],
+                      "style": {
+                        "color": "#F2F4F8",
+                      },
+                      "type": "Text",
+                    },
+                  ],
+                  "style": {
+                    "backgroundColor": "#171B22",
+                    "borderColor": "#2A303A",
+                  },
+                  "testID": "settings-appearance-system",
+                  "type": "View",
+                },
+                {
+                  "children": [
+                    {
+                      "children": [
+                        "Light",
+                      ],
+                      "style": {
+                        "color": "#F2F4F8",
+                      },
+                      "type": "Text",
+                    },
+                  ],
+                  "style": {
+                    "backgroundColor": "#171B22",
+                    "borderColor": "#2A303A",
+                  },
+                  "testID": "settings-appearance-light",
+                  "type": "View",
+                },
+                {
+                  "children": [
+                    {
+                      "children": [
+                        "Dark",
+                      ],
+                      "style": {
+                        "color": "#F2F4F8",
+                      },
+                      "type": "Text",
+                    },
+                  ],
+                  "style": {
+                    "backgroundColor": "#171B22",
+                    "borderColor": "#7C9DFF",
+                  },
+                  "testID": "settings-appearance-dark",
+                  "type": "View",
+                },
+              ],
+              "style": {
+                "backgroundColor": "#171B22",
+                "borderColor": "#2A303A",
+              },
+              "type": "View",
+            },
+            {
+              "children": [
+                {
+                  "children": [
+                    "Units",
+                  ],
+                  "style": {
+                    "color": "#A3ACB8",
+                  },
+                  "type": "Text",
+                },
+                {
+                  "children": [
+                    {
+                      "children": [
+                        "Metric (km)",
+                      ],
+                      "style": {
+                        "color": "#F2F4F8",
+                      },
+                      "type": "Text",
+                    },
+                  ],
+                  "style": {
+                    "backgroundColor": "#171B22",
+                    "borderColor": "#2A303A",
+                  },
+                  "testID": "settings-units-metric",
+                  "type": "View",
+                },
+                {
+                  "children": [
+                    {
+                      "children": [
+                        "Imperial (mi)",
+                      ],
+                      "style": {
+                        "color": "#F2F4F8",
+                      },
+                      "type": "Text",
+                    },
+                  ],
+                  "style": {
+                    "backgroundColor": "#171B22",
+                    "borderColor": "#7C9DFF",
+                  },
+                  "testID": "settings-units-imperial",
+                  "type": "View",
+                },
+              ],
+              "style": {
+                "backgroundColor": "#171B22",
+                "borderColor": "#2A303A",
+              },
+              "testID": "settings-units",
+              "type": "View",
+            },
+            {
+              "children": [
+                {
+                  "children": [
+                    "Time format",
+                  ],
+                  "style": {
+                    "color": "#A3ACB8",
+                  },
+                  "type": "Text",
+                },
+                {
+                  "children": [
+                    {
+                      "children": [
+                        "12-hour (3:50 PM)",
+                      ],
+                      "style": {
+                        "color": "#F2F4F8",
+                      },
+                      "type": "Text",
+                    },
+                  ],
+                  "style": {
+                    "backgroundColor": "#171B22",
+                    "borderColor": "#7C9DFF",
+                  },
+                  "testID": "settings-time-12h",
+                  "type": "View",
+                },
+                {
+                  "children": [
+                    {
+                      "children": [
+                        "24-hour (15:50)",
+                      ],
+                      "style": {
+                        "color": "#F2F4F8",
+                      },
+                      "type": "Text",
+                    },
+                  ],
+                  "style": {
+                    "backgroundColor": "#171B22",
+                    "borderColor": "#2A303A",
+                  },
+                  "testID": "settings-time-24h",
+                  "type": "View",
+                },
+              ],
+              "style": {
+                "backgroundColor": "#171B22",
+                "borderColor": "#2A303A",
+              },
+              "testID": "settings-time-format",
+              "type": "View",
+            },
+            {
+              "children": [
+                {
+                  "children": [
+                    "Account",
+                  ],
+                  "style": {
+                    "color": "#A3ACB8",
+                  },
+                  "type": "Text",
+                },
+                {
+                  "children": [
+                    "Signed in as ada@example.com.",
+                  ],
+                  "style": {
+                    "color": "#F2F4F8",
+                  },
+                  "testID": "settings-account-status",
+                  "type": "Text",
+                },
+                {
+                  "children": [
+                    {
+                      "children": [
+                        "Sign out",
+                      ],
+                      "style": {
+                        "color": "#F2F4F8",
+                      },
+                      "type": "Text",
+                    },
+                  ],
+                  "style": {
+                    "backgroundColor": "#171B22",
+                    "borderColor": "#2A303A",
+                  },
+                  "testID": "settings-sign-out",
+                  "type": "View",
+                },
+                {
+                  "children": [
+                    {
+                      "children": [
+                        "Delete account",
+                      ],
+                      "style": {
+                        "color": "#FF8A80",
+                      },
+                      "type": "Text",
+                    },
+                  ],
+                  "style": {
+                    "borderColor": "#2A303A",
+                  },
+                  "testID": "settings-delete-account",
+                  "type": "View",
+                },
+              ],
+              "style": {
+                "backgroundColor": "#171B22",
+                "borderColor": "#2A303A",
+              },
+              "type": "View",
+            },
+            {
+              "children": [
+                {
+                  "children": [
+                    "Notifications",
+                  ],
+                  "style": {
+                    "color": "#A3ACB8",
+                  },
+                  "type": "Text",
+                },
+                {
+                  "children": [
+                    {
+                      "children": [
+                        "Allow notifications",
+                      ],
+                      "style": {
+                        "color": "#F2F4F8",
+                      },
+                      "type": "Text",
+                    },
+                  ],
+                  "style": {
+                    "backgroundColor": "#171B22",
+                    "borderColor": "#2A303A",
+                  },
+                  "testID": "settings-notifications",
+                  "type": "View",
+                },
+              ],
+              "style": {
+                "backgroundColor": "#171B22",
+                "borderColor": "#2A303A",
+              },
+              "type": "View",
+            },
+            {
+              "children": [
+                {
+                  "children": [
+                    "About",
+                  ],
+                  "style": {
+                    "color": "#A3ACB8",
+                  },
+                  "type": "Text",
+                },
+                {
+                  "children": [
+                    "Version unknown (development), https://api.planeahead.test",
+                  ],
+                  "style": {
+                    "color": "#A3ACB8",
+                  },
+                  "type": "Text",
+                },
+              ],
+              "style": {
+                "backgroundColor": "#171B22",
+                "borderColor": "#2A303A",
+              },
+              "type": "View",
+            },
+          ],
+          "type": "View",
+        },
+      ],
+      "testID": "settings-screen",
+      "type": "RCTScrollView",
+    },
+  ],
+  "style": {
+    "backgroundColor": "#0B0E13",
+  },
+  "type": "View",
+}
+`;
+
+exports[`settings in light and dark renders in light 1`] = `
+{
+  "children": [
+    {
+      "children": [
+        {
+          "children": [
+            {
+              "children": [
+                "Settings",
+              ],
+              "style": {
+                "color": "#101418",
+              },
+              "type": "Text",
+            },
+            {
+              "children": [
+                {
+                  "children": [
+                    "Appearance",
+                  ],
+                  "style": {
+                    "color": "#525B67",
+                  },
+                  "type": "Text",
+                },
+                {
+                  "children": [
+                    {
+                      "children": [
+                        "System",
+                      ],
+                      "style": {
+                        "color": "#101418",
+                      },
+                      "type": "Text",
+                    },
+                  ],
+                  "style": {
+                    "backgroundColor": "#F2F4F8",
+                    "borderColor": "#D6DAE1",
+                  },
+                  "testID": "settings-appearance-system",
+                  "type": "View",
+                },
+                {
+                  "children": [
+                    {
+                      "children": [
+                        "Light",
+                      ],
+                      "style": {
+                        "color": "#101418",
+                      },
+                      "type": "Text",
+                    },
+                  ],
+                  "style": {
+                    "backgroundColor": "#F2F4F8",
+                    "borderColor": "#1C4FD6",
+                  },
+                  "testID": "settings-appearance-light",
+                  "type": "View",
+                },
+                {
+                  "children": [
+                    {
+                      "children": [
+                        "Dark",
+                      ],
+                      "style": {
+                        "color": "#101418",
+                      },
+                      "type": "Text",
+                    },
+                  ],
+                  "style": {
+                    "backgroundColor": "#F2F4F8",
+                    "borderColor": "#D6DAE1",
+                  },
+                  "testID": "settings-appearance-dark",
+                  "type": "View",
+                },
+              ],
+              "style": {
+                "backgroundColor": "#F2F4F8",
+                "borderColor": "#D6DAE1",
+              },
+              "type": "View",
+            },
+            {
+              "children": [
+                {
+                  "children": [
+                    "Units",
+                  ],
+                  "style": {
+                    "color": "#525B67",
+                  },
+                  "type": "Text",
+                },
+                {
+                  "children": [
+                    {
+                      "children": [
+                        "Metric (km)",
+                      ],
+                      "style": {
+                        "color": "#101418",
+                      },
+                      "type": "Text",
+                    },
+                  ],
+                  "style": {
+                    "backgroundColor": "#F2F4F8",
+                    "borderColor": "#D6DAE1",
+                  },
+                  "testID": "settings-units-metric",
+                  "type": "View",
+                },
+                {
+                  "children": [
+                    {
+                      "children": [
+                        "Imperial (mi)",
+                      ],
+                      "style": {
+                        "color": "#101418",
+                      },
+                      "type": "Text",
+                    },
+                  ],
+                  "style": {
+                    "backgroundColor": "#F2F4F8",
+                    "borderColor": "#1C4FD6",
+                  },
+                  "testID": "settings-units-imperial",
+                  "type": "View",
+                },
+              ],
+              "style": {
+                "backgroundColor": "#F2F4F8",
+                "borderColor": "#D6DAE1",
+              },
+              "testID": "settings-units",
+              "type": "View",
+            },
+            {
+              "children": [
+                {
+                  "children": [
+                    "Time format",
+                  ],
+                  "style": {
+                    "color": "#525B67",
+                  },
+                  "type": "Text",
+                },
+                {
+                  "children": [
+                    {
+                      "children": [
+                        "12-hour (3:50 PM)",
+                      ],
+                      "style": {
+                        "color": "#101418",
+                      },
+                      "type": "Text",
+                    },
+                  ],
+                  "style": {
+                    "backgroundColor": "#F2F4F8",
+                    "borderColor": "#1C4FD6",
+                  },
+                  "testID": "settings-time-12h",
+                  "type": "View",
+                },
+                {
+                  "children": [
+                    {
+                      "children": [
+                        "24-hour (15:50)",
+                      ],
+                      "style": {
+                        "color": "#101418",
+                      },
+                      "type": "Text",
+                    },
+                  ],
+                  "style": {
+                    "backgroundColor": "#F2F4F8",
+                    "borderColor": "#D6DAE1",
+                  },
+                  "testID": "settings-time-24h",
+                  "type": "View",
+                },
+              ],
+              "style": {
+                "backgroundColor": "#F2F4F8",
+                "borderColor": "#D6DAE1",
+              },
+              "testID": "settings-time-format",
+              "type": "View",
+            },
+            {
+              "children": [
+                {
+                  "children": [
+                    "Account",
+                  ],
+                  "style": {
+                    "color": "#525B67",
+                  },
+                  "type": "Text",
+                },
+                {
+                  "children": [
+                    "Signed in as ada@example.com.",
+                  ],
+                  "style": {
+                    "color": "#101418",
+                  },
+                  "testID": "settings-account-status",
+                  "type": "Text",
+                },
+                {
+                  "children": [
+                    {
+                      "children": [
+                        "Sign out",
+                      ],
+                      "style": {
+                        "color": "#101418",
+                      },
+                      "type": "Text",
+                    },
+                  ],
+                  "style": {
+                    "backgroundColor": "#F2F4F8",
+                    "borderColor": "#D6DAE1",
+                  },
+                  "testID": "settings-sign-out",
+                  "type": "View",
+                },
+                {
+                  "children": [
+                    {
+                      "children": [
+                        "Delete account",
+                      ],
+                      "style": {
+                        "color": "#B42318",
+                      },
+                      "type": "Text",
+                    },
+                  ],
+                  "style": {
+                    "borderColor": "#D6DAE1",
+                  },
+                  "testID": "settings-delete-account",
+                  "type": "View",
+                },
+              ],
+              "style": {
+                "backgroundColor": "#F2F4F8",
+                "borderColor": "#D6DAE1",
+              },
+              "type": "View",
+            },
+            {
+              "children": [
+                {
+                  "children": [
+                    "Notifications",
+                  ],
+                  "style": {
+                    "color": "#525B67",
+                  },
+                  "type": "Text",
+                },
+                {
+                  "children": [
+                    {
+                      "children": [
+                        "Allow notifications",
+                      ],
+                      "style": {
+                        "color": "#101418",
+                      },
+                      "type": "Text",
+                    },
+                  ],
+                  "style": {
+                    "backgroundColor": "#F2F4F8",
+                    "borderColor": "#D6DAE1",
+                  },
+                  "testID": "settings-notifications",
+                  "type": "View",
+                },
+              ],
+              "style": {
+                "backgroundColor": "#F2F4F8",
+                "borderColor": "#D6DAE1",
+              },
+              "type": "View",
+            },
+            {
+              "children": [
+                {
+                  "children": [
+                    "About",
+                  ],
+                  "style": {
+                    "color": "#525B67",
+                  },
+                  "type": "Text",
+                },
+                {
+                  "children": [
+                    "Version unknown (development), https://api.planeahead.test",
+                  ],
+                  "style": {
+                    "color": "#525B67",
+                  },
+                  "type": "Text",
+                },
+              ],
+              "style": {
+                "backgroundColor": "#F2F4F8",
+                "borderColor": "#D6DAE1",
+              },
+              "type": "View",
+            },
+          ],
+          "type": "View",
+        },
+      ],
+      "testID": "settings-screen",
+      "type": "RCTScrollView",
+    },
+  ],
+  "style": {
+    "backgroundColor": "#FFFFFF",
+  },
+  "type": "View",
+}
+`;

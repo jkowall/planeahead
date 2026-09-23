@@ -1,0 +1,1 @@
+ALTER TABLE `flight_subscriptions` ADD `finished_at` text;

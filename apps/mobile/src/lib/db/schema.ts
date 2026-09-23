@@ -72,6 +72,14 @@ export const flightSubscriptions = sqliteTable(
     snapshotJson: text('snapshot_json'),
     snapshotFetchedAt: text('snapshot_fetched_at'),
     snapshotSource: text('snapshot_source'),
+    /**
+     * When this device learned the flight is over and no longer tracked (increment 10: a refresh
+     * answered 410 `flight_archived`). Local only: the sync feed carries flight snapshots, not the
+     * tracker's phase, so no page writes it and a subscription upsert leaves it alone. A snapshot
+     * replace drops it with the row; the next refresh or the arrival time sets the flight aside
+     * again (src/lib/flight-model.ts).
+     */
+    finishedAt: text('finished_at'),
   },
   (table) => [
     index('flight_subscriptions_flight_key_idx').on(table.flightKey),

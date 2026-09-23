@@ -1,0 +1,901 @@
+// Jest Snapshot v1, https://goo.gl/fbAQLP
+
+exports[`home, light and dark (theme tokens) renders the empty state in dark 1`] = `
+{
+  "children": [
+    {
+      "children": [
+        {
+          "type": "RCTRefreshControl",
+        },
+        {
+          "children": [
+            {
+              "children": [
+                {
+                  "children": [
+                    "PlaneAhead",
+                  ],
+                  "style": {
+                    "color": "#F2F4F8",
+                  },
+                  "type": "Text",
+                },
+                {
+                  "children": [
+                    {
+                      "children": [
+                        {
+                          "children": [
+                            "Settings",
+                          ],
+                          "style": {
+                            "color": "#F2F4F8",
+                          },
+                          "type": "Text",
+                        },
+                      ],
+                      "style": {
+                        "backgroundColor": "#171B22",
+                        "borderColor": "#2A303A",
+                      },
+                      "testID": "home-settings",
+                      "type": "View",
+                    },
+                    {
+                      "children": [
+                        {
+                          "children": [
+                            "Add",
+                          ],
+                          "style": {
+                            "color": "#0B0E13",
+                          },
+                          "type": "Text",
+                        },
+                      ],
+                      "style": {
+                        "backgroundColor": "#7C9DFF",
+                        "borderColor": "#2A303A",
+                      },
+                      "testID": "home-add",
+                      "type": "View",
+                    },
+                  ],
+                  "type": "View",
+                },
+              ],
+              "type": "View",
+            },
+            {
+              "children": [
+                {
+                  "children": [
+                    "No flights yet",
+                  ],
+                  "style": {
+                    "color": "#F2F4F8",
+                  },
+                  "type": "Text",
+                },
+                {
+                  "children": [
+                    "Add a flight by its number and date. Its times, gate and status appear here and stay up to date, even offline.",
+                  ],
+                  "style": {
+                    "color": "#A3ACB8",
+                  },
+                  "type": "Text",
+                },
+                {
+                  "children": [
+                    {
+                      "children": [
+                        "Add a flight",
+                      ],
+                      "style": {
+                        "color": "#0B0E13",
+                      },
+                      "type": "Text",
+                    },
+                  ],
+                  "style": {
+                    "backgroundColor": "#7C9DFF",
+                    "borderColor": "#2A303A",
+                  },
+                  "testID": "home-empty-add",
+                  "type": "View",
+                },
+              ],
+              "style": {
+                "backgroundColor": "#171B22",
+                "borderColor": "#2A303A",
+              },
+              "testID": "home-empty",
+              "type": "View",
+            },
+          ],
+          "type": "View",
+        },
+      ],
+      "testID": "home-screen",
+      "type": "RCTScrollView",
+    },
+  ],
+  "style": {
+    "backgroundColor": "#0B0E13",
+  },
+  "type": "View",
+}
+`;
+
+exports[`home, light and dark (theme tokens) renders the empty state in light 1`] = `
+{
+  "children": [
+    {
+      "children": [
+        {
+          "type": "RCTRefreshControl",
+        },
+        {
+          "children": [
+            {
+              "children": [
+                {
+                  "children": [
+                    "PlaneAhead",
+                  ],
+                  "style": {
+                    "color": "#101418",
+                  },
+                  "type": "Text",
+                },
+                {
+                  "children": [
+                    {
+                      "children": [
+                        {
+                          "children": [
+                            "Settings",
+                          ],
+                          "style": {
+                            "color": "#101418",
+                          },
+                          "type": "Text",
+                        },
+                      ],
+                      "style": {
+                        "backgroundColor": "#F2F4F8",
+                        "borderColor": "#D6DAE1",
+                      },
+                      "testID": "home-settings",
+                      "type": "View",
+                    },
+                    {
+                      "children": [
+                        {
+                          "children": [
+                            "Add",
+                          ],
+                          "style": {
+                            "color": "#FFFFFF",
+                          },
+                          "type": "Text",
+                        },
+                      ],
+                      "style": {
+                        "backgroundColor": "#1C4FD6",
+                        "borderColor": "#D6DAE1",
+                      },
+                      "testID": "home-add",
+                      "type": "View",
+                    },
+                  ],
+                  "type": "View",
+                },
+              ],
+              "type": "View",
+            },
+            {
+              "children": [
+                {
+                  "children": [
+                    "No flights yet",
+                  ],
+                  "style": {
+                    "color": "#101418",
+                  },
+                  "type": "Text",
+                },
+                {
+                  "children": [
+                    "Add a flight by its number and date. Its times, gate and status appear here and stay up to date, even offline.",
+                  ],
+                  "style": {
+                    "color": "#525B67",
+                  },
+                  "type": "Text",
+                },
+                {
+                  "children": [
+                    {
+                      "children": [
+                        "Add a flight",
+                      ],
+                      "style": {
+                        "color": "#FFFFFF",
+                      },
+                      "type": "Text",
+                    },
+                  ],
+                  "style": {
+                    "backgroundColor": "#1C4FD6",
+                    "borderColor": "#D6DAE1",
+                  },
+                  "testID": "home-empty-add",
+                  "type": "View",
+                },
+              ],
+              "style": {
+                "backgroundColor": "#F2F4F8",
+                "borderColor": "#D6DAE1",
+              },
+              "testID": "home-empty",
+              "type": "View",
+            },
+          ],
+          "type": "View",
+        },
+      ],
+      "testID": "home-screen",
+      "type": "RCTScrollView",
+    },
+  ],
+  "style": {
+    "backgroundColor": "#FFFFFF",
+  },
+  "type": "View",
+}
+`;
+
+exports[`home, light and dark (theme tokens) renders the seeded list in dark 1`] = `
+{
+  "children": [
+    {
+      "children": [
+        {
+          "type": "RCTRefreshControl",
+        },
+        {
+          "children": [
+            {
+              "children": [
+                {
+                  "children": [
+                    "PlaneAhead",
+                  ],
+                  "style": {
+                    "color": "#F2F4F8",
+                  },
+                  "type": "Text",
+                },
+                {
+                  "children": [
+                    {
+                      "children": [
+                        {
+                          "children": [
+                            "Settings",
+                          ],
+                          "style": {
+                            "color": "#F2F4F8",
+                          },
+                          "type": "Text",
+                        },
+                      ],
+                      "style": {
+                        "backgroundColor": "#171B22",
+                        "borderColor": "#2A303A",
+                      },
+                      "testID": "home-settings",
+                      "type": "View",
+                    },
+                    {
+                      "children": [
+                        {
+                          "children": [
+                            "Add",
+                          ],
+                          "style": {
+                            "color": "#0B0E13",
+                          },
+                          "type": "Text",
+                        },
+                      ],
+                      "style": {
+                        "backgroundColor": "#7C9DFF",
+                        "borderColor": "#2A303A",
+                      },
+                      "testID": "home-add",
+                      "type": "View",
+                    },
+                  ],
+                  "type": "View",
+                },
+              ],
+              "type": "View",
+            },
+            {
+              "children": [
+                {
+                  "children": [
+                    {
+                      "children": [
+                        "NEXT FLIGHT",
+                      ],
+                      "style": {
+                        "color": "#A3ACB8",
+                      },
+                      "type": "Text",
+                    },
+                    {
+                      "children": [
+                        {
+                          "children": [
+                            "Scheduled",
+                          ],
+                          "style": {
+                            "color": "#E4E8EF",
+                          },
+                          "type": "Text",
+                        },
+                      ],
+                      "label": "Status: Scheduled",
+                      "style": {
+                        "backgroundColor": "#2A303A",
+                      },
+                      "testID": "flight-0199a000-0000-7000-8000-000000000001-status",
+                      "type": "View",
+                    },
+                  ],
+                  "type": "View",
+                },
+                {
+                  "children": [
+                    "AA100  JFK → LHR",
+                  ],
+                  "style": {
+                    "color": "#F2F4F8",
+                  },
+                  "type": "Text",
+                },
+                {
+                  "children": [
+                    "Wed 23 Sep",
+                  ],
+                  "style": {
+                    "color": "#A3ACB8",
+                  },
+                  "type": "Text",
+                },
+                {
+                  "children": [
+                    {
+                      "children": [
+                        "6:25 PM",
+                      ],
+                      "style": {
+                        "color": "#F2F4F8",
+                      },
+                      "testID": "home-next-departure",
+                      "type": "Text",
+                    },
+                    {
+                      "children": [
+                        "→ 7:10 AM +1",
+                      ],
+                      "style": {
+                        "color": "#A3ACB8",
+                      },
+                      "testID": "home-next-arrival",
+                      "type": "Text",
+                    },
+                  ],
+                  "type": "View",
+                },
+                {
+                  "children": [
+                    "Terminal 8, gate B22",
+                  ],
+                  "style": {
+                    "color": "#F2F4F8",
+                  },
+                  "testID": "home-next-gate",
+                  "type": "Text",
+                },
+                {
+                  "children": [
+                    "Departure 25 min late",
+                  ],
+                  "style": {
+                    "color": "#FFB866",
+                  },
+                  "type": "Text",
+                },
+                {
+                  "children": [
+                    "Departs in 8 h 25 min",
+                  ],
+                  "style": {
+                    "color": "#7C9DFF",
+                  },
+                  "testID": "home-countdown",
+                  "type": "Text",
+                },
+              ],
+              "label": "Next flight: AA100, JFK → LHR, Wed 23 Sep",
+              "style": {
+                "backgroundColor": "#171B22",
+                "borderColor": "#2A303A",
+              },
+              "testID": "home-next-flight",
+              "type": "View",
+            },
+            {
+              "children": [
+                {
+                  "children": [
+                    "Other flights",
+                  ],
+                  "style": {
+                    "color": "#A3ACB8",
+                  },
+                  "type": "Text",
+                },
+                {
+                  "children": [
+                    {
+                      "children": [
+                        {
+                          "children": [
+                            "BA117  LHR → JFK",
+                          ],
+                          "style": {
+                            "color": "#F2F4F8",
+                          },
+                          "type": "Text",
+                        },
+                        {
+                          "children": [
+                            {
+                              "children": [
+                                "Scheduled",
+                              ],
+                              "style": {
+                                "color": "#E4E8EF",
+                              },
+                              "type": "Text",
+                            },
+                          ],
+                          "label": "Status: Scheduled",
+                          "style": {
+                            "backgroundColor": "#2A303A",
+                          },
+                          "testID": "flight-0199a000-0000-7000-8000-000000000002-status",
+                          "type": "View",
+                        },
+                      ],
+                      "type": "View",
+                    },
+                    {
+                      "children": [
+                        "Fri 25 Sep, 12:20 PM",
+                      ],
+                      "style": {
+                        "color": "#A3ACB8",
+                      },
+                      "type": "Text",
+                    },
+                  ],
+                  "label": "BA117, LHR → JFK, Fri 25 Sep",
+                  "style": {
+                    "borderColor": "#2A303A",
+                  },
+                  "testID": "flight-row-0199a000-0000-7000-8000-000000000002",
+                  "type": "View",
+                },
+                {
+                  "children": [
+                    {
+                      "children": [
+                        {
+                          "children": [
+                            "DL1  ATL → LAX",
+                          ],
+                          "style": {
+                            "color": "#F2F4F8",
+                          },
+                          "type": "Text",
+                        },
+                        {
+                          "children": [
+                            {
+                              "children": [
+                                "Arrived",
+                              ],
+                              "style": {
+                                "color": "#B8EFC9",
+                              },
+                              "type": "Text",
+                            },
+                          ],
+                          "label": "Status: Arrived",
+                          "style": {
+                            "backgroundColor": "#123D22",
+                          },
+                          "testID": "flight-0199a000-0000-7000-8000-000000000003-status",
+                          "type": "View",
+                        },
+                      ],
+                      "type": "View",
+                    },
+                    {
+                      "children": [
+                        "Tue 22 Sep, 8:04 AM",
+                      ],
+                      "style": {
+                        "color": "#A3ACB8",
+                      },
+                      "type": "Text",
+                    },
+                  ],
+                  "label": "DL1, ATL → LAX, Tue 22 Sep",
+                  "style": {
+                    "borderColor": "#2A303A",
+                  },
+                  "testID": "flight-row-0199a000-0000-7000-8000-000000000003",
+                  "type": "View",
+                },
+              ],
+              "style": {
+                "backgroundColor": "#171B22",
+                "borderColor": "#2A303A",
+              },
+              "testID": "home-rest",
+              "type": "View",
+            },
+          ],
+          "type": "View",
+        },
+      ],
+      "testID": "home-screen",
+      "type": "RCTScrollView",
+    },
+  ],
+  "style": {
+    "backgroundColor": "#0B0E13",
+  },
+  "type": "View",
+}
+`;
+
+exports[`home, light and dark (theme tokens) renders the seeded list in light 1`] = `
+{
+  "children": [
+    {
+      "children": [
+        {
+          "type": "RCTRefreshControl",
+        },
+        {
+          "children": [
+            {
+              "children": [
+                {
+                  "children": [
+                    "PlaneAhead",
+                  ],
+                  "style": {
+                    "color": "#101418",
+                  },
+                  "type": "Text",
+                },
+                {
+                  "children": [
+                    {
+                      "children": [
+                        {
+                          "children": [
+                            "Settings",
+                          ],
+                          "style": {
+                            "color": "#101418",
+                          },
+                          "type": "Text",
+                        },
+                      ],
+                      "style": {
+                        "backgroundColor": "#F2F4F8",
+                        "borderColor": "#D6DAE1",
+                      },
+                      "testID": "home-settings",
+                      "type": "View",
+                    },
+                    {
+                      "children": [
+                        {
+                          "children": [
+                            "Add",
+                          ],
+                          "style": {
+                            "color": "#FFFFFF",
+                          },
+                          "type": "Text",
+                        },
+                      ],
+                      "style": {
+                        "backgroundColor": "#1C4FD6",
+                        "borderColor": "#D6DAE1",
+                      },
+                      "testID": "home-add",
+                      "type": "View",
+                    },
+                  ],
+                  "type": "View",
+                },
+              ],
+              "type": "View",
+            },
+            {
+              "children": [
+                {
+                  "children": [
+                    {
+                      "children": [
+                        "NEXT FLIGHT",
+                      ],
+                      "style": {
+                        "color": "#525B67",
+                      },
+                      "type": "Text",
+                    },
+                    {
+                      "children": [
+                        {
+                          "children": [
+                            "Scheduled",
+                          ],
+                          "style": {
+                            "color": "#27303B",
+                          },
+                          "type": "Text",
+                        },
+                      ],
+                      "label": "Status: Scheduled",
+                      "style": {
+                        "backgroundColor": "#E4E8EF",
+                      },
+                      "testID": "flight-0199a000-0000-7000-8000-000000000001-status",
+                      "type": "View",
+                    },
+                  ],
+                  "type": "View",
+                },
+                {
+                  "children": [
+                    "AA100  JFK → LHR",
+                  ],
+                  "style": {
+                    "color": "#101418",
+                  },
+                  "type": "Text",
+                },
+                {
+                  "children": [
+                    "Wed 23 Sep",
+                  ],
+                  "style": {
+                    "color": "#525B67",
+                  },
+                  "type": "Text",
+                },
+                {
+                  "children": [
+                    {
+                      "children": [
+                        "6:25 PM",
+                      ],
+                      "style": {
+                        "color": "#101418",
+                      },
+                      "testID": "home-next-departure",
+                      "type": "Text",
+                    },
+                    {
+                      "children": [
+                        "→ 7:10 AM +1",
+                      ],
+                      "style": {
+                        "color": "#525B67",
+                      },
+                      "testID": "home-next-arrival",
+                      "type": "Text",
+                    },
+                  ],
+                  "type": "View",
+                },
+                {
+                  "children": [
+                    "Terminal 8, gate B22",
+                  ],
+                  "style": {
+                    "color": "#101418",
+                  },
+                  "testID": "home-next-gate",
+                  "type": "Text",
+                },
+                {
+                  "children": [
+                    "Departure 25 min late",
+                  ],
+                  "style": {
+                    "color": "#8A4B00",
+                  },
+                  "type": "Text",
+                },
+                {
+                  "children": [
+                    "Departs in 8 h 25 min",
+                  ],
+                  "style": {
+                    "color": "#1C4FD6",
+                  },
+                  "testID": "home-countdown",
+                  "type": "Text",
+                },
+              ],
+              "label": "Next flight: AA100, JFK → LHR, Wed 23 Sep",
+              "style": {
+                "backgroundColor": "#F2F4F8",
+                "borderColor": "#D6DAE1",
+              },
+              "testID": "home-next-flight",
+              "type": "View",
+            },
+            {
+              "children": [
+                {
+                  "children": [
+                    "Other flights",
+                  ],
+                  "style": {
+                    "color": "#525B67",
+                  },
+                  "type": "Text",
+                },
+                {
+                  "children": [
+                    {
+                      "children": [
+                        {
+                          "children": [
+                            "BA117  LHR → JFK",
+                          ],
+                          "style": {
+                            "color": "#101418",
+                          },
+                          "type": "Text",
+                        },
+                        {
+                          "children": [
+                            {
+                              "children": [
+                                "Scheduled",
+                              ],
+                              "style": {
+                                "color": "#27303B",
+                              },
+                              "type": "Text",
+                            },
+                          ],
+                          "label": "Status: Scheduled",
+                          "style": {
+                            "backgroundColor": "#E4E8EF",
+                          },
+                          "testID": "flight-0199a000-0000-7000-8000-000000000002-status",
+                          "type": "View",
+                        },
+                      ],
+                      "type": "View",
+                    },
+                    {
+                      "children": [
+                        "Fri 25 Sep, 12:20 PM",
+                      ],
+                      "style": {
+                        "color": "#525B67",
+                      },
+                      "type": "Text",
+                    },
+                  ],
+                  "label": "BA117, LHR → JFK, Fri 25 Sep",
+                  "style": {
+                    "borderColor": "#D6DAE1",
+                  },
+                  "testID": "flight-row-0199a000-0000-7000-8000-000000000002",
+                  "type": "View",
+                },
+                {
+                  "children": [
+                    {
+                      "children": [
+                        {
+                          "children": [
+                            "DL1  ATL → LAX",
+                          ],
+                          "style": {
+                            "color": "#101418",
+                          },
+                          "type": "Text",
+                        },
+                        {
+                          "children": [
+                            {
+                              "children": [
+                                "Arrived",
+                              ],
+                              "style": {
+                                "color": "#0F5A26",
+                              },
+                              "type": "Text",
+                            },
+                          ],
+                          "label": "Status: Arrived",
+                          "style": {
+                            "backgroundColor": "#DDF3E4",
+                          },
+                          "testID": "flight-0199a000-0000-7000-8000-000000000003-status",
+                          "type": "View",
+                        },
+                      ],
+                      "type": "View",
+                    },
+                    {
+                      "children": [
+                        "Tue 22 Sep, 8:04 AM",
+                      ],
+                      "style": {
+                        "color": "#525B67",
+                      },
+                      "type": "Text",
+                    },
+                  ],
+                  "label": "DL1, ATL → LAX, Tue 22 Sep",
+                  "style": {
+                    "borderColor": "#D6DAE1",
+                  },
+                  "testID": "flight-row-0199a000-0000-7000-8000-000000000003",
+                  "type": "View",
+                },
+              ],
+              "style": {
+                "backgroundColor": "#F2F4F8",
+                "borderColor": "#D6DAE1",
+              },
+              "testID": "home-rest",
+              "type": "View",
+            },
+          ],
+          "type": "View",
+        },
+      ],
+      "testID": "home-screen",
+      "type": "RCTScrollView",
+    },
+  ],
+  "style": {
+    "backgroundColor": "#FFFFFF",
+  },
+  "type": "View",
+}
+`;
