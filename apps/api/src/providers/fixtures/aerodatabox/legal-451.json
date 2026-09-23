@@ -1,0 +1,18 @@
+{
+  "synthetic": true,
+  "spec": "specs/aerodatabox-direct-v1.15.3.yaml",
+  "schema": "ErrorContract",
+  "note": "Unavailable For Legal Reasons: terminal for this key, never retried.",
+  "request": {
+    "method": "GET",
+    "path": "/flights/Number/AA100/2026-09-22"
+  },
+  "response": {
+    "status": 451,
+    "contentType": "application/json",
+    "body": {
+      "message": "Data for this flight is not available due to legal restrictions",
+      "details": null
+    }
+  }
+}

@@ -1,0 +1,78 @@
+{
+  "synthetic": true,
+  "spec": "specs/aerodatabox-direct-v1.15.3.yaml",
+  "schema": "FlightContract[]",
+  "note": "AA 3456 flown by Envoy with no callsign yet: the regional operator hint decides the key.",
+  "request": {
+    "method": "GET",
+    "path": "/flights/Number/AA3456/2026-09-22"
+  },
+  "response": {
+    "status": 200,
+    "contentType": "application/json",
+    "body": [
+      {
+        "greatCircleDistance": {
+          "meter": 5539970.0,
+          "km": 5539.97,
+          "mile": 3442.37,
+          "nm": 2991.34,
+          "feet": 18175754.6
+        },
+        "departure": {
+          "airport": {
+            "icao": "KORD",
+            "iata": "ORD",
+            "name": "Chicago O'Hare",
+            "shortName": "O'Hare",
+            "municipalityName": "Chicago",
+            "location": {
+              "lat": 41.9786,
+              "lon": -87.9048
+            },
+            "countryCode": "US",
+            "timeZone": "America/Chicago"
+          },
+          "scheduledTime": {
+            "utc": "2026-09-22 19:15Z",
+            "local": "2026-09-22 14:15"
+          },
+          "quality": ["Basic"]
+        },
+        "arrival": {
+          "airport": {
+            "icao": "KHPN",
+            "iata": "HPN",
+            "name": "White Plains Westchester County",
+            "shortName": "Westchester County",
+            "municipalityName": "White Plains",
+            "location": {
+              "lat": 41.067,
+              "lon": -73.7076
+            },
+            "countryCode": "US",
+            "timeZone": "America/New_York"
+          },
+          "scheduledTime": {
+            "utc": "2026-09-22 21:30Z",
+            "local": "2026-09-22 17:30"
+          },
+          "quality": ["Basic"]
+        },
+        "lastUpdatedUtc": "2026-09-22 12:00Z",
+        "number": "AA 3456",
+        "status": "Expected",
+        "codeshareStatus": "IsCodeshared",
+        "isCargo": false,
+        "aircraft": {
+          "model": "Embraer 175"
+        },
+        "airline": {
+          "name": "American",
+          "iata": "AA",
+          "icao": "AAL"
+        }
+      }
+    ]
+  }
+}

@@ -20,6 +20,8 @@ import {
   CADENCES,
   DEFAULT_CADENCE_PARAMS,
   LITERAL_EXPECTED_POLLS,
+  PRE_48H_RELAXATION_REASON,
+  PRE_48H_WINDOWS,
   SLO_EVENTS,
   SLO_REPORT_LEAD_TIME_DAYS,
   SLO_TABLE,
@@ -69,8 +71,7 @@ const BLOCK_MINUTES = 180;
 const LEAD_TIMES_DAYS = [3, 14, 30] as const;
 
 const TIER_LABELS: Record<CadenceTier, string> = {
-  pre48h_far: 'Beyond 14 d',
-  pre48h_near: '14 d to 48 h',
+  pre48h: 'Before 48 h',
   hourly: 'Hourly window',
   pre_boarding: 'Pre-boarding window',
   in_flight: 'In flight',
@@ -107,7 +108,7 @@ function formatMinutes(minutes: number): string {
 function formatInterval(minutes: number): string {
   if (minutes % 1_440 === 0) {
     const d = minutes / 1_440;
-    return d === 1 ? 'daily' : `every ${String(d)} d`;
+    return d === 1 ? 'daily' : d === 7 ? 'weekly' : `every ${String(d)} d`;
   }
   return `${formatMinutes(minutes)} interval`;
 }
@@ -327,6 +328,9 @@ function formatLeg(leg: RelaxedLeg): string {
  */
 function whyAccepted(cadence: CadenceDefinition, relaxation: SloRelaxation): string {
   const legs = relaxation.relaxedLegs.map(formatLeg).join(', ');
+  if (relaxation.sloWindow === 'beyond_7d' || relaxation.sloWindow === '7d_to_48h') {
+    return PRE_48H_RELAXATION_REASON;
+  }
   if (cadence.id === 'literal') {
     return 'the brief as written, kept for comparison only';
   }
@@ -401,6 +405,15 @@ function landingGapLine(): string {
   return `Gap across the landing instant, from the last poll before \`in\` to the first at or after it: ${parts.join('; ')}.`;
 }
 
+/** The pre-48 h window as one sentence, rendered from `PRE_48H_WINDOWS`. */
+function pre48hRule(): string {
+  const parts = PRE_48H_WINDOWS.map(
+    (window) =>
+      `${formatInterval(window.intervalMinutes)} from ${formatEdge(window.from)} to ${formatEdge(window.to)}, end-anchored on ${formatEdge(window.to)}`,
+  );
+  return `Before T-48 h every cadence polls AeroDataBox ${parts.join('; ')} (increment 6: ${PRE_48H_RELAXATION_REASON}).`;
+}
+
 export function renderCadenceSection(): string {
   const results = new Map<CadenceDefinition, ExpectedCalls>();
   for (const cadence of CADENCES) {
@@ -413,7 +426,7 @@ export function renderCadenceSection(): string {
     '',
     '_Generated from `packages/shared/src/cadence.ts` by `pnpm --filter @planeahead/shared gen:cadence-table`. Do not edit between the markers; `packages/shared/test/cadence-table.test.ts` fails when this block drifts from the code._',
     '',
-    `Assumptions: block ${String(BLOCK_MINUTES)} min, boarding at T-${String(params.boardingMinutesBefore)} min, tail stops at in+${String(params.postArrivalStopMinutes)} min, on-time flight, one creation fetch at the lead time. Slot rule: start-anchored windows yield \`ceil(duration / interval)\` polls, so a trailing partial slot always earns a poll and no window ends with a gap longer than its interval; the pre-48 h AeroDataBox windows count back from T-48 h (daily inside 14 d, every 2 d beyond) and yield \`floor(duration / interval)\`; the instant on a boundary belongs to the later window; fixed-slot windows list their slots. A flight that passes its planned arrival without \`in\` keeps polling until \`in\` or \`MAX_LIFETIME\`: interval windows continue their grid, fixed-slot windows poll every \`lateIntervalMinutes\` from the planned arrival. Prices are list prices from \`cost.ts\` (AeroAPI status $0.005, alert delivery $0.020; AeroDataBox 2 units per status call at $0.00025 per unit on Growth).`,
+    `Assumptions: block ${String(BLOCK_MINUTES)} min, boarding at T-${String(params.boardingMinutesBefore)} min, tail stops at in+${String(params.postArrivalStopMinutes)} min, on-time flight, one creation fetch at the lead time. Slot rule: start-anchored windows yield \`ceil(duration / interval)\` polls, so a trailing partial slot always earns a poll and no window ends with a gap longer than its interval; the pre-48 h AeroDataBox window counts back from T-48 h (weekly: T-9 d, T-16 d, T-23 d, ...) and yields \`floor(duration / interval)\`; the instant on a boundary belongs to the later window; fixed-slot windows list their slots. A flight that passes its planned arrival without \`in\` keeps polling until \`in\` or \`MAX_LIFETIME\`: interval windows continue their grid, fixed-slot windows poll every \`lateIntervalMinutes\` from the planned arrival. Prices are list prices from \`cost.ts\` (AeroAPI status $0.005, alert delivery $0.020; AeroDataBox 2 units per status call at $0.00025 per unit on Growth).`,
     '',
     '### Windows inside 48 h (AeroAPI)',
     '',
@@ -421,7 +434,7 @@ export function renderCadenceSection(): string {
     '',
     '### Pre-48 h AeroDataBox calls and per-flight totals by lead time',
     '',
-    'AeroDataBox status calls are the same for every cadence; the per-cadence columns add the inside-48 h figures (and, for B, the assumed AeroDataBox alert items). The plan quoted 4 / 26 / 42 units; the simulation gives one call less per lead time because the poll at exactly T-48 h is the AeroAPI bracketed fetch, not a second AeroDataBox call.',
+    `${pre48hRule()} AeroDataBox status calls are the same for every cadence: the creation fetch plus every weekly slot after it, so 1 / 2 / 4 calls at 3 / 14 / 30 days (the plan's daily-inside-14-days and every-2-days-beyond grids gave 1 / 12 / 20). The poll at exactly T-48 h opens the AeroAPI window, but the router serves that one slot from AeroDataBox in every mode: at T-48 h the flight sits on AeroAPI's exclusive 2-day horizon, so no window AeroAPI accepts contains it (increment 6 review); in \`live\` mode a flight therefore makes one more AeroDataBox call and one fewer AeroAPI poll than these columns show. The per-cadence columns add the inside-48 h figures (and, for B, the assumed AeroDataBox alert items).`,
     '',
     leadTimeTable(),
     '',

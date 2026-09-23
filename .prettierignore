@@ -22,6 +22,9 @@ apps/mobile/android/
 .dev.vars
 .dev.vars.*
 
+# Vendored provider OpenAPI snapshots: byte-for-byte copies whose SHA-256 a test pins
+apps/api/src/providers/specs/*.yaml
+
 # Orchestrator-owned documents: read only, never reformatted
 docs/plans/
 docs/research/

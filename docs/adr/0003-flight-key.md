@@ -72,6 +72,20 @@ for example `AAL-100-2026-09-19-KJFK`, built and parsed only by `@planeahead/sha
    and the tracker adopts the subscribers (`adoptSubscribers`, Phase 1). Nothing is ever
    renamed.
 
+### Amendment (increment 6, 2026-09-22): the operator at creation
+
+Rule 1 assumed a provider names the operating carrier. The provider that answers every Phase 0
+lookup, AeroDataBox, does not: its `airline` is the marketing carrier, `codeshareStatus` is a
+marker, and the ATC callsign is rarely present before departure. The key therefore carries the
+best-known operating designator at creation, decided by `resolveOperator` in
+`@planeahead/shared` (the marketing designator unless a callsign or the regional hint says
+otherwise; a callsign supplies the carrier AND the number, so `BA1512` flown as `AAL100` keys as
+`AAL-100-...` and never as `AAL-1512-...`, which is another flight), `operatorSource`
+(`provider`, `callsign`, `hint` or `marketing`) is stored on the instance, and the Phase 1 merge
+path, fed by AeroAPI's `operator_icao`, reconciles an instance keyed by a weaker source with the
+operator's own; rule 6 still holds, so reconciliation is a merge, never a rename.
+[ADR 0010](0010-provider-identity.md) records the decision and its cost.
+
 ## Consequences
 
 - Easier: two users, two providers and two marketing designators for one operation all resolve

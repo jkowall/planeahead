@@ -1,0 +1,20 @@
+{
+  "synthetic": true,
+  "spec": "specs/aeroapi-v4.17.1.yaml",
+  "schema": null,
+  "note": "UNVERIFIED: the 4.17.1 spec documents no 429, no Retry-After and no rate-limit header. Synthetic push-back, billed like every non-200.",
+  "request": {
+    "method": "GET",
+    "path": "/flights/AAL100-1758341600-schedule-0391?ident_type=fa_flight_id&max_pages=1"
+  },
+  "response": {
+    "status": 429,
+    "contentType": "application/json; charset=UTF-8",
+    "body": {
+      "title": "Too Many Requests",
+      "reason": "RATE_LIMITED",
+      "detail": "rate limit exceeded",
+      "status": 429
+    }
+  }
+}

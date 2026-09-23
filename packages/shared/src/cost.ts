@@ -5,9 +5,13 @@ import type { ProviderId } from './flight-status';
  * Phase 0 plan section 7. Prices are inputs to budgeting and cost attribution, never to
  * billing; the invoice comes from the provider.
  *
- * AeroAPI: https://www.flightaware.com/commercial/aeroapi/ (per result set).
+ * AeroAPI: https://www.flightaware.com/commercial/aeroapi/ (per result set). The Standard tier
+ * carries a $100 monthly minimum (`AEROAPI_STANDARD_MONTHLY_MINIMUM_USD_MICROS`), which the plan
+ * omitted: below roughly 20,000 status polls a month the invoice is the minimum, not the sum of
+ * these prices. Volume discounting is marginal and not retroactive.
  * AeroDataBox: https://aerodatabox.com/pricing/ (units; Growth plan $99 for 400,000 units,
- * which is 247.5 micros per unit, rounded up to 250 as the plan does).
+ * which is 247.5 micros per unit, rounded up to 250 as the plan does). Health-check endpoints
+ * are FREE TIER (`health`, 0 units) and are still counted.
  * Community ADS-B feeds, aviationweather.gov, NWS, Open-Meteo and the FAA NAS status are free
  * but every call is still counted. `llm` is priced per token by the extraction pipeline, not
  * per call, so its entry is zero here.
@@ -15,38 +19,58 @@ import type { ProviderId } from './flight-status';
 
 export const AEROAPI_STATUS_PRICE_USD_MICROS = 5_000;
 export const ADB_UNIT_PRICE_USD_MICROS = 250;
+/** AeroAPI Standard tier minimum monthly spend ($100), billed whatever the usage. */
+export const AEROAPI_STANDARD_MONTHLY_MINIMUM_USD_MICROS = 100_000_000;
 
 export const AEROAPI_OPERATIONS = [
   'flight_by_ident',
   'flight_by_id',
+  'flight_by_canonical',
   'position',
   'track',
   'schedules',
   'airport_flights',
+  'airport_arrivals',
+  'airport_departures',
   'alert_delivery',
   'alert_manage',
 ] as const;
 export type AeroApiOperation = (typeof AEROAPI_OPERATIONS)[number];
 
-export const AERODATABOX_OPERATIONS = ['flight_status', 'fids', 'airport', 'alert_item'] as const;
+export const AERODATABOX_OPERATIONS = [
+  'flight_status',
+  'fids',
+  'airport',
+  'alert_item',
+  'health',
+] as const;
 export type AeroDataBoxOperation = (typeof AERODATABOX_OPERATIONS)[number];
 
-/** AeroDataBox units per call by operation (tier 2 = 2 units, tier 1 = 1 unit, alert item = 1). */
+/**
+ * AeroDataBox units per call by operation (tier 2 = 2 units, tier 1 = 1 unit, alert item = 1,
+ * FREE TIER health checks = 0).
+ */
 export const ADB_UNITS: Readonly<Record<AeroDataBoxOperation, number>> = Object.freeze({
   flight_status: 2,
   fids: 2,
   airport: 1,
   alert_item: 1,
+  health: 0,
 });
 
 export const LIST_PRICE_USD_MICROS = {
   aeroapi: {
     flight_by_ident: 5_000,
     flight_by_id: 5_000,
+    /** `/flights/{ident}/canonical`: one fifth of a status poll, returns `idents[]`. */
+    flight_by_canonical: 1_000,
     position: 10_000,
     track: 12_000,
     schedules: 20_000,
     airport_flights: 20_000,
+    /** `/airports/{id}/flights/arrivals` and `/departures`: priced apart from `airport_flights`. */
+    airport_arrivals: 5_000,
+    airport_departures: 5_000,
     alert_delivery: 20_000,
     alert_manage: 0,
   },
@@ -55,6 +79,7 @@ export const LIST_PRICE_USD_MICROS = {
     fids: ADB_UNITS.fids * ADB_UNIT_PRICE_USD_MICROS,
     airport: ADB_UNITS.airport * ADB_UNIT_PRICE_USD_MICROS,
     alert_item: ADB_UNITS.alert_item * ADB_UNIT_PRICE_USD_MICROS,
+    health: ADB_UNITS.health * ADB_UNIT_PRICE_USD_MICROS,
   },
   adsb_lol: { positions: 0 },
   adsb_fi: { positions: 0 },

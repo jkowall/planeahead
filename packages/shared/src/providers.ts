@@ -26,6 +26,10 @@ export type { AlertEvent } from './flight-status';
  *    reads the wall clock except the `uuidv7` default clock in `ids.ts`, so tests can drive time.
  * 3. Adapters hand-map provider JSON into the shared shapes, so they return `Exact<...>` types:
  *    a misspelled field is a compile error rather than a gate that never renders.
+ * 4. Every record is written exactly once. The caller records `result.call` through its
+ *    `CostLogger`; an adapter that makes more than one HTTP call for one operation (the
+ *    AeroDataBox plus or minus one day retry) records every attempt it does NOT return through
+ *    `ctx.log` itself, so a retried miss is billed in the ledger like any other call.
  *
  * Optional properties are declared `T | undefined` so a caller holding an optional value can
  * pass it straight through under `exactOptionalPropertyTypes`.
@@ -40,8 +44,33 @@ export interface FlightLookup {
   originIcao?: string | undefined;
   /** Provider-side id after the first fetch (AeroAPI `fa_flight_id`). */
   providerRef?: { provider: ProviderId; id: string } | undefined;
-  /** Bracketed first fetch: `scheduled_out` plus or minus one day, ISO instants. */
+  /**
+   * The instance's `scheduled_out` once known (an ISO instant, from the tracker's snapshot).
+   * AeroAPI brackets its first fetch around it and answers with the instance nearest to it;
+   * AeroDataBox, which asks by the origin-local date, ignores it.
+   */
+  scheduledOut?: string | undefined;
+  /**
+   * An explicit bracket, `scheduled_out` plus or minus one day as ISO instants, UNCLAMPED: its
+   * midpoint is read as `scheduled_out`. Prefer `scheduledOut`; `window` is for a caller that
+   * holds only the bracket.
+   */
   window?: { start: string; end: string } | undefined;
+}
+
+/**
+ * A board (FIDS) window: airport-LOCAL wall-clock times `YYYY-MM-DDTHH:mm` at the airport the
+ * board is for, plus that airport's IANA zone. One contract for every provider: AeroDataBox asks
+ * in local time and uses `from` and `to` as they are; AeroAPI asks in UTC and converts them with
+ * `tz`. Providers differ in WHICH flights a window selects, and the adapters document it:
+ * AeroDataBox FIDS selects by scheduled time, AeroAPI `departures` and `arrivals` by the actual
+ * off or on time (flights that already left or landed), so an AeroAPI board of a future window is
+ * empty.
+ */
+export interface BoardWindow {
+  from: string;
+  to: string;
+  tz: string;
 }
 
 export interface ProviderCapabilities {
@@ -49,8 +78,18 @@ export interface ProviderCapabilities {
   /** Which fields the provider's alert payloads are known to carry. Measured, not assumed. */
   alertFields: ReadonlyArray<'status' | 'times' | 'gate' | 'unknown'>;
   boards: boolean;
-  /** How far ahead a status lookup can see. AeroAPI: 2. AeroDataBox: measured in increment 6. */
+  /**
+   * How far ahead a status lookup can see, in days. A PLAN attribute supplied by configuration,
+   * never a provider constant: AeroDataBox 180 / 365 / 365 on Starter / Growth / Scale (the
+   * pricing page; the real lookahead is measured with a key and recorded in the build log),
+   * AeroAPI 2 (the `/flights/{ident}` window).
+   */
   maxDaysAhead: number;
+  /**
+   * The widest board (FIDS) window one call may ask for, in hours. Also a plan attribute:
+   * AeroDataBox 12 / 24 / 48 on Starter / Growth / Scale.
+   */
+  fidsWindowHours: number;
   /** Whether the provider links the inbound aircraft rotation. */
   inboundLink: boolean;
 }
@@ -59,6 +98,7 @@ export type BudgetDenialReason =
   | 'per_flight_hard_cap'
   | 'provider_daily_cap'
   | 'provider_kill_switch'
+  | 'provider_rate_limit'
   | 'user_refresh_cap'
   | 'routing_rule';
 
@@ -70,7 +110,12 @@ export type BudgetDecision =
       /** Which rung of the 70 / 90 / 100 percent ladder the provider is on right now. */
       ladder: 'normal' | 'warn' | 'degraded';
     }
-  | { allowed: false; reason: BudgetDenialReason };
+  | {
+      allowed: false;
+      reason: BudgetDenialReason;
+      /** For `provider_rate_limit`: when the per-second token bucket next has a token. */
+      retryAfterMs?: number | undefined;
+    };
 
 export interface BudgetRequest {
   provider: ProviderId;
@@ -78,6 +123,12 @@ export interface BudgetRequest {
   pollEquivalents: number;
   trigger: ProviderCallTrigger;
   flightKey?: FlightKey | undefined;
+  /**
+   * The UTC day (`YYYY-MM-DD`) whose provider-wide budget this reservation debits, decided once
+   * when the request is built. `release` refunds that same day even after midnight, where a
+   * clock read at release time would refund the next day for a debit it never saw.
+   */
+  utcDate?: string | undefined;
 }
 
 /**
@@ -86,8 +137,16 @@ export interface BudgetRequest {
  */
 export interface BudgetGuard {
   reserve(request: BudgetRequest): Promise<BudgetDecision>;
-  /** Returns unused poll-equivalents from a reservation (a call that was never made). */
+  /**
+   * Returns unused poll-equivalents from a reservation: a call that was never made, or one the
+   * provider did not bill (AeroDataBox 429, 503 or a non-JSON body).
+   */
   release?(request: BudgetRequest, unusedPollEquivalents: number): Promise<void>;
+  /**
+   * Tells the per-second token bucket that the provider pushed back (a 429, a 503, a Cloudflare
+   * HTML page), so the next reservations wait `retryAfterMs` instead of retrying straight away.
+   */
+  backoff?(provider: ProviderId, retryAfterMs: number): Promise<void>;
 }
 
 /**
@@ -117,13 +176,28 @@ export interface ProviderResult<T> {
 
 export interface AlertRegistrationOptions {
   events: readonly AlertEvent[];
-  /** AeroAPI `max_weekly`; the external backstop against runaway deliveries. */
+  /**
+   * AeroAPI `max_weekly`. A CREATION-TIME rejection threshold (the alert is refused when its
+   * estimated weekly deliveries exceed it), write-only, and explicitly NOT a spend cap: it does
+   * not stop deliveries once the alert exists. The budget guard counts deliveries in our own
+   * ledger and deletes the alert (facts sheet section 2).
+   */
   maxWeekly: number;
 }
 
 export interface FlightDataProvider {
   readonly id: ProviderId;
   readonly capabilities: ProviderCapabilities;
+  /**
+   * Every flight the provider returns for the lookup, as an array: AeroDataBox answers a
+   * designator and date with every matching operation, and AeroAPI answers a diverted flight
+   * with the original leg plus each diversion under one `fa_flight_id`. Empty on a miss.
+   *
+   * One HTTP call per lookup, except for a person-supplied date (`ctx.trigger` `user_search` or
+   * `import`), where AeroDataBox retries the day before and the day after on a miss. A tracker's
+   * own triggers (`alarm`, `reconcile`, `user_refresh`, `provider_alert`) never pay for a retry:
+   * the key's date is canonical.
+   */
   getFlight(
     lookup: FlightLookup,
     ctx: ProviderCallContext,
@@ -131,7 +205,7 @@ export interface FlightDataProvider {
   getBoard?(
     airportIcao: string,
     direction: 'dep' | 'arr',
-    window: { from: string; to: string },
+    window: BoardWindow,
     ctx: ProviderCallContext,
   ): Promise<ProviderResult<Exact<BoardRow>[]>>;
   registerAlert?(

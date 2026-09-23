@@ -4,6 +4,7 @@ import {
   ADB_UNIT_PRICE_USD_MICROS,
   AERODATABOX_OPERATIONS,
   AEROAPI_OPERATIONS,
+  AEROAPI_STANDARD_MONTHLY_MINIMUM_USD_MICROS,
   AEROAPI_STATUS_PRICE_USD_MICROS,
   LIST_PRICE_USD_MICROS,
   UnknownOperationError,
@@ -46,25 +47,44 @@ describe('LIST_PRICE_USD_MICROS', () => {
     expect(LIST_PRICE_USD_MICROS.aeroapi).toEqual({
       flight_by_ident: 5_000,
       flight_by_id: 5_000,
+      flight_by_canonical: 1_000,
       position: 10_000,
       track: 12_000,
       schedules: 20_000,
       airport_flights: 20_000,
+      airport_arrivals: 5_000,
+      airport_departures: 5_000,
       alert_delivery: 20_000,
       alert_manage: 0,
     });
     expect(AEROAPI_STATUS_PRICE_USD_MICROS).toBe(LIST_PRICE_USD_MICROS.aeroapi.flight_by_id);
   });
 
+  it('adds the increment 6 prices: canonical at one fifth of a poll, arrivals and departures apart from airport flights', () => {
+    expect(listPriceUsdMicros('aeroapi', 'flight_by_canonical')).toBe(1_000);
+    expect(listPriceUsdMicros('aeroapi', 'airport_arrivals')).toBe(5_000);
+    expect(listPriceUsdMicros('aeroapi', 'airport_departures')).toBe(5_000);
+    expect(listPriceUsdMicros('aeroapi', 'airport_flights')).toBe(20_000);
+    expect(pollEquivalents('aeroapi', 'flight_by_canonical')).toBe(0.2);
+    expect(pollEquivalents('aeroapi', 'airport_arrivals')).toBe(1);
+    expect(costUnits('aeroapi', 'flight_by_canonical')).toBe(1);
+    // The Standard tier's $100 monthly minimum, which the plan omitted.
+    expect(AEROAPI_STANDARD_MONTHLY_MINIMUM_USD_MICROS).toBe(100_000_000);
+  });
+
   it('prices AeroDataBox by units at the Growth unit price', () => {
     expect(ADB_UNIT_PRICE_USD_MICROS).toBe(250);
-    expect(ADB_UNITS).toEqual({ flight_status: 2, fids: 2, airport: 1, alert_item: 1 });
+    expect(ADB_UNITS).toEqual({ flight_status: 2, fids: 2, airport: 1, alert_item: 1, health: 0 });
     expect(LIST_PRICE_USD_MICROS.aerodatabox).toEqual({
       flight_status: 500,
       fids: 500,
       airport: 250,
       alert_item: 250,
+      health: 0,
     });
+    // Health checks are FREE TIER but still an operation with a record.
+    expect(costUnits('aerodatabox', 'health')).toBe(0);
+    expect(estimateCostUsdMicros('aerodatabox', 'health')).toBe(0);
   });
 
   it('lists every AeroAPI and AeroDataBox operation exactly once', () => {

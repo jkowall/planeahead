@@ -1,0 +1,15 @@
+{
+  "synthetic": true,
+  "spec": "specs/aerodatabox-direct-v1.15.3.yaml",
+  "schema": null,
+  "note": "What an unauthenticated or throttled request meets at the gateway (facts sheet section 1): an HTML page from Cloudflare, not JSON. UNVERIFIED body, shape from the facts sheet.",
+  "request": {
+    "method": "GET",
+    "path": "/flights/Number/AA100/2026-09-22"
+  },
+  "response": {
+    "status": 403,
+    "contentType": "text/html; charset=UTF-8",
+    "body": "<!DOCTYPE html>\n<html lang=\"en-US\"><head><title>Attention Required! | Cloudflare</title></head><body><h1>Sorry, you have been blocked</h1><p>Cloudflare Ray ID: 8c1f00000000000</p></body></html>\n"
+  }
+}

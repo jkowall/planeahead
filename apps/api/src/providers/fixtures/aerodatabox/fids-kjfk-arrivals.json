@@ -1,0 +1,131 @@
+{
+  "synthetic": true,
+  "spec": "specs/aerodatabox-direct-v1.15.3.yaml",
+  "schema": "AirportFidsContract",
+  "note": "KJFK arrivals 17:00 to 23:00 local. Each row's movement times are at KJFK and its airport is the origin. One row per derivation: en route with an estimate, arrived, not yet departed (a regional codeshare with no callsign), cancelled.",
+  "request": {
+    "method": "GET",
+    "path": "/flights/airports/Icao/KJFK/2026-09-22T17:00/2026-09-22T23:00?direction=Arrival"
+  },
+  "response": {
+    "status": 200,
+    "contentType": "application/json",
+    "body": {
+      "arrivals": [
+        {
+          "movement": {
+            "airport": {
+              "icao": "EGLL",
+              "iata": "LHR",
+              "name": "London Heathrow",
+              "timeZone": "Europe/London"
+            },
+            "scheduledTime": {
+              "utc": "2026-09-22 21:40Z",
+              "local": "2026-09-22 17:40"
+            },
+            "revisedTime": {
+              "utc": "2026-09-22 22:05Z",
+              "local": "2026-09-22 18:05"
+            },
+            "terminal": "8",
+            "quality": ["Basic", "Live"]
+          },
+          "number": "AA 101",
+          "callSign": "AAL101",
+          "status": "EnRoute",
+          "codeshareStatus": "IsOperator",
+          "isCargo": false,
+          "airline": {
+            "name": "American",
+            "iata": "AA",
+            "icao": "AAL"
+          }
+        },
+        {
+          "movement": {
+            "airport": {
+              "icao": "EGLL",
+              "iata": "LHR",
+              "name": "London Heathrow",
+              "timeZone": "Europe/London"
+            },
+            "scheduledTime": {
+              "utc": "2026-09-22 21:00Z",
+              "local": "2026-09-22 17:00"
+            },
+            "revisedTime": {
+              "utc": "2026-09-22 20:52Z",
+              "local": "2026-09-22 16:52"
+            },
+            "terminal": "7",
+            "gate": "B7",
+            "baggageBelt": "4",
+            "quality": ["Basic", "Live"]
+          },
+          "number": "BA 117",
+          "status": "Arrived",
+          "codeshareStatus": "IsOperator",
+          "isCargo": false,
+          "airline": {
+            "name": "British Airways",
+            "iata": "BA",
+            "icao": "BAW"
+          }
+        },
+        {
+          "movement": {
+            "airport": {
+              "icao": "KORD",
+              "iata": "ORD",
+              "name": "Chicago O'Hare",
+              "timeZone": "America/Chicago"
+            },
+            "scheduledTime": {
+              "utc": "2026-09-23 01:30Z",
+              "local": "2026-09-22 21:30"
+            },
+            "revisedTime": {
+              "utc": "2026-09-23 01:45Z",
+              "local": "2026-09-22 21:45"
+            },
+            "quality": ["Basic"]
+          },
+          "number": "AA 3456",
+          "status": "Expected",
+          "codeshareStatus": "IsCodeshared",
+          "isCargo": false,
+          "airline": {
+            "name": "American",
+            "iata": "AA",
+            "icao": "AAL"
+          }
+        },
+        {
+          "movement": {
+            "airport": {
+              "icao": "KATL",
+              "iata": "ATL",
+              "name": "Atlanta Hartsfield-Jackson",
+              "timeZone": "America/New_York"
+            },
+            "scheduledTime": {
+              "utc": "2026-09-22 22:30Z",
+              "local": "2026-09-22 18:30"
+            },
+            "quality": ["Basic"]
+          },
+          "number": "DL 404",
+          "status": "Canceled",
+          "codeshareStatus": "IsOperator",
+          "isCargo": false,
+          "airline": {
+            "name": "Delta",
+            "iata": "DL",
+            "icao": "DAL"
+          }
+        }
+      ]
+    }
+  }
+}

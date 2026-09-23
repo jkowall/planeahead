@@ -1,0 +1,104 @@
+{
+  "synthetic": true,
+  "spec": "specs/aerodatabox-direct-v1.15.3.yaml",
+  "schema": "FlightContract[]",
+  "note": "At the gate at Heathrow with a baggage belt.",
+  "request": {
+    "method": "GET",
+    "path": "/flights/Number/AA100/2026-09-22"
+  },
+  "response": {
+    "status": 200,
+    "contentType": "application/json",
+    "body": [
+      {
+        "greatCircleDistance": {
+          "meter": 5539970.0,
+          "km": 5539.97,
+          "mile": 3442.37,
+          "nm": 2991.34,
+          "feet": 18175754.6
+        },
+        "departure": {
+          "airport": {
+            "icao": "KJFK",
+            "iata": "JFK",
+            "name": "New York John F Kennedy",
+            "shortName": "John F Kennedy",
+            "municipalityName": "New York",
+            "location": {
+              "lat": 40.6398,
+              "lon": -73.7789
+            },
+            "countryCode": "US",
+            "timeZone": "America/New_York"
+          },
+          "scheduledTime": {
+            "utc": "2026-09-22 22:00Z",
+            "local": "2026-09-22 18:00"
+          },
+          "quality": ["Basic", "Live"],
+          "revisedTime": {
+            "utc": "2026-09-22 22:05Z",
+            "local": "2026-09-22 18:05"
+          },
+          "runwayTime": {
+            "utc": "2026-09-22 22:24Z",
+            "local": "2026-09-22 18:24"
+          },
+          "terminal": "8",
+          "gate": "B32",
+          "runway": "22R"
+        },
+        "arrival": {
+          "airport": {
+            "icao": "EGLL",
+            "iata": "LHR",
+            "name": "London Heathrow",
+            "shortName": "Heathrow",
+            "municipalityName": "London",
+            "location": {
+              "lat": 51.4706,
+              "lon": -0.461941
+            },
+            "countryCode": "GB",
+            "timeZone": "Europe/London"
+          },
+          "scheduledTime": {
+            "utc": "2026-09-23 05:10Z",
+            "local": "2026-09-23 06:10"
+          },
+          "quality": ["Basic", "Live"],
+          "revisedTime": {
+            "utc": "2026-09-23 05:07Z",
+            "local": "2026-09-23 06:07"
+          },
+          "runwayTime": {
+            "utc": "2026-09-23 04:58Z",
+            "local": "2026-09-23 05:58"
+          },
+          "terminal": "3",
+          "gate": "C64",
+          "baggageBelt": "7",
+          "runway": "27L"
+        },
+        "lastUpdatedUtc": "2026-09-23 05:20Z",
+        "number": "AA 100",
+        "callSign": "AAL100",
+        "status": "Arrived",
+        "codeshareStatus": "IsOperator",
+        "isCargo": false,
+        "aircraft": {
+          "reg": "N717AN",
+          "modeS": "A9A0F7",
+          "model": "Boeing 777-300ER"
+        },
+        "airline": {
+          "name": "American",
+          "iata": "AA",
+          "icao": "AAL"
+        }
+      }
+    ]
+  }
+}

@@ -2,7 +2,7 @@
 
 Status: first version (2026-09-22, increment 5). This document grows one section per increment
 that adds an attack surface. Increment 5 adds authentication, the envelope-encryption module and
-the account routes; the share-link and MCP sections named in `docs/plans/phase0-plan.md` section
+the account routes; increment 6 adds the provider webhook receivers (section 3.1); the share-link and MCP sections named in `docs/plans/phase0-plan.md` section
 10 arrive with the phases that ship those features. Everything below refers to the code as built
 in `apps/api`; where a fact came from research rather than from running code it cites
 `docs/increments/05-auth.facts.md`.
@@ -349,6 +349,43 @@ Three layers, each honest about what it is:
   `rate_limits` per auth request. Accepted for Phase 0; a Durable Object `customStorage` is the
   Phase 1 hardening item.
 - Exact quotas (the magic-link caps now; per-user flight caps later) live in `usage_counters`.
+- The provider webhook receivers are the one exception to `PUBLIC_RL` (section 3.1).
+
+### 3.1 Provider webhook receivers (increment 6)
+
+`POST /v1/webhooks/aerodatabox/{token}` and `POST /v1/webhooks/aeroapi/{token}`
+(`src/routes/webhooks.ts`). Neither provider signs a delivery, so the credential is a 256-bit
+token per provider and per environment in the path, compared in constant time after a length
+check; a wrong token is the ordinary 404, never 401 or 403. A valid delivery is validated strictly
+and only ENQUEUED on `provider-events`; it never fetches, opens Postgres or touches a Durable
+Object, and its body is a hint the tracker merges or re-reads, never trusted to create or rename
+an instance (ADR 0010). The AeroDataBox receiver is shut while `ADB_ALERTS_ENABLED` is false.
+
+**No IP limit, by decision (orchestrator ruling I2).** The receivers are exempt from `PUBLIC_RL`
+(`ipLimiter` skips `/v1/webhooks/`) and get no per-route limiter in Phase 0.
+
+- Why: a provider delivers from a small, shared set of addresses. A per-IP brake of 120 per
+  10 s would throttle a burst of real deliveries (an AeroDataBox notification per flight, AeroAPI
+  alerts around a bank of departures) before it ever slowed an attacker, and a throttled
+  delivery is a missed gate change. A guesser gains nothing from volume: the token space is
+  2^256, and a wrong guess costs one cheap 404 with no body read.
+- What bounds a caller WITH the token (a leak): the `provider-events` queue's own backpressure
+  (a full or failing queue answers 503, which the provider retries and an attacker gains nothing
+  from), the 256 KB body limit, strict schema validation, and the fact that a delivery can only
+  make a tracker merge a plausible patch or re-read the flight, each re-read inside the
+  per-flight and provider-wide budgets. The provider-wide `ProviderBudget` cap, not the route,
+  bounds what a flood of forged hints can cost.
+- Accepted residual: a leaked token lets its holder fill the queue until rotation; the
+  consumer's per-flight budget and the daily provider cap keep the spend bounded, and the
+  token is rotated by a secret change (plus, for AeroAPI, re-registering live alerts with the new
+  `target_url`). Revisit with a per-token rate limit binding when deliveries are live (Phase 1).
+
+**The token stays out of logs and Sentry.** The route never logs a path and answers every
+unexpected failure itself, so nothing reaches `app.onError` (which logs the path). The Sentry
+scrubber redacts `/v1/webhooks/{provider}/{token}` from every string in an event, span attributes
+such as `url.path` included; `webhooks.test.ts` drives a real delivery through the real chain
+and asserts the serialised envelopes. Residual, recorded in ADR 0010: Cloudflare's own invocation
+logs keep request URLs.
 
 ## 4. Open items carried to later increments
 

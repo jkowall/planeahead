@@ -20,6 +20,7 @@ import {
   LITERAL_EXPECTED_POLLS,
   MAX_LIFETIME,
   MINUTE_MS,
+  PRE_48H_RELAXATION_REASON,
   PRE_48H_WINDOWS,
   SLO_EVENTS,
   SLO_REPORT_LEAD_TIME_DAYS,
@@ -94,14 +95,7 @@ function nextMinutes(decision: RefreshDecision): number {
   return (decision.nextRefreshAt.getTime() - OUT) / MINUTE_MS;
 }
 
-const TIER_ORDER: CadenceTier[] = [
-  'pre48h_far',
-  'pre48h_near',
-  'hourly',
-  'pre_boarding',
-  'in_flight',
-  'post_arrival',
-];
+const TIER_ORDER: CadenceTier[] = ['pre48h', 'hourly', 'pre_boarding', 'in_flight', 'post_arrival'];
 
 describe('derived constants', () => {
   it('derive A2 74 polls, 12 alerts, 122 PE; A1 84; literal 181; B 5 (the plan wrote 72 and 83 with a round() slot rule that left a 20-minute hole before boarding)', () => {
@@ -154,40 +148,44 @@ describe('cadence definitions', () => {
     '%s: windows are contiguous, ordered by tier, ADB before T-48h and AeroAPI after',
     (_id, cadence) => {
       expect(cadence.windows.map((w) => w.tier)).toEqual(TIER_ORDER);
-      expect(cadence.windows.slice(0, 2)).toEqual(PRE_48H_WINDOWS);
+      expect(cadence.windows.slice(0, 1)).toEqual(PRE_48H_WINDOWS);
       expect(cadence.windows[0]?.from).toBe(Number.POSITIVE_INFINITY);
       expect(cadence.windows[cadence.windows.length - 1]?.to).toBe('stop');
       for (let i = 1; i < cadence.windows.length; i += 1) {
         expect(cadence.windows[i]?.from).toEqual(cadence.windows[i - 1]?.to);
       }
       for (const window of cadence.windows) {
-        const pre48h = window.tier === 'pre48h_far' || window.tier === 'pre48h_near';
+        const pre48h = window.tier === 'pre48h';
         expect(window.source).toBe(pre48h ? 'aerodatabox' : 'aeroapi');
         expect(window.alerts).toBe(pre48h ? false : cadence.aeroapiAlerts !== null);
       }
     },
   );
 
-  it('pre-48 h rules: daily inside 14 d, every 2 d beyond, end-anchored on T-48 h', () => {
+  it('pre-48 h rule (increment 6): one weekly window from creation to T-48 h, end-anchored on T-48 h', () => {
     expect(PRE_48H_WINDOWS.map((w) => [w.from, w.to, w.intervalMinutes, w.anchor])).toEqual([
-      [Number.POSITIVE_INFINITY, days(14), days(2), 'end'],
-      [days(14), hours(48), days(1), 'end'],
+      [Number.POSITIVE_INFINITY, hours(48), days(7), 'end'],
     ]);
+    expect(PRE_48H_WINDOWS[0]).toMatchObject({
+      tier: 'pre48h',
+      source: 'aerodatabox',
+      alerts: false,
+    });
   });
 
   it('A2 keeps the plan intervals: hourly, 15, 30, 60; A1: hourly, 15, 15, then fixed slots', () => {
     const intervals = (c: CadenceDefinition): (number | null)[] =>
-      c.windows.slice(2).map((w) => (isIntervalWindow(w) ? w.intervalMinutes : null));
+      c.windows.slice(1).map((w) => (isIntervalWindow(w) ? w.intervalMinutes : null));
     expect(intervals(CADENCE_A2)).toEqual([60, 15, 30, 60]);
     expect(intervals(CADENCE_A1)).toEqual([60, 15, 15, null]);
     expect(intervals(CADENCE_LITERAL)).toEqual([60, 10, 2, 10]);
     expect(intervals(CADENCE_B)).toEqual([null, null, null, null]);
-    expect(CADENCE_LITERAL.windows[2]?.to).toBe(hours(3));
-    expect(CADENCE_A2.windows[2]?.to).toBe(hours(6));
+    expect(CADENCE_LITERAL.windows[1]?.to).toBe(hours(3));
+    expect(CADENCE_A2.windows[1]?.to).toBe(hours(6));
   });
 
   it('A1 tail is fixed slots at in+0, in+15, in+30, in+45 and a final poll at in+120 (R2, revised)', () => {
-    const tail = CADENCE_A1.windows[5];
+    const tail = CADENCE_A1.windows[4];
     expect(tail !== undefined && !isIntervalWindow(tail) ? tail.slots : null).toEqual([
       { edge: 'from', offsetMinutes: 0 },
       { edge: 'from', offsetMinutes: 15 },
@@ -199,7 +197,7 @@ describe('cadence definitions', () => {
   });
 
   it('B names a late-flight interval on its fixed-slot in-flight window', () => {
-    const inFlight = CADENCE_B.windows[4];
+    const inFlight = CADENCE_B.windows[3];
     expect(
       inFlight !== undefined && !isIntervalWindow(inFlight) ? inFlight.lateIntervalMinutes : null,
     ).toBe(15);
@@ -255,13 +253,21 @@ describe('SLO table', () => {
   it('documents exactly the relaxations the plan accepts, measured from the simulated polls (R10)', () => {
     const summary = (c: CadenceDefinition): [SloWindow, number, number][] =>
       sloRelaxations(c).map((r) => [r.sloWindow, r.maxGapMinutes, r.strictestSloMinutes]);
-    expect(summary(CADENCE_LITERAL)).toEqual([['6h_to_3h', 60, 15]]);
-    expect(summary(CADENCE_A1)).toEqual([['post_arrival', 75, 15]]);
+    // Increment 6: the weekly pre-48 h grid is slower than both pre-48 h SLO targets, on every
+    // cadence, deliberately (PRE_48H_RELAXATION_REASON).
+    const pre48h: [SloWindow, number, number][] = [
+      ['beyond_7d', days(7), hours(48)],
+      ['7d_to_48h', days(7), hours(24)],
+    ];
+    expect(summary(CADENCE_LITERAL)).toEqual([...pre48h, ['6h_to_3h', 60, 15]]);
+    expect(summary(CADENCE_A1)).toEqual([...pre48h, ['post_arrival', 75, 15]]);
     expect(summary(CADENCE_A2)).toEqual([
+      ...pre48h,
       ['3h_to_arrival', 30, 15],
       ['post_arrival', 60, 15],
     ]);
     expect(summary(CADENCE_B)).toEqual([
+      ...pre48h,
       ['48h_to_6h', hours(45), 60],
       ['6h_to_3h', hours(45), 15],
       ['3h_to_arrival', 195, 15],
@@ -271,7 +277,7 @@ describe('SLO table', () => {
 
   it('holds the literal hourly polls to the 6 h to 3 h target they run into', () => {
     // A lookup by tier name mapped `hourly` to `48h_to_6h` only and reported no relaxation.
-    const [hourly] = sloRelaxations(CADENCE_LITERAL);
+    const hourly = sloRelaxations(CADENCE_LITERAL).find((r) => r.sloWindow === '6h_to_3h');
     expect(hourly).toMatchObject({ sloWindow: '6h_to_3h', tiers: ['hourly'], alerts: false });
     expect(hourly?.relaxedLegs).toEqual([
       { fromMinutes: -hours(6), toMinutes: -hours(5) },
@@ -279,6 +285,8 @@ describe('SLO table', () => {
       { fromMinutes: -hours(4), toMinutes: -hours(3) },
     ]);
     expect(sloRelaxations(CADENCE_A2).map((r) => [r.tiers, r.alerts])).toEqual([
+      [['pre48h'], false],
+      [['pre48h'], false],
       [['pre_boarding', 'in_flight'], true],
       [['post_arrival'], true],
     ]);
@@ -288,7 +296,7 @@ describe('SLO table', () => {
     // B polls at T-48 h and then at T-3 h: the 45 h between them cross T-6 h, so the 48 h to
     // 6 h and the 6 h to 3 h windows both carry that gap. Measuring each cadence window from
     // its own start edge reported 42 h and 3 h instead.
-    const [hourly, preBoarding, inFlight, tail] = sloRelaxations(CADENCE_B);
+    const [hourly, preBoarding, inFlight, tail] = sloRelaxations(CADENCE_B).slice(2);
     const leg = { fromMinutes: -hours(48), toMinutes: -hours(3) };
     expect(hourly).toMatchObject({
       sloWindow: '48h_to_6h',
@@ -315,7 +323,11 @@ describe('SLO table', () => {
   it('charges a gap that ends on an SLO boundary to the earlier window only', () => {
     // The literal brief's T-7 h to T-6 h poll pair ends on T-6 h: the 48 h to 6 h window sees
     // a 60-minute gap that meets its 60-minute target, and the 6 h to 3 h window never sees it.
-    expect(sloRelaxations(CADENCE_LITERAL).map((r) => r.sloWindow)).toEqual(['6h_to_3h']);
+    expect(sloRelaxations(CADENCE_LITERAL).map((r) => r.sloWindow)).toEqual([
+      'beyond_7d',
+      '7d_to_48h',
+      '6h_to_3h',
+    ]);
     // A1's in-10 to in poll pair ends on the landing instant, so the post-arrival row starts at
     // in and holds the 15-minute target until in+45.
     const tail = sloRelaxations(CADENCE_A1).find((r) => r.sloWindow === 'post_arrival');
@@ -379,42 +391,70 @@ describe('SLO table', () => {
     });
   });
 
-  it('never flags the pre-48 h grids: the daily and 2-day polls sit exactly on their targets', () => {
+  it('flags both pre-48 h SLO windows with the weekly gap, and nothing else before T-48 h (increment 6)', () => {
+    // The daily and 2-day grids sat exactly on the 24 h and 48 h targets; the weekly grid is
+    // relaxed on purpose, because AeroDataBox's schedule layer only refreshes every two weeks.
     expect(SLO_REPORT_LEAD_TIME_DAYS).toBe(30);
+    expect(PRE_48H_RELAXATION_REASON).toBe(
+      "AeroDataBox schedule layer refreshes biweekly; a weekly poll is the data source's own resolution",
+    );
+    const PRE_48H_SLO_WINDOWS: readonly SloWindow[] = ['beyond_7d', '7d_to_48h'];
     for (const cadence of CADENCES) {
-      const flagged = sloRelaxations(cadence, { leadTimeDays: SLO_REPORT_LEAD_TIME_DAYS }).map(
-        (r) => r.sloWindow,
+      const report = sloRelaxations(cadence, { leadTimeDays: SLO_REPORT_LEAD_TIME_DAYS });
+      const pre48h = report.filter((r) => PRE_48H_SLO_WINDOWS.includes(r.sloWindow));
+      expect(pre48h).toEqual([
+        {
+          cadence: cadence.id,
+          sloWindow: 'beyond_7d',
+          tiers: ['pre48h'],
+          alerts: false,
+          strictestSloMinutes: hours(48),
+          maxGapMinutes: days(7),
+          relaxedLegs: [
+            { fromMinutes: -days(30), toMinutes: -days(23) },
+            { fromMinutes: -days(23), toMinutes: -days(16) },
+            { fromMinutes: -days(16), toMinutes: -days(9) },
+            // Crosses T-7 d, so it is charged to both windows (R10).
+            { fromMinutes: -days(9), toMinutes: -hours(48) },
+          ],
+        },
+        {
+          cadence: cadence.id,
+          sloWindow: '7d_to_48h',
+          tiers: ['pre48h'],
+          alerts: false,
+          strictestSloMinutes: hours(24),
+          maxGapMinutes: days(7),
+          relaxedLegs: [{ fromMinutes: -days(9), toMinutes: -hours(48) }],
+        },
+      ]);
+      // A tracker created at T-48 h never polls AeroDataBox, so nothing pre-48 h is relaxed and
+      // the inside-48 h rows are the same as the 30-day report's.
+      expect(sloRelaxations(cadence, { leadTimeDays: 2 })).toEqual(
+        report.filter((r) => !PRE_48H_SLO_WINDOWS.includes(r.sloWindow)),
       );
-      expect(flagged).not.toContain('beyond_7d');
-      expect(flagged).not.toContain('7d_to_48h');
-      expect(sloRelaxations(cadence, { leadTimeDays: 2 })).toEqual(sloRelaxations(cadence));
     }
   });
 });
 
 describe('refreshIntervalFor (A2 unless stated)', () => {
-  it('polls AeroDataBox every 2 days beyond 14 d, counting back from T-48 h', () => {
+  it('polls AeroDataBox weekly before T-48 h, counting back from T-48 h (increment 6)', () => {
     const d = decide(CADENCE_A2, -days(30));
-    expect(nextMinutes(d)).toBe(-days(28));
-    expect(d.intervalMs).toBe(2 * DAY_MS);
+    expect(nextMinutes(d)).toBe(-days(23));
+    expect(d.intervalMs).toBe(7 * DAY_MS);
     expect(d.source).toBe('aerodatabox');
-    expect(d.tier).toBe('pre48h_far');
-    expect(d.nominalIntervalMinutes).toBe(days(2));
+    expect(d.tier).toBe('pre48h');
+    expect(d.nominalIntervalMinutes).toBe(days(7));
     expect(d.alerts).toBe(false);
-    expect(nextMinutes(decide(CADENCE_A2, -days(16)))).toBe(-days(14));
+    expect(nextMinutes(decide(CADENCE_A2, -days(16)))).toBe(-days(9));
+    expect(nextMinutes(decide(CADENCE_A2, -days(14)))).toBe(-days(9));
+    expect(nextMinutes(decide(CADENCE_A2, -days(13.5)))).toBe(-days(9));
+    expect(nextMinutes(decide(CADENCE_A2, -days(9) - 1))).toBe(-days(9));
+    expect(decide(CADENCE_A2, -days(14)).tier).toBe('pre48h');
   });
 
-  it('polls AeroDataBox daily inside 14 d', () => {
-    const d = decide(CADENCE_A2, -days(14));
-    expect(nextMinutes(d)).toBe(-days(13));
-    expect(d.tier).toBe('pre48h_near');
-    expect(d.source).toBe('aerodatabox');
-    expect(nextMinutes(decide(CADENCE_A2, -days(13.5)))).toBe(-days(13));
-    expect(nextMinutes(decide(CADENCE_A2, -days(4)))).toBe(-days(3));
-  });
-
-  it('makes T-48 h the first AeroAPI poll: nothing else fires between T-3 d and T-48 h', () => {
-    for (const minutes of [-days(3), -hours(60), -hours(49)]) {
+  it('makes T-48 h the first AeroAPI poll: nothing else fires between T-9 d and T-48 h', () => {
+    for (const minutes of [-days(9), -days(4), -days(3), -hours(60), -hours(49)]) {
       const d = decide(CADENCE_A2, minutes);
       expect(nextMinutes(d)).toBe(-hours(48));
       expect(d.source).toBe('aeroapi');
@@ -626,10 +666,10 @@ describe('expectedCalls', () => {
   it('per-window polls inside 48 h reproduce the plan table', () => {
     const polls = (c: CadenceDefinition): number[] =>
       expectedCalls(c, { leadTimeDays: 2 }).byWindow.map((w) => w.polls);
-    expect(polls(CADENCE_LITERAL)).toEqual([0, 0, 45, 14, 110, 12]);
-    expect(polls(CADENCE_A1)).toEqual([0, 0, 42, 22, 15, 5]);
-    expect(polls(CADENCE_A2)).toEqual([0, 0, 42, 22, 8, 2]);
-    expect(polls(CADENCE_B)).toEqual([0, 0, 1, 1, 1, 2]);
+    expect(polls(CADENCE_LITERAL)).toEqual([0, 45, 14, 110, 12]);
+    expect(polls(CADENCE_A1)).toEqual([0, 42, 22, 15, 5]);
+    expect(polls(CADENCE_A2)).toEqual([0, 42, 22, 8, 2]);
+    expect(polls(CADENCE_B)).toEqual([0, 1, 1, 1, 2]);
   });
 
   it('exposes the poll instants the counts are made of, the creation fetch first', () => {
@@ -644,7 +684,13 @@ describe('expectedCalls', () => {
       BLOCK + 120,
     ]);
     const lead30 = expectedCalls(CADENCE_A2, { leadTimeDays: 30 });
-    expect(lead30.pollInstants.slice(0, 3)).toEqual([-days(30), -days(28), -days(26)]);
+    expect(lead30.pollInstants.slice(0, 5)).toEqual([
+      -days(30),
+      -days(23),
+      -days(16),
+      -days(9),
+      -hours(48),
+    ]);
     expect(lead30.pollInstants).toHaveLength(lead30.polls + lead30.adbCalls);
     for (const cadence of CADENCES) {
       const { pollInstants } = expectedCalls(cadence, { leadTimeDays: 14 });
@@ -697,18 +743,16 @@ describe('expectedCalls', () => {
     }
   });
 
-  it('AeroDataBox calls by lead time: 1 / 12 / 20 calls, 2 / 24 / 40 units', () => {
+  it('AeroDataBox calls by lead time (increment 6, weekly): 1 / 2 / 4 calls, 2 / 4 / 8 units', () => {
+    // The creation fetch plus the weekly slots at T-9 d, T-16 d and T-23 d that follow it. The
+    // plan's daily and 2-day grids gave 1 / 12 / 20.
     const byLead = [3, 14, 30].map((leadTimeDays) => expectedCalls(CADENCE_A2, { leadTimeDays }));
-    expect(byLead.map((r) => r.adbCalls)).toEqual([1, 12, 20]);
-    expect(byLead.map((r) => r.adbUnits)).toEqual([2, 24, 40]);
+    expect(byLead.map((r) => r.adbCalls)).toEqual([1, 2, 4]);
+    expect(byLead.map((r) => r.adbUnits)).toEqual([2, 4, 8]);
     expect(byLead.map((r) => r.polls)).toEqual([74, 74, 74]);
-    expect(byLead.map((r) => r.pollEquivalents)).toEqual([122.1, 123.2, 124]);
-    expect(byLead.map((r) => r.listCostUsdMicros)).toEqual([610_500, 616_000, 620_000]);
-    expect(byLead.map((r) => r.byWindow.slice(0, 2).map((w) => w.polls))).toEqual([
-      [0, 1],
-      [0, 12],
-      [8, 12],
-    ]);
+    expect(byLead.map((r) => r.pollEquivalents)).toEqual([122.1, 122.2, 122.4]);
+    expect(byLead.map((r) => r.listCostUsdMicros)).toEqual([610_500, 611_000, 612_000]);
+    expect(byLead.map((r) => r.byWindow.slice(0, 1).map((w) => w.polls))).toEqual([[1], [2], [4]]);
   });
 
   it('the pre-48 h share is the same for every cadence', () => {
@@ -735,9 +779,9 @@ describe('expectedCalls', () => {
 
 describe('window helpers', () => {
   it('windowAt gives the boundary instant to the later window and the closing instant to the tail', () => {
-    expect(windowAt(CADENCE_A2, ctx(-days(30)))?.tier).toBe('pre48h_far');
-    expect(windowAt(CADENCE_A2, ctx(-days(14)))?.tier).toBe('pre48h_near');
-    expect(windowAt(CADENCE_A2, ctx(-hours(48) - 1))?.tier).toBe('pre48h_near');
+    expect(windowAt(CADENCE_A2, ctx(-days(30)))?.tier).toBe('pre48h');
+    expect(windowAt(CADENCE_A2, ctx(-days(14)))?.tier).toBe('pre48h');
+    expect(windowAt(CADENCE_A2, ctx(-hours(48) - 1))?.tier).toBe('pre48h');
     expect(windowAt(CADENCE_A2, ctx(-hours(48)))?.tier).toBe('hourly');
     expect(windowAt(CADENCE_A2, ctx(-hours(6)))?.tier).toBe('pre_boarding');
     expect(windowAt(CADENCE_A2, ctx(-40))?.tier).toBe('in_flight');
@@ -755,12 +799,12 @@ describe('window helpers', () => {
 
   it('resolveWindows drops the tail and opens the in-flight window while arrival is unobserved', () => {
     const normal = resolveWindows(CADENCE_A2, ctx(-60));
-    expect(normal.windows).toHaveLength(6);
-    expect(normal.windows[2]).toMatchObject({
+    expect(normal.windows).toHaveLength(5);
+    expect(normal.windows[1]).toMatchObject({
       start: OUT - 48 * 60 * MINUTE_MS,
       end: OUT - 6 * 60 * MINUTE_MS,
     });
-    expect(normal.windows[5]?.end).toBe(IN + 120 * MINUTE_MS);
+    expect(normal.windows[4]?.end).toBe(IN + 120 * MINUTE_MS);
     expect(normal.windows.some((w) => w.extended)).toBe(false);
     expect(normal.bounds).toEqual({
       scheduledOut: OUT,
@@ -769,10 +813,10 @@ describe('window helpers', () => {
       stop: IN + 120 * MINUTE_MS,
     });
     const late = resolveWindows(CADENCE_A2, ctx(200, { phase: 'en_route', actualIn: undefined }));
-    expect(late.windows).toHaveLength(5);
-    expect(late.windows[4]?.window.tier).toBe('in_flight');
-    expect(late.windows[4]?.end).toBe(Number.POSITIVE_INFINITY);
-    expect(late.windows[4]?.extended).toBe(true);
+    expect(late.windows).toHaveLength(4);
+    expect(late.windows[3]?.window.tier).toBe('in_flight');
+    expect(late.windows[3]?.end).toBe(Number.POSITIVE_INFINITY);
+    expect(late.windows[3]?.extended).toBe(true);
     expect(resolveWindows(CADENCE_A2, ctx(10, { phase: 'cancelled' })).windows).toEqual([]);
   });
 

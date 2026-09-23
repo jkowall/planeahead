@@ -5,6 +5,7 @@ import {
   DISTANCE_UNITS,
   FLIGHT_STATUS_VALUES,
   IsoInstantSchema,
+  OPERATOR_SOURCES,
   PROVIDER_CALL_RESULTS,
   PROVIDER_CALL_TRIGGERS,
   PROVIDER_IDS,
@@ -401,10 +402,16 @@ describe('agreement with @planeahead/shared', () => {
     expect([...schema.CALL_TRIGGERS]).toEqual([...PROVIDER_CALL_TRIGGERS]);
     expect([...schema.CALL_RESULTS]).toEqual([...PROVIDER_CALL_RESULTS]);
     expect([...schema.SYNC_CHANGE_ENTITIES]).toEqual([...SYNC_ENTITIES]);
-    expect([...schema.ALERT_EVENTS]).toEqual([...ALERT_EVENTS]);
+    expect([...schema.OPERATOR_SOURCES]).toEqual([...OPERATOR_SOURCES]);
     for (const provider of PROVIDER_IDS) {
       expect(schema.EVENT_SOURCES).toContain(provider);
     }
+  });
+
+  it('alert events: the check constraint accepts exactly the nine shared events', () => {
+    // Increment 6 removed hold_start and hold_end (AeroAPI 4.17.1 has no hold events) from the
+    // shared vocabulary and from this mirror, and regenerated migration 0000 to match.
+    expect([...schema.ALERT_EVENTS]).toEqual([...ALERT_EVENTS]);
   });
 
   it('user preference enumerations match the shared UserPreferencesSchema', () => {

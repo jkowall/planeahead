@@ -36,12 +36,69 @@ import { safeErrorMessage, stripQueryParams } from '../observability/log';
 /** Breadcrumb data keys worth keeping on an HTTP breadcrumb. Everything else is dropped. */
 const SAFE_HTTP_BREADCRUMB_KEYS = ['method', 'url', 'status_code', 'reason'] as const;
 
+/**
+ * The webhook receivers authenticate by a token in the PATH (`/v1/webhooks/{provider}/{token}`,
+ * src/routes/webhooks.ts), so a URL can carry a secret even without a query string. This is the
+ * one change increment 6 makes to the frozen middleware (orchestrator ruling H7 lists it as the
+ * allowed exception): the token is the only credential on those routes.
+ */
+const WEBHOOK_TOKEN_PATH_RE = /(\/v1\/webhooks\/[a-z]+\/)[^/?#\s"']+/g;
+
+export function redactWebhookToken(url: string): string {
+  return url.replace(WEBHOOK_TOKEN_PATH_RE, '$1[redacted]');
+}
+
+/** Deep enough for any event Sentry builds; a deeper value is left for the other rules. */
+const MAX_REDACTION_DEPTH = 16;
+
+/**
+ * Redacts the webhook token from EVERY string in the event, wherever the SDK put it. A list of
+ * known fields is not enough: @sentry/core records the raw pathname as the span attribute
+ * `url.path` (and may add `http.target`, a span description, a tag), and a scrubber that knew only
+ * `url.full` shipped the token to Sentry on every sampled delivery. Mutates in place, and only
+ * plain objects and arrays: class instances (the SDK's scopes in `sdkProcessingMetadata`, which
+ * never leaves the Worker) are left alone, and a property is written only when its value changed.
+ */
+function redactWebhookTokensDeep(value: unknown, depth = 0): unknown {
+  if (typeof value === 'string') {
+    return value.includes('/webhooks/') ? redactWebhookToken(value) : value;
+  }
+  if (depth >= MAX_REDACTION_DEPTH || typeof value !== 'object' || value === null) {
+    return value;
+  }
+  if (Array.isArray(value)) {
+    for (let index = 0; index < value.length; index += 1) {
+      const next = redactWebhookTokensDeep(value[index], depth + 1);
+      if (next !== value[index]) {
+        value[index] = next;
+      }
+    }
+    return value;
+  }
+  const prototype: unknown = Object.getPrototypeOf(value);
+  if (prototype !== Object.prototype && prototype !== null) {
+    return value;
+  }
+  const record = value as Record<string, unknown>;
+  for (const key of Object.keys(record)) {
+    if (depth === 0 && key === 'sdkProcessingMetadata') {
+      continue;
+    }
+    const current = record[key];
+    const next = redactWebhookTokensDeep(current, depth + 1);
+    if (next !== current) {
+      record[key] = next;
+    }
+  }
+  return value;
+}
+
 function stripQuery(url: string): string {
   const cut = Math.min(
     url.includes('?') ? url.indexOf('?') : url.length,
     url.includes('#') ? url.indexOf('#') : url.length,
   );
-  return url.slice(0, cut);
+  return redactWebhookToken(url.slice(0, cut));
 }
 
 /**
@@ -107,6 +164,9 @@ function scrubBreadcrumb(breadcrumb: Breadcrumb): void {
  * callbacks in `sentryOptions` call this one function.
  */
 export function scrubSentryEvent<T extends Event>(event: T): T {
+  if (typeof event.transaction === 'string') {
+    event.transaction = redactWebhookToken(event.transaction);
+  }
   const request = event.request;
   if (request !== undefined) {
     delete request.headers;
@@ -158,6 +218,10 @@ export function scrubSentryEvent<T extends Event>(event: T): T {
       exception.value = safeErrorMessage(exception.value);
     }
   }
+
+  // Last: the webhook path token, in every string that is left (span attributes such as
+  // `url.path`, span descriptions, tags, breadcrumb and exception text).
+  redactWebhookTokensDeep(event);
 
   return event;
 }

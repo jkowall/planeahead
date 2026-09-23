@@ -10,8 +10,8 @@ import type { AlertEvent, FlightStatusValue } from './flight-status';
  *   put slot k at `start + k x interval` and yield `ceil(duration / interval)` slots, so a
  *   trailing partial slot always earns a poll and no window ends with a gap longer than its
  *   own interval (a `round` rule left a 20-minute hole before boarding on a 15-minute grid). The
- *   pre-48 h windows are end-anchored (they count back from T-48 h so the daily grid lands on
- *   T-3 d, T-4 d, ...) and yield `floor(duration / interval)` slots, so no slot can precede
+ *   pre-48 h window is end-anchored (it counts back from T-48 h so the weekly grid lands on
+ *   T-9 d, T-16 d, ...) and yields `floor(duration / interval)` slots, so no slot can precede
  *   the window start. The boundary instant between two windows belongs to the later window.
  * - Fixed-slot windows (the A1 post-arrival tail, every cadence B window) list explicit offsets
  *   from the window's edges or from scheduled departure. A fixed-slot in-flight window names a
@@ -38,8 +38,7 @@ export function days(n: number): number {
 
 export type CadenceId = 'literal' | 'A1' | 'A2' | 'B';
 export type CadenceSource = 'aerodatabox' | 'aeroapi';
-export type CadenceTier =
-  'pre48h_far' | 'pre48h_near' | 'hourly' | 'pre_boarding' | 'in_flight' | 'post_arrival';
+export type CadenceTier = 'pre48h' | 'hourly' | 'pre_boarding' | 'in_flight' | 'post_arrival';
 
 /**
  * A window edge: minutes before scheduled departure (`Infinity` = unbounded past), or a
@@ -215,25 +214,28 @@ export const B_ALERT_EVENTS: readonly AlertEvent[] = [
 ];
 
 /**
- * Pre-48 h rules shared by every cadence: AeroDataBox daily inside 14 days, every 2 days
- * beyond, counted back from T-48 h. These are the SLO-derived intervals for `7d_to_48h`
- * (24 h) and `beyond_7d` (48 h). Zero AeroAPI calls before T-48 h.
+ * The reason the two pre-48 h SLO windows are relaxed, as the architecture document prints it.
+ * AeroDataBox's schedule layer refreshes about once every two weeks per airport and its live
+ * layer reaches "typically up to tomorrow" (https://aerodatabox.com/data-coverage/), so a daily
+ * poll before T-48 h detected nothing a weekly one misses (facts sheet section 1).
+ */
+export const PRE_48H_RELAXATION_REASON =
+  "AeroDataBox schedule layer refreshes biweekly; a weekly poll is the data source's own resolution";
+
+/**
+ * The pre-48 h rule shared by every cadence (increment 6): ONE AeroDataBox window from creation
+ * to T-48 h, weekly, end-anchored on T-48 h, so a tracker polls at creation and then at T-9 d,
+ * T-16 d, T-23 d, ... It replaced the plan's daily-inside-14-days and every-2-days-beyond grids,
+ * which sat on the `7d_to_48h` (24 h) and `beyond_7d` (48 h) SLO targets but polled a schedule
+ * layer that refreshes biweekly; the report records both SLO windows as relaxed with
+ * `PRE_48H_RELAXATION_REASON`. Zero AeroAPI calls before T-48 h.
  */
 export const PRE_48H_WINDOWS: readonly IntervalWindow[] = [
   {
-    tier: 'pre48h_far',
+    tier: 'pre48h',
     from: Number.POSITIVE_INFINITY,
-    to: days(14),
-    intervalMinutes: days(2),
-    anchor: 'end',
-    source: 'aerodatabox',
-    alerts: false,
-  },
-  {
-    tier: 'pre48h_near',
-    from: days(14),
     to: hours(48),
-    intervalMinutes: days(1),
+    intervalMinutes: days(7),
     anchor: 'end',
     source: 'aerodatabox',
     alerts: false,
