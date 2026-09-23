@@ -122,11 +122,13 @@ describe('the late-commit hazard', () => {
       expect(delivered).toEqual(['older', 'newer']);
 
       // Why a max(seq) cursor would have lost the older row: it holds the LOWER sequence number
-      // and committed LAST.
+      // and committed LAST. The ORDER BY names the table's column: a bare `seq` resolves to the
+      // `::text` output alias first and sorts as text, which flips the order whenever the two
+      // numbers have different digit counts (parallel files draw from the same sequence).
       const order = await handle.execute<{ n: string; xid: string; seq: string }>(sql`
         select row->>'n' as n, xid::text as xid, seq::text as seq from user_sync_changes
         where user_id = ${session.userId}::uuid and row->>'n' in ('older', 'newer')
-        order by seq
+        order by user_sync_changes.seq
       `);
       expect(order.map((row) => row.n)).toEqual(['older', 'newer']);
       expect(BigInt(order[0]?.xid ?? '0')).toBeLessThan(BigInt(order[1]?.xid ?? '0'));

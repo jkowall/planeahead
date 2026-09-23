@@ -344,6 +344,7 @@ Natural keys used for idempotent upserts by the seed loaders: `airports.icao`, `
 | A cursor from another principal or database timeline is never served                              | the cursor's `hash8` (SHA-256 of the user id) and `epoch` (`sync_epoch`, migration 0003) are checked before the page; 410 `resync_required`; `sync.test.ts`                                                                                                                                                                                                                                                                                                            |
 | A cursor below the purge horizon is never served as complete                                      | `sync_horizon` (one row, migration 0003) written by the purge in the transaction that deletes `xid < H` from both tables, read by the route after the page; `sync.late-commit.test.ts` (the seq/xid inversion)                                                                                                                                                                                                                                                         |
 | A `deleted_subjects` hash is keyed and namespaced                                                 | `deleted_subjects_provider_subject_hash_check` (`apple:`, `google:` or `session:` plus 43 base64url characters)                                                                                                                                                                                                                                                                                                                                                        |
+| A subscribe never removes a tracker subscriber that another request recorded                      | no unsubscribe is scheduled after a lost deadline; the in-request compensation runs under the idempotency in-flight lease; `flights.subscribe.test.ts` (the timed-out call and its retry parked on one in-flight fetch)                                                                                                                                                                                                                                                |
 
 - **Two change tables, one watermark (ADR 0012).** `user_sync_changes` (a user's entities) and
   `flight_sync_changes` (a flight's snapshot, written once per applied upsert however many users
@@ -404,6 +405,22 @@ Natural keys used for idempotent upserts by the seed loaders: `airports.icao`, `
   transaction and its cursor, bound to it, answers 410 under the new session). The persist
   queue's `merge` consumer re-points the FlightTracker subscriber lists with the trackers'
   existing `subscribe` and `unsubscribe` RPCs.
+- **The tracker's subscriber list follows Postgres (ruling O13, settled by the re-review).**
+  `flight_subscriptions` is the record; a tracker's list is only ever repaired toward it, and the
+  two errors are not symmetric. A STRAY subscriber (no live row) costs nothing in Phase 0: the
+  shared tracker polls the flight for its other subscribers regardless, every list the user sees
+  is Postgres', and the increment 12 reconciliation removes it. A WRONG unsubscribe loses a real
+  subscription until the user subscribes again, which the app (already subscribed) never prompts.
+  So `POST /v1/flights` compensates in exactly one place: inside the request whose tracker call
+  answered `subscribed` and whose transaction then failed, where the idempotency in-flight lease
+  still blocks a same-key retry, so nothing can race it. After a LOST DEADLINE the route answers
+  504 and schedules no unsubscribe at all. A point-in-time check when the late call lands cannot
+  decide it: the tracker's `subscribe` joins a provider fetch in flight, so the timed-out call and
+  the outbox's retry (same key, same id) park on the same fetch and resume back to back
+  (`subscribed`, then `already`); the first's check would run before the retry's transaction
+  commits, see no row, and remove the subscriber the retry answered 201 for. Every answer that says
+  "already subscribed" re-sends the idempotent `subscribe` for the live row, so a retry repairs
+  drift in the other direction.
 
 ## 7. Write-path ownership
 
@@ -460,6 +477,21 @@ tracker, best effort: another device's subscribe still authenticates until the s
 step 4, so it can commit between the read and the delete, and would otherwise leave the deleted
 user's id in a tracker for the flight's lifetime (`me.delete.test.ts` races one).
 
+The transaction's FIRST statement is `select 1 from users where id = $1 for update` (re-review).
+A subscribe's INSERT holds FOR KEY SHARE on the user row (its foreign-key check) until it commits,
+and FOR UPDATE conflicts with it, so the lock waits for every subscribe that has already inserted,
+and the `flight_subscriptions` DELETE that follows, a fresh READ COMMITTED snapshot, returns that
+row for the post-commit unsubscribe; a subscribe that inserts after the lock waits at its
+foreign-key check until step 4 commits, then fails 23503, and the route's own compensation
+unsubscribes it. Without the lock the same wait happened at `delete from users`, the LAST
+statement, which then cascaded the freshly committed row past the RETURNING: the audit row said
+`late_subscriptions: 0` and the tracker kept the deleted user (`me.delete.test.ts` holds a
+subscribe open until the lock is seen waiting on it). A lock that finds no row means a concurrent
+deletion finished first; the transaction does nothing and the route answers 401 `account_deleted`,
+as for a replay. The lock cannot deadlock with a subscribe, which waits on the user row only from
+its INSERT, holding no row lock the deletes need (its restore path locks the tombstone but leaves
+`user_id` alone, so it runs no foreign-key check).
+
 Once `trips` get writers, step 4 must also append change rows for OTHER users' entities it
 changes: a delete for every `trip_members` row of the user's trips (the members' feeds), and an
 upsert for every other user's `flight_subscriptions` row whose `trip_id` the trip delete sets to
@@ -504,7 +536,7 @@ null (`ON DELETE SET NULL`). Phase 0 has no trip, so no such row exists today.
 | `usage_counters` (magic link)           | explicit statement (`scope = 'email'`, subject prefix)      | no FK; the ceiling and owner counters start with the SHA-256 of the canonical mailbox, an unkeyed hash reversible by dictionary |
 | `verifications`                         | explicit statement (identifier or value names the email)    | no FK; not for an anonymous user                                                                                                |
 | `rate_limits`                           | explicit statement (key embeds the email)                   | no FK; IP rows age out                                                                                                          |
-| `users`                                 | explicit statement, last                                    |                                                                                                                                 |
+| `users`                                 | explicit statement, last                                    | locked `FOR UPDATE` by the transaction's first statement, so a subscribe that inserted is waited for and its row is RETURNED    |
 | `audit_log`                             | survives                                                    | pseudonymous `subject_id`; the deletion appends its own row                                                                     |
 | `notification_deliveries`               | survives                                                    | pseudonymous `subject_id`                                                                                                       |
 | `revenuecat_events`                     | survives                                                    | keyed by RevenueCat's random app user id                                                                                        |

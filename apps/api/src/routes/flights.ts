@@ -23,15 +23,30 @@
  * and releases the counters it took, so neither the tracker nor the caps keep a subscription
  * Postgres never recorded.
  *
- * Consistency between the tracker's subscriber list and Postgres (ruling O13). The subscription id
- * is stable across retries (a restored tombstone's id, or the client's own), so a compensation may
- * only ever remove a subscriber THIS request added and nobody recorded: it runs when the tracker
- * answered `subscribed` (not `already`) AND no live `flight_subscriptions` row has that id at that
- * moment. That covers the late compensation after a lost 8 s race (the outbox's retry with the
- * same key may have committed the row meanwhile) and the transaction failure. Every answer that
- * says "already subscribed" (the step-2 shortcut, a concurrent subscribe that won inside the
- * transaction, a unique violation from one that won at commit) re-sends the idempotent tracker
- * `subscribe` for the live row, so a client retry repairs any drift. A unique violation on either
+ * Consistency between the tracker's subscriber list and Postgres (ruling O13, and the re-review
+ * ruling that settled the deadline path). Postgres is the record; the tracker's list only ever
+ * follows it, and the two errors are not symmetric: a STRAY subscriber (one with no live row)
+ * costs nothing in Phase 0, because the shared tracker polls the flight for its other subscribers
+ * regardless, Postgres filters every list the user sees, and the increment 12 reconciliation
+ * removes it; a WRONG unsubscribe loses a real subscription until the user happens to subscribe
+ * again, which the app (already subscribed) never prompts. So:
+ *
+ *   - After a lost deadline the route answers 504 and schedules NO unsubscribe. The call lands
+ *     later in `waitUntil`, and the outbox's retry (same key, same id: a 5xx is never stored)
+ *     records the row. A point-in-time check when the call lands cannot decide this: the timed-out
+ *     call and the retry's call both park on the tracker's in-flight provider fetch and resume
+ *     back to back (`subscribed`, then `already`), so the first's check runs before the retry's
+ *     transaction commits, sees no row, and would remove the subscriber the retry just answered
+ *     201 for (`flights.subscribe.test.ts` joins the two calls on one slow fetch).
+ *   - The transaction-failure compensation stays, in the request that made the call: the tracker
+ *     answered `subscribed` and the transaction never recorded it. It cannot race a same-key retry,
+ *     because the idempotency in-flight lease holds until this request answers.
+ *   - Every answer that says "already subscribed" (the step-2 shortcut, a concurrent subscribe
+ *     that won inside the transaction, a unique violation from one that won at commit) re-sends
+ *     the idempotent tracker `subscribe` for the live row, so a client retry repairs any drift.
+ *
+ * The subscription id is stable across retries (a restored tombstone's id, or the client's own),
+ * so a compensation only ever names a subscriber THIS request added. A unique violation on either
  * constraint (the primary key: the same client id raced; `(user_id, flight_instance_id)`: two ids
  * raced) re-reads the live row and answers 200 `already` with it; this request's own id is
  * unsubscribed only when it differs from the winner's.
@@ -307,21 +322,12 @@ async function unsubscribeQuietly(
   }
 }
 
-/** Whether a live `flight_subscriptions` row (anyone's) carries `id`. */
-async function liveRowExists(db: Db, id: string): Promise<boolean> {
-  const rows = await db
-    .select({ id: flightSubscriptions.id })
-    .from(flightSubscriptions)
-    .where(and(eq(flightSubscriptions.id, id), isNull(flightSubscriptions.deletedAt)))
-    .limit(1);
-  return rows.length > 0;
-}
-
 /**
  * The only compensation a subscribe ever makes (ruling O13): remove `subscriptionId` from the
- * tracker when THIS request's call added it (`subscribed`) and no live row records it now. A
- * request whose call answered `already` added nothing and removes nothing; a live row means a
- * retry (or a concurrent request with the same client id) recorded the subscriber and it stays.
+ * tracker when THIS request's call added it (`subscribed`) and this request's transaction did not
+ * record it. A request whose call answered `already` added nothing and removes nothing. It runs
+ * only inside the request that made the call, where the idempotency in-flight lease still blocks
+ * a same-key retry; never after a lost deadline (the module comment says why).
  */
 async function compensateSubscribe(
   ctx: RouteContext,
@@ -329,24 +335,9 @@ async function compensateSubscribe(
   subscriptionId: string,
   landed: SubscribeResponseV1['status'],
 ): Promise<void> {
-  if (landed !== 'subscribed') {
-    return;
+  if (landed === 'subscribed') {
+    await unsubscribeQuietly(ctx, flightKey, subscriptionId);
   }
-  try {
-    if (await liveRowExists(ctx.db, subscriptionId)) {
-      return;
-    }
-  } catch (error) {
-    // Unknown: leave the subscriber. A tracker notification is filtered by Postgres, and the
-    // increment 12 reconciliation repairs a stray subscriber; a wrong unsubscribe loses one.
-    ctx.log.error('flight_subscribe_compensation_check_failed', {
-      flight_key: flightKey,
-      subscription_id: subscriptionId,
-      ...errorFields(error),
-    });
-    return;
-  }
-  await unsubscribeQuietly(ctx, flightKey, subscriptionId);
 }
 
 /**
@@ -621,15 +612,10 @@ export function createFlightRoutes(options: FlightRoutesOptions = {}) {
             throw error;
           }
           if (subscribed.kind === 'timeout') {
-            // The call may still land. When it does, undo it only if it added the subscriber and
-            // nothing recorded it by then: the outbox's retry (same key, same id, since a 5xx is
-            // never stored) may have committed the row in the meantime.
-            ctx.waitUntil(
-              subscribeCall.then(
-                (landed) => compensateSubscribe(ctx, flightKey, subscriptionId, landed.status),
-                () => undefined,
-              ),
-            );
+            // The call still lands (`withDeadline` handed it to waitUntil) and nothing undoes it:
+            // the outbox's retry (same key, same id, since a 5xx is never stored) records the row,
+            // and a subscriber it left stray is harmless where a wrong unsubscribe is not (module
+            // comment). The retry may be parked on the same in-flight fetch as this call.
             await ledger.releaseAll([...CREATION_CAPS]);
             return upstreamTimeout(c);
           }

@@ -14,19 +14,33 @@
  *      next attempt unsubscribes again and a tracker's notifications are filtered by Postgres.
  *   3. REVOKE at Apple, best effort (TN3194: deletion completes without a usable token); RevenueCat
  *      through its flagged-off stub. Both outcomes go to `audit_log` in step 4.
- *   4. ONE short transaction of ordered, leaf-to-root DELETE statements, never one multi-CTE
- *      statement (sibling CTEs share a snapshot and run in unspecified order): every table that
- *      references `users` is emptied of the user's rows explicitly (the ON DELETE CASCADE foreign
- *      keys are a safety net, not the mechanism), then the tables that hold the user id or email
- *      without a foreign key (`usage_counters`, `verifications`, `rate_limits`), then the
- *      `deleted_subjects` rows (HMAC-SHA-256 of each Apple or Google subject for 400 days, and of
- *      each session token for 31 days so another device is told `account_deleted`), the
- *      `audit_log` row, and finally `delete from users`. The sessions are among the rows deleted,
- *      which revokes them.
+ *   4. ONE short transaction whose FIRST statement is `select 1 from users where id = $1 for
+ *      update`, then ordered, leaf-to-root DELETE statements, never one multi-CTE statement
+ *      (sibling CTEs share a snapshot and run in unspecified order): every table that references
+ *      `users` is emptied of the user's rows explicitly (the ON DELETE CASCADE foreign keys are a
+ *      safety net, not the mechanism), then the tables that hold the user id or email without a
+ *      foreign key (`usage_counters`, `verifications`, `rate_limits`), then the `deleted_subjects`
+ *      rows (HMAC-SHA-256 of each Apple or Google subject for 400 days, and of each session token
+ *      for 31 days so another device is told `account_deleted`), the `audit_log` row, and finally
+ *      `delete from users`. The sessions are among the rows deleted, which revokes them.
  *   5. AFTER the commit, unsubscribe every subscription step 4 deleted that step 2 did not
  *      (ruling O14): a mutating request of another device still authenticates until step 4
  *      commits, so a subscribe can commit between the read and the delete; step 4's
  *      `delete ... returning` names it, and it is undone here, best effort like step 2.
+ *
+ * Why the lock comes first (re-review). A subscribe's INSERT holds FOR KEY SHARE on the user's
+ * row (its foreign-key check) until it commits, and FOR UPDATE conflicts with that lock, so the
+ * lock waits for every subscribe that has already inserted, and the `flight_subscriptions` DELETE
+ * that follows (a fresh READ COMMITTED snapshot) returns the row for step 5; a subscribe that
+ * inserts after the lock waits at its foreign-key check until step 4 commits, then fails 23503,
+ * and the route's own compensation unsubscribes it. Without the lock the same wait happened at
+ * `delete from users`, the last statement, which then CASCADED the freshly committed row past the
+ * RETURNING, so step 5 never saw it and the tracker kept the deleted user (`me.delete.test.ts`
+ * holds a subscribe open until the lock waits on it). A lock that finds no row means a concurrent
+ * deletion finished first: the transaction does nothing and the route answers as for a replay.
+ * The lock cannot deadlock with a subscribe: a subscribe waits on the user row only from its
+ * INSERT, and at that point it holds no row lock the deletes need (its restore path, which locks
+ * the tombstone, leaves `user_id` alone and so runs no foreign-key check).
  *
  * Step 4 also removes the magic-link counters keyed by the account's address (`usage_counters`,
  * scope `email`, subjects that start with the SHA-256 of the canonical mailbox, known from step
@@ -412,6 +426,14 @@ export async function deleteAccount(
     mailboxHash: read.email === null ? null : await sha256Hex(canonicalMailbox(read.email)),
   };
   const deletedSubscriptions = await deps.db.transaction(async (tx) => {
+    // First: the user row, FOR UPDATE. A subscribe that has inserted holds FOR KEY SHARE on it
+    // until it commits, so this waits for it and the flight_subscriptions DELETE below (a fresh
+    // snapshot) returns its row; a later subscribe blocks at its foreign-key check, then fails.
+    const locked = await tx.execute(sql`select 1 from users where id = ${userId}::uuid for update`);
+    if (locked.length === 0) {
+      // A concurrent deletion committed while this one waited: nothing left to delete.
+      return null;
+    }
     let deleted: { id: string; flight_instance_id: string; live: boolean }[] = [];
     for (const step of DELETION_ORDER) {
       const statement = step.statement?.(subject) ?? null;
@@ -449,6 +471,9 @@ export async function deleteAccount(
     await tx.delete(users).where(eq(users.id, userId));
     return deleted;
   });
+  if (deletedSubscriptions === null) {
+    return null;
+  }
 
   // Step 5: a live subscription that committed after step 1 (another device's subscribe while
   // this deletion ran) still sits in its tracker; step 4 named it.

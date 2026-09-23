@@ -47,9 +47,11 @@ import { drainTouched } from './helpers/flights';
 import {
   authed,
   db,
+  eventually,
   seedTracker,
   seededFlightFor,
   subscribe,
+  subscribeRequest,
   subscriberCount,
   type ErrorBody,
 } from './helpers/routes';
@@ -376,6 +378,69 @@ describe('POST /v1/me/delete', () => {
     expect(await subscriberCount(first.flightKey)).toBe(0);
     expect(await subscriberCount(raced.flightKey)).toBe(0);
     expect(await auditDetails(session.userId)).toMatchObject({ late_subscriptions: 1 });
+  });
+
+  it('undoes a subscribe that commits after step 4 has started (the user row is locked first)', async () => {
+    // The subscribe's INSERT holds FOR KEY SHARE on the user row until it commits. Step 4's first
+    // statement locks that row FOR UPDATE, so it waits for the commit and the DELETE ... RETURNING
+    // that follows names the row for step 5. Before the lock, the wait happened at the last
+    // statement (`delete from users`), which cascaded the row past RETURNING: the tracker kept
+    // the deleted user. The subscribe is held open until the lock is seen waiting on it.
+    const session = await signInAnonymously();
+    const raced = seededFlightFor();
+    await seedTracker(raced);
+    const otherDevice = { cookie: session.cookie, ip: uniqueIp() };
+    let entered = false;
+    let release: () => void = () => undefined;
+    const gate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const app = createApp();
+    app.route(
+      '/v1',
+      createV1Routes({
+        flights: {
+          beforeSubscribeCommit: async () => {
+            entered = true;
+            await gate;
+          },
+        },
+      }),
+    );
+
+    const subscribeCtx = createExecutionContext();
+    const subscribing = app.fetch(
+      subscribeRequest(otherDevice, { flightKey: raced.flightKey }),
+      env,
+      subscribeCtx,
+    );
+    await eventually(
+      () => Promise.resolve(entered),
+      (value) => value,
+    );
+    const deleting = deleteAccount(session);
+    // Step 4 has started: its lock waits on the subscribe's uncommitted row.
+    await eventually(
+      () =>
+        db().execute<{ n: number }>(sql`
+          select count(*)::int as n from pg_stat_activity
+          where wait_event_type = 'Lock' and query ilike 'select 1 from users%for update%'
+        `),
+      (rows) => (rows[0]?.n ?? 0) > 0,
+    );
+    release();
+    const subscribed = await subscribing;
+    const deleted = await deleting;
+    await waitOnExecutionContext(subscribeCtx);
+
+    expect(subscribed.status).toBe(201);
+    expect(deleted.status).toBe(200);
+    expect(await remainingRows(session.userId)).toEqual({});
+    expect(await subscriberCount(raced.flightKey)).toBe(0);
+    expect(await auditDetails(session.userId)).toMatchObject({
+      subscriptions: 0,
+      late_subscriptions: 1,
+    });
   });
 });
 

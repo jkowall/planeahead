@@ -30,6 +30,7 @@ import { createV1Routes } from '../../src/routes/v1';
 import { captureLogs, jsonRequest, signInAnonymously, uniqueIp, worker } from './helpers/auth';
 import { adbCalls, adbOk, drainTouched, scriptAdb, track, testEnv } from './helpers/flights';
 import {
+  DAY_MS,
   HOUR,
   authed,
   counterValue,
@@ -373,29 +374,23 @@ describe('the tracker and Postgres agree (ruling O13)', () => {
     );
   }
 
-  /** A tracker seam whose FIRST subscribe waits `delayMs`, before or after the real call. */
-  function slowFirstSubscribe(delayMs: number, when: 'before' | 'after') {
-    let calls = 0;
+  /** A pass-through tracker seam that only records what the REAL tracker answered, in order. */
+  function recordingTracker(label: string, order: string[]) {
     return (workerEnv: Env) => {
       const real = defaultTrackerFor(workerEnv);
       return (key: FlightKey): TrackerRpc => {
         const tracker = real(key);
         return {
           getState: () => tracker.getState(),
-          unsubscribe: (input) => tracker.unsubscribe(input),
           forceRefresh: (input) => tracker.forceRefresh(input),
           subscribe: async (input) => {
-            calls += 1;
-            if (calls !== 1) {
-              return tracker.subscribe(input);
-            }
-            const pause = () => new Promise((resolve) => setTimeout(resolve, delayMs));
-            if (when === 'before') {
-              await pause();
-              return tracker.subscribe(input);
-            }
-            const answer = await tracker.subscribe(input);
-            await pause();
+            const answer = (await tracker.subscribe(input)) as { status: string };
+            order.push(`${label}.subscribe:${answer.status}`);
+            return answer;
+          },
+          unsubscribe: async (input) => {
+            const answer = (await tracker.unsubscribe(input)) as { status: string };
+            order.push(`${label}.unsubscribe:${answer.status}`);
             return answer;
           },
         };
@@ -403,56 +398,68 @@ describe('the tracker and Postgres agree (ruling O13)', () => {
     };
   }
 
-  for (const when of ['before', 'after'] as const) {
-    for (const idSource of ['client', 'tombstone'] as const) {
-      it(`keeps the retry's subscriber when a subscribe lost its deadline (delay ${when} the call, ${idSource} id)`, async () => {
-        const flight = seededFlightFor();
-        await seedTracker(flight);
-        const session = await signInAnonymously();
-        let subscriptionId: string = crypto.randomUUID();
-        if (idSource === 'tombstone') {
-          const created = await (
-            await subscribe(session, { flightKey: flight.flightKey })
-          ).json<SubscribeBody>();
-          subscriptionId = created.subscription.id;
-          expect((await authed(session, `/v1/flights/${subscriptionId}`, 'DELETE')).status).toBe(
-            200,
-          );
-        }
-        const body =
-          idSource === 'client'
-            ? { flightKey: flight.flightKey, subscriptionId }
-            : { flightKey: flight.flightKey };
-        const key = idempotencyKey(`late-${when}-${idSource}`);
-        const app = createApp();
-        app.route(
-          '/v1',
-          createV1Routes({
-            flights: { deadlineMs: 300, trackerFor: slowFirstSubscribe(2_000, when) },
-          }),
-        );
+  it('keeps the retry subscriber when the timed-out call and the retry join one in-flight fetch', async () => {
+    // The tracker's `subscribe` joins a provider fetch in flight, never races it. A slow gateway
+    // answer (2.5 s) and another user's refresh put such a fetch in flight; the first subscribe
+    // loses its deadline (compressed to 300 ms here; production races 8 s against a fetch that
+    // can take longer) while parked on it, and the outbox's retry (same key, same id: a 5xx is
+    // not stored) parks on the same fetch. Both land back to back when the fetch completes:
+    // `subscribed`, then `already`. Postgres must end with the retry's row and the tracker with
+    // its subscriber, so nothing may undo the first call when it lands.
+    const flight = seededFlightFor(30 * DAY_MS);
+    await scriptAdb(flight, [{ ...adbOk(flight, { phase: 'expected' }), delayMs: 2_500 }]);
+    await seedTracker(flight);
+    const other = await signInAnonymously();
+    const otherSub = await subscribe(other, { flightKey: flight.flightKey });
+    expect(otherSub.status).toBe(201);
+    const otherId = (await otherSub.json<SubscribeBody>()).subscription.id;
+    const refreshing = authed(other, `/v1/flights/${otherId}/refresh`, 'POST');
+    await eventually(
+      () => adbCalls(flight),
+      (calls) => calls >= 1,
+    );
 
-        const firstCtx = createExecutionContext();
-        const first = await app.fetch(subscribeRequest(session, body, { key }), env, firstCtx);
-        // A 5xx is not stored: the outbox's retry, same key, same body, really runs.
-        const retryCtx = createExecutionContext();
-        const retry = await app.fetch(subscribeRequest(session, body, { key }), env, retryCtx);
-        await waitOnExecutionContext(retryCtx);
-        // The first call lands now, and its late compensation runs.
-        await waitOnExecutionContext(firstCtx);
+    const session = await signInAnonymously();
+    const subscriptionId = crypto.randomUUID();
+    const body = { flightKey: flight.flightKey, subscriptionId };
+    const key = idempotencyKey('coalesced');
+    const order: string[] = [];
+    const first = createApp();
+    first.route(
+      '/v1',
+      createV1Routes({
+        flights: { deadlineMs: 300, trackerFor: recordingTracker('first', order) },
+      }),
+    );
+    const retry = createApp();
+    retry.route(
+      '/v1',
+      createV1Routes({ flights: { trackerFor: recordingTracker('retry', order) } }),
+    );
 
-        expect(first.status).toBe(504);
-        expect(retry.status).toBe(201);
-        expect((await retry.json<SubscribeBody>()).subscription.id).toBe(subscriptionId);
-        expect(await subscriptionRows(session.userId)).toEqual([
-          { id: subscriptionId, deleted: false },
-        ]);
-        expect(await subscribers(flight.flightKey)).toEqual([
-          { id: subscriptionId, user: session.userId },
-        ]);
-      });
-    }
-  }
+    const firstCtx = createExecutionContext();
+    const timedOut = await first.fetch(subscribeRequest(session, body, { key }), env, firstCtx);
+    const retryCtx = createExecutionContext();
+    const retried = await retry.fetch(subscribeRequest(session, body, { key }), env, retryCtx);
+    await waitOnExecutionContext(retryCtx);
+    await waitOnExecutionContext(firstCtx);
+    expect((await refreshing).status).toBe(200);
+
+    expect(timedOut.status).toBe(504);
+    expect((await timedOut.json<ErrorBody>()).error).toBe('upstream_timeout');
+    expect(retried.status).toBe(201);
+    expect((await retried.json<SubscribeBody>()).subscription.id).toBe(subscriptionId);
+    // Both calls waited for the one fetch (the refresh's; a subscribe fetches nothing) and landed
+    // in this order; no unsubscribe ran at all.
+    expect(order).toEqual(['first.subscribe:subscribed', 'retry.subscribe:already']);
+    expect(await adbCalls(flight)).toBe(1);
+    expect(await subscriptionRows(session.userId)).toEqual([
+      { id: subscriptionId, deleted: false },
+    ]);
+    expect(
+      (await subscribers(flight.flightKey)).filter((row) => row.user === session.userId),
+    ).toEqual([{ id: subscriptionId, user: session.userId }]);
+  });
 
   it('repairs a tracker that lost the subscriber when the client subscribes again', async () => {
     const flight = seededFlightFor();
