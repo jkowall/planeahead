@@ -22,13 +22,16 @@
     "deploy:dry-run": "wrangler deploy --dry-run --env staging"
   },
   "dependencies": {
+    "@better-auth/expo": "catalog:",
     "@hono/zod-validator": "catalog:",
     "@planeahead/db": "workspace:*",
     "@planeahead/shared": "workspace:*",
     "@sentry/cloudflare": "catalog:",
     "@sentry/hono": "catalog:",
+    "better-auth": "catalog:",
     "drizzle-orm": "catalog:",
     "hono": "catalog:",
+    "jose": "catalog:",
     "zod": "catalog:"
   },
   "devDependencies": {

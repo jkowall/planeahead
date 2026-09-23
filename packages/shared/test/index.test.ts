@@ -144,6 +144,19 @@ const EXPECTED_EXPORTS = [
   // live-activity
   'LIVE_ACTIVITY_PAYLOAD_LIMIT_BYTES',
   'LiveActivityContentStateV1',
+  // preferences
+  'DEFAULT_USER_PREFERENCES',
+  'DISTANCE_UNITS',
+  'DistanceUnitSchema',
+  'PREFERENCE_SETTINGS_KEY_RE',
+  'PREFERENCE_SETTINGS_MAX_KEYS',
+  'PreferenceSettingsSchema',
+  'TEMPERATURE_UNITS',
+  'TIME_FORMATS',
+  'TemperatureUnitSchema',
+  'TimeFormatSchema',
+  'UserPreferencesPatchSchema',
+  'UserPreferencesSchema',
   // rpc
   'ForceRefreshRequestV1',
   'GetStateResponseV1',

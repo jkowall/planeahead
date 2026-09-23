@@ -51,6 +51,24 @@ jobs:
     runs-on: ubuntu-latest
     environment: staging
     timeout-minutes: 30
+    services:
+      postgres:
+        image: postgres:18
+        env:
+          POSTGRES_USER: planeahead
+          POSTGRES_PASSWORD: planeahead
+          POSTGRES_DB: planeahead_admin
+          TZ: UTC
+          PGTZ: UTC
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+    env:
+      TEST_DATABASE_URL: postgres://planeahead:planeahead@localhost:5432/planeahead_admin
     steps:
       - uses: actions/checkout@v5
 
@@ -82,14 +100,22 @@ jobs:
       # conclusion and resolves the workflow file from the default branch. Repeating them costs a
       # few minutes on a deploy and cannot race.
       #
-      # The @planeahead/db suite is deliberately NOT repeated: it needs the Postgres service
-      # container ci.yml gives it, and standing one up here to gate a Worker deploy is a second
-      # copy of ci.yml, not a gate. The Worker's own suite needs no database at all.
+      # The @planeahead/db suite is deliberately NOT repeated: it is a schema suite, not a gate on
+      # the Worker. The Worker's own suite does need Postgres from increment 5 on (the auth and
+      # account tests), so this job carries the same postgres:18 service container ci.yml's
+      # test-workers job has rather than starting embedded-postgres on the runner.
       - name: Typecheck and lint
         run: pnpm turbo run typecheck lint
 
+      # Same grep as ci.yml's test-workers job: the suite must have used the service container.
       - name: Test the Worker
-        run: pnpm turbo run test --filter=@planeahead/api
+        shell: bash
+        run: |
+          pnpm turbo run test --filter=@planeahead/api 2>&1 | tee test-workers.log
+          grep -q 'database source: shell' test-workers.log || {
+            echo '::error title=Wrong database::the Workers suite did not use the postgres:18 service container (TEST_DATABASE_URL did not reach vitest)'
+            exit 1
+          }
 
       - name: Validate the Worker config and bundle
         run: pnpm --filter @planeahead/api exec wrangler deploy --dry-run --env staging

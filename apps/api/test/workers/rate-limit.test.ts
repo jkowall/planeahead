@@ -190,7 +190,12 @@ describe('principalLimiter', () => {
     let seenKey: string | null = null;
     const probe = new Hono<AppBindings>();
     probe.use(async (c, next) => {
-      c.set('user', { id: 'user-123', isAnonymous: false, sessionId: 'session-123' });
+      c.set('user', {
+        id: 'user-123',
+        isAnonymous: false,
+        sessionId: 'session-123',
+        scopes: ['user'],
+      });
       await next();
     });
     probe.use(

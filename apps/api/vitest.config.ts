@@ -15,31 +15,39 @@ import { defineConfig } from 'vitest/config';
  * environments, which this Worker depends on for staging and production. ADR 0004 records it as a
  * rejected option so it is not relitigated.
  *
- * No `miniflare.hyperdrives` override, and no Postgres anywhere. Increment 4's tests never open a
- * database connection: `/health` reports a build-time constant, the Durable Objects never touch
- * Postgres (ADR 0007), and the idempotency middleware falls back to its in-memory store because
- * `ENVIRONMENT` is `test` below. The CI job for this package runs without a service container.
- * Increments 5 and 8 add the override when auth and route tests need a Neon branch.
+ * Postgres, from increment 5 on. `test/globalSetup.ts` starts the embedded PostgreSQL 18 cluster
+ * (or uses `TEST_DATABASE_URL`, which CI sets to its `postgres:18` service container), migrates a
+ * database, starts the fake Apple, Google and Resend endpoints, and reads `.dev.vars.test`. The
+ * plugin is given a FUNCTION so it can `inject()` those values after the setup has run: the
+ * database URL becomes the Hyperdrive binding's local connection string through
+ * `miniflare.hyperdrives` (the plugin ignores CLOUDFLARE_HYPERDRIVE_LOCAL_CONNECTION_STRING_DB,
+ * and `localConnectionString` in wrangler.jsonc is a placeholder that never answers), and the
+ * secrets plus the provider URLs become bindings, which is exactly how `wrangler secret put`
+ * delivers them in staging.
+ *
+ * `test/unit` runs INSIDE the Workers pool too. Those files are pure (WebCrypto, jose, an
+ * injected `fetch`) and running them in workerd is the point: several increment 5 facts about
+ * the runtime (pkcs8 import for ECDSA P-256, AES-KW wrap length, timingSafeEqual throwing on
+ * unequal lengths) are settled there rather than on Node's WebCrypto. Increment 6 adds a separate
+ * Node project for the undici MockAgent provider tests, which cannot run in workerd.
  */
 export default defineConfig({
   plugins: [
-    cloudflareTest({
+    cloudflareTest(({ inject }) => ({
       wrangler: { configPath: './wrangler.jsonc' },
       miniflare: {
-        // Overrides the `local` value from wrangler.jsonc. `wrangler types` only knows the three
-        // values the config file declares, so `environmentName()` in src/env.ts reads this
-        // through a widened `string` rather than the generated literal union.
-        bindings: { ENVIRONMENT: 'test' },
+        hyperdrives: { DB: inject('apiDatabaseUrl') },
+        // Overrides the `local` value from wrangler.jsonc with ENVIRONMENT=test and adds every
+        // secret and test URL. `wrangler types` only knows the three ENVIRONMENT values the config
+        // file declares, so `environmentName()` in src/env.ts reads this through a widened
+        // `string` rather than the generated literal union.
+        bindings: inject('apiTestBindings'),
       },
-    }),
+    })),
   ],
   test: {
-    // Only `test/workers`. Increments 5 and 6 add `test/unit`, which is Node-side (undici
-    // MockAgent for provider adapters, since `fetchMock` was removed from `cloudflare:test`) and
-    // cannot run inside the Workers pool. Scoping the include now means that increment adds a
-    // second Vitest project rather than discovering that its unit tests are being loaded into
-    // workerd.
-    include: ['test/workers/**/*.test.ts'],
+    globalSetup: ['test/globalSetup.ts'],
+    include: ['test/workers/**/*.test.ts', 'test/unit/**/*.test.ts'],
 
     // Vitest's 5 second default is too tight for the FIRST request into the Worker in a test
     // file. That request is what makes workerd evaluate the whole bundle, and the bundle is a

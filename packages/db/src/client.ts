@@ -36,13 +36,25 @@ export const WORKER_CLIENT_OPTIONS = Object.freeze({
 });
 
 /**
+ * Opens a client on the Hyperdrive binding and returns the Drizzle handle. Does not call
+ * `end()`: Hyperdrive closes connections when the fetch, queue or Workflow invocation ends.
+ *
+ * Call it inside a handler, never at module scope (the ESLint rule enforces the call site). It
+ * exists for code that has to hold ONE client for the life of a request across several callers,
+ * such as the auth middleware, which resolves the session and then hands the same handle to the
+ * route so a request does not open a second pool. Everything else uses `withDb`.
+ */
+export function openDb(env: DbEnv): Db {
+  const client = postgres(env.DB.connectionString, WORKER_CLIENT_OPTIONS);
+  return drizzle(client, { schema });
+}
+
+/**
  * Opens a client on the Hyperdrive binding, runs `fn`, and returns its result. Does not call
  * `end()`: Hyperdrive closes connections when the fetch, queue or Workflow invocation ends.
  */
 export async function withDb<T>(env: DbEnv, fn: (db: Db) => Promise<T>): Promise<T> {
-  const client = postgres(env.DB.connectionString, WORKER_CLIENT_OPTIONS);
-  const db = drizzle(client, { schema });
-  return fn(db);
+  return fn(openDb(env));
 }
 
 export interface NodeDb {

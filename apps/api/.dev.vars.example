@@ -4,9 +4,13 @@
 # entirely when you pass `--env <environment>`, it does not merge with it, so a `.dev.vars.staging`
 # has to repeat every line it needs.
 #
-# None of this reaches the Vitest pool. `pnpm --filter @planeahead/api test` reads its bindings
-# from wrangler.jsonc and from the `miniflare` block in vitest.config.ts, and it opens no database
-# connection at all.
+# None of this reaches the Vitest pool. `pnpm --filter @planeahead/api test` reads its secrets
+# from `.dev.vars.test` (committed, generated dummy values) through test/globalSetup.ts, and its
+# database from the embedded PostgreSQL 18 cluster that setup starts (or TEST_DATABASE_URL in CI).
+#
+# test/workers/secrets-in-logs.test.ts asserts that every name in WORKER_SECRET_NAMES (src/env.ts)
+# is an uncommented key in this file, so a new secret cannot be read by the Worker without being
+# listed here.
 
 # Overrides the Hyperdrive binding's connection string for `wrangler dev` only. Point it at your
 # own Neon branch (for example dev-jkowall); there is no local Postgres and no Docker in this
@@ -24,18 +28,47 @@ SENTRY_DSN=
 # to start a local Hyperdrive without one.
 
 # ---------------------------------------------------------------------------------------------
-# Not yet. Everything above is what increment 4 reads; everything below is the rest of the secret
-# set docs/plans/phase0-plan.md section 5 names, listed here because this file is the only place a
-# developer finds out what `wrangler secret put --env staging` has to be run for. Each line turns
-# on in the increment named beside it, and the increment that turns it on also adds it to
-# `WorkerSecrets` in src/env.ts. Keep them commented out until then: `wrangler types` and
-# `environmentName()` do not read this file, but a half-set secret is worse than an absent one.
+# Authentication and encryption (increment 5). Set every one of these with
+# `wrangler secret put <NAME> --env staging` (and again for production) before sign-in works.
+
+# Better Auth's session signing secret. At least 32 random characters (`openssl rand -base64 48`).
+# createAuth refuses to start without it: Better Auth would otherwise fall back to a PUBLIC
+# default secret, because it keys that check on NODE_ENV, which Workers never set.
+BETTER_AUTH_SECRET=
+
+# Key-encryption key, version 1: 32 random bytes as STANDARD padded base64
+# (`openssl rand -base64 32`). base64url is rejected. Add TOKEN_KEK_V2 to rotate; keep V1 until
+# every user_keys row has been re-wrapped (docs/security/threat-model.md section 2).
+TOKEN_KEK_V1=
+
+# Sign in with Apple: the .p8 private key as PKCS8 PEM with the newlines written as \n on one
+# line, its key id, the team id, and the iOS bundle id (the `aud` of native identity tokens and
+# the `client_id` at Apple's token endpoint).
+APPLE_SIWA_P8=
+APPLE_SIWA_KEY_ID=
+APPLE_SIWA_TEAM_ID=
+APPLE_BUNDLE_ID=
+
+# Google: the three OAuth client ids a native identity token may name as `aud`. No client secret
+# is needed: the native flow verifies the ID token's signature against Google's JWKS.
+GOOGLE_CLIENT_ID_WEB=
+GOOGLE_CLIENT_ID_IOS=
+GOOGLE_CLIENT_ID_ANDROID=
+
+# Resend API key for magic-link mail. Empty means the logging NoopSender (wrangler dev only).
+RESEND_API_KEY=
+
+# Optional test seams. NEVER set in a deployed environment: each one points the Worker at a
+# different host for one external endpoint. The suite sets them to test/fake-providers.ts.
+APPLE_JWKS_URL=
+APPLE_TOKEN_URL=
+GOOGLE_JWKS_URL=
+RESEND_API_URL=
+
+# ---------------------------------------------------------------------------------------------
+# Not yet. Each line turns on in the increment named beside it, and the increment that turns it
+# on also adds it to `WorkerSecrets` and WORKER_SECRET_NAMES in src/env.ts.
 #
-# BETTER_AUTH_SECRET=        increment 5   session and token signing
-# APPLE_SIWA_P8=             increment 5   Sign in with Apple private key, PEM, newlines escaped
-# GOOGLE_CLIENT_SECRET=      increment 5   Google ID token exchange
-# RESEND_API_KEY=            increment 5   magic link delivery
-# TOKEN_KEK_V1=              increment 5   key encryption key for stored provider tokens
 # AERODATABOX_API_KEY=       increment 6   primary flight data provider
 # AEROAPI_API_KEY=           increment 6   FlightAware AeroAPI, the fallback provider
 # PROVIDER_WEBHOOK_SECRET=   increment 6   shared secret on the inbound webhook receivers

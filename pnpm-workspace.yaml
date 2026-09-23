@@ -59,11 +59,19 @@ catalog:
   '@sentry/cloudflare': 10.75.0
   '@sentry/hono': 10.75.0
 
+  # Auth (increment 5). better-auth and @better-auth/expo are exact pins that move together: the
+  # Expo package is npm-pinned to the same better-auth line and the server-side plugin registers
+  # routes whose shapes the mobile client (increment 9) depends on. jose verifies Apple and Google
+  # identity tokens and mints the Apple client secret; it is MIT, dependency free and documents
+  # Workers support. Nothing else was added on the API for this increment.
+  better-auth: 1.7.5
+  '@better-auth/expo': 1.7.5
+  jose: ^6.2.12
+
   # Not installed yet. Versions verified 2026-09-19 and recorded here so the
   # increment that adds them does not have to rediscover the pin.
   #
   # expo: ~57.0.24                         increment 9
-  # better-auth: 1.7.5                     increment 5
 
 minimumReleaseAgeExclude:
   - '@turbo/darwin-64@2.11.2'

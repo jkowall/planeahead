@@ -13,6 +13,10 @@
  * types away and the client ends up with an empty surface. Add routes to the chain below, never
  * as separate statements.
  *
+ * `/api/auth` is in the chain too. The mobile client reaches those paths through the Better Auth
+ * client rather than `hc`, so the type contributes only the catch-all, which is harmless and
+ * keeps one mount style for every sub-app.
+ *
  * The error handlers and the middleware chain live in `src/app.ts` and are applied by
  * `createApp()`. They are not inlined here so that the tests can build the same chain instead of
  * a hand-written approximation of it; the order is a runtime contract and a second copy of it is
@@ -21,12 +25,15 @@
 
 import { withSentry } from '@sentry/cloudflare';
 import { createApp } from './app';
+import { MAGIC_LINK_LANDING_PATH } from './auth/paths';
 import type { Env } from './env';
 import { scheduled } from './cron/index';
 import { sentryOptions } from './middleware/sentry';
 import { queue } from './queues/index';
+import { authRoutes } from './routes/auth';
 import { health } from './routes/health';
-import { authStub, v1Stub } from './routes/not-implemented';
+import { magicLinkLanding } from './routes/magic-link-landing';
+import { v1Routes } from './routes/v1';
 
 export { AirportState } from './do/airport-state';
 export { DesignatorResolver } from './do/designator-resolver';
@@ -40,7 +47,13 @@ const app = createApp();
  * `route()` returns the same Hono instance, so `routes` and `app` are one object at run time.
  * The two names exist because only the chained expression carries the accumulated RPC types.
  */
-const routes = app.route('/', health).route('/v1', v1Stub).route('/api/auth', authStub);
+const routes = app
+  .route('/', health)
+  .route('/v1', v1Routes)
+  .route('/api/auth', authRoutes)
+  // The browser landing page for the emailed magic link: outside the Better Auth mount so a
+  // GET can never consume the token (src/routes/magic-link-landing.ts).
+  .route(MAGIC_LINK_LANDING_PATH, magicLinkLanding);
 
 /** The RPC surface `hc<AppType>()` in apps/mobile is typed from. */
 export type AppType = typeof routes;

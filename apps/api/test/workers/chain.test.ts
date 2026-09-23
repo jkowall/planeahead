@@ -47,8 +47,8 @@ function postInit(key?: string, installId: string | null = 'chain-install-0001')
 
 describe('the deployed chain answers the shape it documents', () => {
   it('answers 501, not 500, for a mutating request carrying an Idempotency-Key', async () => {
-    // The regression. `POST /v1/flights` with this header is the first request shape increment 5
-    // will send, and the mobile outbox is specified to retry it aggressively.
+    // The regression. `POST /v1/flights` with this header is the request shape the mobile
+    // outbox retries aggressively; increments 7 and 8 own the route, so the stub still answers.
     const response = await exports.default.fetch(
       'https://api.planeahead.test/v1/flights',
       postInit('chain-key-00000001'),
@@ -57,7 +57,7 @@ describe('the deployed chain answers the shape it documents', () => {
 
     expect(response.status).toBe(501);
     expect(body.error).toBe('not_implemented');
-    expect(body.increment).toContain('05');
+    expect(body.increment).toContain('08');
   });
 
   it('answers the same 501 without the header, so the header is not what routes', async () => {
@@ -83,15 +83,26 @@ describe('the deployed chain answers the shape it documents', () => {
     expect(body.requestId).toBe(response.headers.get(REQUEST_ID_HEADER));
   });
 
-  it('answers 501 for a keyed POST to the auth surface increment 5 owns', async () => {
+  it('reaches Better Auth for a keyed POST to the auth mount and gets its validation answer', async () => {
+    // The idempotency middleware skips the auth mount (a replayed key must never answer ahead
+    // of the magic-link gate), and the body has no `email`, so the gate forwards it uncounted
+    // and Better Auth's own schema rejects it: a 400 from the handler, never a 500 from the
+    // chain. The address keeps the request out of the shared no-IP rate-limit bucket that
+    // other files could be filling.
+    const init = postInit('chain-key-00000002');
     const response = await exports.default.fetch(
       'https://api.planeahead.test/api/auth/sign-in/magic-link',
-      postInit('chain-key-00000002'),
+      {
+        ...init,
+        headers: {
+          ...(init.headers as Record<string, string>),
+          'cf-connecting-ip': '198.51.249.2',
+        },
+      },
     );
-    const body = await response.json<{ error: string; increment: string }>();
 
-    expect(response.status).toBe(501);
-    expect(body.increment).toBe('05-auth');
+    expect(response.status).toBe(400);
+    expect(response.headers.get('content-type')).toContain('application/json');
   });
 
   it('answers 404, not 500, for a keyed POST to a path nothing mounts', async () => {

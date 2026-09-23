@@ -38,6 +38,12 @@
     },
     "test": {
       "dependsOn": ["//#test:tools"],
+      // turbo runs tasks in strict env mode: a variable not listed here never reaches the
+      // script. CI sets TEST_DATABASE_URL to its postgres:18 service container for the db and
+      // api suites; without this line both would start embedded-postgres on the runner instead,
+      // and the containers would be dead weight. apps/api/test/globalSetup.ts throws when the
+      // variable is set and the harness did not use it.
+      "env": ["TEST_DATABASE_URL"],
       "inputs": [
         "src/**",
         "scripts/**",

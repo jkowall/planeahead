@@ -38,13 +38,30 @@ jobs:
       - run: pnpm turbo run lint
       - run: pnpm prettier --check .
 
-  # The Workers suite. No service container: increment 4's tests open no database connection at
-  # all. /health reports a build-time constant, the Durable Objects never touch Postgres (ADR
-  # 0007), and the Hyperdrive binding carries a connection string that is never dialled. Keeping
-  # this job Postgres-free is what makes that property visible: the day a Workers test needs a
-  # database, this job fails rather than quietly picking one up.
+  # The Workers suite. From increment 5 it needs Postgres: apps/api/test/globalSetup.ts migrates
+  # a database on this container and hands its URL to the Vitest Workers pool as the Hyperdrive
+  # binding's local connection string (locally the same setup starts embedded-postgres). The
+  # Durable Objects still never touch Postgres (ADR 0007); the auth, device and account tests do.
   test-workers:
     runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:18
+        env:
+          POSTGRES_USER: planeahead
+          POSTGRES_PASSWORD: planeahead
+          POSTGRES_DB: planeahead_admin
+          TZ: UTC
+          PGTZ: UTC
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+    env:
+      TEST_DATABASE_URL: postgres://planeahead:planeahead@localhost:5432/planeahead_admin
     steps:
       - uses: actions/checkout@v5
       - uses: pnpm/action-setup@v4
@@ -58,7 +75,18 @@ jobs:
       # wrote. Checking first is what makes the job that CONSUMES the constant also report on it,
       # rather than leaving that to wrangler-dry-run alone.
       - run: node scripts/gen-migration-hash.mjs --check
-      - run: pnpm turbo run test --filter=@planeahead/api
+      # The harness prints which database it used. turbo's strict env mode once dropped
+      # TEST_DATABASE_URL (turbo.json now lists it on the `test` task) and the suite quietly ran
+      # on embedded-postgres while the container above sat idle; the grep makes that a failure.
+      # `shell: bash` gives `-o pipefail`, so a failing suite still fails through the tee.
+      - name: Test the Worker against the service container
+        shell: bash
+        run: |
+          pnpm turbo run test --filter=@planeahead/api 2>&1 | tee test-workers.log
+          grep -q 'database source: shell' test-workers.log || {
+            echo '::error title=Wrong database::the Workers suite did not use the postgres:18 service container (TEST_DATABASE_URL did not reach vitest)'
+            exit 1
+          }
 
   # Validates wrangler.jsonc and bundles the Worker without credentials: `wrangler deploy
   # --dry-run` never resolves an account id in 4.135.0. It does NOT verify that the KV, R2, queue

@@ -11,16 +11,92 @@
  * missing one must fail with its own message, not with a type error that never runs.
  */
 
+import type { AuthRuntime } from './auth/runtime';
 import type { AuthenticatedUser } from './auth/user';
 
 /**
- * Secrets set with `wrangler secret put` (staging and production) or `.dev.vars` (local).
- * See `.dev.vars.example` for the local template.
+ * Secrets set with `wrangler secret put` (staging and production) or `.dev.vars` (local), and
+ * under test by `.dev.vars.test` through vitest.config.ts. See `.dev.vars.example`.
+ *
+ * Every name here is also listed in `.dev.vars.example`, and `test/workers/secrets-in-logs.test.ts`
+ * asserts that none of their VALUES ever reaches a log line.
  */
 export interface WorkerSecrets {
   /** Sentry DSN. Unset means the SDK initialises with no transport and drops every event. */
   readonly SENTRY_DSN?: string;
+
+  /**
+   * Better Auth's signing secret for session cookies. At least 32 characters; `createAuth`
+   * refuses to start without it, because Better Auth itself would fall back to a public default
+   * (it keys that check on NODE_ENV, which Workers never set).
+   */
+  readonly BETTER_AUTH_SECRET?: string;
+
+  /**
+   * Key-encryption keys for the envelope module, one per version, standard padded base64 of 32
+   * bytes. The highest configured version is the one new data-encryption keys are wrapped under;
+   * older versions stay configured until every `user_keys` row has been re-wrapped
+   * (`docs/security/threat-model.md`, KEK rotation). Three are declared for the type; the key
+   * provider reads `TOKEN_KEK_V1` through `TOKEN_KEK_V32` dynamically (`readKekSecrets`).
+   */
+  readonly TOKEN_KEK_V1?: string;
+  readonly TOKEN_KEK_V2?: string;
+  readonly TOKEN_KEK_V3?: string;
+
+  /** Sign in with Apple private key (`.p8`), PKCS8 PEM with the newlines written as `\n`. */
+  readonly APPLE_SIWA_P8?: string;
+  /** Key id of that `.p8`, from Certificates, Identifiers and Profiles. */
+  readonly APPLE_SIWA_KEY_ID?: string;
+  /** Apple Developer team id: the `iss` of the client secret. */
+  readonly APPLE_SIWA_TEAM_ID?: string;
+  /** The iOS bundle id: `aud` of native identity tokens and `client_id` at the token endpoint. */
+  readonly APPLE_BUNDLE_ID?: string;
+
+  /** The three Google OAuth client ids a native identity token may name as `aud`. */
+  readonly GOOGLE_CLIENT_ID_WEB?: string;
+  readonly GOOGLE_CLIENT_ID_IOS?: string;
+  readonly GOOGLE_CLIENT_ID_ANDROID?: string;
+
+  /** Resend API key. Unset means magic-link mail goes to the logging `NoopSender`. */
+  readonly RESEND_API_KEY?: string;
+
+  /**
+   * Test seams. Unset in every deployed environment, where the code falls back to the real
+   * hosts; the Workers suite points them at `test/fake-providers.ts`.
+   */
+  readonly APPLE_JWKS_URL?: string;
+  readonly APPLE_TOKEN_URL?: string;
+  readonly GOOGLE_JWKS_URL?: string;
+  readonly RESEND_API_URL?: string;
 }
+
+/**
+ * The secret names as a runtime value, in the same order as the interface above. Kept beside the
+ * type so a test can assert that every one is listed in `.dev.vars.example` and `.dev.vars.test`
+ * (ruling F5) and that none of their values reaches a log line. The test seams below are not
+ * secrets and are not in this list.
+ */
+export const WORKER_SECRET_NAMES = [
+  'SENTRY_DSN',
+  'BETTER_AUTH_SECRET',
+  'TOKEN_KEK_V1',
+  'APPLE_SIWA_P8',
+  'APPLE_SIWA_KEY_ID',
+  'APPLE_SIWA_TEAM_ID',
+  'APPLE_BUNDLE_ID',
+  'GOOGLE_CLIENT_ID_WEB',
+  'GOOGLE_CLIENT_ID_IOS',
+  'GOOGLE_CLIENT_ID_ANDROID',
+  'RESEND_API_KEY',
+] as const satisfies readonly (keyof WorkerSecrets)[];
+
+/** Bindings that redirect an external endpoint at a test double. Never set in a deployment. */
+export const TEST_SEAM_NAMES = [
+  'APPLE_JWKS_URL',
+  'APPLE_TOKEN_URL',
+  'GOOGLE_JWKS_URL',
+  'RESEND_API_URL',
+] as const satisfies readonly (keyof WorkerSecrets)[];
 
 export type Env = Cloudflare.Env & WorkerSecrets;
 
@@ -29,10 +105,16 @@ export interface Variables {
   /** Correlation id for this request. Echoed in the response and on every log line. */
   requestId: string;
   /**
-   * The caller, or null when the request is unauthenticated. The increment 4 middleware always
-   * sets null; increment 5 resolves a Better Auth session here.
+   * The caller, or null when the request is unauthenticated. Set by the auth middleware from
+   * the Better Auth session; `undefined` in every slot ahead of it (read it as `?? null`).
    */
   user: AuthenticatedUser | null;
+  /**
+   * The request's database handle, Better Auth instance, envelope and mail sender, created on
+   * first use by `authRuntime(c)` (src/auth/runtime.ts) and shared by the auth middleware and
+   * the routes so one request opens one client. Unset until something asks for it.
+   */
+  authRuntime: AuthRuntime | undefined;
 }
 
 /**

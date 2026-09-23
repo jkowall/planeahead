@@ -6,13 +6,17 @@ classes, consumes four queues and runs two cron triggers. The design is in
 the Durable Object migration runner are in [ADR 0004](../../docs/adr/0004-hono-rpc.md).
 
 Increment 4 is the bootstrap: the middleware chain, `GET /health`, the Durable Object shells and
-the queue and cron skeletons. Routes, authentication and provider calls arrive in increments 5
-to 8, and every path they will own already answers `501` with the increment that owns it.
+the queue and cron skeletons. Increment 5 adds authentication (Better Auth 1.7.5: anonymous,
+magic link, native Apple, native Google, the Expo transport), the envelope-encryption module,
+`POST /v1/devices`, `GET /v1/me` and `PATCH /v1/me/preferences`. Provider calls and the flight
+routes arrive in increments 6 to 8, and every path they will own answers `501` with the increment
+that owns it. The auth design is in [docs/increments/05-auth.md](../../docs/increments/05-auth.md)
+and its threat model in [docs/security/threat-model.md](../../docs/security/threat-model.md).
 
 ## Commands
 
 ```sh
-pnpm --filter @planeahead/api test              # Vitest in the Workers pool, no database
+pnpm --filter @planeahead/api test              # Vitest in the Workers pool, embedded Postgres 18
 pnpm --filter @planeahead/api run typecheck
 pnpm --filter @planeahead/api run dev           # wrangler dev on http://localhost:8787
 pnpm --filter @planeahead/api run cf-typegen    # regenerate worker-configuration.d.ts
@@ -34,9 +38,14 @@ Two things about `.dev.vars` are easy to get wrong:
 - `.dev.vars.<environment>` **replaces** `.dev.vars` entirely when you pass `--env <environment>`.
   It does not merge, so a `.dev.vars.staging` has to repeat every line it needs.
 - `CLOUDFLARE_HYPERDRIVE_LOCAL_CONNECTION_STRING_DB` is read by the `wrangler dev` command only.
-  The Vitest plugin ignores it. Under `pnpm test` the Hyperdrive binding uses the
-  `localConnectionString` in `wrangler.jsonc`, which is never dialled, because increment 4's
-  tests open no database connection at all.
+  The Vitest plugin ignores it. Under `pnpm test`, `test/globalSetup.ts` starts an embedded
+  PostgreSQL 18 cluster (or uses `TEST_DATABASE_URL`, which CI points at a `postgres:18` service
+  container), migrates a database and hands its URL to the pool through `miniflare.hyperdrives`;
+  the `localConnectionString` in `wrangler.jsonc` is a placeholder the suite never dials.
+- Secrets under test come from `.dev.vars.test`, which is committed on purpose: every value in it
+  is a generated dummy (a throwaway P-256 key, a KEK that wraps nothing outside the suite). Never
+  copy a real value into it. Every secret the Worker reads must be listed in `.dev.vars.example`
+  and given a dummy in `.dev.vars.test`; `test/workers/secrets-in-logs.test.ts` enforces both.
 - `wrangler dev --env staging` **requires** that variable. `localConnectionString` is declared
   only on the top-level Hyperdrive binding, and the environment blocks do not inherit it, so
   without the variable wrangler refuses to start with "you should use a local Postgres connection
@@ -50,12 +59,27 @@ src/index.ts              the routes as ONE chain, the five DO exports, the defa
 src/app.ts                createApp(): the error handlers and the middleware chain, one definition
 src/env.ts                Env (from worker-configuration.d.ts) plus the Variables for c.var
 src/middleware/           request-id, sentry, cors, rate-limit, idempotency, auth  (in that order)
-src/routes/               health.ts, not-implemented.ts (the /v1 and /api/auth mounts)
+                          plus magic-link-cap (the gate ahead of Better Auth's magic-link request:
+                          body validation, per-address and per-requester caps, `{ email }` only)
+src/auth/                 create-auth.ts (the per-request Better Auth instance), plugin.ts (the
+                          native Apple and Google endpoints), merge.ts (anonymous upgrade),
+                          magic-link-requester.ts (binds a link to the anonymous user who asked),
+                          used-tokens.ts (identity-token replay markers in KV), paths.ts, runtime.ts
+src/crypto/               envelope.ts, key-provider.ts, hash.ts
+src/mail/                 sender.ts (MailSender, the magic-link message), resend.ts, noop.ts,
+                          cloudflare-email.ts (implementation only, never wired)
+src/routes/               health.ts, auth.ts (/api/auth: the gate, the verify wrapper, the browser
+                          consume route), magic-link-landing.ts (/auth/magic-link, the emailed
+                          non-consuming page), v1.ts (/v1: devices.ts, me.ts, the stub)
+src/validation/           nul.ts (U+0000 is refused at every JSON boundary; Postgres would 500)
 src/do/                   migrate.ts (the SQLite schema runner), base.ts, the five classes
 src/queues/               index.ts dispatch, consume.ts (per-message ack), analytics.ts, consumers
 src/cron/                 index.ts dispatch, reconcile.ts, housekeeping.ts
 src/observability/log.ts  structured JSON logging with the request id
-test/workers/             everything that runs inside workerd
+test/workers/             everything that drives the Worker, inside workerd
+test/unit/                pure WebCrypto and jose tests, ALSO inside workerd (that is the point:
+                          they settle facts about the runtime, not about Node)
+test/globalSetup.ts       embedded Postgres, the fake Apple/Google/Resend server, .dev.vars.test
 ```
 
 ## Rules that are not obvious from the code
@@ -85,7 +109,10 @@ mutating request that carries `Idempotency-Key` without it, or with a malformed 
 scope: it changes when a phone moves from WiFi to LTE mid-retry, which is the retry the key exists
 to make safe, and behind a carrier NAT two phones share one. In the global slot the store is the
 in-memory map; the Postgres store and the per-user scope in `idempotency.ts` are for the `/v1`
-mount behind auth in increment 8 and are never taken before then.
+mount behind auth in increment 8 and are never taken before then. The one path the middleware
+skips is the Better Auth mount (`/api/auth/*`): its endpoints carry their own replay semantics, a
+stored 200 replayed for `/sign-in/magic-link` would answer ahead of the per-address cap and never
+count, and reading the body there would consume it ahead of the handler that has to parse it.
 
 `app.onError` and `app.notFound` are registered **before** the Sentry middleware: `withSentry`
 wraps whatever `app.errorHandler` is at the moment it runs, and a later `app.onError()` replaces
@@ -121,6 +148,19 @@ not scrubbed but not captured: `sendDefaultPii: false` does not stop `httpServer
 `sentryOptions` replaces it with `maxRequestBodySize: 'none'`. Span attributes
 (`contexts.trace.data` and `spans[].data`) are a second copy of the request that `event.request`
 does not cover, and the scrubber clears the body, header and query attributes there too.
+
+**Better Auth is built per request and fails closed.** `createAuth(env, deps)` in
+`src/auth/create-auth.ts` runs once per request (the ESLint rule that bans module-scope
+`drizzle()` bans module-scope `betterAuth()` too). It sets `rateLimit.enabled: true`, asserts a
+32-character `BETTER_AUTH_SECRET` and reads the client IP from `cf-connecting-ip`, because all
+three of Better Auth's defaults key on `NODE_ENV=production`, which Workers never set. Two
+module-scope memos are documented exceptions to the no-module-scope rule: the imported KEK
+(`src/crypto/key-provider.ts`) and the remote JWKS resolvers (`src/auth/jwks.ts`); both hold
+objects that do no I/O at construction and carry no request state.
+
+**Native sign-in bodies say `identityToken`, never `idToken`.** The Expo client strips the stored
+session cookie from any request whose body has an `idToken` key, and the anonymous-to-account
+merge needs that cookie to find the account being upgraded.
 
 **No raw control characters in source.** A literal NUL makes git classify the blob as binary, and
 a binary blob has no diff, no line-level review comment and no three-way merge.

@@ -9,7 +9,7 @@ const ruleTester = new RuleTester({
   },
 });
 
-test('no-module-scope-drizzle flags module-scope clients and allows per-request clients', () => {
+test('no-module-scope-drizzle flags module-scope clients and auth instances, allows per-request ones', () => {
   ruleTester.run('no-module-scope-drizzle', rule, {
     valid: [
       {
@@ -45,6 +45,15 @@ test('no-module-scope-drizzle flags module-scope clients and allows per-request 
       {
         name: 'unrelated module-scope call',
         code: 'const pool = createPool({ max: 1 });',
+      },
+      {
+        name: 'Better Auth instance built inside a per-request factory',
+        code: [
+          "import { betterAuth } from 'better-auth/minimal';",
+          'export function createAuth(env, db) {',
+          '  return betterAuth({ secret: env.BETTER_AUTH_SECRET, database: db });',
+          '}',
+        ].join('\n'),
       },
     ],
     invalid: [
@@ -102,6 +111,23 @@ test('no-module-scope-drizzle flags module-scope clients and allows per-request 
         code: [
           "import * as pgjs from 'postgres';",
           'export const client = pgjs.postgres(process.env.DATABASE_URL);',
+        ].join('\n'),
+        errors: [{ messageId: 'moduleScope' }],
+      },
+      {
+        name: 'Better Auth instance created at module scope',
+        code: [
+          "import { betterAuth } from 'better-auth/minimal';",
+          'export const auth = betterAuth({ secret: process.env.BETTER_AUTH_SECRET });',
+        ].join('\n'),
+        errors: [{ messageId: 'moduleScope' }],
+      },
+      {
+        name: 'Better Auth instance created at module scope through a namespace import',
+        code: [
+          "import * as ba from 'better-auth';",
+          'const auth = ba.betterAuth({});',
+          'export { auth };',
         ].join('\n'),
         errors: [{ messageId: 'moduleScope' }],
       },

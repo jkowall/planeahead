@@ -9,6 +9,59 @@ increment is reviewed.
 | 2. Shared contracts | Fable 5.1 build and fixes, Opus 5 review panel | Fable ~970k output (build 714k incl. two stalled restarts, fix rounds 160k + 94k); Opus ~620k (two reviewers 365k, twelve skeptics 139k, two re-reviews 115k) | ~4.5 h from launch to final commit, of which ~1 h was API and GitHub stalls on the VPN      | `packages/shared`: uuidv7, flight key (ADR 0003), Zod 4 boundary schemas, provider interfaces, cost table, cadence engine with the SLO table and a simulation that derives every constant, RPC and sync envelopes, Live Activity state, secret patterns; `docs/architecture.md` generated from code with a drift test; ADR 0003 and 0006. Review: 15 findings (10 API design, 5 correctness), every blocker and major sent to two Opus skeptics (spec lens refuted 4 as deliberate spec choices, reproduction lens confirmed all real defects), 17 items fixed, re-review found 3 regressions in the fixes (fixed in round 2, re-verified by execution), orchestrator closed the 20-minute pre-boarding hole the honest report exposed. Derived constants: A2 74 polls / 122 PE / $0.61 list (plan wrote 72 / 120 / $0.60 under a round() slot rule), A1 84, literal 181, B 5; AeroDataBox 2 / 24 / 40 units at 3 / 14 / 30 days (plan wrote 4 / 26 / 42). 387 tests. |
 | 3. Database schema  | Fable 5.1 build and fix, Opus 5 review panel   | Fable ~900k (build 448k, fix 455k); Opus ~2.1M (two reviewers 577k, fourteen skeptics ~1.3M, re-review 232k); orchestrator close-out on top                   | ~1 h 55 min workflow plus ~50 min close-out                                                 | `packages/db`: 70 tables in 9 schema files (the plan's 61 undercounted the spec's normative list), migration 0000 plus a generated set_updated_at migration with no-op WHEN guards, embedded PostgreSQL 18.4 harness (initdb 3.2 s cold, 0.6 s warm; skipped when TEST_DATABASE_URL is set, which is how CI's postgres:18 service container is used), withDb and createNodeDb, a URL-only migrator with pooler and version guards, seed loaders with a Content-Length and SHA-256 manifest and IANA-checked timezone overrides (739 accepted, 5 rejected and listed), schema-review.md, ADR 0002, 0007, 0009. Review: 19 findings, 7 serious ones sent to two skeptics each (spec lens refuted 4 as deliberate choices, reproduction lens confirmed every physical defect), 22 items fixed, re-review confirmed each by execution and left 4 nits, all applied in the close-out along with two forward-looking columns increments 6 and 7 need. 166 tests.            |
 
+## Measurements and decisions (increment 5 review fixes)
+
+- **`better-auth/minimal` versus `better-auth` (ruling F3).** The Worker imports `betterAuth`
+  from `better-auth/minimal`, which exposes everything the Drizzle adapter, the anonymous and
+  magic-link plugins, the Expo plugin and the PlaneAhead plugin need (nothing was missing, no
+  fallback). `wrangler deploy --dry-run --env staging` on the fix-round build: minimal
+  3020.03 KiB raw / 571.04 KiB gzip; the same build with the full entry point 3739.89 KiB /
+  674.71 KiB. The minimal entry saves 719.86 KiB raw and 103.67 KiB gzipped (the Kysely
+  exclusion); the import is pinned to `minimal`.
+- **Magic-link cap keying (ruling G1, revised in the second round).** Three counters. The
+  owner budget (3 per hour, 10 per UTC day) is keyed by the address AND the requester, the valid
+  `X-Install-Id` when present, else the client address: the owner's own device keeps its own
+  budget. The address ceiling (10 per hour, 30 per UTC day, every requester combined) bounds what
+  one inbox can receive whatever the attacker's address supply. The requester brake (429; 100
+  per hour, 300 per UTC day across addresses) is keyed by the client address, else the install
+  id, because the brake cannot be keyed by a value the client chooses and rotates. The client
+  address is reduced the way Better Auth's limiter reduces it (IPv6 to /64) before any keying:
+  the re-review's probe sent 25 requests for one inbox from 25 /128s in one /64 and got 25
+  mails, because each was a new requester; and the first round's 20-per-hour brake was found to
+  lock a whole NAT egress out, so the brake moved to NAT scale and the ceiling took over the
+  mail-bomb bound. `better-auth` does not re-export `normalizeIP`, so `src/validation/client-ip.ts`
+  carries a 40-line equivalent pinned to Better Auth's documented outputs by a unit test.
+- **Session refresh on `/v1` (ruling G7, settled in the second round).** Forwarding the refreshed
+  cookie on `/v1` only works for a client that stores it, and the increment 9 client does not
+  (the Expo client stores cookies from its own `/api/auth/*` requests only). The auth middleware
+  now reads the session with `disableRefresh` and `/v1` never emits `Set-Cookie`; the refresh
+  happens on `GET /api/auth/get-session`, and the increment 9 spec now requires the session gate
+  to call it on launch and on foreground, with a Jest test.
+- **Push tokens across users (ruling G10, amended).** A token moves to the caller when the
+  registering installation is the one the token's device row already names (account switch on
+  one phone; cross-device magic link whose merge was withheld), checked inside the upsert's
+  `ON CONFLICT ... WHERE` with a correlated subquery on `devices`; a different installation is
+  still refused with `push_token_conflict`.
+- **Landing page referrer policy.** `no-referrer` made Chromium send `Origin: null` on the
+  page's own form post, so the consume route refused its own button. The page now declares
+  `strict-origin`, and the consume route accepts `Origin: null` only with
+  `Sec-Fetch-Site: same-origin` and refuses cross-site and same-site outright. The page is
+  deliberately not a custom-scheme hand-off to the app (scheme squatting on Android).
+- **Magic-link landing page (ruling G3).** The emailed URL is `${API_PUBLIC_URL}/auth/magic-link`
+  outside the Better Auth mount; increment 9's universal-link prefix moves from
+  `/api/auth/magic-link/*` to `/auth/magic-link*` (the increment 9 spec is updated).
+- **Transaction test seam (ruling G4).** `createAuth` gained an optional `databaseHooks` dep used
+  only by `auth-transaction.test.ts` to make the account INSERT of a new sign-in fail after the
+  user INSERT; the Worker passes none.
+- **NUL bytes (rulings G6 and G14).** Refused with 400 at every JSON boundary (the auth mount,
+  `/v1/devices`, `/v1/me/preferences`) rather than only in the magic-link body, because Postgres
+  refuses U+0000 in any text or jsonb value and every such input was a 500 on demand.
+- **Facts settled by tests (ruling F7).** The Drizzle adapter rolls back a transaction with
+  `transaction: true` (`auth-config.test.ts`); Better Auth's `runWithTransaction` was a
+  pass-through without it (the fix-round finding); the anonymous after-hook fires for a plugin
+  endpoint reached over HTTP and receives `ctx.query` (the requester binding relies on it);
+  workerd's KV enforces the 60 second TTL floor (`used-tokens.ts` clamps to it).
+
 ## Deviations and decisions (increment 4 review fixes)
 
 Applied on top of `b824ae4` after the Opus review panel. The spike results ruling E8 asks for are
@@ -101,6 +154,26 @@ and alarm findings are in `apps/api/vitest.config.ts` and `apps/api/test/workers
   swapped in the code. The slots are now `[name, handler]` pairs the loop registers from, and
   chain.test.ts compares the returned names to the constant.
   | 4. API Worker bootstrap | Opus 5 build and first fix, Fable 5.1 escalation fix, Opus 5 review panel | Opus ~2.6M (build 732k, two reviewers 469k, sixteen skeptics ~1.3M, fix 568k, two re-reviews 403k); Fable 238k (escalation fix); orchestrator close-out | ~3 h 20 min workflow plus ~30 min close-out | `apps/api`: chained Hono app with `AppType`, six-stage middleware chain registered from a slot list the test observes, `/health` with the generated migration hash and compiled-in DO schema versions, five Durable Object shells over a `_sql_schema_migrations` runner (PRAGMA user_version is unavailable in DO SQLite), `wrangler.jsonc` with `exports` plus per-environment bindings and distinct ratelimit namespace ids, queue consumers that ack per message with a guarded 200-point Analytics Engine budget, cron handlers, Sentry with request-id tagging and scrubbing on both the error and transaction paths, staging deploy workflow, wrangler dry-run and toolchain pair guard in CI, ADR 0004. Spikes: `exports` works under wrangler dev and the Vitest pool; a test-scheduled alarm fires on its own wall clock (the afterEach drain is mandatory); the rate-limit binding enforces in the pool. Review: 23 findings, 8 serious ones sent to skeptics (spec lens refuted 3, reproduction lens confirmed 7), Opus fixed 22; the re-review found the idempotency scope still wrong and a vacuous migration-hash check, so the escalation rule sent the second round to Fable (anonymous idempotency now scoped by a client-owned `X-Install-Id`, the ordering guard made real, the chain constant derived from registration); the final re-review left one minor and two nits, applied in the close-out. 129 api tests, 693 total. |
+  | 5. Auth, envelope encryption, mail, devices | Fable 5.1 build and both fix rounds, Opus 5 review panel | Fable ~1.85M (a first build attempt of 510k stopped at the usage limit and was continued, continuation build ~500k est., fix rounds 561k and 273k); Opus ~2.4M (two reviewers and sixteen skeptics ~1.9M est., the interrupted run wrote no summary; two re-reviews 532k); orchestrator close-out | ~6 h across two days (one usage-limit stop, one deliberate stop to inject rulings before the fix) | Better Auth 1.7.5 (`better-auth/minimal`, 104 KiB gzip smaller) built per request and fail closed (rate limiting on, secret asserted, `cf-connecting-ip`), five-key schema subset, UUIDv7 ids, Expo server plugin; native Apple and Google sign-in as plugin endpoints under `/sign-in/*` (no provider tokens handed to Better Auth, Apple refresh token envelope-encrypted, code exchange bound to the identity token's subject, nonce required, Google `azp` and `email_verified` enforced, used-token replay guard in KV); idempotent anonymous merge with a row lock and status marker, bound to the magic-link requester; envelope encryption (AES-KW wrapped per-user DEK, AES-256-GCM with cell AAD); Resend sender with a digest idempotency key; non-consuming magic-link landing page plus a consume route; a two-key magic-link gate (owner budget, per-inbox ceiling counting sent mail, NAT-scale requester brake, canonical mailbox); devices and me routes; the embedded Postgres 18 harness wired into the Workers pool. Review: 21 findings (2 blockers: cap bypass via keyed requests, login-CSRF merge); 8 serious ones confirmed by reproduction skeptics; 14 orchestrator rulings injected before the fix; two fix rounds and two re-reviews; the last three findings applied in the close-out. 292 api tests, 865 total. |
+
+## Pinned versions (increment 5)
+
+| Package           | Pin             | Resolved | Why this pin                                                                                                     |
+| ----------------- | --------------- | -------- | ---------------------------------------------------------------------------------------------------------------- |
+| better-auth       | `1.7.5` (exact) | 1.7.5    | Runtime schema validator and plugin surface verified at this tag; `better-auth/minimal` entry point.             |
+| @better-auth/expo | `1.7.5` (exact) | 1.7.5    | npm-pinned to better-auth 1.7.5; server plugin for trusted origins and the Expo client transport.                |
+| jose              | `^6.2.12`       | 6.2.12   | RS256 verification against Apple and Google JWKS; `createRemoteJWKSet` at module scope (no I/O at construction). |
+
+## Deviations (increment 5)
+
+- **Magic links are verified in the app**, and the emailed URL is a non-consuming landing page (`/auth/magic-link?token=`) with a consume route for browsers, so mail scanners cannot burn the token and no cookie rides in a redirect.
+- **The anonymous merge only runs for the anonymous user who requested the link** (a `verifications` side row keyed by the hashed token); a stranger's link signs the verifier in without merging.
+- **Magic-link caps** are three: an owner budget per (inbox, requester), a per-inbox ceiling that counts mail the provider accepted, and a NAT-scale per-client-address brake (IPv6 reduced to its /64 the way Better Auth does). Subjects are SHA-256 of a canonical mailbox.
+- **`/v1` does not extend the session**; the sliding 30-day session refreshes on `GET /api/auth/get-session`, which the app calls on launch and foreground (increment 9).
+- **Push tokens move across users only from the installation that holds them.**
+- **Apple `email_required` applies only to a new account**; returning users are found by subject first.
+- **Idempotency scope for anonymous callers is `X-Install-Id`** (increment 4), preserved through devices and the merge.
+- **The Workers test pool now starts embedded Postgres** through a shared harness; CI gives the `test-workers` and staging deploy jobs the `postgres:18` service container.
 
 ## Pinned versions (increment 4)
 

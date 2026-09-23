@@ -1,5 +1,5 @@
 /**
- * Ban `drizzle(...)` and `postgres(...)` at module scope.
+ * Ban `drizzle(...)`, `postgres(...)` and `betterAuth(...)` at module scope.
  *
  * The Workers runtime rule is one database client per request or queue batch. A client created
  * at module scope is shared across requests inside an isolate and outlives the request that
@@ -9,9 +9,18 @@
  * Hyperdrive path nothing calls `end()`, Hyperdrive reclaims the connection when the invocation
  * ends (ADR 0009).
  *
+ * `betterAuth()` joins the list in increment 5 for the same reason one level up: a Better Auth
+ * instance holds the Drizzle adapter, and therefore the client, that it was built over. It is
+ * built per request by `createAuth(env, deps)` in apps/api/src/auth/create-auth.ts.
+ *
  * The postgres.js default import can be bound to any local name (`import pg from 'postgres'`),
  * so the rule tracks the names each module binds to that package as well as the literal names
- * `drizzle` and `postgres`.
+ * `drizzle`, `postgres` and `betterAuth`.
+ *
+ * Two module-scope memos are documented exceptions and are not calls this rule sees: the KEK
+ * `CryptoKey` memo in apps/api/src/crypto/key-provider.ts and the remote JWKS resolvers in
+ * apps/api/src/auth/jwks.ts. Both hold objects that do no I/O at construction and carry no
+ * request-scoped state; each file says so next to its Map.
  *
  * @type {import('eslint').Rule.RuleModule}
  */
@@ -20,12 +29,12 @@ const noModuleScopeDrizzle = {
     type: 'problem',
     docs: {
       description:
-        'Disallow calling drizzle() or postgres() at module scope; create the client per request or queue batch',
+        'Disallow calling drizzle(), postgres() or betterAuth() at module scope; create the client per request or queue batch',
     },
     schema: [],
     messages: {
       moduleScope:
-        'Do not create a database client at module scope. Create it inside the request or queue handler (withDb), never as a shared module-level value.',
+        'Do not create a database client (or a Better Auth instance over one) at module scope. Create it inside the request or queue handler (withDb, createAuth), never as a shared module-level value.',
     },
   },
   create(context) {
@@ -37,8 +46,9 @@ const noModuleScopeDrizzle = {
       'StaticBlock',
     ]);
 
-    /** Local names bound to the postgres.js default export in this module. */
-    const clientFactoryNames = new Set(['drizzle', 'postgres']);
+    /** Local names bound to the postgres.js default export in this module, plus the literals. */
+    const clientFactoryNames = new Set(['drizzle', 'postgres', 'betterAuth']);
+    const memberNames = new Set(['drizzle', 'postgres', 'betterAuth']);
 
     /**
      * @param {import('estree').Node} node
@@ -53,7 +63,7 @@ const noModuleScopeDrizzle = {
         !node.computed &&
         node.property.type === 'Identifier'
       ) {
-        return node.property.name === 'drizzle' || node.property.name === 'postgres';
+        return memberNames.has(node.property.name);
       }
       return false;
     }

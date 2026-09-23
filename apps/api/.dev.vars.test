@@ -1,0 +1,25 @@
+# Test-only secrets for the Vitest Workers pool. GENERATED DUMMY VALUES, committed on purpose.
+#
+# Nothing here is a real credential: the P-256 key was generated for this file and has never
+# been registered with Apple, the KEK wraps nothing outside the suite, and the Resend key does
+# not exist. apps/api/vitest.config.ts reads this file and hands every line to the Worker as a
+# binding, so the suite exercises the same code path that `wrangler secret put` feeds in
+# staging. `.dev.vars.*` is gitignored except for this file and `.dev.vars.example`; never
+# copy a real value in here.
+#
+# The provider URLs (APPLE_JWKS_URL, APPLE_TOKEN_URL, GOOGLE_JWKS_URL, RESEND_API_URL) are NOT
+# in this file: test/globalSetup.ts starts a fake provider server on a free port and injects
+# those four at run time.
+
+# Empty on purpose: the Sentry SDK initialises with no transport and drops every event.
+SENTRY_DSN=
+BETTER_AUTH_SECRET=5QuzEiMvhsNmGMrNMAvaal/FCyHEfxl//waUiWyg7WfF7HUB
+TOKEN_KEK_V1=5Z1y1tTdT7lfVQIyytIvEYo2APDZGhOFqYlxEvwaF4w=
+APPLE_SIWA_P8="-----BEGIN PRIVATE KEY-----\nMIGHAgEAMBMGByqGSM49AgEGCCqGSM49AwEHBG0wawIBAQQg3PpEnIT6nGj54xcM\nHMW/VrbleILSN0e+zTgYx/6Sev+hRANCAAT+pkYc13T320WhC80Wl5S/1q7HaNHn\n1hUKED/AfGEgvwDPTssmtYo3/y/b4yNFJpfL0xK6KXQoIbiVQDypR0HS\n-----END PRIVATE KEY-----"
+APPLE_SIWA_KEY_ID=TESTKEY001
+APPLE_SIWA_TEAM_ID=TESTTEAM01
+APPLE_BUNDLE_ID=app.planeahead.test
+GOOGLE_CLIENT_ID_WEB=000000000001-web.apps.googleusercontent.com
+GOOGLE_CLIENT_ID_IOS=000000000001-ios.apps.googleusercontent.com
+GOOGLE_CLIENT_ID_ANDROID=000000000001-android.apps.googleusercontent.com
+RESEND_API_KEY=re_test_000000000000000000000000000000

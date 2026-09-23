@@ -7,8 +7,8 @@
  * at staging early, and the mounts fix the URL shape before anything depends on it.
  *
  * `all()` is used rather than a method list because these stubs contribute nothing to `AppType`
- * worth narrowing. Increment 5 replaces the `/api/auth` sub-app with Better Auth's handler, and
- * increments 5, 7 and 8 replace `/v1` route by route.
+ * worth narrowing. Increment 5 replaced the `/api/auth` stub with Better Auth's handler and took
+ * `/v1/devices` and `/v1/me`; increments 7 and 8 replace the rest of `/v1` route by route.
  */
 
 import { Hono } from 'hono';
@@ -36,20 +36,12 @@ function stub(increment: string, message: string) {
 }
 
 /**
- * `/api/auth/*`: Better Auth's handler (anonymous, magic link, Google ID token, the Expo
- * transport) plus the custom `POST /api/auth/apple/native` route.
- */
-export const authStub = stub(
-  '05-auth',
-  'authentication is not wired yet; see docs/increments/05-auth.md',
-);
-
-/**
- * `/v1/*`: `/v1/me`, `/v1/devices`, `/v1/flights`, `/v1/sync`, `/v1/events` and
- * `/v1/webhooks/*`. Increment 5 adds the account routes, increment 6 the webhook receivers,
- * increment 7 the flight routes.
+ * `/v1/*` beyond the account routes: `/v1/flights`, `/v1/sync`, `/v1/events` and
+ * `/v1/webhooks/*`. Increment 6 adds the webhook receivers, increments 7 and 8 the flight and
+ * sync routes. Mounted last under `/v1` (src/routes/v1.ts), so a real route registered ahead of
+ * it answers first.
  */
 export const v1Stub = stub(
-  '05-auth through 08-routes',
-  'the /v1 surface is not wired yet; see docs/plans/phase0-plan.md section 5',
+  '06-providers through 08-routes',
+  'this part of the /v1 surface is not wired yet; see docs/plans/phase0-plan.md section 5',
 );

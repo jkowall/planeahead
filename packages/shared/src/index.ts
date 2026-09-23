@@ -15,6 +15,7 @@ export * from './flight-key';
 export * from './flight-status';
 export * from './ids';
 export * from './live-activity';
+export * from './preferences';
 export * from './providers';
 export * from './rpc';
 export * from './secrets';

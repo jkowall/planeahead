@@ -1,0 +1,316 @@
+import { describe, expect, it } from 'vitest';
+import {
+  APPLE_ISSUER,
+  AppleExchangeError,
+  exchangeAppleAuthorizationCode,
+  parseBoolClaim,
+  sanitizeFullName,
+  verifyAppleIdentityToken,
+} from '../../src/auth/apple-native';
+import { localIdp, mintToken, sha256Hex } from '../workers/helpers/idp';
+
+const audience = 'app.planeahead.test';
+
+async function appleToken(
+  idp: Awaited<ReturnType<typeof localIdp>>,
+  claims: Record<string, unknown>,
+  extra: { issuedAt?: number; lifetime?: number; audience?: string; issuer?: string } = {},
+) {
+  return mintToken(idp.privateKey, idp.kid, {
+    issuer: extra.issuer ?? APPLE_ISSUER,
+    audience: extra.audience ?? audience,
+    subject: '001234.abcdef.5678',
+    claims,
+    ...(extra.issuedAt === undefined ? {} : { issuedAt: extra.issuedAt }),
+    ...(extra.lifetime === undefined ? {} : { lifetime: extra.lifetime }),
+  });
+}
+
+describe('verifyAppleIdentityToken', () => {
+  it('accepts RS256 with the hashed nonce and parses string booleans', async () => {
+    const idp = await localIdp();
+    const token = await appleToken(idp, {
+      nonce: await sha256Hex('raw-nonce-1'),
+      email: 'Someone@PrivateRelay.AppleID.com',
+      email_verified: 'true',
+      is_private_email: 'true',
+    });
+
+    const claims = await verifyAppleIdentityToken(token, {
+      getKey: idp.getKey,
+      audience,
+      rawNonce: 'raw-nonce-1',
+    });
+
+    expect(claims).toMatchObject({
+      sub: '001234.abcdef.5678',
+      email: 'someone@privaterelay.appleid.com',
+      emailVerified: true,
+      isPrivateEmail: true,
+      nonce: await sha256Hex('raw-nonce-1'),
+      jti: null,
+    });
+    // `exp` is what the replay marker's TTL is derived from.
+    expect(claims.expiresAt).toBeGreaterThan(Math.floor(Date.now() / 1000));
+  });
+
+  it('accepts a token without an email (returning user or managed Apple ID)', async () => {
+    const idp = await localIdp();
+    const token = await appleToken(idp, { nonce: await sha256Hex('n'), email_verified: true });
+    const claims = await verifyAppleIdentityToken(token, {
+      getKey: idp.getKey,
+      audience,
+      rawNonce: 'n',
+    });
+    expect(claims.email).toBeNull();
+    expect(claims.isPrivateEmail).toBe(false);
+  });
+
+  it('rejects a missing, raw (unhashed) or foreign nonce as nonce_mismatch', async () => {
+    const idp = await localIdp();
+    const options = { getKey: idp.getKey, audience, rawNonce: 'n' };
+    const missing = await appleToken(idp, {});
+    const unhashed = await appleToken(idp, { nonce: 'n' });
+    const foreign = await appleToken(idp, { nonce: await sha256Hex('other') });
+
+    for (const token of [missing, unhashed, foreign]) {
+      await expect(verifyAppleIdentityToken(token, options)).rejects.toMatchObject({
+        code: 'nonce_mismatch',
+      });
+    }
+  });
+
+  it('rejects a token older than an hour even when exp is still in the future', async () => {
+    const idp = await localIdp();
+    const issuedAt = Math.floor(Date.now() / 1000) - 3601;
+    const token = await appleToken(
+      idp,
+      { nonce: await sha256Hex('n') },
+      { issuedAt, lifetime: 24 * 3600 },
+    );
+    await expect(
+      verifyAppleIdentityToken(token, { getKey: idp.getKey, audience, rawNonce: 'n' }),
+    ).rejects.toMatchObject({ code: 'invalid_token' });
+  });
+
+  it('rejects a wrong audience, a wrong issuer and an unknown signing key', async () => {
+    const idp = await localIdp();
+    const other = await localIdp('other-kid');
+    const nonce = await sha256Hex('n');
+    const options = { getKey: idp.getKey, audience, rawNonce: 'n' };
+    const cases = await Promise.all([
+      appleToken(idp, { nonce }, { audience: 'app.other' }),
+      appleToken(idp, { nonce }, { issuer: 'https://appleid.example' }),
+      mintToken(other.privateKey, other.kid, {
+        issuer: APPLE_ISSUER,
+        audience,
+        subject: 's',
+        claims: { nonce },
+      }),
+    ]);
+    for (const token of cases) {
+      await expect(verifyAppleIdentityToken(token, options)).rejects.toMatchObject({
+        code: 'invalid_token',
+      });
+    }
+  });
+});
+
+describe('parseBoolClaim', () => {
+  it('accepts booleans and the strings Apple sends', () => {
+    expect(parseBoolClaim(true)).toBe(true);
+    expect(parseBoolClaim('true')).toBe(true);
+    expect(parseBoolClaim(false)).toBe(false);
+    expect(parseBoolClaim('false')).toBe(false);
+    expect(parseBoolClaim(undefined)).toBe(false);
+    expect(parseBoolClaim('TRUE')).toBe(false);
+  });
+});
+
+describe('sanitizeFullName', () => {
+  it('joins the parts, trims, collapses whitespace and strips controls', () => {
+    const nul = String.fromCharCode(0);
+    expect(sanitizeFullName({ givenName: '  Ada ', familyName: `Lovelace${nul}` })).toBe(
+      'Ada Lovelace',
+    );
+    expect(sanitizeFullName({ givenName: 'Ada', middleName: 'K', familyName: 'L' })).toBe(
+      'Ada K L',
+    );
+    expect(sanitizeFullName('Line\nBreak\tTab')).toBe('Line Break Tab');
+    const zeroWidth = String.fromCharCode(0x200b);
+    const bidiOverride = String.fromCharCode(0x202e);
+    expect(sanitizeFullName({ givenName: `A${zeroWidth}B${bidiOverride}C` })).toBe('ABC');
+    expect(sanitizeFullName('Zoë Ñandú 李雷')).toBe('Zoë Ñandú 李雷');
+  });
+
+  it('returns null for nothing usable and caps at 100 characters', () => {
+    expect(sanitizeFullName(undefined)).toBeNull();
+    expect(sanitizeFullName({ givenName: null, familyName: '   ' })).toBeNull();
+    expect(sanitizeFullName(String.fromCharCode(7, 8))).toBeNull();
+    expect(sanitizeFullName('a'.repeat(250))).toHaveLength(100);
+  });
+});
+
+describe('exchangeAppleAuthorizationCode', () => {
+  /** A stub token endpoint answering with the given JSON body and status. */
+  function tokenEndpoint(body: unknown, status = 200) {
+    let seen: { url: string; init: RequestInit } | null = null;
+    const stub: typeof fetch = (input, init) => {
+      const url = typeof input === 'string' ? input : input instanceof URL ? input.href : input.url;
+      seen = { url, init: init ?? {} };
+      return Promise.resolve(
+        new Response(JSON.stringify(body), {
+          status,
+          headers: { 'content-type': 'application/json' },
+        }),
+      );
+    };
+    return { stub, seen: () => seen };
+  }
+
+  /** The id_token Apple returns with the exchange, for `subject`, signed by `idp`. */
+  async function exchangedIdToken(
+    idp: Awaited<ReturnType<typeof localIdp>>,
+    subject: string,
+    claims: Record<string, unknown> = {},
+  ) {
+    return mintToken(idp.privateKey, idp.kid, {
+      issuer: APPLE_ISSUER,
+      audience,
+      subject,
+      claims,
+    });
+  }
+
+  it('posts the four form fields without redirect_uri and returns the refresh token', async () => {
+    const idp = await localIdp();
+    const endpoint = tokenEndpoint({
+      refresh_token: 'rt_1',
+      access_token: 'at',
+      expires_in: 3600,
+      id_token: await exchangedIdToken(idp, 'sub-1'),
+    });
+
+    const result = await exchangeAppleAuthorizationCode({
+      code: 'c-1',
+      clientId: audience,
+      clientSecret: 'cs',
+      binding: { getKey: idp.getKey, audience, expectedSub: 'sub-1' },
+      tokenUrl: 'https://apple.test/auth/token',
+      fetch: endpoint.stub,
+    });
+
+    expect(result).toEqual({
+      refreshToken: 'rt_1',
+      accessToken: 'at',
+      expiresIn: 3600,
+      idTokenSub: 'sub-1',
+    });
+    const request = endpoint.seen();
+    expect(request?.url).toBe('https://apple.test/auth/token');
+    const rawBody = request?.init.body;
+    const form = new URLSearchParams(typeof rawBody === 'string' ? rawBody : '');
+    expect(Object.fromEntries(form)).toEqual({
+      client_id: audience,
+      client_secret: 'cs',
+      code: 'c-1',
+      grant_type: 'authorization_code',
+    });
+    expect(form.has('redirect_uri')).toBe(false);
+  });
+
+  it('binds the exchange to the identity token: another subject, another key, a missing or foreign id_token all fail', async () => {
+    const idp = await localIdp();
+    const other = await localIdp('other-kid');
+    const binding = { getKey: idp.getKey, audience, expectedSub: 'victim' };
+    const cases: [string, unknown][] = [
+      ['id_token_subject_mismatch', await exchangedIdToken(idp, 'attacker')],
+      ['id_token_invalid', await exchangedIdToken(other, 'victim')],
+      ['no_id_token', undefined],
+      ['no_id_token', ''],
+      ['id_token_invalid', 'not-a-jwt'],
+      [
+        'id_token_invalid',
+        await mintToken(idp.privateKey, idp.kid, {
+          issuer: APPLE_ISSUER,
+          audience: 'app.other',
+          subject: 'victim',
+        }),
+      ],
+    ];
+    for (const [reason, idToken] of cases) {
+      const endpoint = tokenEndpoint({ refresh_token: 'rt', id_token: idToken });
+      await expect(
+        exchangeAppleAuthorizationCode({
+          code: 'c',
+          clientId: audience,
+          clientSecret: 'cs',
+          binding,
+          fetch: endpoint.stub,
+        }),
+        reason,
+      ).rejects.toMatchObject({ reason });
+    }
+  });
+
+  it('checks the nonce on the exchanged token only when Apple includes one', async () => {
+    const idp = await localIdp();
+    const nonce = await sha256Hex('raw');
+    const withNonce = tokenEndpoint({
+      refresh_token: 'rt',
+      id_token: await exchangedIdToken(idp, 's', { nonce }),
+    });
+    const wrongNonce = tokenEndpoint({
+      refresh_token: 'rt',
+      id_token: await exchangedIdToken(idp, 's', { nonce: await sha256Hex('other') }),
+    });
+    const noNonce = tokenEndpoint({
+      refresh_token: 'rt',
+      id_token: await exchangedIdToken(idp, 's'),
+    });
+    const binding = { getKey: idp.getKey, audience, expectedSub: 's', expectedNonce: nonce };
+    const options = { code: 'c', clientId: audience, clientSecret: 'cs', binding };
+
+    await expect(
+      exchangeAppleAuthorizationCode({ ...options, fetch: withNonce.stub }),
+    ).resolves.toMatchObject({ idTokenSub: 's' });
+    await expect(
+      exchangeAppleAuthorizationCode({ ...options, fetch: wrongNonce.stub }),
+    ).rejects.toMatchObject({ reason: 'id_token_nonce_mismatch' });
+    await expect(
+      exchangeAppleAuthorizationCode({ ...options, fetch: noNonce.stub }),
+    ).resolves.toMatchObject({ idTokenSub: 's' });
+  });
+
+  it('turns an Apple error into AppleExchangeError with the status and the error code only', async () => {
+    const idp = await localIdp();
+    const endpoint = tokenEndpoint(
+      { error: 'invalid_grant', error_description: 'secret detail' },
+      400,
+    );
+    const failure = exchangeAppleAuthorizationCode({
+      code: 'c',
+      clientId: audience,
+      clientSecret: 'cs',
+      binding: { getKey: idp.getKey, audience, expectedSub: 's' },
+      fetch: endpoint.stub,
+    });
+    await expect(failure).rejects.toBeInstanceOf(AppleExchangeError);
+    await expect(failure).rejects.toMatchObject({ status: 400, reason: 'invalid_grant' });
+    await expect(failure).rejects.not.toThrow(/secret detail/);
+  });
+
+  it('treats a 200 without a refresh token as a failure, before looking at the id_token', async () => {
+    const idp = await localIdp();
+    const endpoint = tokenEndpoint({ access_token: 'only' });
+    await expect(
+      exchangeAppleAuthorizationCode({
+        code: 'c',
+        clientId: audience,
+        clientSecret: 'cs',
+        binding: { getKey: idp.getKey, audience, expectedSub: 's' },
+        fetch: endpoint.stub,
+      }),
+    ).rejects.toMatchObject({ reason: 'no_refresh_token' });
+  });
+});

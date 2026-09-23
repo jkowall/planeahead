@@ -18,6 +18,8 @@ dist/
 .dev.vars
 .dev.vars.*
 !.dev.vars.example
+# Generated dummy values for the Workers test pool, never real credentials (see the file header)
+!.dev.vars.test
 
 # Editors and OS
 .DS_Store
