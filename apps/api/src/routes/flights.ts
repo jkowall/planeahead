@@ -24,20 +24,29 @@
  * Postgres never recorded.
  *
  * Consistency between the tracker's subscriber list and Postgres (ruling O13, and the re-review
- * ruling that settled the deadline path). Postgres is the record; the tracker's list only ever
+ * rulings that settled the deadline path). Postgres is the record; the tracker's list only ever
  * follows it, and the two errors are not symmetric: a STRAY subscriber (one with no live row)
- * costs nothing in Phase 0, because the shared tracker polls the flight for its other subscribers
- * regardless, Postgres filters every list the user sees, and the increment 12 reconciliation
- * removes it; a WRONG unsubscribe loses a real subscription until the user happens to subscribe
- * again, which the app (already subscribed) never prompts. So:
+ * costs little in Phase 0, because the shared tracker polls the flight for its other subscribers
+ * regardless and Postgres filters every list the user sees; a WRONG unsubscribe loses a real
+ * subscription until the user happens to subscribe again, which the app (already subscribed)
+ * never prompts. The safety net for every stray this route leaves is the increment 12
+ * tracker-subscriber reconciliation, a housekeeping pass that lists each active tracker's
+ * subscribers and unsubscribes every id with no live `flight_subscriptions` row. So:
  *
- *   - After a lost deadline the route answers 504 and schedules NO unsubscribe. The call lands
- *     later in `waitUntil`, and the outbox's retry (same key, same id: a 5xx is never stored)
- *     records the row. A point-in-time check when the call lands cannot decide this: the timed-out
- *     call and the retry's call both park on the tracker's in-flight provider fetch and resume
- *     back to back (`subscribed`, then `already`), so the first's check runs before the retry's
- *     transaction commits, sees no row, and would remove the subscriber the retry just answered
- *     201 for (`flights.subscribe.test.ts` joins the two calls on one slow fetch).
+ *   - After a lost deadline the route answers 504, and the call lands later in `waitUntil`. The
+ *     outbox's retry (same key, same id: a 5xx is never stored) records the row, so whether a
+ *     live row exists when the call lands decides nothing: the timed-out call and the retry's
+ *     call both park on the tracker's in-flight provider fetch and resume back to back
+ *     (`subscribed`, then `already`), so such a check runs before the retry's transaction
+ *     commits, sees no row, and would remove the subscriber the retry just answered 201 for
+ *     (`flights.subscribe.test.ts` joins the two calls on one slow fetch). The one check that is
+ *     safe is monotonic: when the late call lands `subscribed` and the caller's `users` row no
+ *     longer exists, it is unsubscribed. A deleted user never comes back, and every retry after
+ *     the deletion answers 401 (the sessions died with it) or fails 23503 at its insert, so no
+ *     request can have recorded that subscriber. (A merge keeps the anonymous `users` row, marked
+ *     `deleting`, until increment 12 housekeeping, long after any `waitUntil` has run.) While the
+ *     row exists nothing is undone, and a deletion that commits after the check leaves a stray
+ *     for the reconciliation.
  *   - The transaction-failure compensation stays, in the request that made the call: the tracker
  *     answered `subscribed` and the transaction never recorded it. It cannot race a same-key retry,
  *     because the idempotency in-flight lease holds until this request answers.
@@ -64,7 +73,7 @@
 
 import { and, desc, eq, isNull, sql } from 'drizzle-orm';
 import { Hono, type Context } from 'hono';
-import { flightInstances, flightSubscriptions, type Db } from '@planeahead/db';
+import { flightInstances, flightSubscriptions, users, type Db } from '@planeahead/db';
 import {
   DO_CALL_DEADLINE_MS,
   DesignatorInputSchema,
@@ -109,6 +118,7 @@ import {
   type KnownInstance,
 } from '../lib/flight-registry';
 import { resolveFlight, type FlightResolution, type Resolver } from '../lib/flight-search';
+import { pgCode } from '../lib/pg-error';
 import {
   lastKnownFlight,
   readKvSnapshot,
@@ -142,6 +152,11 @@ export interface FlightRoutesOptions {
   readonly deadlineMs?: number | undefined;
   /** Test seam: runs inside the subscribe transaction just before it commits. */
   readonly beforeSubscribeCommit?: ((userId: string) => Promise<void> | void) | undefined;
+  /**
+   * Test seam: runs inside the unsubscribe transaction once the row is locked, before the
+   * tombstone and its change row.
+   */
+  readonly afterUnsubscribeLock?: ((userId: string) => Promise<void> | void) | undefined;
 }
 
 export const FlightSearchQuerySchema = z.object({
@@ -323,11 +338,12 @@ async function unsubscribeQuietly(
 }
 
 /**
- * The only compensation a subscribe ever makes (ruling O13): remove `subscriptionId` from the
- * tracker when THIS request's call added it (`subscribed`) and this request's transaction did not
- * record it. A request whose call answered `already` added nothing and removes nothing. It runs
- * only inside the request that made the call, where the idempotency in-flight lease still blocks
- * a same-key retry; never after a lost deadline (the module comment says why).
+ * The in-request compensation (ruling O13): remove `subscriptionId` from the tracker when THIS
+ * request's call added it (`subscribed`) and this request's transaction did not record it. A
+ * request whose call answered `already` added nothing and removes nothing. It runs only inside the
+ * request that made the call, where the idempotency in-flight lease still blocks a same-key
+ * retry; after a lost deadline only `undoLateSubscribeOfDeletedUser` runs (the module comment
+ * says why).
  */
 async function compensateSubscribe(
   ctx: RouteContext,
@@ -336,6 +352,49 @@ async function compensateSubscribe(
   landed: SubscribeResponseV1['status'],
 ): Promise<void> {
   if (landed === 'subscribed') {
+    await unsubscribeQuietly(ctx, flightKey, subscriptionId);
+  }
+}
+
+/**
+ * The one check after a lost deadline (final re-review): when the timed-out call lands
+ * `subscribed` and the caller's `users` row no longer exists, the account was deleted while the
+ * call was in flight and no request can ever record that subscriber, so it is removed. The check
+ * is monotonic (a deleted user never comes back); while the row exists nothing is undone, because
+ * the outbox's retry may be about to record the row (module comment).
+ */
+async function undoLateSubscribeOfDeletedUser(
+  ctx: RouteContext,
+  flightKey: FlightKey,
+  subscriptionId: string,
+  userId: string,
+  landed: SubscribeResponseV1['status'],
+): Promise<void> {
+  if (landed !== 'subscribed') {
+    return;
+  }
+  let exists: boolean;
+  try {
+    const rows = await ctx.db
+      .select({ id: users.id })
+      .from(users)
+      .where(eq(users.id, userId))
+      .limit(1);
+    exists = rows.length > 0;
+  } catch (error) {
+    // Unknown: leave the subscriber for the increment 12 reconciliation.
+    ctx.log.error('flight_subscribe_late_check_failed', {
+      flight_key: flightKey,
+      subscription_id: subscriptionId,
+      ...errorFields(error),
+    });
+    return;
+  }
+  if (!exists) {
+    ctx.log.info('flight_subscribe_late_after_deletion', {
+      flight_key: flightKey,
+      subscription_id: subscriptionId,
+    });
     await unsubscribeQuietly(ctx, flightKey, subscriptionId);
   }
 }
@@ -400,22 +459,6 @@ const SUBSCRIPTION_UNIQUE_CONSTRAINTS: ReadonlySet<string> = new Set([
   'flight_subscriptions_pkey',
   'flight_subscriptions_user_id_flight_instance_id_key',
 ]);
-
-/** Postgres error codes, read off whatever shape the driver threw. */
-function pgCode(error: unknown): { code: string | undefined; constraint: string | undefined } {
-  let current: unknown = error;
-  for (let depth = 0; depth < 4 && typeof current === 'object' && current !== null; depth += 1) {
-    const record = current as { code?: unknown; constraint_name?: unknown; cause?: unknown };
-    if (typeof record.code === 'string') {
-      return {
-        code: record.code,
-        constraint: typeof record.constraint_name === 'string' ? record.constraint_name : undefined,
-      };
-    }
-    current = record.cause;
-  }
-  return { code: undefined, constraint: undefined };
-}
 
 type SubscribeOutcome =
   | { readonly kind: 'created' | 'restored'; readonly row: FlightSubscriptionRecord }
@@ -612,10 +655,23 @@ export function createFlightRoutes(options: FlightRoutesOptions = {}) {
             throw error;
           }
           if (subscribed.kind === 'timeout') {
-            // The call still lands (`withDeadline` handed it to waitUntil) and nothing undoes it:
-            // the outbox's retry (same key, same id, since a 5xx is never stored) records the row,
-            // and a subscriber it left stray is harmless where a wrong unsubscribe is not (module
-            // comment). The retry may be parked on the same in-flight fetch as this call.
+            // The call still lands (`withDeadline` handed it to waitUntil). The outbox's retry
+            // (same key, same id, since a 5xx is never stored) records the row, possibly parked on
+            // the same in-flight fetch as this call, so the landing undoes the subscriber only
+            // when the account is gone by then (module comment).
+            ctx.waitUntil(
+              subscribeCall.then(
+                (late) =>
+                  undoLateSubscribeOfDeletedUser(
+                    ctx,
+                    flightKey,
+                    subscriptionId,
+                    user.id,
+                    late.status,
+                  ),
+                () => undefined,
+              ),
+            );
             await ledger.releaseAll([...CREATION_CAPS]);
             return upstreamTimeout(c);
           }
@@ -851,6 +907,7 @@ export function createFlightRoutes(options: FlightRoutesOptions = {}) {
             if (found === undefined) {
               return null;
             }
+            await options.afterUnsubscribeLock?.(user.id);
             // The flag goes with the slot, so the persist consumer's release when the flight lands
             // (ruling O3) can never give the same slot back a second time.
             const [tombstoned] = await tx

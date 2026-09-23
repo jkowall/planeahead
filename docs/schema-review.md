@@ -344,7 +344,7 @@ Natural keys used for idempotent upserts by the seed loaders: `airports.icao`, `
 | A cursor from another principal or database timeline is never served                              | the cursor's `hash8` (SHA-256 of the user id) and `epoch` (`sync_epoch`, migration 0003) are checked before the page; 410 `resync_required`; `sync.test.ts`                                                                                                                                                                                                                                                                                                            |
 | A cursor below the purge horizon is never served as complete                                      | `sync_horizon` (one row, migration 0003) written by the purge in the transaction that deletes `xid < H` from both tables, read by the route after the page; `sync.late-commit.test.ts` (the seq/xid inversion)                                                                                                                                                                                                                                                         |
 | A `deleted_subjects` hash is keyed and namespaced                                                 | `deleted_subjects_provider_subject_hash_check` (`apple:`, `google:` or `session:` plus 43 base64url characters)                                                                                                                                                                                                                                                                                                                                                        |
-| A subscribe never removes a tracker subscriber that another request recorded                      | no unsubscribe is scheduled after a lost deadline; the in-request compensation runs under the idempotency in-flight lease; `flights.subscribe.test.ts` (the timed-out call and its retry parked on one in-flight fetch)                                                                                                                                                                                                                                                |
+| A subscribe never removes a tracker subscriber that another request recorded                      | after a lost deadline the only unsubscribe is for a caller whose `users` row no longer exists (monotonic: no request can record a subscriber after the deletion); the in-request compensation runs under the idempotency in-flight lease; `flights.subscribe.test.ts` (the timed-out call and its retry parked on one in-flight fetch; a late landing after a deletion, and after a retry)                                                                             |
 
 - **Two change tables, one watermark (ADR 0012).** `user_sync_changes` (a user's entities) and
   `flight_sync_changes` (a flight's snapshot, written once per applied upsert however many users
@@ -405,22 +405,29 @@ Natural keys used for idempotent upserts by the seed loaders: `airports.icao`, `
   transaction and its cursor, bound to it, answers 410 under the new session). The persist
   queue's `merge` consumer re-points the FlightTracker subscriber lists with the trackers'
   existing `subscribe` and `unsubscribe` RPCs.
-- **The tracker's subscriber list follows Postgres (ruling O13, settled by the re-review).**
+- **The tracker's subscriber list follows Postgres (ruling O13, settled by the re-reviews).**
   `flight_subscriptions` is the record; a tracker's list is only ever repaired toward it, and the
-  two errors are not symmetric. A STRAY subscriber (no live row) costs nothing in Phase 0: the
-  shared tracker polls the flight for its other subscribers regardless, every list the user sees
-  is Postgres', and the increment 12 reconciliation removes it. A WRONG unsubscribe loses a real
-  subscription until the user subscribes again, which the app (already subscribed) never prompts.
-  So `POST /v1/flights` compensates in exactly one place: inside the request whose tracker call
-  answered `subscribed` and whose transaction then failed, where the idempotency in-flight lease
-  still blocks a same-key retry, so nothing can race it. After a LOST DEADLINE the route answers
-  504 and schedules no unsubscribe at all. A point-in-time check when the late call lands cannot
-  decide it: the tracker's `subscribe` joins a provider fetch in flight, so the timed-out call and
-  the outbox's retry (same key, same id) park on the same fetch and resume back to back
-  (`subscribed`, then `already`); the first's check would run before the retry's transaction
-  commits, see no row, and remove the subscriber the retry answered 201 for. Every answer that says
-  "already subscribed" re-sends the idempotent `subscribe` for the live row, so a retry repairs
-  drift in the other direction.
+  two errors are not symmetric. A STRAY subscriber (no live row) costs little in Phase 0: the
+  shared tracker polls the flight for its other subscribers regardless, and every list the user
+  sees is Postgres'. A WRONG unsubscribe loses a real subscription until the user subscribes again,
+  which the app (already subscribed) never prompts. The safety net for every stray is the increment
+  12 tracker-subscriber reconciliation, a housekeeping pass that lists each active tracker's
+  subscribers and unsubscribes every id with no live `flight_subscriptions` row. So
+  `POST /v1/flights` compensates inside the request whose tracker call answered `subscribed` and
+  whose transaction then failed, where the idempotency in-flight lease still blocks a same-key
+  retry, so nothing can race it. After a LOST DEADLINE the route answers 504, and whether a live
+  row exists when the late call lands decides nothing: the tracker's `subscribe` joins a provider
+  fetch in flight, so the timed-out call and the outbox's retry (same key, same id) park on the
+  same fetch and resume back to back (`subscribed`, then `already`), and such a check would run
+  before the retry's transaction commits, see no row, and remove the subscriber the retry answered
+  201 for. The one check it makes is monotonic: when the late call lands `subscribed` and the
+  caller's `users` row no longer exists, the subscriber is removed. A deleted user never comes
+  back, and every retry after the deletion answers 401 or fails 23503 at its insert, so no request
+  can have recorded it; a merge keeps the anonymous row (marked `deleting`) until increment 12
+  housekeeping, long after any `waitUntil` has run. While the row exists nothing is undone, and a
+  deletion that commits after the check leaves a stray for the reconciliation. Every answer that
+  says "already subscribed" re-sends the idempotent `subscribe` for the live row, so a retry
+  repairs drift in the other direction.
 
 ## 7. Write-path ownership
 
@@ -488,9 +495,25 @@ statement, which then cascaded the freshly committed row past the RETURNING: the
 `late_subscriptions: 0` and the tracker kept the deleted user (`me.delete.test.ts` holds a
 subscribe open until the lock is seen waiting on it). A lock that finds no row means a concurrent
 deletion finished first; the transaction does nothing and the route answers 401 `account_deleted`,
-as for a replay. The lock cannot deadlock with a subscribe, which waits on the user row only from
-its INSERT, holding no row lock the deletes need (its restore path locks the tombstone but leaves
-`user_id` alone, so it runs no foreign-key check).
+as for a replay.
+
+That lock order IS inverted against every writer that locks one of the user's rows and then
+appends a change row (final re-review): `DELETE /v1/flights/:id` (the row FOR UPDATE, then the
+tombstone and its `user_sync_changes` row), the subscribe restore path (the tombstone FOR UPDATE,
+then its change row), `PATCH /v1/me/preferences` on an existing row, the persist consumer's
+`live_tracked` pass and `mergeUsers`. The change row's foreign-key check needs FOR KEY SHARE on the
+user row, which the deletion holds FOR UPDATE, while the deletion's DELETE waits for the row the
+writer holds. Postgres breaks the deadlock after `deadlock_timeout` (1 s) by aborting, with 40P01,
+the waiter whose timeout runs out first, normally the one that began waiting first. The writers
+take no root-first lock; the deletion's transaction is retried instead, and that retry is what
+makes the inversion safe: up to three attempts on 40P01 or 40001, after a short jittered pause
+(`scheduler.wait`). The transaction is fast and idempotent (an aborted attempt leaves nothing
+behind), and the retry's `delete ... returning` names the row the surviving writer committed, so
+the post-commit unsubscribe still sees it; the audit row and the deletion report count the retries
+(`transaction_retries`). When Postgres aborts the writer instead, it fails as any failed transaction
+does: rolled back whole, a route answers 500 and the client's retry meets 401 `account_deleted`, a
+queue message is redelivered. `me.delete.test.ts` holds a `DELETE /v1/flights/:id` inside its row
+lock until the deletion waits on it, and asserts one retry, no row and no subscriber left.
 
 Once `trips` get writers, step 4 must also append change rows for OTHER users' entities it
 changes: a delete for every `trip_members` row of the user's trips (the members' feeds), and an
@@ -536,7 +559,7 @@ null (`ON DELETE SET NULL`). Phase 0 has no trip, so no such row exists today.
 | `usage_counters` (magic link)           | explicit statement (`scope = 'email'`, subject prefix)      | no FK; the ceiling and owner counters start with the SHA-256 of the canonical mailbox, an unkeyed hash reversible by dictionary |
 | `verifications`                         | explicit statement (identifier or value names the email)    | no FK; not for an anonymous user                                                                                                |
 | `rate_limits`                           | explicit statement (key embeds the email)                   | no FK; IP rows age out                                                                                                          |
-| `users`                                 | explicit statement, last                                    | locked `FOR UPDATE` by the transaction's first statement, so a subscribe that inserted is waited for and its row is RETURNED    |
+| `users`                                 | explicit statement, last                                    | locked `FOR UPDATE` first: a subscribe that inserted is waited for (its row RETURNED), a deadlock retries the transaction       |
 | `audit_log`                             | survives                                                    | pseudonymous `subject_id`; the deletion appends its own row                                                                     |
 | `notification_deliveries`               | survives                                                    | pseudonymous `subject_id`                                                                                                       |
 | `revenuecat_events`                     | survives                                                    | keyed by RevenueCat's random app user id                                                                                        |

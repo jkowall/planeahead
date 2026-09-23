@@ -22,7 +22,8 @@
  *      foreign key (`usage_counters`, `verifications`, `rate_limits`), then the `deleted_subjects`
  *      rows (HMAC-SHA-256 of each Apple or Google subject for 400 days, and of each session token
  *      for 31 days so another device is told `account_deleted`), the `audit_log` row, and finally
- *      `delete from users`. The sessions are among the rows deleted, which revokes them.
+ *      `delete from users`. The sessions are among the rows deleted, which revokes them. A
+ *      deadlock or serialization failure runs the whole transaction again (below).
  *   5. AFTER the commit, unsubscribe every subscription step 4 deleted that step 2 did not
  *      (ruling O14): a mutating request of another device still authenticates until step 4
  *      commits, so a subscribe can commit between the read and the delete; step 4's
@@ -38,9 +39,24 @@
  * RETURNING, so step 5 never saw it and the tracker kept the deleted user (`me.delete.test.ts`
  * holds a subscribe open until the lock waits on it). A lock that finds no row means a concurrent
  * deletion finished first: the transaction does nothing and the route answers as for a replay.
- * The lock cannot deadlock with a subscribe: a subscribe waits on the user row only from its
- * INSERT, and at that point it holds no row lock the deletes need (its restore path, which locks
- * the tombstone, leaves `user_id` alone and so runs no foreign-key check).
+ *
+ * Why step 4 retries (final re-review). The lock order IS inverted against every writer that
+ * locks one of the user's rows and then appends a change row: `DELETE /v1/flights/:id` (the row
+ * FOR UPDATE, then the tombstone and its `user_sync_changes` row), the subscribe restore path
+ * (the tombstone FOR UPDATE, then its change row), `PATCH /v1/me/preferences` on an existing
+ * row, the persist consumer's `live_tracked` pass and `mergeUsers`. The change row's foreign-key
+ * check needs FOR KEY SHARE on the user row, which step 4 holds FOR UPDATE, while step 4's DELETE
+ * waits for the row the writer holds: a deadlock, which Postgres breaks after `deadlock_timeout`
+ * (1 s) by aborting the waiter whose timeout runs out first, normally the one that began waiting
+ * first, with 40P01. The writers take no root-first lock; step 4 is run again instead, up to
+ * `DELETION_TRANSACTION_ATTEMPTS` times on 40P01 or 40001, after a short jittered pause through
+ * `scheduler.wait`. That is safe because the transaction is fast and idempotent (an aborted
+ * attempt leaves nothing behind, and every statement finds the user's rows afresh), and the
+ * retry's `delete ... returning` names the row the surviving writer committed, so step 5 still
+ * sees it. When Postgres aborts the writer instead, that request fails as any failed transaction
+ * does (rolled back whole; a route answers 500 and the client's retry meets 401
+ * `account_deleted`; a queue message is redelivered). `me.delete.test.ts` holds a
+ * `DELETE /v1/flights/:id` inside its row lock until step 4 waits on it.
  *
  * Step 4 also removes the magic-link counters keyed by the account's address (`usage_counters`,
  * scope `email`, subjects that start with the SHA-256 of the canonical mailbox, known from step
@@ -79,7 +95,19 @@ import type { Env } from '../env';
 import { errorFields, type Logger } from '../observability/log';
 import { callWithDeadline } from './deadline';
 import { deletedSubjectHash, requireSecret, type DeletedSubjectKind } from './hmac';
+import { pgCode } from './pg-error';
 import { unsubscribeTracker, type TrackerFor } from './trackers';
+
+/** Step 4 runs at most this many times (module comment: why step 4 retries). */
+export const DELETION_TRANSACTION_ATTEMPTS = 3;
+
+/** `deadlock_detected` and `serialization_failure`: the attempt was aborted whole. */
+const RETRYABLE_SQLSTATES: ReadonlySet<string> = new Set(['40P01', '40001']);
+
+/** 20 to 60 ms after the first abort, 40 to 120 ms after the second: the survivor commits. */
+function retryPauseMs(retry: number): number {
+  return retry * (20 + Math.floor(Math.random() * 40));
+}
 
 /** What a step's statement may use: the user id, the email, and its mailbox hash. */
 export interface DeletionSubject {
@@ -241,6 +269,8 @@ export interface DeletionReport {
   readonly trackersFailed: number;
   /** Subscriptions that committed after step 1 and were unsubscribed after the commit. */
   readonly lateSubscriptions: number;
+  /** Step 4 attempts Postgres aborted (40P01, 40001) before the one that committed. */
+  readonly transactionRetries: number;
   readonly apple: AppleRevokeOutcome;
   readonly revenueCat: RevenueCatDeletion;
   readonly deletedSubjects: number;
@@ -375,10 +405,38 @@ function daysFromNow(days: number): SQL {
 }
 
 /**
+ * Step 4's bounded retry: `run` again after a 40P01 or 40001, at most
+ * `DELETION_TRANSACTION_ATTEMPTS` times in all; any other error, or the last attempt's, is thrown.
+ * `run` receives the number of aborted attempts so far.
+ */
+async function withTransactionRetry<T>(
+  log: Logger,
+  run: (retries: number) => Promise<T>,
+): Promise<{ readonly value: T; readonly retries: number }> {
+  for (let retries = 0; ; retries += 1) {
+    try {
+      return { value: await run(retries), retries };
+    } catch (error) {
+      const { code } = pgCode(error);
+      if (
+        code === undefined ||
+        !RETRYABLE_SQLSTATES.has(code) ||
+        retries + 1 >= DELETION_TRANSACTION_ATTEMPTS
+      ) {
+        throw error;
+      }
+      log.warn('account_deletion_transaction_retry', { attempt: retries + 1, error_code: code });
+      await scheduler.wait(retryPauseMs(retries + 1));
+    }
+  }
+}
+
+/**
  * Deletes the account. Returns null when the user row is already gone (a replay of a completed
  * deletion that still carried a cached session). Throws only for a configuration error (the HMAC
- * key) before anything is touched, or when the final transaction fails, in which case nothing of
- * step 4 happened and the request can simply be retried.
+ * key) before anything is touched, or when the final transaction fails (any error but a deadlock
+ * or serialization failure, or one of those on the last attempt), in which case nothing of step 4
+ * happened and the request can simply be retried.
  */
 export async function deleteAccount(
   deps: DeletionDeps,
@@ -425,52 +483,60 @@ export async function deleteAccount(
     email: read.email,
     mailboxHash: read.email === null ? null : await sha256Hex(canonicalMailbox(read.email)),
   };
-  const deletedSubscriptions = await deps.db.transaction(async (tx) => {
-    // First: the user row, FOR UPDATE. A subscribe that has inserted holds FOR KEY SHARE on it
-    // until it commits, so this waits for it and the flight_subscriptions DELETE below (a fresh
-    // snapshot) returns its row; a later subscribe blocks at its foreign-key check, then fails.
-    const locked = await tx.execute(sql`select 1 from users where id = ${userId}::uuid for update`);
-    if (locked.length === 0) {
-      // A concurrent deletion committed while this one waited: nothing left to delete.
-      return null;
-    }
-    let deleted: { id: string; flight_instance_id: string; live: boolean }[] = [];
-    for (const step of DELETION_ORDER) {
-      const statement = step.statement?.(subject) ?? null;
-      if (statement === null) {
-        continue;
-      }
-      const rows = await tx.execute<{ id: string; flight_instance_id: string; live: boolean }>(
-        statement,
+  const step4 = await withTransactionRetry(deps.log, (retries) =>
+    deps.db.transaction(async (tx) => {
+      // First: the user row, FOR UPDATE. A subscribe that has inserted holds FOR KEY SHARE on it
+      // until it commits, so this waits for it and the flight_subscriptions DELETE below (a fresh
+      // snapshot) returns its row; a later subscribe blocks at its foreign-key check, then fails.
+      // A writer that already holds one of the user's rows and appends its change row after
+      // this lock deadlocks with it; the retry around this transaction settles that.
+      const locked = await tx.execute(
+        sql`select 1 from users where id = ${userId}::uuid for update`,
       );
-      if (step.table === 'flight_subscriptions') {
-        deleted = [...rows];
+      if (locked.length === 0) {
+        // A concurrent deletion committed while this one waited: nothing left to delete.
+        return null;
       }
-    }
-    if (subjectRows.length + rcRows.length > 0) {
-      await tx.insert(deletedSubjects).values([...subjectRows, ...rcRows]);
-    }
-    await tx.insert(auditLog).values({
-      subjectId: userId,
-      actorType: 'user',
-      actorId: userId,
-      action: 'account.deleted',
-      targetType: 'user',
-      targetId: userId,
-      requestId: deps.requestId,
-      details: {
-        subscriptions: read.subscriptions.length,
-        trackers_unsubscribed: trackers.ok,
-        trackers_failed: trackers.failed,
-        late_subscriptions: deleted.filter((row) => row.live && !unsubscribed.has(row.id)).length,
-        apple_revoke: apple,
-        revenuecat: revenueCat,
-        deleted_subjects: subjectRows.length + rcRows.length,
-      },
-    });
-    await tx.delete(users).where(eq(users.id, userId));
-    return deleted;
-  });
+      let deleted: { id: string; flight_instance_id: string; live: boolean }[] = [];
+      for (const step of DELETION_ORDER) {
+        const statement = step.statement?.(subject) ?? null;
+        if (statement === null) {
+          continue;
+        }
+        const rows = await tx.execute<{ id: string; flight_instance_id: string; live: boolean }>(
+          statement,
+        );
+        if (step.table === 'flight_subscriptions') {
+          deleted = [...rows];
+        }
+      }
+      if (subjectRows.length + rcRows.length > 0) {
+        await tx.insert(deletedSubjects).values([...subjectRows, ...rcRows]);
+      }
+      await tx.insert(auditLog).values({
+        subjectId: userId,
+        actorType: 'user',
+        actorId: userId,
+        action: 'account.deleted',
+        targetType: 'user',
+        targetId: userId,
+        requestId: deps.requestId,
+        details: {
+          subscriptions: read.subscriptions.length,
+          trackers_unsubscribed: trackers.ok,
+          trackers_failed: trackers.failed,
+          late_subscriptions: deleted.filter((row) => row.live && !unsubscribed.has(row.id)).length,
+          apple_revoke: apple,
+          revenuecat: revenueCat,
+          deleted_subjects: subjectRows.length + rcRows.length,
+          transaction_retries: retries,
+        },
+      });
+      await tx.delete(users).where(eq(users.id, userId));
+      return deleted;
+    }),
+  );
+  const deletedSubscriptions = step4.value;
   if (deletedSubscriptions === null) {
     return null;
   }
@@ -494,6 +560,7 @@ export async function deleteAccount(
     trackersUnsubscribed: trackers.ok + lateTrackers.ok,
     trackersFailed: trackers.failed + lateTrackers.failed,
     lateSubscriptions: late.length,
+    transactionRetries: step4.retries,
     apple,
     revenueCat,
     deletedSubjects: subjectRows.length + rcRows.length,

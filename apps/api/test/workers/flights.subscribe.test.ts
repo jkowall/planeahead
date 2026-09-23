@@ -461,6 +461,85 @@ describe('the tracker and Postgres agree (ruling O13)', () => {
     ).toEqual([{ id: subscriptionId, user: session.userId }]);
   });
 
+  /**
+   * A pass-through tracker whose `subscribe` reaches the REAL tracker at once (the subscriber is
+   * added) but whose answer lands only when `landing` resolves, so the route loses its deadline.
+   */
+  function heldAnswerTracker(landing: Promise<void>) {
+    return (workerEnv: Env) => {
+      const real = defaultTrackerFor(workerEnv);
+      return (key: FlightKey): TrackerRpc => {
+        const tracker = real(key);
+        return {
+          getState: () => tracker.getState(),
+          forceRefresh: (input) => tracker.forceRefresh(input),
+          unsubscribe: (input) => tracker.unsubscribe(input),
+          subscribe: async (input) => {
+            const answer: unknown = await tracker.subscribe(input);
+            await landing;
+            return answer;
+          },
+        };
+      };
+    };
+  }
+
+  for (const next of ['deletion', 'retry'] as const) {
+    it(`undoes a timed-out subscribe that lands only when the account is gone (${next} first)`, async () => {
+      // After a lost deadline the one check is monotonic: the late `subscribed` is undone when
+      // the users row no longer exists. A deletion in between leaves the subscriber to that
+      // check (step 1 read no row for it); a retry in between records it, and it stays.
+      const flight = seededFlightFor();
+      await seedTracker(flight);
+      const session = await signInAnonymously();
+      const subscriptionId = crypto.randomUUID();
+      const body = { flightKey: flight.flightKey, subscriptionId };
+      const key = idempotencyKey(`late-${next}`);
+      let land: () => void = () => undefined;
+      const landing = new Promise<void>((resolve) => {
+        land = resolve;
+      });
+      const first = createApp();
+      first.route(
+        '/v1',
+        createV1Routes({
+          flights: { deadlineMs: 300, trackerFor: heldAnswerTracker(landing) },
+        }),
+      );
+
+      const firstCtx = createExecutionContext();
+      const timedOut = await first.fetch(subscribeRequest(session, body, { key }), env, firstCtx);
+      expect(timedOut.status).toBe(504);
+      if (next === 'deletion') {
+        const deleted = await worker(
+          jsonRequest('/v1/me/delete', 'POST', undefined, {
+            ip: session.ip,
+            cookie: session.cookie,
+          }),
+        );
+        expect(deleted.status).toBe(200);
+      } else {
+        const retried = await subscribe(session, body, { key });
+        expect(retried.status).toBe(201);
+        expect((await retried.json<SubscribeBody>()).subscription.id).toBe(subscriptionId);
+      }
+      // The subscriber is in the tracker; the timed-out call has not landed yet.
+      expect(await subscriberCount(flight.flightKey)).toBe(1);
+      land();
+      await waitOnExecutionContext(firstCtx);
+
+      if (next === 'deletion') {
+        expect(await subscriberCount(flight.flightKey)).toBe(0);
+        expect(await subscriptionRows(session.userId)).toEqual([]);
+      } else {
+        expect(await subscriberCount(flight.flightKey)).toBe(1);
+        expect(await subscriptionRows(session.userId)).toEqual([
+          { id: subscriptionId, deleted: false },
+        ]);
+      }
+    });
+  }
+
   it('repairs a tracker that lost the subscriber when the client subscribes again', async () => {
     const flight = seededFlightFor();
     await seedTracker(flight);

@@ -9,8 +9,9 @@
  * completes when Apple's revoke answers 500, accepts an anonymous session, and tells another
  * device of the same user 401 `account_deleted` on its next call, GETs included, with the whole
  * cookie jar the real client sends (the `session_data` cache cookie too: ruling O5). A subscribe
- * another device commits while the deletion runs is undone after the commit (ruling O14), and the
- * magic-link counters keyed by the account's mailbox go with the account.
+ * another device commits while the deletion runs is undone after the commit (ruling O14), a
+ * deadlock between the deletion's user lock and a writer holding one of the user's rows is retried,
+ * and the magic-link counters keyed by the account's mailbox go with the account.
  */
 
 import { createExecutionContext, waitOnExecutionContext } from 'cloudflare:test';
@@ -440,6 +441,95 @@ describe('POST /v1/me/delete', () => {
     expect(await auditDetails(session.userId)).toMatchObject({
       subscriptions: 0,
       late_subscriptions: 1,
+    });
+  });
+
+  it('retries step 4 when it deadlocks with a writer that holds one of the user rows (final re-review)', async () => {
+    // The lock order is inverted against every writer that locks one of the user's rows and then
+    // appends a change row. `DELETE /v1/flights/:id` is held open inside its row lock; step 4
+    // takes the user row FOR UPDATE and its flight_subscriptions DELETE waits on that row lock.
+    // Released, the route's change row waits at its foreign-key check on the user row: a
+    // deadlock. Step 4 began waiting first, so after deadlock_timeout Postgres aborts it with
+    // 40P01; the retry waits for the route's commit and its DELETE ... RETURNING names the row.
+    const session = await signInAnonymously();
+    const flight = seededFlightFor();
+    await seedTracker(flight);
+    const created = await subscribe(session, { flightKey: flight.flightKey });
+    expect(created.status).toBe(201);
+    const id = (await created.json<{ subscription: { id: string } }>()).subscription.id;
+    let entered = false;
+    let release: () => void = () => undefined;
+    const gate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const app = createApp();
+    app.route(
+      '/v1',
+      createV1Routes({
+        flights: {
+          afterUnsubscribeLock: async () => {
+            entered = true;
+            await gate;
+          },
+        },
+      }),
+    );
+
+    const unsubscribeCtx = createExecutionContext();
+    const unsubscribing = app.fetch(
+      jsonRequest(`/v1/flights/${id}`, 'DELETE', undefined, {
+        ip: uniqueIp(),
+        cookie: session.cookie,
+      }),
+      env,
+      unsubscribeCtx,
+    );
+    await eventually(
+      () => Promise.resolve(entered),
+      (value) => value,
+    );
+    const log = createLogger({}, () => undefined);
+    const deletionCtx = createExecutionContext();
+    const deleting = runDeletion(
+      {
+        env,
+        db: db(),
+        envelope: createAuthRuntime(env, log).envelope,
+        log,
+        trackerFor: defaultTrackerFor(env),
+        deadlineMs: 8_000,
+        waitUntil: (promise) => {
+          deletionCtx.waitUntil(promise);
+        },
+        requestId: 'delete-deadlock',
+      },
+      session.userId,
+    );
+    // Step 4 holds the user row and waits on the route's subscription row.
+    await eventually(
+      () =>
+        db().execute<{ n: number }>(sql`
+          select count(*)::int as n from pg_stat_activity
+          where wait_event_type = 'Lock' and query ilike 'delete from flight_subscriptions%'
+        `),
+      (rows) => (rows[0]?.n ?? 0) > 0,
+    );
+    release();
+    const unsubscribed = await unsubscribing;
+    const report = await deleting;
+    await waitOnExecutionContext(unsubscribeCtx);
+    await waitOnExecutionContext(deletionCtx);
+
+    expect(unsubscribed.status).toBe(200);
+    expect(report).not.toBeNull();
+    expect(report?.transactionRetries).toBe(1);
+    // The retry's RETURNING saw the route's tombstone, which the route unsubscribed itself.
+    expect(report?.lateSubscriptions).toBe(0);
+    expect(await remainingRows(session.userId)).toEqual({});
+    expect(await subscriberCount(flight.flightKey)).toBe(0);
+    expect(await auditDetails(session.userId)).toMatchObject({
+      subscriptions: 1,
+      transaction_retries: 1,
     });
   });
 });

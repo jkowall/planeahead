@@ -190,6 +190,7 @@ export const meRoutes = new Hono<AppBindings>()
     log.info('account_deleted', {
       subscriptions: report.subscriptions,
       trackers_failed: report.trackersFailed,
+      transaction_retries: report.transactionRetries,
       apple_revoke: report.apple.outcome,
     });
     return c.json({ deleted: true as const, wipeLocalStore: true as const }, 200);
