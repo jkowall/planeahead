@@ -45,7 +45,7 @@ import {
 import { z } from 'zod';
 import { sqlBoolean, type SqliteLike } from '../db/sqlite-like';
 import { notifyTablesChanged, type StoreTable } from '../db/store-signal';
-import { deleteSyncedRows, SYNCED_TABLES, writeSyncState } from './store';
+import { deleteSyncedRows, SUBSCRIBE_MUTATION, SYNCED_TABLES, writeSyncState } from './store';
 
 /**
  * The page as the client parses it: the shell strictly, the elements as unknown. `SyncEnvelopeV1`
@@ -342,6 +342,28 @@ export function applySyncPage(
         touched.add('flight_subscriptions');
         flights += 1;
       });
+
+      if (replace) {
+        // A kept optimistic row (one a queued subscribe names) whose flight the snapshot already
+        // carries under the server's own id would show the flight twice: the server answers that
+        // queued POST with its existing row (200, created false), never with the client's id, so
+        // the duplicate goes now and the POST stays queued (final re-review of increment 9). A
+        // qualified delete, like every other statement here.
+        db.run(
+          `DELETE FROM flight_subscriptions
+             WHERE id IN (
+               SELECT entity_id FROM outbox
+               WHERE entity_id IS NOT NULL AND method = ? AND path = ?
+             )
+             AND EXISTS (
+               SELECT 1 FROM flight_subscriptions AS live
+               WHERE live.flight_key = flight_subscriptions.flight_key
+                 AND live.id <> flight_subscriptions.id
+                 AND live.deleted_at IS NULL
+             )`,
+          [SUBSCRIBE_MUTATION.method, SUBSCRIBE_MUTATION.path],
+        );
+      }
 
       writeSyncState(db, {
         cursor: page.cursor,

@@ -98,7 +98,25 @@ jobs:
       - name: Publish the EAS Update to the preview builds
         if: env.EXPO_TOKEN != ''
         working-directory: apps/mobile
-        run: eas update --auto --branch preview --environment preview --non-interactive
+        run: eas update --auto --branch preview --environment preview --non-interactive --json > update.json
+
+      # Parity between the update's runtime version and the builds it should reach rests on the
+      # visibility rule in the header and on fingerprint.config.js; this step is the check that
+      # nothing drifted. It warns rather than fails (no finished preview build exists before the
+      # first EAS build, and the CLI's JSON shapes are unverified without an Expo account).
+      - name: Check the update's runtime version against the latest preview build
+        if: env.EXPO_TOKEN != ''
+        working-directory: apps/mobile
+        run: |
+          update=$(jq -r '[.[] | .runtimeVersion] | unique | join(",")' update.json 2>/dev/null || true)
+          build=$(eas build:list --profile preview --status finished --limit 1 --json --non-interactive 2>/dev/null | jq -r '.[0].runtimeVersion // empty' || true)
+          if [ -z "$build" ]; then
+            echo "::notice title=Runtime version unchecked::no finished preview build yet (update runtime version: ${update:-unknown})"
+          elif [ "$update" != "$build" ]; then
+            echo "::warning title=Runtime version mismatch::the update has ${update:-unknown} and the latest finished preview build has $build; the update will not reach that build"
+          else
+            echo "runtime version $build matches the latest preview build"
+          fi
 
       # SENTRY_ORG and SENTRY_PROJECT come from the same EAS environment the build and the update
       # used, so the maps land in the project the DSN reports to.

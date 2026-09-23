@@ -786,10 +786,56 @@ describe('a row a queued subscribe names', () => {
       createSyncClient({ db, transport, gate, onAccountDeleted: jest.fn() }).sync(USER),
     ).resolves.toMatchObject({ kind: 'synced', resets: 1 });
     expect(cursors).toEqual([cursorAt(9), null]);
-    // Row 1 and the preferences went with the reset; the queued subscribe's row stayed.
-    expect(subscriptions(db).map((row) => row.id)).toEqual([id(2), id(50)]);
+    // Row 1 and the preferences went with the reset. The snapshot carries BA117 under the server's
+    // own id, so the queued subscribe's optimistic row for the same flight goes too (the server
+    // answers that POST with its existing row); the POST itself stays queued.
+    expect(subscriptions(db).map((row) => row.id)).toEqual([id(2)]);
     expect(count(db, 'user_preferences')).toBe(0);
     expect(pendingCount(db)).toBe(1);
+  });
+
+  it('survives a 410 reset when the snapshot does not carry its flight', async () => {
+    const db = seeded(USER, cursorAt(9), [subscriptionUpsert(1, AA100), preferencesUpsert()]);
+    const gate = new ApplyGate();
+    optimisticSubscribe(db, 50, BA117);
+    await drainDeferred(db, gate);
+    const { transport } = scripted([
+      { status: 410, body: envelope('resync_required') },
+      { status: 200, body: page({ changes: [subscriptionUpsert(2, AA100)], cursor: cursorAt(1) }) },
+    ]);
+
+    await expect(
+      createSyncClient({ db, transport, gate, onAccountDeleted: jest.fn() }).sync(USER),
+    ).resolves.toMatchObject({ kind: 'synced', resets: 1 });
+    expect(subscriptions(db).map((row) => row.id)).toEqual([id(2), id(50)]);
+    expect(pendingCount(db)).toBe(1);
+  });
+
+  it('drops a kept row whose flight the snapshot carries under the server id, by a qualified delete', async () => {
+    const db = createMemorySqlite();
+    const gate = new ApplyGate();
+    optimisticSubscribe(db, 50, BA117);
+    await drainDeferred(db, gate);
+    const { transport } = scripted([
+      {
+        status: 200,
+        body: page({
+          changes: [subscriptionUpsert(1, AA100), subscriptionUpsert(2, BA117)],
+          cursor: cursorAt(9),
+        }),
+      },
+    ]);
+
+    await createSyncClient({ db, transport, gate, onAccountDeleted: jest.fn() }).sync(USER);
+    expect(subscriptions(db).map((row) => row.id)).toEqual([id(1), id(2)]);
+    // The queued POST stays: the server answers it with row 2 (200, created false).
+    expect(pendingCount(db)).toBe(1);
+    const applied = db.transactions.at(-1);
+    expect(applied?.outcome).toBe('committed');
+    const dedupe = applied?.statements.filter((line) =>
+      /DELETE FROM flight_subscriptions/.test(line),
+    );
+    expect(dedupe?.some((line) => /EXISTS/.test(line) && /\bWHERE\b/.test(line))).toBe(true);
   });
 
   it('survives the owner wipe with its outbox item, and goes with the account wipe', async () => {
@@ -804,7 +850,8 @@ describe('a row a queued subscribe names', () => {
       gate: new ApplyGate(),
       onAccountDeleted: jest.fn(),
     }).sync(OTHER_USER);
-    expect(subscriptions(db).map((row) => row.id)).toEqual([id(3), id(50)]);
+    // The snapshot carries BA117 under the server's id 3, so the optimistic row 50 goes with it.
+    expect(subscriptions(db).map((row) => row.id)).toEqual([id(3)]);
     expect(pendingCount(db)).toBe(1);
 
     const gone = scripted([{ status: 401, body: envelope('account_deleted') }]);
