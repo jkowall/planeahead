@@ -1,6 +1,6 @@
 # Increment 6: provider layer
 
-Status: spec (2026-09-20). Builder: Opus 5. Reviewers: Opus 5 (adapter correctness against the vendored OpenAPI specs) plus orchestrator read. Branch `inc6-provider-layer` based on `inc5-auth`.
+Status: complete (2026-09-22) on branch `inc6-provider-layer`, stacked PR opened for CI. Outcome, rulings and deviations are in `docs/build-log.md`; where the text below disagrees with the review rulings recorded there (the operating designator from a callsign, `dateLocalRole=Departure`, the AeroAPI account-wide alert endpoint set before the first alert, the T-48h window gate, the read-only closed budget day, the webhook receivers exempt from the IP limiter), the build log wins. Builder: Opus 5. Reviewers: two Opus 5 lenses (adapter fidelity against the vendored OpenAPI specs, budget and Durable Object correctness) plus orchestrator read. Branch `inc6-provider-layer` based on `inc5-auth`.
 
 Read `docs/increments/06-07-providers-and-trackers.facts.md` sections 1, 2 and 5 first. Several plan statements about the providers were wrong and are corrected below.
 

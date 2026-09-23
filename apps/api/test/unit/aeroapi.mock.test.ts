@@ -640,6 +640,33 @@ describe('getFlight: mapping', () => {
 });
 
 describe('getBoard', () => {
+  it('keeps a local window ordered across the spring-forward gap', async () => {
+    // Both adapters take the same airport-local window; on the one night a year with a gap the
+    // AeroAPI conversion must not turn a valid local window into an inverted UTC one.
+    const stub = fixtureFetch(FIXTURES['airport-departures'] as Fixture);
+    const ctx = providerContext({ now: '2026-03-08T08:00:00Z' }).ctx;
+    await adapter(stub.fetch).getBoard(
+      'KJFK',
+      'dep',
+      { from: '2026-03-08T01:45', to: '2026-03-08T02:15', tz: 'America/New_York' },
+      ctx,
+    );
+    expect(Object.fromEntries(stub.urls()[0]?.searchParams ?? [])).toEqual({
+      start: '2026-03-08T06:45:00Z',
+      end: '2026-03-08T07:00:00Z',
+      max_pages: '1',
+    });
+    // A window lying entirely inside the gap is empty, and refused like any empty window.
+    await expect(
+      adapter(stub.fetch).getBoard(
+        'KJFK',
+        'dep',
+        { from: '2026-03-08T02:15', to: '2026-03-08T02:45', tz: 'America/New_York' },
+        ctx,
+      ),
+    ).rejects.toThrow(RangeError);
+  });
+
   it('reads recent departures as airport_departures, one result set', async () => {
     const stub = fixtureFetch(FIXTURES['airport-departures'] as Fixture);
     const { data, call } = await adapter(stub.fetch).getBoard(
@@ -709,6 +736,28 @@ describe('getBoard', () => {
     );
     expect(localMinuteToUtcMs('2026-03-08T04:00', 'America/New_York')).toBe(
       Date.parse('2026-03-08T08:00:00Z'),
+    );
+    // 02:00 to 03:00 exists on no clock at JFK that night: a gap time lands on the transition
+    // itself (07:00Z), after the last real minute before it and no later than 03:00 EDT, so the
+    // mapping never runs backwards.
+    expect(localMinuteToUtcMs('2026-03-08T01:59', 'America/New_York')).toBe(
+      Date.parse('2026-03-08T06:59:00Z'),
+    );
+    expect(localMinuteToUtcMs('2026-03-08T02:00', 'America/New_York')).toBe(
+      Date.parse('2026-03-08T07:00:00Z'),
+    );
+    expect(localMinuteToUtcMs('2026-03-08T02:30', 'America/New_York')).toBe(
+      Date.parse('2026-03-08T07:00:00Z'),
+    );
+    expect(localMinuteToUtcMs('2026-03-08T03:00', 'America/New_York')).toBe(
+      Date.parse('2026-03-08T07:00:00Z'),
+    );
+    // An ambiguous fall-back time is its first occurrence (EDT), and the hour after it is EST.
+    expect(localMinuteToUtcMs('2026-11-01T01:30', 'America/New_York')).toBe(
+      Date.parse('2026-11-01T05:30:00Z'),
+    );
+    expect(localMinuteToUtcMs('2026-11-01T02:00', 'America/New_York')).toBe(
+      Date.parse('2026-11-01T07:00:00Z'),
     );
     expect(localMinuteToUtcMs('2026-09-22T17:00', 'Not/AZone')).toBeNull();
     expect(localMinuteToUtcMs('2026-13-22T17:00', 'America/New_York')).toBeNull();

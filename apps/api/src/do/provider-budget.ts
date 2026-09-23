@@ -41,7 +41,10 @@
  *     object starts killed; the automatic one (the daily cap) ends with the day. The brake fails
  *     CLOSED: when the persistent kill switch cannot be read before the day's first decision, the
  *     day starts killed (`persistent:unknown`, with the same alert) and re-reads it every 30 s,
- *     lifting the stop on its own once the read says there is none.
+ *     lifting the stop on its own once the read says there is none. The re-read runs on the next
+ *     call that reaches the object; the guard's fast path answers from the blocked KV copy until
+ *     that expires, so through `ProviderBudgetGuard` the stop lifts within `BUDGET_KV_TTL_SECONDS`
+ *     (60 s) rather than 30 s.
  *   - The alarm, armed when the day's config is first written (never in the constructor), fires at
  *     00:05 UTC the next day: it writes the final counters to the outbox, sends them, and calls
  *     `deleteAll()`, because storage bills until it is deleted.
@@ -112,7 +115,11 @@ const KV_REFRESH_MS = 10_000;
 const KV_MIN_WRITE_GAP_MS = 1_000;
 /** Shards divide the cap and the rate. */
 const SHARDS = 8;
-/** Re-read an unreadable persistent kill switch this often while the day runs killed. */
+/**
+ * Re-read an unreadable persistent kill switch this often while the day runs killed. It runs on
+ * the next call that reaches the object; the blocked KV copy keeps guard calls away for up to
+ * `BUDGET_KV_TTL_SECONDS`, which is the real bound on recovery through the guard.
+ */
 const PERSISTENT_KILL_RETRY_MS = 30_000;
 /** The kill reason of a day that started killed because the persistent switch was unreadable. */
 export const PERSISTENT_KILL_UNKNOWN = 'persistent:unknown';

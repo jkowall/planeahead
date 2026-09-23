@@ -23,6 +23,20 @@
  * burst of 1 and a rate of at most 1, which also stays within one grant per second. The earlier
  * `burst = rate` handed out up to `2N - 1` in a second (9 at 5 per second).
  *
+ * WHY HALF THE LIMIT GOES TO THE BURST (increment 6 re-review, orchestrator decision). The
+ * sustained rate of this bucket is `r` alone, so the split leaves the paid limit half used under
+ * steady load (5 a second sustained against AeroDataBox Growth's 10). A burst of one token with
+ * `r = N - 1` would nearly double that, and it was rejected on purpose: a refusal here is not a
+ * wait. The provider layer has no timers (a pending `setTimeout` pins a Durable Object awake), so
+ * `http.ts` turns a `provider_rate_limit` denial into a zero-cost `rate_limited` record and the
+ * caller's poll slot is lost. Debits arrive as independent FlightTracker alarms, a Poisson stream
+ * of about 3.4 a second on average at 100,000 flights a month; with a burst of one and 9 a
+ * second, roughly a third of them would land inside the 111 ms an earlier grant blocks and lose
+ * their slot, while a burst of five absorbs that clustering and 5 a second still clears the mean.
+ * The sustained rate only has to beat the average debit rate; the burst is what keeps clustered
+ * alarms from failing. Revisit (a larger plan, or the sharding hatch) when the mean debit rate
+ * approaches half the plan limit, not when the peak does.
+ *
  * Sharding caveat: the burst cannot go below one token, so eight shards of one provider each keep
  * a burst of 1 and can release 8 grants in the same instant against a limit of 5. The sharding
  * escape hatch (src/do/provider-budget.ts) must route the per-second limit through one object or
