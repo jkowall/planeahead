@@ -1,10 +1,64 @@
+import { cloudflareTest } from '@cloudflare/vitest-plugin';
 import { defineConfig } from 'vitest/config';
 
-// Plain node environment on purpose. @cloudflare/vitest-plugin and the Workers pool arrive in
-// increment 4, together with Hono and wrangler.jsonc.
+/**
+ * Workers pool configuration.
+ *
+ * `defineWorkersConfig` and `defineWorkersProject` were removed in the Vitest 4 plugin. The only
+ * supported shape is `cloudflareTest()` as a plugin inside the ordinary `defineConfig` from
+ * `vitest/config`. `isolatedStorage` and `singleWorker` are gone too: storage isolation is per
+ * test file and automatic, which is why every Durable Object test still uses a unique object name
+ * (isolation is per file, not per test).
+ *
+ * `experimental.newConfig` with a `cloudflare.config.ts` is deliberately not used. It is
+ * experimental, may change without a major version bump, and does not support wrangler
+ * environments, which this Worker depends on for staging and production. ADR 0004 records it as a
+ * rejected option so it is not relitigated.
+ *
+ * No `miniflare.hyperdrives` override, and no Postgres anywhere. Increment 4's tests never open a
+ * database connection: `/health` reports a build-time constant, the Durable Objects never touch
+ * Postgres (ADR 0007), and the idempotency middleware falls back to its in-memory store because
+ * `ENVIRONMENT` is `test` below. The CI job for this package runs without a service container.
+ * Increments 5 and 8 add the override when auth and route tests need a Neon branch.
+ */
 export default defineConfig({
+  plugins: [
+    cloudflareTest({
+      wrangler: { configPath: './wrangler.jsonc' },
+      miniflare: {
+        // Overrides the `local` value from wrangler.jsonc. `wrangler types` only knows the three
+        // values the config file declares, so `environmentName()` in src/env.ts reads this
+        // through a widened `string` rather than the generated literal union.
+        bindings: { ENVIRONMENT: 'test' },
+      },
+    }),
+  ],
   test: {
-    environment: 'node',
-    include: ['test/**/*.test.ts'],
+    // Only `test/workers`. Increments 5 and 6 add `test/unit`, which is Node-side (undici
+    // MockAgent for provider adapters, since `fetchMock` was removed from `cloudflare:test`) and
+    // cannot run inside the Workers pool. Scoping the include now means that increment adds a
+    // second Vitest project rather than discovering that its unit tests are being loaded into
+    // workerd.
+    include: ['test/workers/**/*.test.ts'],
+
+    // Vitest's 5 second default is too tight for the FIRST request into the Worker in a test
+    // file. That request is what makes workerd evaluate the whole bundle, and the bundle is a
+    // megabyte, most of it the Sentry SDK; every later request in the same file costs
+    // milliseconds, and tests that only import modules from `src/` never pay it at all.
+    //
+    // The number moves a great deal with what is cached, so treat it as a range rather than a
+    // constant. With a warm Vite transform cache that first request costs tens of milliseconds
+    // (measured: 33 ms). Cold, the bundle is built and evaluated on that call and the cost lands
+    // on the test: a review run on an M-series Mac measured 20.9 seconds for it, 11.1 on a
+    // repeat. An earlier version of this comment claimed "about 10 seconds" flat, which
+    // understated the cold case by 2x and left the worst observed test consuming 69 percent of
+    // a 30 second budget.
+    //
+    // GitHub's ubuntu-latest runners are slower than this machine and always start cold
+    // (turbo.json configures no remote cache), so 30 seconds was around 1.4x headroom on the one
+    // assertion that has to evaluate the bundle, and the failure mode is a bare timeout with no
+    // useful message. 60 seconds restores the margin; it costs nothing on a run that passes.
+    testTimeout: 60_000,
+    hookTimeout: 60_000,
   },
 });

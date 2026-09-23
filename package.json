@@ -13,7 +13,7 @@
     "lint": "turbo run lint",
     "lint:root": "eslint eslint.config.js scripts tools",
     "test": "turbo run test",
-    "test:eslint-rules": "vitest run --dir tools/eslint",
+    "test:tools": "vitest run --dir tools",
     "format": "prettier --write .",
     "format:check": "prettier --check .",
     "toolchain-guard": "node scripts/toolchain-guard.mjs"

@@ -16,9 +16,12 @@ catalog:
   # Expo SDK 57 nor typescript-eslint 8 supports it yet.
   typescript: ~6.0.3
   typescript-eslint: ^8.70.0
-  # Vitest is held at 4.1.x on purpose. @cloudflare/vitest-plugin 1.1.x peers on ^4.1,
-  # and Vitest 5 breaks the Workers pool.
-  vitest: ~4.1.11
+  # Vitest is held at 4.1.11 EXACTLY, which is what docs/increments/04-api-bootstrap.facts.md
+  # pins. @cloudflare/vitest-plugin 1.1.x peers on ^4.1 and Vitest 5 breaks the Workers pool, so a
+  # caret is out of the question; a tilde would still float to any 4.1.x, and nothing in the
+  # repository enforces the facts sheet's value once it floats (the toolchain guard's pair
+  # assertion deliberately covers wrangler, not vitest). Exact here, moved deliberately.
+  vitest: 4.1.11
   zod: ^4.6.5
   # tsx runs packages/shared/scripts/gen-cadence-table.ts and packages/db's drizzle-kit and
   # migrate entry points.
@@ -38,12 +41,27 @@ catalog:
   # and the reviewed output is committed as curated data.
   geo-tz: ^8.1.9
 
+  # Cloudflare toolchain (increment 4). wrangler and @cloudflare/vitest-plugin are exact pins that
+  # must move together: the plugin declares `wrangler` as a normal dependency at an exact version
+  # (1.1.13 declares 4.135.0) and a second wrangler copy means a second workerd build in one
+  # install. scripts/toolchain-guard.mjs asserts the pair rather than a frozen constant.
+  wrangler: 4.135.0
+  '@cloudflare/vitest-plugin': 1.1.13
+  # @vitest/runner and @vitest/snapshot are peers of @cloudflare/vitest-plugin. pnpm's isolated
+  # linker does not hoist them into apps/api, so they are declared explicitly and pinned to the
+  # same exact version as vitest itself.
+  '@vitest/runner': 4.1.11
+  '@vitest/snapshot': 4.1.11
+  hono: ^4.13.8
+  '@hono/zod-validator': ^0.9.1
+  # @sentry/cloudflare and @sentry/hono share an internal core and must be the same version.
+  # Exact pins on both, moved together.
+  '@sentry/cloudflare': 10.75.0
+  '@sentry/hono': 10.75.0
+
   # Not installed yet. Versions verified 2026-09-19 and recorded here so the
   # increment that adds them does not have to rediscover the pin.
   #
-  # '@cloudflare/vitest-plugin': ^1.1.13   increment 4
-  # wrangler: ^4.135.0                     increment 4
-  # hono: ^4.13.8                          increment 4
   # expo: ~57.0.24                         increment 9
   # better-auth: 1.7.5                     increment 5
 
@@ -65,3 +83,6 @@ allowBuilds:
   # in their postinstall; without it initdb cannot find its shared libraries.
   '@embedded-postgres/darwin-arm64': true
   '@embedded-postgres/linux-x64': true
+  # workerd's postinstall checks that the platform binary for this OS and architecture unpacked
+  # correctly. Without it wrangler and the Vitest Workers pool cannot start a runtime.
+  workerd: true

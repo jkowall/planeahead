@@ -1,3 +1,4 @@
+import noLiteralControlCharacters from './no-literal-control-characters.js';
 import noModuleScopeDrizzle from './no-module-scope-drizzle.js';
 
 /**
@@ -11,6 +12,7 @@ const plugin = {
     version: '0.0.0',
   },
   rules: {
+    'no-literal-control-characters': noLiteralControlCharacters,
     'no-module-scope-drizzle': noModuleScopeDrizzle,
   },
 };

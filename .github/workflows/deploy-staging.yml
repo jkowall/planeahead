@@ -1,0 +1,138 @@
+name: Deploy staging
+
+# Every push to main that touches the API or the database schema. Staging is a separate Worker
+# (planeahead-api-staging) with its own Durable Object namespaces, queues and secrets, so this
+# never touches production.
+#
+# Prerequisites the owner has to satisfy once, before the first run:
+#   - Cloudflare account on Workers Paid.
+#   - CLOUDFLARE_API_TOKEN with Workers Scripts Edit, Workers KV Storage Edit, Workers R2 Storage
+#     Edit, Account Queues Edit, Hyperdrive Edit, Account Settings Read and, for the custom
+#     domain, Zone Workers Routes Write on planeahead.app. The "Edit Cloudflare Workers" template
+#     does NOT include Account Queues Edit and the deploy fails without it.
+#   - The four queues and their dead letter queues created with `wrangler queues create`. Deploy
+#     fails with `Queue "<name>" does not exist`; it does not create them.
+#   - The KV namespaces, R2 buckets and the Hyperdrive config created, and their real ids written
+#     into wrangler.jsonc in place of the placeholders.
+#   - Worker secrets set out of band with `wrangler secret put --env staging`. This workflow
+#     passes an EMPTY `secrets` input on purpose: wrangler-action's `secrets` runs
+#     `wrangler secret bulk`, which rewrites every secret and creates a new version on every run.
+#
+# Plain `wrangler deploy` only. Gradual deployments (`versions upload` / `versions deploy`) are
+# not supported for a Worker that declares `exports`, and PlaneAhead carries five Durable Object
+# classes permanently, so there is no branch where the versions path becomes available.
+
+on:
+  push:
+    branches: [main]
+    # The header above says "touches the API or the database schema"; without this filter it was
+    # not true. A docs-only or mobile-only commit used to run migrations against the staging Neon
+    # branch and cut a new Worker version, and `cancel-in-progress: false` queues those rather
+    # than collapsing them.
+    paths:
+      - 'apps/api/**'
+      - 'packages/db/**'
+      - 'packages/shared/**'
+      - 'scripts/gen-migration-hash.mjs'
+      - 'pnpm-lock.yaml'
+      - 'pnpm-workspace.yaml'
+      - '.github/workflows/deploy-staging.yml'
+  workflow_dispatch:
+
+concurrency:
+  group: deploy-staging
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    environment: staging
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: pnpm/action-setup@v4
+
+      - uses: actions/setup-node@v6
+        with:
+          node-version-file: .node-version
+          cache: pnpm
+
+      - run: pnpm install --frozen-lockfile
+
+      # The Worker reports the hash of the migration journal on /health. Failing on a diff means a
+      # deploy can never claim a schema version the repository does not have.
+      #
+      # This step must stay the FIRST thing after install. The api `typecheck` and `test` scripts
+      # both begin by regenerating src/generated/migration-hash.ts on disk, and `--check` only
+      # compares the file on disk with the journal, so a check placed after those steps compares
+      # the file they just wrote and can never fail. That is how this workflow once shipped, with
+      # ci.yml red and staging deploying a silently corrected constant.
+      # tools/workflows/migration-hash-check.test.js asserts the ordering.
+      - name: Check the generated migration hash is current
+        run: node scripts/gen-migration-hash.mjs --check
+
+      # ci.yml is a SEPARATE workflow triggered by the same push, so nothing orders the two: a
+      # commit that fails typecheck would otherwise still migrate the staging database and deploy,
+      # and migrations are forward-only. These three steps repeat the checks that matter here
+      # rather than gating on ci.yml with `workflow_run`, which fires on completion regardless of
+      # conclusion and resolves the workflow file from the default branch. Repeating them costs a
+      # few minutes on a deploy and cannot race.
+      #
+      # The @planeahead/db suite is deliberately NOT repeated: it needs the Postgres service
+      # container ci.yml gives it, and standing one up here to gate a Worker deploy is a second
+      # copy of ci.yml, not a gate. The Worker's own suite needs no database at all.
+      - name: Typecheck and lint
+        run: pnpm turbo run typecheck lint
+
+      - name: Test the Worker
+        run: pnpm turbo run test --filter=@planeahead/api
+
+      - name: Validate the Worker config and bundle
+        run: pnpm --filter @planeahead/api exec wrangler deploy --dry-run --env staging
+
+      # Migrations run against the Neon DIRECT endpoint, never through Hyperdrive and never
+      # through the -pooler host; packages/db asserts both. Missing secret is a warning, not a
+      # failure: the Worker deploy is still useful before the Neon project exists.
+      - name: Migrate the staging database
+        env:
+          DATABASE_URL: ${{ secrets.NEON_STAGING_DIRECT_URL }}
+        run: |
+          if [ -z "${DATABASE_URL}" ]; then
+            echo "::warning title=Migrations skipped::NEON_STAGING_DIRECT_URL is not set; the staging schema was not touched"
+            exit 0
+          fi
+          pnpm --filter @planeahead/db run db:migrate
+
+      - name: Deploy the Worker
+        uses: cloudflare/wrangler-action@v4
+        with:
+          apiToken: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          accountId: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          wranglerVersion: '4.135.0'
+          workingDirectory: apps/api
+          packageManager: pnpm
+          command: deploy --env staging
+          # Deliberately empty. See the note at the top of this file.
+          secrets: ''
+
+      # The dry run in ci.yml only parses the config and bundles; it cannot tell whether the KV,
+      # R2, queue and Hyperdrive ids exist. This is the step that actually proves the Worker is
+      # alive with its bindings attached.
+      - name: Smoke test /health
+        run: |
+          for attempt in 1 2 3 4 5; do
+            code=$(curl --silent --show-error --max-time 20 --output /tmp/health.json --write-out '%{http_code}' https://api-staging.planeahead.app/health || true)
+            if [ "${code}" = "200" ]; then
+              cat /tmp/health.json
+              echo
+              exit 0
+            fi
+            echo "attempt ${attempt}: /health returned ${code}"
+            sleep 10
+          done
+          echo "::error title=Smoke test failed::api-staging.planeahead.app/health never returned 200"
+          exit 1

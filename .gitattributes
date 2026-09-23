@@ -1,0 +1,26 @@
+# Keep source reviewable.
+#
+# git classifies a blob as binary when it finds a NUL byte in the first 8000 bytes, and a binary
+# blob has no diff, no line-level review comment and no three-way merge: it merges wholesale or
+# conflicts wholesale. A stray control character in a template literal is enough to do it, which
+# is how `apps/api/src/middleware/idempotency.ts` shipped in increment 4 with no reviewable diff.
+#
+# `diff` forces git to treat these paths as text anyway, so the damage is contained. It is the
+# second line of defence, not the first: the `planeahead/no-literal-control-characters` ESLint
+# rule (tools/eslint) fails the build on the character itself, which is the part that is loud.
+
+* text=auto eol=lf
+
+*.ts   text diff
+*.tsx  text diff
+*.js   text diff
+*.mjs  text diff
+*.cjs  text diff
+*.json text diff
+*.jsonc text diff
+*.md   text diff
+*.yml  text diff
+*.yaml text diff
+*.sql  text diff
+
+pnpm-lock.yaml linguist-generated=true

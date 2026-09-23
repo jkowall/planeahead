@@ -1,0 +1,318 @@
+{
+  "$schema": "./node_modules/wrangler/config-schema.json",
+
+  // PlaneAhead API Worker.
+  //
+  // Layout rules this file follows, all of them load bearing:
+  //
+  //  1. `exports` is inheritable, so the five Durable Object classes are declared exactly once at
+  //     the top level. `exports` and `migrations` are mutually exclusive; there is no `migrations`
+  //     array anywhere in this repository and there never will be.
+  //  2. `exports` does NOT create the `env.*` binding. `durable_objects.bindings` is still
+  //     required, and it is NOT inheritable, so it is repeated verbatim in every environment.
+  //  3. Every other non-inheritable key (durable_objects, kv_namespaces, r2_buckets, queues,
+  //     hyperdrive, analytics_engine_datasets, ratelimits, vars, routes) is repeated in full in
+  //     `env.staging` and `env.production`. A key left out of an environment block is not
+  //     inherited, it is simply absent, and the Worker deploys without that binding.
+  //  4. The top level is the local environment: `wrangler dev` and the Vitest pool read it.
+  //     `--env staging` and `--env production` deploy separate Workers (planeahead-api-staging and
+  //     planeahead-api-production) with their own Durable Object namespaces, queues and secrets.
+  //  5. Queues, R2 buckets, KV namespaces and Analytics Engine datasets all live in one Cloudflare
+  //     account, so each environment gets its own names and ids. A Cloudflare queue accepts a
+  //     single consumer Worker, so a shared queue name between staging and production would make
+  //     the second deploy steal the first one's consumer.
+  "name": "planeahead-api",
+  "main": "src/index.ts",
+
+  // nodejs_compat and nodejs_compat_v2 are both on by default from compatibility date 2026-08-04,
+  // so at 2026-09-01 this flag is a no-op. It is kept explicit so that a future date bump, or a
+  // reader auditing what the Worker may import from node:, does not have to know that history.
+  "compatibility_date": "2026-09-01",
+  "compatibility_flags": ["nodejs_compat"],
+
+  // Inheritable. Declared once. Storage is "sqlite" for every class: the migration runner in
+  // src/do/migrate.ts uses ctx.storage.sql, which does not exist on "legacy-kv".
+  "exports": {
+    "FlightTracker": { "type": "durable-object", "storage": "sqlite" },
+    "DesignatorResolver": { "type": "durable-object", "storage": "sqlite" },
+    "AirportState": { "type": "durable-object", "storage": "sqlite" },
+    "UserInbox": { "type": "durable-object", "storage": "sqlite" },
+    "ProviderBudget": { "type": "durable-object", "storage": "sqlite" },
+  },
+
+  // Inheritable. Five fields, not the abbreviated forms in the plan: "*/15 * * * *" is every
+  // fifteen minutes, "0 3 * * *" is 03:00 UTC daily. A cron with an interval under one hour gets
+  // 30 seconds of CPU on the Paid plan, which is why the reconcile handler pages and fans out to
+  // a queue rather than doing the work inline (increment 7).
+  "triggers": {
+    "crons": ["*/15 * * * *", "0 3 * * *"],
+  },
+
+  "observability": {
+    "enabled": true,
+    "head_sampling_rate": 1,
+  },
+
+  "vars": {
+    "ENVIRONMENT": "local",
+    "API_PUBLIC_URL": "http://localhost:8787",
+  },
+
+  "durable_objects": {
+    "bindings": [
+      { "name": "FLIGHT_TRACKER", "class_name": "FlightTracker" },
+      { "name": "DESIGNATOR_RESOLVER", "class_name": "DesignatorResolver" },
+      { "name": "AIRPORT_STATE", "class_name": "AirportState" },
+      { "name": "USER_INBOX", "class_name": "UserInbox" },
+      { "name": "PROVIDER_BUDGET", "class_name": "ProviderBudget" },
+    ],
+  },
+
+  // One Hyperdrive config, pointed at the Neon direct endpoint (ADR 0002, ADR 0009).
+  //
+  // `localConnectionString` is what `wrangler dev` and the Vitest pool use. Under `wrangler dev`
+  // the environment variable CLOUDFLARE_HYPERDRIVE_LOCAL_CONNECTION_STRING_DB from .dev.vars
+  // overrides it; the Vitest plugin does NOT read that variable, so the value below is what the
+  // test pool sees. Increment 4 opens no database connection at all, so this string only has to
+  // parse. Increments 5 and 8 add a miniflare.hyperdrives override in vitest.config.ts.
+  "hyperdrive": [
+    {
+      "binding": "DB",
+      "id": "0000000000000000000000000000ffff",
+      "localConnectionString": "postgres://planeahead:planeahead@127.0.0.1:5432/planeahead_local",
+    },
+  ],
+
+  "kv_namespaces": [
+    { "binding": "CACHE", "id": "00000000000000000000000000000c01" },
+    { "binding": "PUBLIC", "id": "00000000000000000000000000000c02" },
+    { "binding": "CONFIG", "id": "00000000000000000000000000000c03" },
+  ],
+
+  "r2_buckets": [
+    { "binding": "PUBLIC_BUCKET", "bucket_name": "planeahead-public-local" },
+    { "binding": "PRIVATE_BUCKET", "bucket_name": "planeahead-private-local" },
+  ],
+
+  "queues": {
+    "producers": [
+      { "binding": "PERSIST_QUEUE", "queue": "planeahead-persist-local" },
+      { "binding": "NOTIFY_QUEUE", "queue": "planeahead-notify-local" },
+      { "binding": "PROVIDER_EVENTS_QUEUE", "queue": "planeahead-provider-events-local" },
+      { "binding": "IMPORTS_QUEUE", "queue": "planeahead-imports-local" },
+    ],
+    "consumers": [
+      {
+        "queue": "planeahead-persist-local",
+        "max_batch_size": 100,
+        "max_retries": 5,
+        "dead_letter_queue": "planeahead-persist-dlq-local",
+      },
+      {
+        "queue": "planeahead-notify-local",
+        "max_retries": 5,
+        "dead_letter_queue": "planeahead-notify-dlq-local",
+      },
+      {
+        "queue": "planeahead-provider-events-local",
+        "max_retries": 5,
+        "dead_letter_queue": "planeahead-provider-events-dlq-local",
+      },
+      {
+        "queue": "planeahead-imports-local",
+        "max_retries": 5,
+        "dead_letter_queue": "planeahead-imports-dlq-local",
+      },
+    ],
+  },
+
+  "analytics_engine_datasets": [
+    { "binding": "PROVIDER_CALLS", "dataset": "planeahead_provider_calls_local" },
+    { "binding": "API_METRICS", "dataset": "planeahead_api_metrics_local" },
+    { "binding": "PRODUCT_EVENTS", "dataset": "planeahead_product_events_local" },
+  ],
+
+  // Rate limit namespace ids are account-wide counters: two Workers that name the same id share
+  // the same budget. Staging traffic must never spend production's allowance, so every
+  // environment gets its own block of ids (1001-1003 staging, 2001-2003 production, 3001-3003
+  // local). `period` is hard enumerated to 10 or 60 seconds by the platform.
+  "ratelimits": [
+    { "name": "PUBLIC_RL", "namespace_id": "3001", "simple": { "limit": 120, "period": 10 } },
+    { "name": "USER_RL", "namespace_id": "3002", "simple": { "limit": 600, "period": 60 } },
+    { "name": "EVENTS_RL", "namespace_id": "3003", "simple": { "limit": 60, "period": 60 } },
+  ],
+
+  "env": {
+    "staging": {
+      "observability": {
+        "enabled": true,
+        "head_sampling_rate": 1,
+      },
+
+      "routes": [{ "pattern": "api-staging.planeahead.app", "custom_domain": true }],
+
+      "vars": {
+        "ENVIRONMENT": "staging",
+        "API_PUBLIC_URL": "https://api-staging.planeahead.app",
+      },
+
+      "durable_objects": {
+        "bindings": [
+          { "name": "FLIGHT_TRACKER", "class_name": "FlightTracker" },
+          { "name": "DESIGNATOR_RESOLVER", "class_name": "DesignatorResolver" },
+          { "name": "AIRPORT_STATE", "class_name": "AirportState" },
+          { "name": "USER_INBOX", "class_name": "UserInbox" },
+          { "name": "PROVIDER_BUDGET", "class_name": "ProviderBudget" },
+        ],
+      },
+
+      "hyperdrive": [
+        {
+          "binding": "DB",
+          "id": "11111111111111111111111111111111",
+        },
+      ],
+
+      "kv_namespaces": [
+        { "binding": "CACHE", "id": "11111111111111111111111111111c01" },
+        { "binding": "PUBLIC", "id": "11111111111111111111111111111c02" },
+        { "binding": "CONFIG", "id": "11111111111111111111111111111c03" },
+      ],
+
+      "r2_buckets": [
+        { "binding": "PUBLIC_BUCKET", "bucket_name": "planeahead-public-staging" },
+        { "binding": "PRIVATE_BUCKET", "bucket_name": "planeahead-private-staging" },
+      ],
+
+      "queues": {
+        "producers": [
+          { "binding": "PERSIST_QUEUE", "queue": "planeahead-persist-staging" },
+          { "binding": "NOTIFY_QUEUE", "queue": "planeahead-notify-staging" },
+          { "binding": "PROVIDER_EVENTS_QUEUE", "queue": "planeahead-provider-events-staging" },
+          { "binding": "IMPORTS_QUEUE", "queue": "planeahead-imports-staging" },
+        ],
+        "consumers": [
+          {
+            "queue": "planeahead-persist-staging",
+            "max_batch_size": 100,
+            "max_retries": 5,
+            "dead_letter_queue": "planeahead-persist-dlq-staging",
+          },
+          {
+            "queue": "planeahead-notify-staging",
+            "max_retries": 5,
+            "dead_letter_queue": "planeahead-notify-dlq-staging",
+          },
+          {
+            "queue": "planeahead-provider-events-staging",
+            "max_retries": 5,
+            "dead_letter_queue": "planeahead-provider-events-dlq-staging",
+          },
+          {
+            "queue": "planeahead-imports-staging",
+            "max_retries": 5,
+            "dead_letter_queue": "planeahead-imports-dlq-staging",
+          },
+        ],
+      },
+
+      "analytics_engine_datasets": [
+        { "binding": "PROVIDER_CALLS", "dataset": "planeahead_provider_calls_staging" },
+        { "binding": "API_METRICS", "dataset": "planeahead_api_metrics_staging" },
+        { "binding": "PRODUCT_EVENTS", "dataset": "planeahead_product_events_staging" },
+      ],
+
+      "ratelimits": [
+        { "name": "PUBLIC_RL", "namespace_id": "1001", "simple": { "limit": 120, "period": 10 } },
+        { "name": "USER_RL", "namespace_id": "1002", "simple": { "limit": 600, "period": 60 } },
+        { "name": "EVENTS_RL", "namespace_id": "1003", "simple": { "limit": 60, "period": 60 } },
+      ],
+    },
+
+    "production": {
+      "observability": {
+        "enabled": true,
+        "head_sampling_rate": 0.1,
+      },
+
+      "routes": [{ "pattern": "api.planeahead.app", "custom_domain": true }],
+
+      "vars": {
+        "ENVIRONMENT": "production",
+        "API_PUBLIC_URL": "https://api.planeahead.app",
+      },
+
+      "durable_objects": {
+        "bindings": [
+          { "name": "FLIGHT_TRACKER", "class_name": "FlightTracker" },
+          { "name": "DESIGNATOR_RESOLVER", "class_name": "DesignatorResolver" },
+          { "name": "AIRPORT_STATE", "class_name": "AirportState" },
+          { "name": "USER_INBOX", "class_name": "UserInbox" },
+          { "name": "PROVIDER_BUDGET", "class_name": "ProviderBudget" },
+        ],
+      },
+
+      "hyperdrive": [
+        {
+          "binding": "DB",
+          "id": "22222222222222222222222222222222",
+        },
+      ],
+
+      "kv_namespaces": [
+        { "binding": "CACHE", "id": "22222222222222222222222222222c01" },
+        { "binding": "PUBLIC", "id": "22222222222222222222222222222c02" },
+        { "binding": "CONFIG", "id": "22222222222222222222222222222c03" },
+      ],
+
+      "r2_buckets": [
+        { "binding": "PUBLIC_BUCKET", "bucket_name": "planeahead-public" },
+        { "binding": "PRIVATE_BUCKET", "bucket_name": "planeahead-private" },
+      ],
+
+      "queues": {
+        "producers": [
+          { "binding": "PERSIST_QUEUE", "queue": "planeahead-persist" },
+          { "binding": "NOTIFY_QUEUE", "queue": "planeahead-notify" },
+          { "binding": "PROVIDER_EVENTS_QUEUE", "queue": "planeahead-provider-events" },
+          { "binding": "IMPORTS_QUEUE", "queue": "planeahead-imports" },
+        ],
+        "consumers": [
+          {
+            "queue": "planeahead-persist",
+            "max_batch_size": 100,
+            "max_retries": 5,
+            "dead_letter_queue": "planeahead-persist-dlq",
+          },
+          {
+            "queue": "planeahead-notify",
+            "max_retries": 5,
+            "dead_letter_queue": "planeahead-notify-dlq",
+          },
+          {
+            "queue": "planeahead-provider-events",
+            "max_retries": 5,
+            "dead_letter_queue": "planeahead-provider-events-dlq",
+          },
+          {
+            "queue": "planeahead-imports",
+            "max_retries": 5,
+            "dead_letter_queue": "planeahead-imports-dlq",
+          },
+        ],
+      },
+
+      "analytics_engine_datasets": [
+        { "binding": "PROVIDER_CALLS", "dataset": "planeahead_provider_calls" },
+        { "binding": "API_METRICS", "dataset": "planeahead_api_metrics" },
+        { "binding": "PRODUCT_EVENTS", "dataset": "planeahead_product_events" },
+      ],
+
+      "ratelimits": [
+        { "name": "PUBLIC_RL", "namespace_id": "2001", "simple": { "limit": 120, "period": 10 } },
+        { "name": "USER_RL", "namespace_id": "2002", "simple": { "limit": 600, "period": 60 } },
+        { "name": "EVENTS_RL", "namespace_id": "2003", "simple": { "limit": 60, "period": 60 } },
+      ],
+    },
+  },
+}

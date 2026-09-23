@@ -9,6 +9,119 @@ increment is reviewed.
 | 2. Shared contracts | Fable 5.1 build and fixes, Opus 5 review panel | Fable ~970k output (build 714k incl. two stalled restarts, fix rounds 160k + 94k); Opus ~620k (two reviewers 365k, twelve skeptics 139k, two re-reviews 115k) | ~4.5 h from launch to final commit, of which ~1 h was API and GitHub stalls on the VPN      | `packages/shared`: uuidv7, flight key (ADR 0003), Zod 4 boundary schemas, provider interfaces, cost table, cadence engine with the SLO table and a simulation that derives every constant, RPC and sync envelopes, Live Activity state, secret patterns; `docs/architecture.md` generated from code with a drift test; ADR 0003 and 0006. Review: 15 findings (10 API design, 5 correctness), every blocker and major sent to two Opus skeptics (spec lens refuted 4 as deliberate spec choices, reproduction lens confirmed all real defects), 17 items fixed, re-review found 3 regressions in the fixes (fixed in round 2, re-verified by execution), orchestrator closed the 20-minute pre-boarding hole the honest report exposed. Derived constants: A2 74 polls / 122 PE / $0.61 list (plan wrote 72 / 120 / $0.60 under a round() slot rule), A1 84, literal 181, B 5; AeroDataBox 2 / 24 / 40 units at 3 / 14 / 30 days (plan wrote 4 / 26 / 42). 387 tests. |
 | 3. Database schema  | Fable 5.1 build and fix, Opus 5 review panel   | Fable ~900k (build 448k, fix 455k); Opus ~2.1M (two reviewers 577k, fourteen skeptics ~1.3M, re-review 232k); orchestrator close-out on top                   | ~1 h 55 min workflow plus ~50 min close-out                                                 | `packages/db`: 70 tables in 9 schema files (the plan's 61 undercounted the spec's normative list), migration 0000 plus a generated set_updated_at migration with no-op WHEN guards, embedded PostgreSQL 18.4 harness (initdb 3.2 s cold, 0.6 s warm; skipped when TEST_DATABASE_URL is set, which is how CI's postgres:18 service container is used), withDb and createNodeDb, a URL-only migrator with pooler and version guards, seed loaders with a Content-Length and SHA-256 manifest and IANA-checked timezone overrides (739 accepted, 5 rejected and listed), schema-review.md, ADR 0002, 0007, 0009. Review: 19 findings, 7 serious ones sent to two skeptics each (spec lens refuted 4 as deliberate choices, reproduction lens confirmed every physical defect), 22 items fixed, re-review confirmed each by execution and left 4 nits, all applied in the close-out along with two forward-looking columns increments 6 and 7 need. 166 tests.            |
 
+## Deviations and decisions (increment 4 review fixes)
+
+Applied on top of `b824ae4` after the Opus review panel. The spike results ruling E8 asks for are
+recorded where they are load-bearing rather than repeated here: spike 3's answer (`PUBLIC_RL`
+DOES enforce inside the Workers Vitest pool, 300 calls against the 120-per-10-s binding returned
+180 failures) is the docstring of `apps/api/test/workers/rate-limit.test.ts`, and the `exports`
+and alarm findings are in `apps/api/vitest.config.ts` and `apps/api/test/workers/do-ping.test.ts`.
+
+- **The middleware chain moved to `apps/api/src/app.ts`.** `createApp()` is now the only place
+  `use()` is called on the root app, and every test that needs the chain calls it. The chain's
+  registration order is a runtime contract, and three test files had been reproducing it inverted
+  (auth registered before the middleware under test), which is why a Worker that answered 500 to
+  every mutating request carrying an `Idempotency-Key` shipped with 74 green tests. `src/index.ts`
+  still owns the routes, because only the chained `.route()` expression carries the RPC types.
+- **`c.var.user ?? null` everywhere ahead of the auth slot.** The `Variables` generic types the
+  value as `AuthenticatedUser | null` and cannot express "not set yet", so a strict `=== null`
+  test reads `user.id` off `undefined`. Applied to `storeFor`, `scopeFor`, `principalLimiter` and
+  `requireUser`; the last one failed OPEN before, which is the dangerous direction for a guard.
+- **`handleError` keeps Hono's `HTTPException` branch.** A custom `onError` without it turns every
+  401, 403 and 413 signalled by a throw into an opaque 500. Nothing in increment 4 throws one (the
+  house convention is to return the response), but increment 5 mounts the first thrower.
+- **Sentry: stop capturing rather than scrub.** `sendDefaultPii: false` does not stop request body
+  capture, so `sentryOptions` replaces the default `httpServerIntegration` with
+  `maxRequestBodySize: 'none'`. `beforeSendTransaction` was added alongside `beforeSend`, which
+  only ever sees error events. The end-to-end test added for this then found a leak no hand-built
+  event could have: `url.query` and the query half of `url.full` ride out as SEGMENT SPAN
+  attributes, which `event.request` does not cover. The scrubber now clears body, header and query
+  attributes from `contexts.trace.data` and from every `spans[].data`.
+- **Unauthenticated idempotency scopes are per `X-Install-Id`**, the client-owned install id
+  increment 5's `POST /v1/devices` registers, not one shared `anonymous` bucket and not the
+  client IP. The first fix round scoped by `CF-Connecting-IP`, which closed the cross-caller leak
+  only for callers on different addresses and broke the one retry the key exists for: a phone
+  moving from WiFi to LTE mid-retry changed scope and created its resource twice. A keyed request
+  with neither a user nor an install id is answered 400 `idempotency_scope_missing` rather than
+  run without the guarantee it asked for. Ruling E6 stands (idempotency ahead of auth), so the
+  Postgres store and the per-user scope stay in the file as the documented path for the `/v1`
+  mount behind auth in increment 8 and are stated, in code and in tests, to be unreachable from
+  the global slot until then.
+- **New ESLint rule `planeahead/no-literal-control-characters`**, with a RuleTester unit test and
+  a `.gitattributes` backstop. A raw NUL in a template literal made git classify
+  `apps/api/src/middleware/idempotency.ts` as binary (`Bin 0 -> 9233 bytes`), costing the one file
+  no diff-based review could read its diff, its line-level comments and its three-way merge.
+  Prettier, tsc and the toolchain guard all accepted it. The rule scans raw source text, so a
+  control character in a comment or a regex is caught too, and it is enabled for every linted
+  file rather than only `apps/api/src`.
+- **The cron seam is async now**, while every handler is one log line: `runCron` and `scheduled`
+  return `Promise<void>`, handlers are typed `CronHandler`, and the expression table is injectable
+  so a rejected handler's path is testable. Increment 7's reconcile has to page and enqueue, and a
+  `void` seam offered only two bad ways to express that.
+- **`SqlMigrationError` gained `kind` and `foundVersion`.** The version-ahead path used to put the
+  object's schema version in `migrationId`, which told an operator that a migration that had
+  applied cleanly was the failure. `migrationId` is now always an id this build cannot account
+  for.
+- **`AnalyticsBudget` counts a missing dataset as `skipped`, not `failed`**, and names it once per
+  invocation as `analytics_dataset_missing`. A missing `analytics_engine_datasets` block (a
+  non-inheritable key) used to report exactly like a batch of oversized points.
+- **`truncateToBytes` cuts on a codepoint boundary.** Slicing bytes and decoding puts U+FFFD at
+  the cut, which re-encodes to three bytes, so the clamp could return a value LARGER than the
+  platform limit it exists to enforce.
+- **turbo.json names the migration journal and the generator** in the `typecheck` and `test`
+  inputs. `scripts/**` resolves inside the package (`apps/api/scripts`, which does not exist), so
+  a new migration used to cache-hit and replay a stale `up to date` line while the compiled-in
+  `MIGRATION_HASH` still reported the previous schema. The `test-workers` CI job now also runs
+  `gen-migration-hash.mjs --check`, because it regenerates the file before vitest and would
+  otherwise test the value it just wrote.
+- **`deploy-staging.yml` got the path filter its header already claimed**, and repeats typecheck,
+  lint, the Worker suite and the dry run as steps before the deploy. ci.yml is a separate workflow
+  triggered by the same push, so nothing ordered the two and a commit that failed CI still ran
+  forward-only migrations against the staging Neon branch. `workflow_run` was rejected: it fires
+  on completion regardless of conclusion and resolves the workflow file from the default branch.
+  The `@planeahead/db` suite is deliberately not repeated there; it needs ci.yml's service
+  container.
+- **vitest, `@vitest/runner` and `@vitest/snapshot` are exact `4.1.11`**, matching the facts
+  sheet. The tildes floated to any 4.1.x and nothing in the repository enforced the pinned value
+  (the toolchain guard's pair assertion covers wrangler, by design).
+- **`testTimeout` is 60 s, not 30.** The old comment's "about 10 seconds" understated the cold
+  first-request cost by 2x. The number varies by an order of magnitude with the Vite transform
+  cache, so the comment now gives the range and the reason rather than one figure.
+- **`.dev.vars.example` lists the rest of the secret set** from plan section 5 as commented-out
+  placeholders tagged with the increment that turns each one on, so the file is a checklist rather
+  than a snapshot of what increment 4 happens to read.
+- **`deploy-staging.yml` checks the migration hash first, immediately after install.** The first
+  fix round inserted typecheck, test and the dry run between install and the `--check` step, and
+  the api `typecheck` and `test` scripts regenerate the constant, so the check compared the file
+  they had just written and could never fail. `tools/workflows/migration-hash-check.test.js`
+  (run by the root `test:tools` script, which replaces `test:eslint-rules`) asserts in every job
+  that checks that the check precedes every regenerating step.
+- **`registerChain` returns the order it registered.** `MIDDLEWARE_ORDER` was a hand-maintained
+  list compared to a literal copy of itself, and the suite stayed green with cors and rate-limit
+  swapped in the code. The slots are now `[name, handler]` pairs the loop registers from, and
+  chain.test.ts compares the returned names to the constant.
+  | 4. API Worker bootstrap | Opus 5 build and first fix, Fable 5.1 escalation fix, Opus 5 review panel | Opus ~2.6M (build 732k, two reviewers 469k, sixteen skeptics ~1.3M, fix 568k, two re-reviews 403k); Fable 238k (escalation fix); orchestrator close-out | ~3 h 20 min workflow plus ~30 min close-out | `apps/api`: chained Hono app with `AppType`, six-stage middleware chain registered from a slot list the test observes, `/health` with the generated migration hash and compiled-in DO schema versions, five Durable Object shells over a `_sql_schema_migrations` runner (PRAGMA user_version is unavailable in DO SQLite), `wrangler.jsonc` with `exports` plus per-environment bindings and distinct ratelimit namespace ids, queue consumers that ack per message with a guarded 200-point Analytics Engine budget, cron handlers, Sentry with request-id tagging and scrubbing on both the error and transaction paths, staging deploy workflow, wrangler dry-run and toolchain pair guard in CI, ADR 0004. Spikes: `exports` works under wrangler dev and the Vitest pool; a test-scheduled alarm fires on its own wall clock (the afterEach drain is mandatory); the rate-limit binding enforces in the pool. Review: 23 findings, 8 serious ones sent to skeptics (spec lens refuted 3, reproduction lens confirmed 7), Opus fixed 22; the re-review found the idempotency scope still wrong and a vacuous migration-hash check, so the escalation rule sent the second round to Fable (anonymous idempotency now scoped by a client-owned `X-Install-Id`, the ordering guard made real, the chain constant derived from registration); the final re-review left one minor and two nits, applied in the close-out. 129 api tests, 693 total. |
+
+## Pinned versions (increment 4)
+
+| Package                                  | Pin                        | Resolved | Why this pin                                                                |
+| ---------------------------------------- | -------------------------- | -------- | --------------------------------------------------------------------------- |
+| wrangler                                 | `4.135.0` (exact)          | 4.135.0  | Pair-locked to the Vitest plugin's bundled wrangler by the toolchain guard. |
+| @cloudflare/vitest-plugin                | `1.1.13` (exact)           | 1.1.13   | `cloudflareTest()` plugin; SELF is deprecated; Vitest 5 breaks the pool.    |
+| vitest, @vitest/runner, @vitest/snapshot | `4.1.11` (exact)           | 4.1.11   | The plugin's peers, declared explicitly for the isolated linker.            |
+| hono                                     | `^4.13.8`                  | 4.13.8   | Chained app for a complete `AppType`.                                       |
+| @hono/zod-validator                      | `^0.9.1`                   | 0.9.1    | Zod 4 support.                                                              |
+| @sentry/cloudflare, @sentry/hono         | `10.75.0` (exact, matched) | 10.75.0  | `sentry()` middleware plus `withSentry`; the pair must match.               |
+
+## Deviations (increment 4)
+
+- **Middleware chain order stays request-id, sentry, cors, rate-limit, idempotency, auth** (ruling E6), so idempotency scopes anonymous callers by the client-owned `X-Install-Id` header (400 `idempotency_scope_missing` when a keyed request has neither a user nor a valid install id) rather than by IP. The specs for increments 5, 8 and 9 carry the header.
+- **Queue and cron handlers take a context object** `{ env, ctx, log }` rather than loose arguments.
+- **`/health` reports `migrationCount`** alongside the four fields the spec named.
+- **CI splits the api suite into a Postgres-free `test-workers` job** and filters the api package out of the container-backed `test` job; a `wrangler-dry-run` job and a migration-hash ordering guard (a test over the workflow files) were added.
+- **`@cloudflare/workers-types` is transitive only**; `worker-configuration.d.ts` (generated by `wrangler types`) is committed and excluded from Prettier and ESLint.
+- **The rate-limit test drives the real binding** (spike 3 showed it enforces in the pool), and every DO test drains alarms in `afterEach` (spike 2 showed test-scheduled alarms fire on their own).
+
 ## Pinned versions (increment 3)
 
 | Package           | Pin                      | Resolved       | Why this pin                                                                                           |

@@ -14,7 +14,14 @@
         "test/**",
         "*.ts",
         "tsconfig.json",
-        "../../tsconfig.base.json"
+        "../../tsconfig.base.json",
+        // `scripts/**` above resolves inside the PACKAGE (apps/api/scripts), which does not
+        // exist. The api typecheck and test scripts both start by running the repo-root
+        // generator, so the generator and its only input have to be named explicitly or a new
+        // migration cache-hits and replays a stale "up to date" line while the compiled-in
+        // MIGRATION_HASH still reports the previous schema.
+        "../../scripts/gen-migration-hash.mjs",
+        "../../packages/db/migrations/meta/_journal.json"
       ],
       "outputs": ["dist/**"]
     },
@@ -30,7 +37,7 @@
       ]
     },
     "test": {
-      "dependsOn": ["//#test:eslint-rules"],
+      "dependsOn": ["//#test:tools"],
       "inputs": [
         "src/**",
         "scripts/**",
@@ -39,15 +46,21 @@
         "tsconfig.json",
         "vitest.config.ts",
         "../../docs/architecture.md",
-        "../../docs/adr/**"
+        "../../docs/adr/**",
+        // Same reason as typecheck: `pnpm --filter @planeahead/api test` regenerates
+        // src/generated/migration-hash.ts before vitest runs.
+        "../../scripts/gen-migration-hash.mjs",
+        "../../packages/db/migrations/meta/_journal.json"
       ],
       "outputs": []
     },
     "//#lint:root": {
       "inputs": ["eslint.config.js", "scripts/**", "tools/**"]
     },
-    "//#test:eslint-rules": {
-      "inputs": ["tools/eslint/**"]
+    "//#test:tools": {
+      // The ESLint rule tests and the workflow-order test. The latter reads the workflow files,
+      // so they are inputs too or a reordered step would cache-hit against a stale pass.
+      "inputs": ["tools/**", ".github/workflows/**"]
     },
     "//#format:check": {
       "cache": false
