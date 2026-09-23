@@ -44,7 +44,8 @@ describe('GET /health', () => {
     // Named individually rather than compared against a snapshot: a class dropped from the
     // wrangler `exports` map must fail this test, and a snapshot would simply be updated.
     expect(body.doSchemaVersions).toEqual({
-      FlightTracker: 1,
+      // Increment 7: the flight schema, then the outbox's dead-letter columns (final re-review).
+      FlightTracker: 2,
       DesignatorResolver: 2,
       AirportState: 0,
       UserInbox: 0,

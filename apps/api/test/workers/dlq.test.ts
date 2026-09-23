@@ -3,14 +3,20 @@
  * message to R2 at `dlq/{queue}/{messageId}.json`, raises the ops alert once per batch, and
  * acknowledges each message; an archive failure is retried while `max_retries: 2` allows and
  * acknowledged, with the body on the log line, on the last attempt. An archived `persist` message
- * is confirmed to the tracker lifetime its envelope names, exactly as the persist consumer
- * confirms what it wrote; a message that was not archived is confirmed to no one.
+ * is REPORTED to the tracker lifetime its envelope names (`confirmPersisted` with
+ * `deadLettered: true`, on which the tracker stamps and keeps the row) and never confirmed; a
+ * message that was not archived is reported to no one (rulings N1 and N2).
  */
 
 import { createExecutionContext, createMessageBatch, getQueueResult } from 'cloudflare:test';
 import { env } from 'cloudflare:workers';
 import { afterEach, describe, expect, it } from 'vitest';
-import { RPC_SCHEMA_VERSION, flightTrackerOrigin, type FlightKey } from '@planeahead/shared';
+import {
+  ConfirmPersistedRequestV1,
+  RPC_SCHEMA_VERSION,
+  flightTrackerOrigin,
+  type FlightKey,
+} from '@planeahead/shared';
 import { type LogLine, createLogger } from '../../src/observability/log';
 import { handleDeadLetterBatch } from '../../src/queues/dlq';
 import { queue } from '../../src/queues/index';
@@ -36,7 +42,7 @@ describe('dead letter consumer', () => {
         body: { kind: 'flight_instance', seq: 9, origin: 'flight_tracker:AAL-1-2100-01-01-KJFK@1' },
       },
     ]);
-    // The archived message is confirmed to the tracker its origin names; that object holds no
+    // The archived message is reported to the tracker its origin names; that object holds no
     // flight, answers with `matched: false` and arms its own cleanup, drained by afterEach.
     track(testEnv.FLIGHT_TRACKER.getByName('AAL-1-2100-01-01-KJFK', { locationHint: 'enam' }));
     const ctx = createExecutionContext();
@@ -58,16 +64,16 @@ describe('dead letter consumer', () => {
     });
   });
 
-  it('confirms an archived persist message to its tracker lifetime, and a non-tracker one to no one', async () => {
+  it('reports an archived persist message to its tracker lifetime as dead-lettered, never as persisted, and a non-tracker one to no one', async () => {
     const { lines, log } = capture();
-    const confirmed: unknown[] = [];
+    const confirmed: { flightKey: FlightKey; input: unknown }[] = [];
     const trackerFor = (flightKey: FlightKey): ConfirmingTracker => ({
       confirmPersisted: (input) => {
         confirmed.push({ flightKey, input });
         return Promise.resolve({
           rpcVersion: RPC_SCHEMA_VERSION,
-          deleted: 2,
-          remaining: 0,
+          deleted: 0,
+          remaining: 2,
           matched: true,
         });
       },
@@ -85,7 +91,7 @@ describe('dead letter consumer', () => {
         attempts: 6,
         body: { kind: 'flight_event', seq: 7, origin },
       },
-      // Unreadable to the persist consumer too: the envelope is all the confirmation needs.
+      // Unreadable to the persist consumer too: the envelope is all the notice needs.
       {
         id: ids[1] ?? '',
         timestamp: new Date(),
@@ -113,13 +119,20 @@ describe('dead letter consumer', () => {
     expect(confirmed).toEqual([
       {
         flightKey: 'AAL-1-2100-01-01-KJFK',
-        input: { rpcVersion: RPC_SCHEMA_VERSION, epochMs: 5, seqs: [7, 9] },
+        input: { rpcVersion: RPC_SCHEMA_VERSION, epochMs: 5, seqs: [7, 9], deadLettered: true },
       },
     ]);
-    expect(lines.find((line) => line.event === 'persist_confirmed')?.['deleted']).toBe(2);
+    // Never a confirmation: every call this consumer makes carries the flag (ruling N5).
+    for (const call of confirmed) {
+      expect(ConfirmPersistedRequestV1.parse(call.input).deadLettered).toBe(true);
+    }
+    const noted = lines.find((line) => line.event === 'persist_dead_letter_noted');
+    expect(noted?.level).toBe('info');
+    expect(noted?.['remaining']).toBe(2);
+    expect(lines.some((line) => line.event === 'persist_confirmed')).toBe(false);
   });
 
-  it('confirms nothing that was not archived, and logs a confirmation that throws', async () => {
+  it('reports nothing that was not archived, and logs a notice that throws', async () => {
     const { lines, log } = capture();
     let confirmAttempts = 0;
     const trackerFor = (): ConfirmingTracker => ({
@@ -140,7 +153,7 @@ describe('dead letter consumer', () => {
       'put'
     >;
 
-    // Archive failed on the last allowed attempt: acknowledged, not archived, not confirmed.
+    // Archive failed on the last allowed attempt: acknowledged, not archived, not reported.
     const lost = createMessageBatch('planeahead-persist-dlq-local', [message('lost', 3)]);
     const lostCtx = createExecutionContext();
     await handleDeadLetterBatch(
@@ -166,6 +179,7 @@ describe('dead letter consumer', () => {
     const failure = lines.find((line) => line.event === 'persist_confirm_failed');
     expect(failure?.level).toBe('error');
     expect(failure?.['flight_key']).toBe('AAL-2-2100-01-01-KJFK');
+    expect(failure?.['dead_lettered']).toBe(true);
   });
 
   it('raises one fatal ops alert per batch naming the queue and the message ids', async () => {

@@ -14,8 +14,12 @@
  *     flight whose cadence has nothing left, whatever its status says;
  *   - the +22 h alarm keeps its time when the cadence alarm is delivered while another path is
  *     finishing the flight (an early delivery re-arms, and counts no deferral);
- *   - every acknowledged persist message is confirmed, an unreadable one and a dead-lettered one
- *     included, so the finished tracker can delete itself.
+ *   - every message the persist consumer acknowledges is confirmed, an unreadable one included,
+ *     so the finished tracker can delete itself;
+ *   - a dead-lettered row is never confirmed: the dead-letter consumer's notice stamps it and the
+ *     flush re-sends it after a spacing that doubles per dead-lettering, so a persist outage
+ *     longer than the retry window heals on the first re-send after recovery and a poison row
+ *     settles at one dead-letter event a day under the same stuck alert (rulings N1 to N3).
  */
 
 import {
@@ -25,9 +29,13 @@ import {
   runInDurableObject,
 } from 'cloudflare:test';
 import { eq } from 'drizzle-orm';
-import { flightEvents, flightInstances, openDb } from '@planeahead/db';
+import { flightEvents, flightInstances, openDb, type Db } from '@planeahead/db';
 import { afterEach, describe, expect, it } from 'vitest';
-import { RPC_SCHEMA_VERSION, parseFlightTrackerOrigin } from '@planeahead/shared';
+import {
+  RPC_SCHEMA_VERSION,
+  deadLetterResendSpacingMs,
+  parseFlightTrackerOrigin,
+} from '@planeahead/shared';
 import {
   FINISH_ALARM_MS,
   FINISH_ALERT_AFTER_ATTEMPTS,
@@ -59,12 +67,6 @@ import {
 afterEach(drainTouched);
 
 const quietLog = createLogger({}, () => undefined);
-
-function sleep(ms: number): Promise<void> {
-  return new Promise((resolve) => {
-    setTimeout(resolve, ms);
-  });
-}
 
 async function seeded(flight: TestFlight, clock: number): Promise<TrackerHarness> {
   await scriptAdb(flight, [adbOk(flight, { phase: onTimePhaseAt(flight, clock) })]);
@@ -105,11 +107,23 @@ async function confirmAll(tracker: TrackerHarness): Promise<void> {
   }
 }
 
+interface PersistOutcome {
+  readonly acked: string[];
+  readonly retried: string[];
+}
+
+/**
+ * Runs the persist consumer over `bodies` in batches of 100, against the real database unless
+ * `db` says otherwise, and reports what it acknowledged and what it sent back for a retry.
+ */
 async function persist(
   bodies: readonly unknown[],
-  capture?: (message: string) => void,
-): Promise<void> {
-  const db = openDb(testEnv);
+  options: { capture?: ((message: string) => void) | undefined; db?: Db | undefined } = {},
+): Promise<PersistOutcome> {
+  const db = options.db ?? openDb(testEnv);
+  const capture = options.capture;
+  const acked: string[] = [];
+  const retried: string[] = [];
   for (let i = 0; i < bodies.length; i += 100) {
     const batch = createMessageBatch(
       'planeahead-persist-local',
@@ -120,12 +134,17 @@ async function persist(
         body,
       })),
     );
+    const ctx = createExecutionContext();
     await handlePersistBatch(
       batch,
-      { env: testEnv, ctx: createExecutionContext(), log: quietLog },
+      { env: testEnv, ctx, log: quietLog },
       { db, capture: capture === undefined ? undefined : (message) => void capture(message) },
     );
+    const result = await getQueueResult(batch, ctx);
+    acked.push(...result.explicitAcks);
+    retried.push(...result.retryMessages.map((message) => message.msgId));
   }
+  return { acked, retried };
 }
 
 describe('the +22 h alarm never discards an outbox row (L2)', () => {
@@ -336,7 +355,9 @@ describe('a finished flight never gets a second lifetime (L9)', () => {
         ?.created_at_ms ?? 0;
     const alerts: string[] = [];
     // Lifetime 1 lands in Postgres and R2, and its object deletes itself.
-    await persist(tracker.outbox.sent.splice(0), (message) => alerts.push(message));
+    await persist(tracker.outbox.sent.splice(0), {
+      capture: (message) => void alerts.push(message),
+    });
     expect(alerts).toEqual([]);
     await tracker.setClock(at + FINISH_ALARM_MS);
     expect(await tracker.runAlarm()).toBe(true);
@@ -383,7 +404,9 @@ describe('a finished flight never gets a second lifetime (L9)', () => {
     expect(await (await testEnv.PRIVATE_BUCKET.get(key1))?.text()).toBe(archive1);
 
     // Postgres refuses the whole lifetime, once, loudly; every message is still acknowledged.
-    await persist(tracker.outbox.sent.splice(0), (message) => alerts.push(message));
+    await persist(tracker.outbox.sent.splice(0), {
+      capture: (message) => void alerts.push(message),
+    });
     expect(alerts).toEqual(['flight_lifetime_rejected']);
     const [after] = await db
       .select({
@@ -485,7 +508,7 @@ async function resolvedWithoutTracker(flight: TestFlight, clock: number): Promis
 }
 
 describe('an alarm delivered while another path finishes the flight', () => {
-  it('leaves the +22 h alarm in place when the cadence alarm lands during a slow-archive refresh finish', async () => {
+  it('leaves the +22 h alarm in place when the cadence alarm lands during a refresh finish', async () => {
     const flight = uniqueFlight();
     const clock = flight.scheduledOut.getTime() - 2 * HOUR_MS;
     const tracker = await seeded(flight, clock);
@@ -495,12 +518,25 @@ describe('an alarm delivered while another path finishes the flight', () => {
     const expected = adbOk(flight, { phase: 'expected' });
     const body = (expected.body as Record<string, unknown>[])[0] ?? {};
     await scriptAdb(flight, [{ status: 200, body: [{ ...body, status: 'Canceled' }] }]);
-    // The archive put takes a while, and the cadence alarm is delivered while it is pending.
-    await runInDurableObject(tracker.stub, (instance: FlightTracker) => {
+    // The archive put parks on a latch the test holds, so the finish stays in progress for
+    // exactly as long as the test needs (no sleep: rr8-early-alarm-test-timing). Once released,
+    // the put counts whether the alarm handler had been entered meanwhile: the pool's runner,
+    // like the platform, clears the alarm before it calls `alarm()`, so a null `getAlarm()` here
+    // means the handler is inside the object, parked on the finish (step 0).
+    const gate = { archiving: false, alarmsSeenDuringArchive: 0 };
+    let release: (() => void) | undefined;
+    const latch = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    await runInDurableObject(tracker.stub, (instance: FlightTracker, state) => {
       const bucket = instance.bucket;
       instance.bucket = {
         put: async (key: string, ...rest: unknown[]) => {
-          await scheduler.wait(800);
+          gate.archiving = true;
+          await latch;
+          if ((await state.storage.getAlarm()) === null) {
+            gate.alarmsSeenDuringArchive += 1;
+          }
           return (bucket.put as (...args: unknown[]) => Promise<R2Object | null>)(key, ...rest);
         },
       } as unknown as Pick<R2Bucket, 'put'>;
@@ -511,10 +547,20 @@ describe('an alarm delivered while another path finishes the flight', () => {
       reason: 'user_refresh',
       userId: 'user-cancel',
     });
-    await sleep(200);
-    const ran = await tracker.runAlarm();
+    // Each poll is a round trip into the object, and so a yield that lets the refresh run on
+    // until its put parks.
+    let archiving = false;
+    while (!archiving) {
+      archiving = await runInDurableObject(tracker.stub, () => gate.archiving);
+    }
+    // The alarm is delivered while the finish is in progress, and the latch opens behind it:
+    // calls into one object are delivered in order, and the handler parks at step 0 before the
+    // release can be delivered.
+    const ran = tracker.runAlarm();
+    await runInDurableObject(tracker.stub, () => release?.());
     expect(await refresh).toMatchObject({ outcome: 'refreshed', phase: 'finished' });
-    expect(ran).toBe(true);
+    expect(await ran).toBe(true);
+    expect(gate.alarmsSeenDuringArchive).toBe(1);
 
     // The early delivery re-armed to the finish's own time and counted no deferral; the finish
     // logic did not run 22 hours early.
@@ -535,20 +581,22 @@ describe('an alarm delivered while another path finishes the flight', () => {
   });
 });
 
-describe('every acknowledged persist message is confirmed', () => {
-  /**
-   * The distinct rows a tracker sent (the finish re-sends rows unconfirmed past the grace), with
-   * one `flight_event` row picked out: an instance row is the prerequisite for the events behind
-   * it, so losing one of those would leave the rest retrying, which is not what is under test.
-   */
-  function distinctSent(tracker: TrackerHarness) {
-    const unique = [...new Map(tracker.outbox.sent.splice(0).map((m) => [m.seq, m])).values()];
-    const index = unique.findIndex((m) => m.kind === 'flight_event');
-    const picked = unique[index];
-    expect(picked).toBeDefined();
-    return { unique, index, picked, rest: unique.filter((_m, i) => i !== index) };
+/**
+ * The distinct rows a tracker sent (the finish re-sends rows unconfirmed past the grace), with
+ * one `flight_event` row picked out: an instance row is the prerequisite for the events behind
+ * it, so losing one of those would leave the rest retrying, which is not what is under test.
+ */
+function distinctSent(tracker: TrackerHarness) {
+  const unique = [...new Map(tracker.outbox.sent.splice(0).map((m) => [m.seq, m])).values()];
+  const index = unique.findIndex((m) => m.kind === 'flight_event');
+  const picked = unique[index];
+  if (picked === undefined) {
+    throw new Error('the tracker sent no flight_event row');
   }
+  return { unique, index, picked, rest: unique.filter((_m, i) => i !== index) };
+}
 
+describe('every message the persist consumer acknowledges is confirmed', () => {
   it('a message the consumer cannot read is confirmed, and the finished tracker deletes itself', async () => {
     const flight = uniqueFlight();
     const { tracker, at } = await finished(flight);
@@ -564,29 +612,142 @@ describe('every acknowledged persist message is confirmed', () => {
     expect(await tracker.tables()).toEqual([]);
     expect(await tracker.alarmAt()).toBeNull();
   });
+});
 
-  it('a dead-lettered message is confirmed once archived, and the finished tracker deletes itself', async () => {
+describe('a dead-lettered row is kept and re-sent with a doubling spacing (N1 to N3)', () => {
+  /** A database handle that refuses every call: Postgres, or Hyperdrive in front of it, is down. */
+  const postgresDown = new Proxy(
+    {},
+    {
+      get: () => {
+        throw new Error('postgres unavailable');
+      },
+    },
+  ) as unknown as Db;
+
+  /** Runs the dead-letter consumer on `body` as a message that exhausted its five retries. */
+  async function deadLetter(body: unknown): Promise<void> {
+    const id = `dlq-${crypto.randomUUID()}`;
+    const batch = createMessageBatch('planeahead-persist-dlq-local', [
+      { id, timestamp: new Date(), attempts: 6, body },
+    ]);
+    const ctx = createExecutionContext();
+    await handleDeadLetterBatch(
+      batch,
+      'persist',
+      { env: testEnv, ctx, log: quietLog },
+      { capture: () => undefined },
+    );
+    expect((await getQueueResult(batch, ctx)).explicitAcks).toEqual([id]);
+    expect(await testEnv.PRIVATE_BUCKET.get(deadLetterArchiveKey('persist', id))).not.toBeNull();
+  }
+
+  it('heals a persist outage longer than the retry window on the first re-send after recovery', async () => {
     const flight = uniqueFlight();
     const { tracker, at } = await finished(flight);
     const { picked, rest } = distinctSent(tracker);
     await persist(rest);
     expect((await tracker.stub.health()).unconfirmedOutbox).toBe(1);
 
-    // The remaining row exhausted its retries: the dead-letter consumer archives it, confirms it.
-    const id = `dlq-${crypto.randomUUID()}`;
-    const batch = createMessageBatch('planeahead-persist-dlq-local', [
-      { id, timestamp: new Date(), attempts: 6, body: picked },
-    ]);
-    const ctx = createExecutionContext();
-    await handleDeadLetterBatch(batch, 'persist', { env: testEnv, ctx, log: quietLog });
-    const result = await getQueueResult(batch, ctx);
-    expect(result.explicitAcks).toEqual([id]);
-    expect(await testEnv.PRIVATE_BUCKET.get(deadLetterArchiveKey('persist', id))).not.toBeNull();
+    // Postgres is down for longer than the consumer's five retries: every delivery fails, nothing
+    // is acknowledged, nothing is confirmed.
+    const failed = await persist([picked], { db: postgresDown });
+    expect(failed).toEqual({ acked: [], retried: [expect.stringMatching(/^m-0-/)] });
+    expect((await tracker.stub.health()).unconfirmedOutbox).toBe(1);
 
-    expect((await tracker.stub.health()).unconfirmedOutbox).toBe(0);
+    // The message dead-letters half an hour before the finish alarm is due. The dead-letter
+    // consumer's notice stamps the row and confirms nothing: the row stays.
+    const deadLetteredAt = at + FINISH_ALARM_MS - 30 * MINUTE_MS;
+    await tracker.setClock(deadLetteredAt);
+    await deadLetter(picked);
+    expect(
+      await tracker.rows('SELECT seq, dead_letter_count, last_dead_lettered_at_ms FROM outbox'),
+    ).toEqual([
+      { seq: picked.seq, dead_letter_count: 1, last_dead_lettered_at_ms: deadLetteredAt },
+    ]);
+    expect((await tracker.stub.health()).unconfirmedOutbox).toBe(1);
+
+    // The finish alarm, half an hour later: the row's one-hour spacing has not passed, so the
+    // flush holds it back and the object defers an hour, as for any unconfirmed row.
     await tracker.setClock(at + FINISH_ALARM_MS);
+    expect(await tracker.runAlarm()).toBe(true);
+    expect(tracker.outbox.sent).toEqual([]);
+    expect(await tracker.alarmAt()).toBe(at + FINISH_ALARM_MS + FINISH_RETRY_MS);
+
+    // Postgres is back. The next flush, past the spacing, re-sends the row; the consumer writes
+    // it and confirms it; the alarm after that finds the outbox empty and deletes the object.
+    await tracker.setClock(at + FINISH_ALARM_MS + FINISH_RETRY_MS);
+    expect(await tracker.runAlarm()).toBe(true);
+    expect(tracker.outbox.sent.map((message) => message.seq)).toEqual([picked.seq]);
+    const healed = await persist(tracker.outbox.sent.splice(0));
+    expect(healed.retried).toEqual([]);
+    expect((await tracker.stub.health()).unconfirmedOutbox).toBe(0);
+    await tracker.setClock(at + FINISH_ALARM_MS + 2 * FINISH_RETRY_MS);
     expect(await tracker.runAlarm()).toBe(true);
     expect(await tracker.tables()).toEqual([]);
     expect(await tracker.alarmAt()).toBeNull();
+  });
+
+  it('spaces a poison row out to 16 hours after five dead-letterings, with the stuck alert once', async () => {
+    const flight = uniqueFlight();
+    const alerts: { message: string; extra: Record<string, unknown> }[] = [];
+    const { tracker, at } = await finished(flight);
+    await runInDurableObject(tracker.stub, (instance: FlightTracker) => {
+      instance.capture = (message, context) => {
+        alerts.push({ message, extra: context.extra });
+      };
+    });
+    const { picked, rest } = distinctSent(tracker);
+    await persist(rest);
+
+    // The row the consumer can never write dead-letters straight away (the clock is the finish).
+    await deadLetter(picked);
+    let count = 1;
+    // Hourly finish alarms from +22 h for thirty hours: the row is re-sent exactly when its
+    // spacing has passed (1 h, 2 h, 4 h, 8 h, then 16 h after the fifth dead-lettering), and
+    // every re-send but the last dead-letters again.
+    const first = at + FINISH_ALARM_MS;
+    const expectedResends = [
+      first,
+      first + 2 * HOUR_MS,
+      first + 6 * HOUR_MS,
+      first + 14 * HOUR_MS,
+      first + 30 * HOUR_MS,
+    ];
+    const resends: number[] = [];
+    for (let clock = first; clock <= first + 30 * HOUR_MS; clock += FINISH_RETRY_MS) {
+      await tracker.setClock(clock);
+      expect(await tracker.runAlarm()).toBe(true);
+      const sent = tracker.outbox.sent.splice(0);
+      if (sent.length === 0) {
+        continue;
+      }
+      expect(sent.map((message) => message.seq)).toEqual([picked.seq]);
+      resends.push(clock);
+      if (count < 5) {
+        await deadLetter(sent[0]);
+        count += 1;
+      }
+    }
+    expect(resends).toEqual(expectedResends);
+    expect(deadLetterResendSpacingMs(5)).toBe(16 * HOUR_MS);
+    expect(
+      await tracker.rows('SELECT seq, dead_letter_count, last_dead_lettered_at_ms FROM outbox'),
+    ).toEqual([
+      { seq: picked.seq, dead_letter_count: 5, last_dead_lettered_at_ms: first + 14 * HOUR_MS },
+    ]);
+    // Still alive, still deferring hourly, alerted once (at the sixth deferral) and never again.
+    expect((await tracker.tables()).length).toBeGreaterThan(0);
+    expect(await tracker.alarmAt()).toBe(first + 31 * HOUR_MS);
+    expect(alerts).toHaveLength(1);
+    expect(alerts[0]).toMatchObject({
+      message: 'flight_tracker_outbox_stuck',
+      extra: {
+        unconfirmed: 1,
+        unsent: 0,
+        dead_lettered: 1,
+        attempts: FINISH_ALERT_AFTER_ATTEMPTS,
+      },
+    });
   });
 });

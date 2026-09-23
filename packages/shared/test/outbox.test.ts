@@ -1,6 +1,8 @@
 import { describe, expect, it } from 'vitest';
 import type { FlightKey } from '../src/flight-key';
 import {
+  DEAD_LETTER_RESEND_MAX_MS,
+  DEAD_LETTER_RESEND_MS,
   FLIGHT_TRACKING_STATES,
   FlightEventOutboxPayloadV1,
   FlightInstanceOutboxPayloadV1,
@@ -8,6 +10,7 @@ import {
   OUTBOX_SCHEMA_VERSION,
   PersistMessageV1,
   ReconcileMessageV1,
+  deadLetterResendSpacingMs,
   designatorResolverOrigin,
   flightTrackerOrigin,
   parseFlightTrackerOrigin,
@@ -222,6 +225,21 @@ describe('PersistMessageV1', () => {
         .success,
     ).toBe(false);
     expect(PersistMessageV1.safeParse({ seq: 1, origin: ORIGIN }).success).toBe(false);
+  });
+});
+
+describe('deadLetterResendSpacingMs', () => {
+  it('doubles from an hour per dead-lettering and caps at a day', () => {
+    expect(DEAD_LETTER_RESEND_MS).toBe(3_600_000);
+    expect(DEAD_LETTER_RESEND_MAX_MS).toBe(24 * 3_600_000);
+    expect([1, 2, 3, 4, 5].map(deadLetterResendSpacingMs)).toEqual(
+      [1, 2, 4, 8, 16].map((hours) => hours * 3_600_000),
+    );
+    expect(deadLetterResendSpacingMs(6)).toBe(DEAD_LETTER_RESEND_MAX_MS);
+    // A row dead-lettered daily for years never wraps to zero: 2 ** 1024 is Infinity, which
+    // the cap still bounds.
+    expect(deadLetterResendSpacingMs(2_000)).toBe(DEAD_LETTER_RESEND_MAX_MS);
+    expect(deadLetterResendSpacingMs(0)).toBe(DEAD_LETTER_RESEND_MS);
   });
 });
 

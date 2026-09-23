@@ -50,10 +50,14 @@
  * write the final KV snapshot itself, and arm one alarm 22 hours out. That alarm calls
  * `deleteAll()` ONLY once the outbox is empty, every row confirmed; while rows remain it re-arms
  * hourly, bounded by nothing but the rows draining, and raises the ops alert once after the sixth
- * deferral. Every acknowledged persist message is confirmed, an unreadable one and a
- * dead-lettered one included (the persist and dead-letter consumers confirm by origin and seq,
- * the latter once the raw message is archived under `dlq/persist/`), so that hourly retry covers
- * only rows that never reached the queue. The finish alarm's due time is derived (the finish
+ * deferral. Every message the persist consumer acknowledges is confirmed, an unreadable one
+ * included (by origin and seq); the dead-letter consumer confirms nothing and instead reports a
+ * dead-lettered row (`confirmPersisted` with `deadLettered`), which is stamped, kept and re-sent
+ * after a spacing that doubles per dead-lettering (an hour, capped at a day), so a persist outage
+ * longer than the queue's retry window heals on the first re-send after recovery while a poison
+ * row is a decaying stream of dead-letter events under the same stuck alert. The hourly retry
+ * therefore covers rows that never reached the queue and rows the queue could not deliver. The
+ * finish alarm's due time is derived (the finish
  * instant plus 22 hours plus an hour per deferral): a delivery that arrives before it, such as
  * the cadence alarm already in flight while a user refresh finished the flight, re-asserts that
  * time and counts nothing. A finish reason of `arrived` means the cadence's tail poll after
@@ -68,13 +72,15 @@
  * its rows.
  *
  * Outbox rows are deleted only when the persist consumer confirms them (`confirmPersisted`);
- * there is no `confirmed_at` column, deletion IS the confirmation, and a sent row unconfirmed for
- * longer than `OUTBOX_RESEND_GRACE_MS` is re-sent by the next flush. A row over the single-message
- * limit is never sent: it is dropped with an `outbox_oversize` event. `deleteAll()` is never
- * called inside a transaction, there is no `setAlarm` in the constructor, no timer of any kind in
- * this module (the one in-request wait is `scheduler.wait` in the finish path, bounded by the KV
- * per-key gap), no `blockConcurrencyWhile` outside the migration run. An object that exists but
- * holds no flight (probed, or finished and deleted) answers `absent` and arms a 60 s cleanup.
+ * there is no `confirmed_at` column, deletion IS the confirmation, a sent row unconfirmed for
+ * longer than `OUTBOX_RESEND_GRACE_MS` is re-sent by the next flush, and a row the dead-letter
+ * consumer stamped waits `deadLetterResendSpacingMs` of its count instead (migration 002). A row
+ * over the single-message limit is never sent: it is dropped with an `outbox_oversize` event.
+ * `deleteAll()` is never called inside a transaction, there is no `setAlarm` in the constructor,
+ * no timer of any kind in this module (the one in-request wait is `scheduler.wait` in the finish
+ * path, bounded by the KV per-key gap), no `blockConcurrencyWhile` outside the migration run. An
+ * object that exists but holds no flight (probed, or finished and deleted) answers `absent` and
+ * arms a 60 s cleanup.
  *
  * Test seams (`outboxSink`, `kv`, `bucket`, `providerDeps`, `caps`, `providerFetchTimeoutMs`,
  * `capture`, `flushStats`, the row meters) are public fields set through `runInDurableObject`,
@@ -99,6 +105,7 @@ import {
   SubscribeRequestV1,
   USER_REFRESH_FRESHNESS_MS,
   UnsubscribeRequestV1,
+  deadLetterResendSpacingMs,
   flightTrackerOrigin,
   isIntervalWindow,
   parseDesignator,
@@ -165,6 +172,7 @@ import {
   runSqlMigrations,
 } from './migrate';
 import { FLIGHT_TRACKER_MIGRATION_001 } from './migrations/flight-tracker/001';
+import { FLIGHT_TRACKER_MIGRATION_002 } from './migrations/flight-tracker/002';
 import { chunkOutbox, forEachBindChunk, markOutboxSent, sendOutboxChunks } from './outbox';
 
 // ---------------------------------------------------------------------------------------------
@@ -173,14 +181,15 @@ import { chunkOutbox, forEachBindChunk, markOutboxSent, sendOutboxChunks } from 
 
 /**
  * Rows written over one flight's life (creation to `deleteAll()`), the budget the lifecycle
- * test holds a full A2 walk under. Measured on 2026-09-22 after the review fix round
+ * test holds a full A2 walk under. Measured on 2026-09-23 after the final re-review round
  * (test/workers/flight-tracker.lifecycle, printed as `[lifecycle] ... rows_written_lifetime=`):
- * 1,200 rows for the whole life of an on-time flight created at T-48 h, everything included (the
+ * 1,203 rows for the whole life of an on-time flight created at T-48 h, everything included (the
  * schema DDL at creation, the seed, two subscribes, 74 alarms at 13 rows each when nothing
  * changed, the persist confirmations, which are charged to the tracker because they are its
- * rows, the finish path with its final KV write and the +22 h deletion; 16.2 rows per alarm on
- * average once everything else is spread over them; the same walk measured 1,173 before the DDL
- * was counted). The budget is that with about a third of headroom for a delayed flight's extra
+ * rows, the finish path with its final KV write and the +22 h deletion; 16.3 rows per alarm on
+ * average once everything else is spread over them; the same walk measured 1,200 before
+ * migration 002's two `ALTER TABLE` statements and its id row, and 1,173 before the DDL was
+ * counted at all). The budget is that with about a third of headroom for a delayed flight's extra
  * events (two rows each), and it moves only deliberately: rows written are 70 to 85 percent of
  * the per-flight Durable Object cost.
  */
@@ -200,7 +209,9 @@ const EARLY_ALARM_TOLERANCE_MS = 5_000;
 /**
  * A sent row is re-sent by the next flush when it has been unconfirmed this long. Confirmation
  * normally lands within seconds; the grace keeps a burst of coalesced user refreshes from
- * re-sending rows whose acknowledgement is still in flight.
+ * re-sending rows whose acknowledgement is still in flight. A row the dead-letter consumer
+ * stamped is not on this rule: it waits `deadLetterResendSpacingMs` of its count
+ * (`deadLetterResendDue`).
  */
 export const OUTBOX_RESEND_GRACE_MS = 10_000;
 /** Per user, per flight, per UTC day (ruling J8). Charged only when a provider call is made. */
@@ -265,6 +276,10 @@ interface BudgetRow extends Row {
 interface OutboxRow extends Row {
   seq: number;
   payload: string;
+  sent_at_ms: number | null;
+  /** Times the persist queue dead-lettered the row (migration 002). */
+  dead_letter_count: number;
+  last_dead_lettered_at_ms: number | null;
 }
 
 interface EventRow extends Row {
@@ -434,6 +449,17 @@ function iso(value: number | null): string | null {
   return value === null ? null : new Date(value).toISOString();
 }
 
+/**
+ * Whether a row the dead-letter consumer stamped is due for a re-send: its spacing
+ * (`deadLetterResendSpacingMs`, doubling per dead-lettering) has passed since the later of its
+ * last dead-lettering and its last send. The send term keeps a flush inside the consumer's retry
+ * window (the minute between a re-send and its next dead-lettering) from sending the row twice.
+ */
+function deadLetterResendDue(row: OutboxRow, now: number): boolean {
+  const since = Math.max(row.sent_at_ms ?? 0, row.last_dead_lettered_at_ms ?? 0);
+  return now - since >= deadLetterResendSpacingMs(row.dead_letter_count);
+}
+
 /** JSON with object keys sorted at every level, so key order never reads as a change. */
 function canonicalJson(value: unknown): string {
   if (Array.isArray(value)) {
@@ -548,10 +574,13 @@ function lookupDesignator(
 
 export class FlightTracker extends DurableObject<Env> {
   /** Schema version this build expects. Reported by `GET /health` without touching an object. */
-  static readonly SCHEMA_VERSION = 1;
+  static readonly SCHEMA_VERSION = 2;
 
   /** Append only, in order. Index 0 is migration id 1. */
-  static readonly MIGRATIONS: SqlMigrations = [FLIGHT_TRACKER_MIGRATION_001];
+  static readonly MIGRATIONS: SqlMigrations = [
+    FLIGHT_TRACKER_MIGRATION_001,
+    FLIGHT_TRACKER_MIGRATION_002,
+  ];
 
   /**
    * Test seams, set through `runInDurableObject` and never over RPC: where the outbox is sent,
@@ -986,7 +1015,14 @@ export class FlightTracker extends DurableObject<Env> {
     return { rpcVersion: RPC_SCHEMA_VERSION, outcome: 'refreshed', version: outcome.version };
   }
 
-  /** The persist consumer's confirmation: the named seqs of this lifetime are stored. */
+  /**
+   * The persist consumer's confirmation: the named seqs of this lifetime are stored, and their
+   * rows are deleted. With `deadLettered`, the dead-letter consumer's notice instead: the seqs
+   * exhausted the persist queue's retries. Those rows STAY (a dead-lettering after a minute of
+   * retries is as often a Postgres outage as a poison row, and a deleted row is gone for good);
+   * they are stamped so the flush spaces their re-sends out, doubling per dead-lettering. A seq
+   * that is not in the outbox is ignored either way.
+   */
   confirmPersisted(input: unknown): Exact<ConfirmPersistedResponseV1> {
     const request = parseRpcRequest(ConfirmPersistedRequestV1, input);
     this.#ensureSchema();
@@ -1005,6 +1041,25 @@ export class FlightTracker extends DurableObject<Env> {
         remaining: this.#count('outbox'),
         matched: false,
       };
+    }
+    if (request.deadLettered === true) {
+      this.#tx(() => {
+        forEachBindChunk(request.seqs, (placeholders, chunk) => {
+          this.#exec(
+            `UPDATE outbox SET dead_letter_count = dead_letter_count + 1, last_dead_lettered_at_ms = ?
+              WHERE seq IN (${placeholders})`,
+            now,
+            ...chunk,
+          );
+        });
+      });
+      const remaining = this.#count('outbox');
+      this.#log.warn('flight_tracker_outbox_dead_lettered', {
+        seqs: request.seqs.length,
+        unconfirmed: remaining,
+      });
+      this.#scheduleKv(now, false);
+      return { rpcVersion: RPC_SCHEMA_VERSION, deleted: 0, remaining, matched: true };
     }
     const deleted = this.#tx((): number => {
       let removed = 0;
@@ -1886,7 +1941,9 @@ export class FlightTracker extends DurableObject<Env> {
    * The +22 h alarm (ruling L2): re-read phase and outbox in one synchronous block, flush, and
    * `deleteAll()` ONLY when every outbox row has been confirmed. While rows remain, re-arm an
    * hour out, bounded by nothing but the rows draining, and raise the ops alert once after the
-   * sixth deferral. Storage for one small object is cheaper than losing a flight's events.
+   * sixth deferral. Storage for one small object is cheaper than losing a flight's events. A row
+   * the dead-letter consumer stamped counts as remaining (it is unconfirmed); the flush re-sends
+   * it on its own spacing, and the alert says how many rows are of that kind.
    */
   async #finishAlarm(now: number): Promise<void> {
     const state = this.#tx(() => {
@@ -1919,6 +1976,7 @@ export class FlightTracker extends DurableObject<Env> {
     const remaining = this.#count('outbox');
     if (remaining > 0) {
       const unsent = this.#countUnsent();
+      const deadLettered = this.#countDeadLettered();
       const attempts = state.attempts + 1;
       this.#tx(() => {
         this.#exec(
@@ -1936,6 +1994,7 @@ export class FlightTracker extends DurableObject<Env> {
             name: this.ctx.id.name ?? 'unnamed',
             unconfirmed: remaining,
             unsent,
+            dead_lettered: deadLettered,
             attempts,
           },
           this.#log,
@@ -1945,6 +2004,7 @@ export class FlightTracker extends DurableObject<Env> {
         this.#log.warn('flight_tracker_finish_deferred', {
           unconfirmed: remaining,
           unsent,
+          dead_lettered: deadLettered,
           attempts,
         });
       }
@@ -2000,18 +2060,24 @@ export class FlightTracker extends DurableObject<Env> {
   // -------------------------------------------------------------------------------------------
 
   /**
-   * Sends every unsent row, and every sent row that has waited `OUTBOX_RESEND_GRACE_MS` without
-   * confirmation, in byte-chunked batches; marks `sent_at` on the accepted rows only. Never
-   * throws: a failed send leaves the rows for the next flush. Not inside a transaction.
+   * Sends every unsent row, every sent row that has waited `OUTBOX_RESEND_GRACE_MS` without
+   * confirmation, and every dead-lettered row whose spacing has passed (`deadLetterResendDue`),
+   * in byte-chunked batches; marks `sent_at` on the accepted rows only. Never throws: a failed
+   * send leaves the rows for the next flush. Not inside a transaction.
    */
   async #flushOutbox(now: number): Promise<void> {
     const row = this.#flight();
     if (row === null) {
       return;
     }
-    const rows = this.#exec<OutboxRow>(
-      'SELECT seq, payload FROM outbox WHERE sent_at_ms IS NULL OR sent_at_ms <= ? ORDER BY seq',
+    const due = this.#exec<OutboxRow>(
+      `SELECT seq, payload, sent_at_ms, dead_letter_count, last_dead_lettered_at_ms FROM outbox
+        WHERE sent_at_ms IS NULL OR sent_at_ms <= ? ORDER BY seq`,
       now - OUTBOX_RESEND_GRACE_MS,
+    );
+    // A row the dead-letter consumer stamped waits for its spacing, not for the grace.
+    const rows = due.filter(
+      (entry) => entry.dead_letter_count === 0 || deadLetterResendDue(entry, now),
     );
     if (rows.length === 0) {
       return;
@@ -2275,6 +2341,14 @@ export class FlightTracker extends DurableObject<Env> {
   #countUnsent(): number {
     return (
       this.#exec<CountRow>('SELECT COUNT(*) AS n FROM outbox WHERE sent_at_ms IS NULL')[0]?.n ?? 0
+    );
+  }
+
+  /** Outbox rows the persist queue has dead-lettered at least once. */
+  #countDeadLettered(): number {
+    return (
+      this.#exec<CountRow>('SELECT COUNT(*) AS n FROM outbox WHERE dead_letter_count > 0')[0]?.n ??
+      0
     );
   }
 

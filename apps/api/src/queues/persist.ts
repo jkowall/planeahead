@@ -43,9 +43,11 @@
  * message this build cannot read included: its `origin` and `seq` are read with the minimal
  * `PersistMessageIdentityV1` before the full validation, because no retry and no build will ever
  * write it, and an unconfirmed row would pin its finished tracker (hourly re-sends, for ever). The
- * dead-letter consumer confirms the same way once a message that exhausted its retries is archived
- * (src/queues/dlq.ts), so a finished tracker's hourly retry covers only rows that never reached
- * the queue. The helpers below are what both consumers share.
+ * dead-letter consumer confirms NOTHING: a message dead-letters after five retries spanning about
+ * a minute, which a transient Postgres or Hyperdrive outage exceeds as easily as a poison row
+ * does, and a confirmed row is deleted; it reports the dead-lettering instead (the same RPC with
+ * `deadLettered: true`, src/queues/dlq.ts) and the tracker keeps the row and re-sends it with a
+ * doubling spacing. The helpers below are what both consumers share.
  */
 
 import { eq, sql } from 'drizzle-orm';
@@ -393,13 +395,17 @@ export function noteConfirmation(confirmations: Confirmations, origin: string, s
 }
 
 /**
- * One `confirmPersisted` per tracker lifetime. A failure is logged and not retried: the tracker
- * re-sends every unconfirmed row on its next flush, and the consumers' writes are idempotent.
+ * One `confirmPersisted` per tracker lifetime: a confirmation (the seqs are stored; the tracker
+ * deletes their rows) or, with `deadLettered`, the dead-letter consumer's notice (the seqs
+ * exhausted their retries; the tracker stamps their rows and keeps them). A failure is logged and
+ * not retried: the tracker re-sends every unconfirmed row on its next flush, and the consumers'
+ * writes are idempotent.
  */
 export async function confirmPersistedSeqs(
   confirmations: Confirmations,
   trackerFor: (flightKey: FlightKey) => ConfirmingTracker,
   log: Logger,
+  deadLettered = false,
 ): Promise<void> {
   for (const confirmation of confirmations.values()) {
     try {
@@ -407,17 +413,25 @@ export async function confirmPersistedSeqs(
         rpcVersion: RPC_SCHEMA_VERSION,
         epochMs: confirmation.epochMs,
         seqs: confirmation.seqs,
+        ...(deadLettered ? { deadLettered: true } : {}),
       });
-      log.debug('persist_confirmed', {
+      const fields = {
         flight_key: confirmation.flightKey,
         seqs: confirmation.seqs.length,
         deleted: result.deleted,
+        remaining: result.remaining,
         matched: result.matched,
-      });
+      };
+      if (deadLettered) {
+        log.info('persist_dead_letter_noted', fields);
+      } else {
+        log.debug('persist_confirmed', fields);
+      }
     } catch (error) {
       log.error('persist_confirm_failed', {
         flight_key: confirmation.flightKey,
         seqs: confirmation.seqs.length,
+        dead_lettered: deadLettered,
         ...errorFields(error),
       });
     }

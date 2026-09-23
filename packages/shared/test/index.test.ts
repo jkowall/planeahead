@@ -160,6 +160,8 @@ const EXPECTED_EXPORTS = [
   'parseAirlineCallsign',
   'resolveOperator',
   // outbox
+  'DEAD_LETTER_RESEND_MAX_MS',
+  'DEAD_LETTER_RESEND_MS',
   'DESIGNATOR_RESOLVER_ORIGIN_PREFIX',
   'FLIGHT_TRACKER_ORIGIN_PREFIX',
   'FLIGHT_TRACKING_STATES',
@@ -179,6 +181,7 @@ const EXPECTED_EXPORTS = [
   'ProviderCallMessageV1',
   'ReconcileMessageV1',
   'RefreshCadenceSchema',
+  'deadLetterResendSpacingMs',
   'designatorResolverOrigin',
   'flightTrackerOrigin',
   'parseFlightTrackerOrigin',

@@ -251,8 +251,13 @@ describe('increment 7 schemas', () => {
     ).toBe(1);
   });
 
-  it('ConfirmPersistedRequestV1 names a lifetime and at most 1000 seqs', () => {
+  it('ConfirmPersistedRequestV1 names a lifetime, at most 1000 seqs and an optional dead-letter flag', () => {
     expect(ConfirmPersistedRequestV1.parse({ epochMs: 5, seqs: [1, 2] }).seqs).toEqual([1, 2]);
+    // A confirmation leaves the flag out; the dead-letter consumer's notice sets it.
+    expect(ConfirmPersistedRequestV1.parse({ epochMs: 5, seqs: [1] }).deadLettered).toBeUndefined();
+    expect(
+      ConfirmPersistedRequestV1.parse({ epochMs: 5, seqs: [1], deadLettered: true }).deadLettered,
+    ).toBe(true);
     expect(ConfirmPersistedRequestV1.safeParse({ epochMs: 5, seqs: [-1] }).success).toBe(false);
     expect(
       ConfirmPersistedRequestV1.safeParse({

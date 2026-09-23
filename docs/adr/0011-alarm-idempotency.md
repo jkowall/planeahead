@@ -1,7 +1,8 @@
 # 0011. Alarm idempotency: the attempt row, the retry ladder, the in-flight handle, the outbox confirmation
 
 - Status: Accepted
-- Date: 2026-09-22 (amended the same day by the increment 7 review fix round)
+- Date: 2026-09-22 (amended the same day by the increment 7 review fix round, and on 2026-09-23
+  by the final re-review round: the dead-letter notice in item 5)
 - Deciders: @jkowall
 - Supersedes: none
 - Superseded by: none
@@ -106,17 +107,37 @@ We will make the alarm handler idempotent per cadence slot with these mechanisms
    Engine point written only when the `provider_calls` row was inserted), so a re-send is
    harmless and a failed confirmation is logged and not retried. Outbox seqs are allocated from a
    counter on the flight row rather than the rowid, because SQLite reuses a rowid once the rows
-   above it are deleted, and a confirmed outbox row is exactly that. EVERY acknowledged message
-   is confirmed: a message the consumer cannot read (acknowledged loudly, its body on the log
-   line) is confirmed by the `origin` and `seq` of its envelope, read with the minimal
-   `PersistMessageIdentityV1` before the full validation, and the dead-letter consumer confirms a
-   `persist` message the same way once its raw body is archived under `dlq/persist/`, so the
-   finished object's hourly retry (item 6) covers only rows that never reached the queue; a row
-   that no build will ever write must not pin its tracker for ever. The `IN (...)` lists of the
-   confirmation delete and of the sent-marking update run in chunks of `SQL_BIND_CHUNK` (90)
-   through one shared helper, inside one transaction, because Durable Object SQLite binds at most
-   100 parameters per statement; the DesignatorResolver's flush uses the same helper (a backlog
-   of 100 failed searches once made its every flush throw after the send).
+   above it are deleted, and a confirmed outbox row is exactly that. EVERY message the persist
+   consumer acknowledges is confirmed: a message it cannot read (acknowledged loudly, its body on
+   the log line) is confirmed by the `origin` and `seq` of its envelope, read with the minimal
+   `PersistMessageIdentityV1` before the full validation, because a row that no build will ever
+   write must not pin its tracker for ever. The dead-letter consumer confirms NOTHING (final
+   re-review, rulings N1 to N3, reversing that part of the fix round's M3): a `persist` message
+   dead-letters after five consumer retries spanning about a minute, which a transient Postgres
+   or Hyperdrive outage exceeds as easily as a poison row does, and a confirmed row is deleted, so
+   confirming from the dead-letter consumer had stopped the outbox healing itself. Instead it
+   REPORTS the dead-lettering once the raw body is archived under `dlq/persist/` (the same RPC
+   with the optional `deadLettered: true`; `rpcVersion` unchanged, an older caller still parses),
+   and the tracker stamps the rows (`dead_letter_count + 1`, `last_dead_lettered_at_ms`;
+   migration 002, `SCHEMA_VERSION` 2) and keeps them; a notice for an unknown row or an absent
+   tracker is ignored (the absent cleanup still armed), and a notice that fails is logged, not
+   retried. The flush re-sends a stamped row after `DEAD_LETTER_RESEND_MS x 2^(dead_letter_count
+   - 1)`, from one hour, capped at `DEAD_LETTER_RESEND_MAX_MS`(24 hours; both shared constants,
+the spacing in`deadLetterResendSpacingMs`), measured from the later of
+`last_dead_lettered_at_ms`and the row's last send (so a flush inside the consumer's retry
+window does not send it twice); a row never dead-lettered keeps the 10 s grace. A transient
+outage therefore heals on the first re-send after recovery (persist succeeds, the consumer
+confirms, the row is deleted), and a poison row produces a bounded, decaying stream of
+dead-letter events that settles at one per day per row, while the stuck alert (item 6, the
+sixth deferral) still fires and now says how many of the rows are dead-lettered. The finished
+object stays alive while rows remain, and the R2 copy under`dlq/persist/`remains the
+durable record. Accepted Phase 0 residual: the DesignatorResolver's cost records are deleted
+on send, not on confirmation, so after a dead-lettering they exist only in R2; the increment
+12 housekeeping replay of`dlq/persist/`objects is the planned closer. The`IN (...)`lists of the
+confirmation delete and of the sent-marking update run in chunks of`SQL_BIND_CHUNK` (90)
+     through one shared helper, inside one transaction, because Durable Object SQLite binds at most
+     100 parameters per statement; the DesignatorResolver's flush uses the same helper (a backlog
+     of 100 failed searches once made its every flush throw after the send).
 6. **The finish path and the +22 h alarm.** Every path that learns the flight is done (the alarm,
    a user refresh, a reconcile poll, a merged alert, a re-seed) runs the same finish path: flush,
    archive the events to R2 under a per-lifetime key (`events/{key}@{epochMs}.json`, written with
@@ -152,9 +173,10 @@ We will make the alarm handler idempotent per cadence slot with these mechanisms
 Rows written are a budgeted number: every statement runs through one helper that sums the
 cursor's `rowsWritten`, each `setAlarm` counts one, the migration DDL an object pays for at
 creation is added from the runner, the totals are stored on the attempt row, and the lifecycle
-test holds a full A2 walk under `ROWS_WRITTEN_BUDGET_PER_FLIGHT` (1,600). Measured on 2026-09-22
-after the fix round: 1,200 rows for the whole life of an on-time flight created at T-48 h (1,173
-before the DDL was counted), 13 per alarm when nothing changed, 16.2 per alarm on average with
+test holds a full A2 walk under `ROWS_WRITTEN_BUDGET_PER_FLIGHT` (1,600). Measured on 2026-09-23
+after the final re-review round: 1,203 rows for the whole life of an on-time flight created at
+T-48 h (1,200 before migration 002's two `ALTER TABLE` statements and its id row; 1,173 before the
+DDL was counted at all), 13 per alarm when nothing changed, 16.3 per alarm on average with
 the seed, the subscribes, the persist confirmations (charged to the tracker: they are its rows),
 the finish path and the +22 h deletion spread over the 74 alarms; the largest `sendBatch` the walk
 produced carried 7 messages and the largest message 1,635 bytes (a `flight_instance` row is about
@@ -181,9 +203,10 @@ slot; the hard cap's own finish reason; the ProviderBudget's daily row under ope
   and finished by the reconcile path.
 - Harder: the outbox holds rows until the consumer confirms them, so a consumer outage grows
   every active tracker's storage, and a finished object whose rows never confirm lives on at
-  storage cost (alerted after six hours, deleted only when the rows drain; since every
-  acknowledged message is confirmed, only rows that never reached the queue can do that); the
-  alarm handler is
+  storage cost (alerted after six hours, deleted only when the rows drain: rows that never
+  reached the queue, and dead-lettered rows, which it keeps re-sending on a spacing that doubles
+  to a day, so a poison row keeps its object, and one dead-letter event a day, until increment
+  12's replay or an operator deletes it); the alarm handler is
   five steps with two transactions, not one function; every RPC that reads the snapshot has to
   know about `#inflight` and `#finishing`; and a new lifetime for a flight that is still active in
   Postgres (a recovery, never a rebirth) is applied under the lifetime rule and its events keep
@@ -199,15 +222,16 @@ slot; the hard cap's own finish reason; the ProviderBudget's daily row under ope
 
 ## Alternatives considered
 
-| Option                                                  | Why not                                                                                                                                                    |
-| ------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| Let the platform retry the whole handler                | Storage writes from the failed attempt persist, so the retry would re-poll the provider on top of a half-applied result: double spend and a torn snapshot. |
-| Judge a retry by the age of the last attempt            | A step 1 that rolled back leaves the previous slot's attempt looking fresh when tiers are closer together than the previous tier's interval: a lost slot.  |
-| `blockConcurrencyWhile` around the fetch                | Its 30 second timeout resets the object; a slow provider would turn into a lost alarm.                                                                     |
-| Delete outbox rows on a successful `sendBatch`          | A message the queue accepted can still be lost before the consumer writes it; the row would be gone with it.                                               |
-| Keep outbox rows for a fixed time instead of confirming | Either too short (a consumer outage loses rows) or too long (every tracker carries hours of sent rows); confirmation is exact and cheap.                   |
-| Force the +22 h delete after a bounded number of tries  | Rows with `sent_at` NULL never reached the queue; deleting them destroys the only copy of a flight's events or a billed search's cost record.              |
-| Write Postgres from the alarm                           | ADR 0007: connection budget and the same idempotency problem one hop later.                                                                                |
+| Option                                                  | Why not                                                                                                                                                                                                                           |
+| ------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Let the platform retry the whole handler                | Storage writes from the failed attempt persist, so the retry would re-poll the provider on top of a half-applied result: double spend and a torn snapshot.                                                                        |
+| Judge a retry by the age of the last attempt            | A step 1 that rolled back leaves the previous slot's attempt looking fresh when tiers are closer together than the previous tier's interval: a lost slot.                                                                         |
+| `blockConcurrencyWhile` around the fetch                | Its 30 second timeout resets the object; a slow provider would turn into a lost alarm.                                                                                                                                            |
+| Delete outbox rows on a successful `sendBatch`          | A message the queue accepted can still be lost before the consumer writes it; the row would be gone with it.                                                                                                                      |
+| Keep outbox rows for a fixed time instead of confirming | Either too short (a consumer outage loses rows) or too long (every tracker carries hours of sent rows); confirmation is exact and cheap.                                                                                          |
+| Force the +22 h delete after a bounded number of tries  | Rows with `sent_at` NULL never reached the queue; deleting them destroys the only copy of a flight's events or a billed search's cost record.                                                                                     |
+| Let the dead-letter consumer confirm the archived row   | A message dead-letters after about a minute of retries, which a transient Postgres or Hyperdrive outage exceeds as easily as a poison row; the confirmed row was deleted and the outbox stopped healing itself (final re-review). |
+| Write Postgres from the alarm                           | ADR 0007: connection budget and the same idempotency problem one hop later.                                                                                                                                                       |
 
 ## References
 

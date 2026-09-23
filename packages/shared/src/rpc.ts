@@ -257,18 +257,29 @@ export const SeedResponseV1 = z.looseObject({
 });
 export type SeedResponseV1 = z.infer<typeof SeedResponseV1>;
 
-/** The persist consumer's confirmation: these outbox seqs of this tracker lifetime are stored. */
+/**
+ * The persist consumer's confirmation: these outbox seqs of this tracker lifetime are stored, and
+ * the tracker deletes them. With `deadLettered: true` it is the dead-letter consumer's NOTICE
+ * instead: the seqs exhausted the persist queue's retries and their raw bodies are archived; the
+ * tracker stamps the rows (`dead_letter_count`, `last_dead_lettered_at_ms`) and KEEPS them,
+ * re-sending each after `deadLetterResendSpacingMs` of its count (increment 7 final re-review:
+ * a message dead-letters after about a minute of retries, which a transient Postgres outage
+ * exceeds as easily as a poison row does, and a confirmed row is gone). The flag is optional so
+ * a caller one build behind still parses; `rpcVersion` is unchanged.
+ */
 export const ConfirmPersistedRequestV1 = z.looseObject({
   rpcVersion,
   /** The lifetime the seqs belong to (`flight_tracker:{key}@{epochMs}`); a mismatch is ignored. */
   epochMs: z.int().nonnegative(),
   seqs: z.array(z.int().nonnegative()).max(1_000),
+  /** True for the dead-letter consumer's notice: stamp and keep the rows, delete nothing. */
+  deadLettered: z.boolean().optional(),
 });
 export type ConfirmPersistedRequestV1 = z.infer<typeof ConfirmPersistedRequestV1>;
 
 export const ConfirmPersistedResponseV1 = z.looseObject({
   rpcVersion,
-  /** Rows this call removed from the outbox. */
+  /** Rows this call removed from the outbox; 0 for a dead-letter notice. */
   deleted: z.int().nonnegative(),
   /** Rows still awaiting confirmation. */
   remaining: z.int().nonnegative(),

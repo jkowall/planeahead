@@ -11,11 +11,17 @@
  * failure must not discard the only copy), and acknowledged on the last attempt with the body on
  * the log line: a dead letter message must never loop.
  *
- * A `persist` message archived here is also CONFIRMED to the FlightTracker lifetime that sent it,
- * by `origin` and `seq`, exactly as the persist consumer confirms what it wrote: the raw message is
- * under `dlq/persist/`, so nothing is lost, and an unconfirmed row would otherwise be re-sent by
- * its finished tracker every hour for ever (six consumer attempts, a new archive and a fatal alert
- * each time). A confirmation failure is logged, not retried.
+ * A `persist` message archived here is REPORTED to the FlightTracker lifetime that sent it, by
+ * `origin` and `seq` (`confirmPersisted` with `deadLettered: true`), and never confirmed: a
+ * message dead-letters after five consumer retries spanning about a minute, which a transient
+ * Postgres or Hyperdrive outage exceeds as easily as a poison row does, and a confirmed row is
+ * deleted by its tracker (the increment 7 re-review found the outbox had stopped healing itself).
+ * The tracker stamps the row and keeps it, re-sending it after a spacing that doubles per
+ * dead-lettering (an hour, capped at a day), so a transient outage heals on the first re-send
+ * after recovery and a poison row is a bounded, decaying stream of these events that settles at
+ * one a day, under the tracker's own stuck alert. The raw message under `dlq/persist/` remains
+ * the durable record. The tracker ignores a notice for a row or a lifetime it does not hold; a
+ * notice that fails here is logged, not retried.
  */
 
 import { PersistMessageIdentityV1, type FlightKey } from '@planeahead/shared';
@@ -62,7 +68,7 @@ export async function handleDeadLetterBatch(
   const archived: string[] = [];
   const failed: string[] = [];
   const retried: string[] = [];
-  const confirmations: Confirmations = new Map();
+  const deadLettered: Confirmations = new Map();
   for (const message of batch.messages) {
     const key = deadLetterArchiveKey(kind, message.id);
     const record: DeadLetterRecord = {
@@ -86,7 +92,7 @@ export async function handleDeadLetterBatch(
       if (kind === 'persist') {
         const identity = PersistMessageIdentityV1.safeParse(message.body);
         if (identity.success) {
-          noteConfirmation(confirmations, identity.data.origin, identity.data.seq);
+          noteConfirmation(deadLettered, identity.data.origin, identity.data.seq);
         }
       }
     } catch (error) {
@@ -116,8 +122,9 @@ export async function handleDeadLetterBatch(
     }
     message.ack();
   }
-  // Only archived persist messages are noted above, so this confirms nothing that is not in R2.
-  await confirmPersistedSeqs(confirmations, deps.trackerFor ?? defaultTrackerFor(env), log);
+  // Only archived persist messages are noted above, so the tracker hears of nothing that is not
+  // in R2; a message whose archive failed is re-sent by its tracker's ordinary grace rule.
+  await confirmPersistedSeqs(deadLettered, deps.trackerFor ?? defaultTrackerFor(env), log, true);
   if (archived.length === 0 && failed.length === 0) {
     // Every message is coming back: the alert belongs to the attempt that settles them.
     return;

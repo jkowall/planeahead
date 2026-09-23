@@ -154,17 +154,37 @@ const envelope = {
 };
 
 /**
- * The two envelope fields a consumer needs to CONFIRM a message it cannot otherwise read. Every
- * acknowledged persist message is confirmed to the tracker lifetime that sent it, an unreadable
- * one included (no build will ever write it, and an unconfirmed row would pin its finished
- * tracker for ever), so the persist and dead-letter consumers parse this before, or instead of,
- * the full `PersistMessageV1`.
+ * The two envelope fields a consumer needs to name a message it cannot otherwise read. The
+ * persist consumer confirms every message it acknowledges to the tracker lifetime that sent it,
+ * an unreadable one included (no build will ever write it, and an unconfirmed row would pin its
+ * finished tracker for ever); the dead-letter consumer reports a dead-lettered message by the
+ * same two fields (`confirmPersisted` with `deadLettered: true`) and confirms nothing. Both parse
+ * this before, or instead of, the full `PersistMessageV1`.
  */
 export const PersistMessageIdentityV1 = z.looseObject({
   seq: envelope.seq,
   origin: envelope.origin,
 });
 export type PersistMessageIdentityV1 = z.infer<typeof PersistMessageIdentityV1>;
+
+/**
+ * How a FlightTracker re-sends an outbox row the dead-letter consumer reported (ADR 0011 item
+ * 5). A `persist` message dead-letters after five consumer retries spanning about a minute, which
+ * a transient Postgres or Hyperdrive outage exceeds as easily as a poison row does, so the row is
+ * kept and re-sent: `DEAD_LETTER_RESEND_MS x 2^(count - 1)` after its last dead-lettering, from
+ * one hour, doubling to `DEAD_LETTER_RESEND_MAX_MS`. A transient outage heals on the first
+ * re-send after recovery; a poison row costs a bounded, decaying stream of dead-letter events
+ * that settles at one per day per row.
+ */
+export const DEAD_LETTER_RESEND_MS = 60 * 60_000;
+export const DEAD_LETTER_RESEND_MAX_MS = 24 * 60 * 60_000;
+
+/** The spacing before a row dead-lettered `count` times (at least once) is re-sent. */
+export function deadLetterResendSpacingMs(count: number): number {
+  const doublings = Math.max(0, Math.floor(count) - 1);
+  // `2 ** doublings` is Infinity past 1023 doublings, which `Math.min` still reads as the cap.
+  return Math.min(DEAD_LETTER_RESEND_MAX_MS, DEAD_LETTER_RESEND_MS * 2 ** doublings);
+}
 
 export const FlightInstanceMessageV1 = z.looseObject({
   ...envelope,
