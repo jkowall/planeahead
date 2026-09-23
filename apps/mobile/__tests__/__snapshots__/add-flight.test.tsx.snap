@@ -107,6 +107,7 @@ exports[`the sheet in light and dark renders with its validation errors in dark 
                       "type": "Text",
                     },
                   ],
+                  "label": "Today",
                   "style": {
                     "backgroundColor": "#171B22",
                     "borderColor": "#2A303A",
@@ -126,6 +127,7 @@ exports[`the sheet in light and dark renders with its validation errors in dark 
                       "type": "Text",
                     },
                   ],
+                  "label": "Tomorrow",
                   "style": {
                     "backgroundColor": "#171B22",
                     "borderColor": "#2A303A",
@@ -145,6 +147,7 @@ exports[`the sheet in light and dark renders with its validation errors in dark 
                       "type": "Text",
                     },
                   ],
+                  "label": "Fri 25 Sep",
                   "style": {
                     "backgroundColor": "#171B22",
                     "borderColor": "#2A303A",
@@ -167,6 +170,7 @@ exports[`the sheet in light and dark renders with its validation errors in dark 
                   "type": "Text",
                 },
               ],
+              "label": "Add flight",
               "style": {
                 "backgroundColor": "#7C9DFF",
                 "borderColor": "#2A303A",
@@ -186,6 +190,7 @@ exports[`the sheet in light and dark renders with its validation errors in dark 
                   "type": "Text",
                 },
               ],
+              "label": "Cancel",
               "style": {
                 "backgroundColor": "#171B22",
                 "borderColor": "#2A303A",
@@ -315,6 +320,7 @@ exports[`the sheet in light and dark renders with its validation errors in light
                       "type": "Text",
                     },
                   ],
+                  "label": "Today",
                   "style": {
                     "backgroundColor": "#F2F4F8",
                     "borderColor": "#D6DAE1",
@@ -334,6 +340,7 @@ exports[`the sheet in light and dark renders with its validation errors in light
                       "type": "Text",
                     },
                   ],
+                  "label": "Tomorrow",
                   "style": {
                     "backgroundColor": "#F2F4F8",
                     "borderColor": "#D6DAE1",
@@ -353,6 +360,7 @@ exports[`the sheet in light and dark renders with its validation errors in light
                       "type": "Text",
                     },
                   ],
+                  "label": "Fri 25 Sep",
                   "style": {
                     "backgroundColor": "#F2F4F8",
                     "borderColor": "#D6DAE1",
@@ -375,6 +383,7 @@ exports[`the sheet in light and dark renders with its validation errors in light
                   "type": "Text",
                 },
               ],
+              "label": "Add flight",
               "style": {
                 "backgroundColor": "#1C4FD6",
                 "borderColor": "#D6DAE1",
@@ -394,6 +403,7 @@ exports[`the sheet in light and dark renders with its validation errors in light
                   "type": "Text",
                 },
               ],
+              "label": "Cancel",
               "style": {
                 "backgroundColor": "#F2F4F8",
                 "borderColor": "#D6DAE1",

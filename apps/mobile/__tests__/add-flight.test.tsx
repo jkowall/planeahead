@@ -8,11 +8,16 @@
  * install id and the runtime config.
  *
  * The answers the increment 8 route gives: 201 with the server's row and the flight (the times
- * show at once, before any sync pull), 200 `created: false` under another id (the optimistic row
- * is replaced, a queued unsubscribe follows the server's id), 403 `cap_exceeded` (the free-tier
- * explanation from the payload, the row removed), 404 `flight_not_found` (the dates tried, the row
- * removed), 422 `idempotency_payload_mismatch` (a fresh key, reported to Sentry without the
- * body), and no network (the row stays, queued).
+ * show at once, before any sync pull), 200 `created: false` under another id (the add was a no-op:
+ * the optimistic row and anything queued for it go, the account's row stays; ruling X7), 403
+ * `cap_exceeded` (the free-tier explanation from the payload, the row removed), 404
+ * `flight_not_found` (the dates tried, the row removed), 410 `flight_archived`, 422
+ * `date_out_of_range`, 400 `validation_failed` and a code this build does not know (a generic
+ * sentence; the code goes to Sentry only), 422 `idempotency_payload_mismatch` (a fresh key,
+ * reported to Sentry without the body), and no network (the row stays, queued).
+ *
+ * The date field keeps the number pad: the sheet inserts the hyphens as the digits are typed and
+ * the validation reads eight bare digits as a date (increment 10 review).
  */
 
 import * as Sentry from '@sentry/react-native';
@@ -23,13 +28,16 @@ import {
   type FlightKey,
 } from '@planeahead/shared';
 import { fireEvent, render, screen, waitFor } from '@testing-library/react-native';
+import { StyleSheet } from 'react-native';
 import AddFlightSheet from '../src/app/(app)/add';
 import type { SqliteLike } from '../src/lib/db/sqlite-like';
 import { useFlightNotices } from '../src/lib/flight-notices';
 import { listFlights } from '../src/lib/flight-queries';
-import { addFlight, removeFlight, validateAddFlight } from '../src/lib/flights';
+import { addFlight, refusalMessage, removeFlight, validateAddFlight } from '../src/lib/flights';
+import { formatDateInput } from '../src/lib/format';
 import { services } from '../src/lib/services';
 import { useSettings } from '../src/lib/settings';
+import { DARK, LIGHT } from '../src/theme/tokens';
 import { compactTree } from './support/compact-tree';
 import { createMemorySqlite, type MemorySqlite } from './support/memory-sqlite';
 import {
@@ -222,6 +230,56 @@ describe('add-flight validation (the shared parseDesignator and IsoDateSchema)',
     expect(IsoDateSchema.safeParse(date).success).toBe(valid);
   });
 
+  it.each([
+    ['20260926', '2026-09-26'],
+    ['2026-09-26', '2026-09-26'],
+    [' 20280229 ', '2028-02-29'],
+  ])('reads the number pad form %p as %p', (typed, date) => {
+    expect(validateAddFlight({ number: 'AA100', date: typed })).toEqual({
+      ok: true,
+      value: { designator: 'AA100', date },
+    });
+  });
+
+  it.each(['20260230', '2026092', '202609261', '26092026'])(
+    'still refuses %p when its digits are not a real YYYYMMDD date',
+    (typed) => {
+      expect(validateAddFlight({ number: 'AA100', date: typed }).ok).toBe(false);
+    },
+  );
+
+  it('inserts the hyphens as the digits are typed, and deleting never sticks on one', () => {
+    const typed = ['2', '20', '202', '2026', '20260', '202609', '2026092', '20260926'];
+    expect(typed.map(formatDateInput)).toEqual([
+      '2',
+      '20',
+      '202',
+      '2026',
+      '2026-0',
+      '2026-09',
+      '2026-09-2',
+      '2026-09-26',
+    ]);
+    // Backspace over "2026-0" leaves "2026-", which reads as the four digits.
+    expect(formatDateInput('2026-')).toBe('2026');
+    expect(formatDateInput('2026-09-')).toBe('2026-09');
+    // A pasted date, and anything past eight digits.
+    expect(formatDateInput('2026-09-26')).toBe('2026-09-26');
+    expect(formatDateInput('2026-09-261')).toBe('2026-09-26');
+    expect(formatDateInput('2026/09/26')).toBe('2026-09-26');
+  });
+
+  it('the sheet formats the date as it is typed on the number pad', async () => {
+    await openSheet();
+    const field = screen.getByTestId('add-flight-date');
+    await fireEvent.changeText(field, '');
+    for (const text of ['2', '20', '202', '2026', '20260', '2026-01', '2026-011', '2026-01-05']) {
+      await fireEvent.changeText(field, text);
+    }
+    expect(screen.getByTestId('add-flight-date')).toHaveProp('value', '2026-01-05');
+    expect(screen.getByTestId('add-flight-date')).toHaveProp('inputMode', 'numeric');
+  });
+
   it('says what is wrong with each field', () => {
     expect(validateAddFlight({ number: '', date: '' })).toEqual({
       ok: false,
@@ -285,6 +343,35 @@ describe('addFlight writes through the outbox', () => {
     });
     expect(outboxRows(db)).toEqual([]);
   });
+
+  it('compares flight keys, never the displayed designator (increment 10 review)', () => {
+    const db = createMemorySqlite();
+    // The shared snapshot names BA1512, the designator whoever searched first typed.
+    seedStore(db, { marketingCarrierIcao: 'BAW', marketingFlightNumber: '1512' });
+    const tracked = {
+      kind: 'already_tracked',
+      subscriptionId: '0199a000-0000-7000-8000-000000000001',
+    };
+    expect(addFlight(db, { designator: 'AA100', date: '2026-09-23' })).toEqual(tracked);
+    expect(addFlight(db, { designator: 'AAL100', date: '2026-09-23' })).toEqual(tracked);
+    // Another date is another flight.
+    expect(addFlight(db, { designator: 'AA100', date: '2026-09-24' }).kind).toBe('queued');
+    // A codeshare cannot be told apart by key offline: queued, hidden, and settled by the server.
+    const codeshare = addFlight(db, { designator: 'BA1511', date: '2026-09-23' });
+    expect(codeshare.kind).toBe('queued');
+    expect(listFlights(db).map((item) => item.id)).not.toContain(codeshare.subscriptionId);
+    // The same add again is answered by its pending key.
+    expect(addFlight(db, { designator: 'BA1511', date: '2026-09-23' })).toEqual({
+      kind: 'already_tracked',
+      subscriptionId: codeshare.subscriptionId,
+    });
+    // One row per flight on screen: the tracked AA100, the next day's AA100 being added, the rest.
+    expect(
+      listFlights(db)
+        .map((item) => `${item.designator}${item.pending ? ' (adding)' : ''}`)
+        .sort(),
+    ).toEqual(['AA100', 'AA100 (adding)', 'BA117', 'DL1']);
+  });
 });
 
 describe('the sheet, through the real outbox', () => {
@@ -331,20 +418,23 @@ describe('the sheet, through the real outbox', () => {
     expect(outboxRows(mockEdge.db)).toEqual([]);
   });
 
-  it('200 created false under another id: the server row replaces the optimistic one', async () => {
+  it('200 created false under another id: a DELETE queued for the add is dropped, never re-pointed', async () => {
     const db = mockEdge.db;
     const { outbox } = await services();
+    // The POST leaves and its answer is lost; the user then stops tracking the "Adding" row.
+    mockEdge.network.answer(() => {
+      throw new TypeError('Network request failed');
+    });
     const added = addFlight(db, { designator: 'AA100', date: '2026-09-23' });
     if (added.kind !== 'queued') {
       throw new Error('expected a queued add');
     }
-    // Removed on this phone before the POST answered: the DELETE must follow the server's id.
-    removeFlight(db, added.subscriptionId);
+    await outbox.drain();
+    expect(removeFlight(db, added.subscriptionId)).toBe('queued');
+    db.run('UPDATE outbox SET next_attempt_at = 0');
+    // The account already held the flight under SERVER_ID: the add was a no-op on the server.
     mockEdge.network.answer(() =>
       json(200, { subscription: serverRow(SERVER_ID), flight: flightView(), created: false }),
-    );
-    mockEdge.network.answer(() =>
-      json(200, { deleted: true, subscription: { ...serverRow(SERVER_ID), deletedAt: 'x' } }),
     );
 
     await outbox.drain();
@@ -352,14 +442,14 @@ describe('the sheet, through the real outbox', () => {
     const paths = mockEdge.network.requests.map((request) => `${request.method} ${request.url}`);
     expect(paths).toEqual([
       'POST https://api.planeahead.test/v1/flights',
-      `DELETE https://api.planeahead.test/v1/flights/${SERVER_ID}`,
+      'POST https://api.planeahead.test/v1/flights',
     ]);
     const rows = db.raw
       .prepare('SELECT id, flight_key, deleted_at FROM flight_subscriptions')
       .all() as { id: string; flight_key: string; deleted_at: string | null }[];
-    expect(rows).toHaveLength(1);
-    expect(rows[0]).toMatchObject({ id: SERVER_ID, flight_key: AA100_KEY });
-    expect(rows[0]?.deleted_at).not.toBeNull();
+    // The account's own row stays live: the user removed the add, not the flight they had.
+    expect(rows).toEqual([{ id: SERVER_ID, flight_key: AA100_KEY, deleted_at: null }]);
+    expect(outboxRows(db)).toEqual([]);
   });
 
   it('200 created false: one row for the flight between the answer and the next pull', async () => {
@@ -504,6 +594,50 @@ describe('the sheet, through the real outbox', () => {
     expect(useFlightNotices.getState().notices[0]?.message).toMatch(/up to 20 new flights a day/);
   });
 
+  it('410 flight_archived: says the flight is over and removes the row', async () => {
+    mockEdge.network.answer(() =>
+      json(410, { error: 'flight_archived', message: 'over', requestId: 'req-5' }),
+    );
+    await openSheet();
+    await submit('AA100', '20260924');
+    expect(await screen.findByTestId('add-flight-message')).toHaveTextContent(
+      'AA100 on Thu 24 Sep is over and can no longer be tracked.',
+    );
+    expect(mockEdge.network.requests[0]?.body).toMatchObject({ date: '2026-09-24' });
+    expect(listFlights(mockEdge.db)).toEqual([]);
+    expect(outboxRows(mockEdge.db)).toEqual([]);
+  });
+
+  it('422 date_out_of_range: says how far ahead flights can be added, and removes the row', async () => {
+    mockEdge.network.answer(() =>
+      json(422, { error: 'date_out_of_range', maxDaysAhead: 330, requestId: 'req-6' }),
+    );
+    await openSheet();
+    await submit('AA100', '2027-09-24');
+    expect(await screen.findByTestId('add-flight-message')).toHaveTextContent(
+      'Flights can be added up to 330 days ahead.',
+    );
+    expect(listFlights(mockEdge.db)).toEqual([]);
+  });
+
+  it('a code this build does not know: a generic sentence, the code to Sentry only', async () => {
+    mockEdge.network.answer(() =>
+      json(403, { error: 'insufficient_scope', message: 'nope', requestId: 'req-7' }),
+    );
+    await openSheet();
+    await submit('AA100', '2026-09-24');
+    const message = await screen.findByTestId('add-flight-message');
+    expect(message).toHaveTextContent(
+      'AA100 on Thu 24 Sep could not be added right now. Try again later.',
+    );
+    expect(message).not.toHaveTextContent(/insufficient_scope|403/);
+    expect(Sentry.captureMessage).toHaveBeenCalledWith('outbox_mutation_dropped', {
+      level: 'warning',
+      extra: { method: 'POST', path: '/v1/flights', status: 403, code: 'insufficient_scope' },
+    });
+    expect(listFlights(mockEdge.db)).toEqual([]);
+  });
+
   it('says so when the flight is already tracked', async () => {
     seedStore(mockEdge.db);
     await openSheet();
@@ -515,11 +649,60 @@ describe('the sheet, through the real outbox', () => {
   });
 });
 
+describe('refusalMessage', () => {
+  const item = {
+    id: 'o',
+    method: 'POST',
+    path: '/v1/flights',
+    body: { subscriptionId: 's', number: 'UA901', date: '2026-09-24' },
+    idempotencyKey: 'k',
+    attempts: 0,
+    entityId: 's',
+  };
+
+  it.each([
+    [
+      400,
+      { error: 'validation_failed' },
+      'UA901 on Thu 24 Sep could not be added. Check the flight number and date.',
+    ],
+    [422, { error: 'date_out_of_range' }, 'UA901 on Thu 24 Sep is too far ahead to add yet.'],
+    [
+      413,
+      { error: 'payload_too_large' },
+      'UA901 on Thu 24 Sep could not be added right now. Try again later.',
+    ],
+    [
+      403,
+      { error: 'install_id_mismatch' },
+      'UA901 on Thu 24 Sep could not be added right now. Try again later.',
+    ],
+    [418, 'not json', 'UA901 on Thu 24 Sep could not be added right now. Try again later.'],
+  ] as const)('answers %p %j with %p', (status, body, text) => {
+    expect(refusalMessage(item, status, body)).toBe(text);
+  });
+});
+
 describe('the sheet in light and dark', () => {
   it.each(['light', 'dark'] as const)('renders with its validation errors in %s', async (theme) => {
     useSettings.getState().setAppearance(theme);
     await openSheet();
     await submit('', '');
     expect(compactTree(screen.toJSON())).toMatchSnapshot();
+  });
+
+  it.each([
+    ['light', LIGHT],
+    ['dark', DARK],
+  ] as const)('draws the fields with the 3:1 input border in %s', async (theme, tokens) => {
+    useSettings.getState().setAppearance(theme);
+    await openSheet();
+    for (const id of ['add-flight-number', 'add-flight-date']) {
+      expect(StyleSheet.flatten(screen.getByTestId(id).props.style)).toMatchObject({
+        borderColor: tokens.color.inputBorder,
+        backgroundColor: tokens.color.surfaceRaised,
+        borderWidth: 1,
+      });
+    }
   });
 });

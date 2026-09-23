@@ -8,9 +8,14 @@
  * within its own 8 s deadline, with a 504 `refresh_timeout` carrying the last known flight when
  * the tracker is slow; past 8 s the screen says it is still checking, and past the grace it stops
  * the spinner and says the flight updates when the refresh finishes. The answer's snapshot is
- * applied only when it is not null, and a 410 `flight_archived` marks the flight finished here.
+ * applied only when it is not null, a 410 `flight_archived` marks the flight finished here (with
+ * or without a flight in the answer), and a 401 `account_deleted` runs the app's one
+ * `forgetAccount` path.
  *
- * Unsubscribe tombstones the row at once and queues `DELETE /v1/flights/:id` (src/lib/flights.ts).
+ * Unsubscribe tombstones the row at once and queues `DELETE /v1/flights/:id`, or cancels an add
+ * that has not been sent yet (src/lib/flights.ts). The screen follows the flight when the server
+ * answers an add under its own id (src/lib/flight-queries.ts `useFlight`), so the refresh and the
+ * unsubscribe use the id of the row shown, not the route's.
  */
 
 import { DO_CALL_DEADLINE_MS } from '@planeahead/shared';
@@ -21,7 +26,7 @@ import { StatusPill } from '../../../components/StatusPill';
 import { Timeline } from '../../../components/Timeline';
 import { Body, Button, Loading, Notice, Screen, Section, Title } from '../../../components/ui';
 import { useDisplayPrefs } from '../../../lib/display-prefs';
-import { isOver, type FlightItem } from '../../../lib/flight-model';
+import { isOver, operatedAs, type FlightItem } from '../../../lib/flight-model';
 import { useFlight } from '../../../lib/flight-queries';
 import { refreshFlight, removeFlight, type RefreshOutcome } from '../../../lib/flights';
 import {
@@ -30,6 +35,7 @@ import {
   formatDelay,
   formatDistance,
   formatIsoDate,
+  localDate,
   providerName,
 } from '../../../lib/format';
 import { services } from '../../../lib/services';
@@ -52,6 +58,7 @@ function toneOf(outcome: RefreshOutcome): Message['tone'] {
       return 'warning';
     case 'refused':
     case 'offline':
+    case 'account_deleted':
       return 'danger';
   }
 }
@@ -118,10 +125,11 @@ export default function FlightDetailScreen() {
   const [message, setMessage] = useState<Message | null>(null);
   const [slow, setSlow] = useState(false);
 
+  const shownId = item?.id ?? id;
   const gesture = useRefreshGesture(async () => {
     setMessage(null);
-    const { store, api } = await services();
-    const outcome = await refreshFlight({ db: store.sqlite, api }, id);
+    const { store, api, onAccountDeleted } = await services();
+    const outcome = await refreshFlight({ db: store.sqlite, api, onAccountDeleted }, shownId);
     setMessage({ text: outcome.message, tone: toneOf(outcome) });
   });
 
@@ -177,6 +185,12 @@ export default function FlightDetailScreen() {
   const age = formatAge(item.snapshotFetchedAt, nowMs);
   const departureDelay = formatDelay(item.departureDelaySec);
   const arrivalDelay = formatDelay(item.arrivalDelaySec);
+  const operated = operatedAs(item);
+  // The header's date, as the timeline's day cues count from it.
+  const scheduledOutMs = item.scheduledOut === null ? Number.NaN : Date.parse(item.scheduledOut);
+  const departureDate = Number.isNaN(scheduledOutMs)
+    ? item.dateLocal
+    : localDate(scheduledOutMs, prefs.zoneFor(item.origin.tz));
 
   const confirmRemove = () => {
     Alert.alert(
@@ -232,6 +246,14 @@ export default function FlightDetailScreen() {
           <Title>{item.designator}</Title>
           <StatusPill status={item.status} pending={item.pending} testID="detail-status" />
         </View>
+        {operated === null ? null : (
+          <Text
+            testID="detail-operated-as"
+            style={{ color: theme.color.textMuted, fontSize: theme.font.body }}
+          >
+            {operated}
+          </Text>
+        )}
         <Text style={{ color: theme.color.text, fontSize: theme.font.heading }}>
           {route ?? 'Looking up the flight'}
         </Text>
@@ -277,7 +299,7 @@ export default function FlightDetailScreen() {
       )}
 
       <Section title="Timeline" testID="detail-timeline-section">
-        <Timeline steps={steps} prefs={prefs} />
+        <Timeline steps={steps} prefs={prefs} departureDate={departureDate} />
       </Section>
 
       <Details item={item} />

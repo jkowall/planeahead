@@ -3,9 +3,11 @@
  * the real page apply over the in-memory SQLite, the screen reads it through the increment 9 live
  * query, and the tests assert what a person sees. The next flight by scheduled departure with its
  * status pill, gate and terminal, times in the user's format, and a countdown that ticks once a
- * minute on its own interval; then the rest of the list; the empty state with the add button; a
- * pending add; a refused add's notice; pull to refresh at most once per gesture; light and dark
- * snapshots through the theme tokens.
+ * minute on its own interval; then the rest of the list; the empty state with the add button only
+ * when the store has no rows, an add still being looked up in the top slot when nothing live is
+ * ahead; a refused add's notice; pull to refresh at most once per gesture; what a screen reader
+ * hears (each card one button whose name carries the status, times, gate, terminal and
+ * countdown); light and dark snapshots through the theme tokens.
  */
 
 import { act, fireEvent, render, screen, within } from '@testing-library/react-native';
@@ -20,7 +22,17 @@ import { useSettings } from '../src/lib/settings';
 import { DARK, LIGHT } from '../src/theme/tokens';
 import { compactTree } from './support/compact-tree';
 import { createMemorySqlite, type MemorySqlite } from './support/memory-sqlite';
-import { AA100_ID, BA117_ID, DL1_ID, NOW, seedStore } from './support/flight-fixtures';
+import { applySyncPage, SyncPageShell } from '../src/lib/sync/apply';
+import {
+  AA100_ID,
+  AA100_KEY,
+  BA117_ID,
+  DL1_ID,
+  NOW,
+  aa100Snapshot,
+  seedStore,
+} from './support/flight-fixtures';
+import { cursorAt, id, page, subscriptionUpsert } from './support/sync-fixtures';
 
 const mockRouter = { push: jest.fn(), back: jest.fn(), replace: jest.fn() };
 let mockSession: unknown = {
@@ -142,12 +154,36 @@ describe('home, from a seeded store', () => {
     expect(mockRouter.push).toHaveBeenCalledWith('/add');
   });
 
-  it('says "no upcoming flights" when only past flights remain', async () => {
+  it('says "no upcoming flights" when only past flights remain, and lists them', async () => {
     const db = createMemorySqlite();
     seedStore(db, { status: 'cancelled' });
     db.run('DELETE FROM flight_subscriptions WHERE id = ?', [BA117_ID]);
     await renderHome(db);
-    expect(await screen.findByTestId('home-empty')).toHaveTextContent(/No upcoming flights/);
+    expect(await screen.findByTestId('home-no-upcoming')).toHaveTextContent(/No upcoming flights/);
+    expect(screen.queryByTestId('home-empty')).toBeNull();
+    expect(within(screen.getByTestId('home-rest')).getAllByTestId(/^flight-row-/)).toHaveLength(2);
+  });
+
+  it('never says "No flights yet" next to the first flight being added: it fills the top slot', async () => {
+    const db = createMemorySqlite();
+    await renderHome(db);
+    await screen.findByTestId('home-empty');
+    await act(async () => {
+      addFlight(db, { designator: 'AA100', date: '2026-09-24' });
+      await Promise.resolve();
+    });
+    const hero = await screen.findByTestId('home-next-flight');
+    expect(screen.queryByTestId('home-empty')).toBeNull();
+    expect(screen.queryByText(/No flights yet/)).toBeNull();
+    expect(hero).toHaveTextContent(/NEW FLIGHT/);
+    expect(hero).toHaveTextContent(/AA100/);
+    expect(hero).toHaveTextContent(/Looking up the flight/);
+    expect(
+      screen.getByRole('button', {
+        name: 'New flight: AA100, Thu 24 Sep, status Adding, looking up the flight',
+      }),
+    ).toBeOnTheScreen();
+    expect(screen.queryByTestId('home-rest')).toBeNull();
   });
 
   it('shows an add the outbox has not sent yet as "Adding", live from the store signal', async () => {
@@ -179,6 +215,91 @@ describe('home, from a seeded store', () => {
     expect(notice).toHaveTextContent(/up to 5 flights/);
     await fireEvent.press(screen.getByTestId('home-notice-sub-1-dismiss'));
     expect(screen.queryByTestId('home-notice-sub-1')).toBeNull();
+  });
+
+  it('names each card for a screen reader: status, times, gate, terminal and the countdown', async () => {
+    await renderHome(seeded());
+    await screen.findByTestId('home-next-flight');
+    expect(
+      screen.getByRole('button', {
+        name:
+          'Next flight: AA100, JFK → LHR, Wed 23 Sep, status Scheduled, departs 6:25 PM, ' +
+          'arrives 7:10 AM the next day, Terminal 8, gate B22, departure 25 min late, ' +
+          'Departs in 8 h 25 min',
+      }),
+    ).toBeOnTheScreen();
+    expect(
+      screen.getByRole('button', {
+        name: 'BA117, LHR → JFK, Fri 25 Sep, status Scheduled, departs 12:20 PM, Terminal 5',
+      }),
+    ).toBeOnTheScreen();
+    expect(
+      screen.getByRole('button', {
+        name: 'DL1, ATL → LAX, Tue 22 Sep, status Arrived, departed 8:04 AM',
+      }),
+    ).toBeOnTheScreen();
+    // The header's add button says what it adds; settings is named by its title.
+    expect(screen.getByTestId('home-add')).toHaveAccessibleName('Add a flight');
+    expect(screen.getByRole('button', { name: 'Settings' })).toBeOnTheScreen();
+  });
+
+  it('keeps the card label in step with the countdown as it ticks', async () => {
+    jest.restoreAllMocks();
+    jest.useFakeTimers({ now: NOW });
+    try {
+      await renderHome(seeded());
+      await screen.findByTestId('home-next-flight');
+      await act(async () => {
+        jest.advanceTimersByTime(60_000);
+        await Promise.resolve();
+      });
+      expect(screen.getByTestId('home-countdown')).toHaveTextContent('Departs in 8 h 24 min');
+      expect(screen.getByTestId('home-next-flight')).toHaveAccessibleName(/Departs in 8 h 24 min$/);
+    } finally {
+      jest.useRealTimers();
+    }
+  });
+
+  it('counts down from now, not from mount, when an add being looked up becomes the next flight', async () => {
+    jest.restoreAllMocks();
+    jest.useFakeTimers({ now: NOW });
+    try {
+      const db = createMemorySqlite();
+      addFlight(db, { designator: 'AA100', date: '2026-09-23' }, { newId: () => id(5) });
+      await renderHome(db);
+      expect(await screen.findByTestId('home-next-pending')).toBeOnTheScreen();
+      // Ten minutes later the server's row lands under the same id, with its snapshot.
+      await act(async () => {
+        jest.advanceTimersByTime(10 * 60_000);
+        applySyncPage(
+          db,
+          SyncPageShell.parse(
+            page({
+              changes: [subscriptionUpsert(5, AA100_KEY)],
+              flights: [aa100Snapshot()],
+              cursor: cursorAt(2),
+            }),
+          ),
+        );
+        await Promise.resolve();
+      });
+      // 22:25Z less 14:10Z (and the few ms the queries let the fake clock run): never the
+      // 8 h 25 min a clock read when the card mounted would give.
+      expect(await screen.findByTestId('home-countdown')).toHaveTextContent(
+        /^Departs in 8 h 1[45] min$/,
+      );
+    } finally {
+      jest.useRealTimers();
+    }
+  });
+
+  it('shows the designator typed on this phone and the operating one beside it', async () => {
+    const db = seeded();
+    db.run("UPDATE flight_subscriptions SET added_as = 'BA1511' WHERE id = ?", [AA100_ID]);
+    await renderHome(db);
+    const hero = within(await screen.findByTestId('home-next-flight'));
+    expect(hero.getByText('BA1511  JFK → LHR')).toBeOnTheScreen();
+    expect(hero.getByTestId('home-next-operated-as')).toHaveTextContent('Operated as AA100');
   });
 
   it('offers sign-in to an anonymous session', async () => {
@@ -243,6 +364,22 @@ describe('home, light and dark (theme tokens)', () => {
     await screen.findByTestId('home-empty');
     expect(compactTree(screen.toJSON())).toMatchSnapshot();
   });
+
+  it.each(['light', 'dark'] as const)(
+    'renders a first add being looked up in the top slot in %s',
+    async (appearance) => {
+      useSettings.getState().setAppearance(appearance);
+      const db = createMemorySqlite();
+      addFlight(
+        db,
+        { designator: 'UA901', date: '2026-09-24' },
+        { newId: () => '0199b000-0000-7000-8000-000000000901', now: () => new Date(NOW) },
+      );
+      await renderHome(db);
+      await screen.findByTestId('home-next-pending');
+      expect(compactTree(screen.toJSON())).toMatchSnapshot();
+    },
+  );
 });
 
 describe('Countdown', () => {

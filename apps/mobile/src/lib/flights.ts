@@ -9,29 +9,51 @@
  *   the server's row carries the same id and the next sync page lands on it (the server's row wins
  *   on the same id). The outbox row names that id as `entityId`, so a snapshot replace keeps the
  *   row while the POST is queued (increment 9). The drain then sends it with `Idempotency-Key`
- *   and `X-Install-Id`.
+ *   and `X-Install-Id`. The row also records the designator the user typed (`added_as`, local
+ *   only), which the card and the detail show. A flight the store already tracks is answered
+ *   locally, by flight key, never by designator (`findTracked`); a pending add the store already
+ *   holds as a live row (a codeshare of a tracked flight) is marked superseded and hidden
+ *   (src/lib/sync/local-intent.ts), and its POST settles it.
  * - `reconcileSent` is the outbox's `onSent` hook. On the subscribe's 201 it writes the server's
  *   row and the flight snapshot from the answer, so the list shows the scheduled times at once
- *   rather than after the next pull. On 200 `created: false` the account already held that
- *   flight under ANOTHER id: the optimistic row is replaced by the server's, and any queued
- *   mutation naming the optimistic id (an unsubscribe) is pointed at the server's id. Without
- *   this the list would show the flight twice until a snapshot replace dropped the duplicate.
+ *   rather than after the next pull. The answer's `created` decides the rest (ruling X7):
+ *   - 200 `created: false` under ANOTHER id: the account already held the flight and the add
+ *     was a no-op on the server. The optimistic row is deleted, and so is every queued mutation
+ *     naming it (a DELETE queued while the add was in flight is dropped, never pointed at the
+ *     server's row: the user removed the add, not the flight they already had), and its
+ *     tombstone is never copied onto the server's row. The server's row and its flight are still
+ *     written, so the list keeps one row for the flight between the answer and the next pull.
+ *   - `created: true` under another id (a restored tombstone): the add really made that row live,
+ *     so a DELETE queued for the optimistic id is pointed at it and the tombstone follows.
+ *   Either way the replacement is recorded for an open detail screen
+ *   (src/lib/flight-replacements.ts).
+ *   A settled `DELETE /v1/flights/:id` removes its local tombstone for good.
  * - `reconcileRefused` is the `onRefused` hook: a refused subscribe (403 `cap_exceeded`, 404
  *   `flight_not_found`, 410, 422 `date_out_of_range`, 400) removes the optimistic row and any
- *   mutation queued behind it for that row, in the transaction that drops the outbox row.
+ *   mutation queued behind it for that row, in the transaction that drops the outbox row; a
+ *   DELETE refused with 404 (the server has no such subscription) removes the local tombstone.
  *   `refusalMessage` turns the answer into the text the add sheet (or the home screen) shows:
- *   the free-tier cap and limit from the payload, the dates the search tried.
+ *   the free-tier cap and limit from the payload, the dates the search tried, and a generic
+ *   sentence for a code this build does not know (the code itself goes to Sentry only).
  * - 422 `idempotency_payload_mismatch` never reaches here: the outbox regenerates the key and
  *   services.ts reports it to Sentry without the body.
- * - `removeFlight` tombstones the row locally and queues `DELETE /v1/flights/:id`.
+ * - `removeFlight` tombstones the row locally and queues `DELETE /v1/flights/:id`, except for an
+ *   add whose POST has never left the phone (no `last_attempt_at`): that POST and the optimistic
+ *   row are deleted in one transaction and nothing is queued, so a cancelled typo costs no tracker,
+ *   no provider call and no daily add.
  *
  * Refresh is not a write through the outbox: it carries no key and changes nothing locally until
  * it answers, and replaying a stale refresh later would spend a provider call for nothing. It is
  * called directly, at most once per gesture (the screen's hook), under the 8 s deadline UX; its
- * answer's flight snapshot is applied only when not null and not older than the stored one.
+ * answer's flight snapshot is applied only when not null and not older than the stored one. A 410
+ * `flight_archived` stamps `finished_at` on the subscription by its id, with or without a flight
+ * in the answer; a 401 `account_deleted` runs the same `forgetAccount` path as the outbox and the
+ * sync client.
  */
 
+import * as Sentry from '@sentry/react-native';
 import {
+  CARRIER_IATA_TO_ICAO_FALLBACK,
   DO_CALL_DEADLINE_MS,
   FREE_TIER_LIMITS,
   FlightKeySchema,
@@ -41,6 +63,8 @@ import {
   SubscribeFlightBodySchema,
   SyncFlightV1,
   parseDesignator,
+  parseFlightKey,
+  resolveCarrierIcao,
   uuidv7,
   type CapName,
 } from '@planeahead/shared';
@@ -48,15 +72,12 @@ import { z } from 'zod';
 import type { ApiClient, RawResponse } from './api-client';
 import type { SqliteLike } from './db/sqlite-like';
 import { commitWrite, type StoreTable } from './db/store-signal';
-import {
-  PENDING_KEY_PREFIX,
-  pendingFlightKey,
-  toFlightItem,
-  type FlightRowRecord,
-} from './flight-model';
+import { PENDING_KEY_PREFIX, pendingFlightKey } from './flight-model';
+import { recordReplacement } from './flight-replacements';
 import { formatDateList, formatIsoDate } from './format';
 import { applySnapshot, upsertSubscription } from './sync/apply';
 import { useFlightNotices } from './flight-notices';
+import { markSupersededPending, reapplyQueuedUnsubscribes } from './sync/local-intent';
 import {
   enqueueMutation,
   type DrainResult,
@@ -64,7 +85,7 @@ import {
   type OutboxDeps,
   type OutboxItem,
 } from './sync/outbox';
-import { SUBSCRIBE_MUTATION } from './sync/store';
+import { isUnsubscribe, SUBSCRIBE_MUTATION, wipeLocalStore } from './sync/store';
 
 // ---------------------------------------------------------------------------------------------
 // Validation (the shared `parseDesignator` and `IsoDateSchema`, the API's own rules).
@@ -98,11 +119,21 @@ function normaliseDesignator(input: string): string | null {
   }
 }
 
+/**
+ * The date as the sheet's number pad types it: eight digits (`20260926`) read as `YYYY-MM-DD`.
+ * Anything else is left as it is for `IsoDateSchema` to judge.
+ */
+export function normaliseDateInput(input: string): string {
+  const date = input.trim();
+  const digits = /^([0-9]{4})([0-9]{2})([0-9]{2})$/.exec(date);
+  return digits === null ? date : `${digits[1] ?? ''}-${digits[2] ?? ''}-${digits[3] ?? ''}`;
+}
+
 /** The add-flight sheet's validation: the same designator and date rules the API applies. */
 export function validateAddFlight(input: AddFlightInput): AddFlightValidation {
   const errors: AddFlightErrors = {};
   const number = input.number.trim();
-  const date = input.date.trim();
+  const date = normaliseDateInput(input.date);
   const designator = number === '' ? null : normaliseDesignator(number);
   if (number === '') {
     errors.number = 'Enter the flight number, e.g. AA100.';
@@ -140,15 +171,55 @@ export interface MutationOptions {
   readonly newId?: () => string;
 }
 
-/** A live row for the same designator and date, pending or synced, if the store has one. */
+/**
+ * The operating carrier (ICAO), number and date a typed designator keys as when it is not a
+ * codeshare, or null when this build cannot resolve the carrier offline.
+ */
+function probableKeyParts(
+  request: AddFlightRequest,
+): { readonly carrierIcao: string; readonly number: string; readonly date: string } | null {
+  try {
+    const parsed = parseDesignator(request.designator);
+    const carrierIcao = resolveCarrierIcao(parsed.carrier, CARRIER_IATA_TO_ICAO_FALLBACK);
+    return carrierIcao === undefined
+      ? null
+      : { carrierIcao, number: `${parsed.number}${parsed.suffix ?? ''}`, date: request.date };
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * A live row that already tracks this add, compared by FLIGHT KEY, never by a displayed
+ * designator (increment 10 review): a pending row with the same placeholder key, or a synced row
+ * whose key has the designator's operating carrier, number and date. A codeshare (`BA1511` for
+ * a tracked `AA100`) is not caught here: its add is queued, hidden as superseded, and the server's
+ * 200 `created: false` settles it (see the header).
+ */
 export function findTracked(db: SqliteLike, request: AddFlightRequest): string | null {
-  const rows = db.all<FlightRowRecord>(
-    'SELECT * FROM flight_subscriptions WHERE deleted_at IS NULL AND id IS NOT NULL',
+  const placeholder = pendingFlightKey(request.designator, request.date);
+  const wanted = probableKeyParts(request);
+  const rows = db.all<{ id: string; flight_key: string }>(
+    'SELECT id, flight_key FROM flight_subscriptions WHERE deleted_at IS NULL AND id IS NOT NULL',
   );
   for (const row of rows) {
-    const item = toFlightItem(row);
-    if (item.designator === request.designator && item.dateLocal === request.date) {
-      return item.id;
+    if (row.flight_key === placeholder) {
+      return row.id;
+    }
+    if (wanted === null || row.flight_key.startsWith(PENDING_KEY_PREFIX)) {
+      continue;
+    }
+    try {
+      const key = parseFlightKey(row.flight_key);
+      if (
+        key.operatingCarrierIcao === wanted.carrierIcao &&
+        key.flightNumber === wanted.number &&
+        key.scheduledDepartureDateLocal === wanted.date
+      ) {
+        return row.id;
+      }
+    } catch {
+      // A key this build cannot read tracks nothing it could compare.
     }
   }
   return null;
@@ -179,24 +250,59 @@ export function addFlight(
   const item = commitWrite(db, ['flight_subscriptions', 'outbox'], (): OutboxItem => {
     db.run(
       `INSERT INTO flight_subscriptions (
-         id, flight_key, muted, notification_overrides, source, live_tracked, created_at, updated_at
-       ) VALUES (?, ?, 0, '{}', 'app', 0, ?, ?)`,
-      [subscriptionId, pendingFlightKey(request.designator, request.date), stamp, stamp],
+         id, flight_key, muted, notification_overrides, source, live_tracked, created_at,
+         updated_at, added_as
+       ) VALUES (?, ?, 0, '{}', 'app', 0, ?, ?, ?)`,
+      [
+        subscriptionId,
+        pendingFlightKey(request.designator, request.date),
+        stamp,
+        stamp,
+        request.designator,
+      ],
     );
-    return enqueueMutation(db, { ...SUBSCRIBE_MUTATION, body, entityId: subscriptionId }, { now });
+    const queued = enqueueMutation(
+      db,
+      { ...SUBSCRIBE_MUTATION, body, entityId: subscriptionId },
+      { now },
+    );
+    // A codeshare of a flight the list already has: hidden until the POST settles it.
+    markSupersededPending(db);
+    return queued;
   });
   return { kind: 'queued', subscriptionId, outboxId: item.id };
 }
 
-/** Tombstones the row now and queues `DELETE /v1/flights/:id`, in one transaction. */
-export function removeFlight(db: SqliteLike, id: string, options: MutationOptions = {}): void {
+export type RemoveResult = 'cancelled' | 'queued';
+
+/**
+ * Stops tracking a flight, in one transaction. An add whose POST has never been sent is cancelled
+ * outright (the POST and the optimistic row go, nothing is queued); anything else is tombstoned
+ * now and `DELETE /v1/flights/:id` is queued (see the header).
+ */
+export function removeFlight(
+  db: SqliteLike,
+  id: string,
+  options: MutationOptions = {},
+): RemoveResult {
   const now = (options.now ?? (() => new Date(Date.now())))();
-  commitWrite(db, ['flight_subscriptions', 'outbox'], () => {
+  return commitWrite(db, ['flight_subscriptions', 'outbox'], (): RemoveResult => {
+    const unsent = db.get<{ id: string }>(
+      `SELECT id FROM outbox
+         WHERE entity_id = ? AND method = ? AND path = ? AND last_attempt_at IS NULL AND attempts = 0`,
+      [id, SUBSCRIBE_MUTATION.method, SUBSCRIBE_MUTATION.path],
+    );
+    if (unsent !== null) {
+      db.run('DELETE FROM outbox WHERE entity_id = ?', [id]);
+      db.run('DELETE FROM flight_subscriptions WHERE id = ?', [id]);
+      return 'cancelled';
+    }
     db.run(
       'UPDATE flight_subscriptions SET deleted_at = ?, updated_at = ? WHERE id = ? AND deleted_at IS NULL',
       [now.toISOString(), now.toISOString(), id],
     );
     enqueueMutation(db, { method: 'DELETE', path: `/v1/flights/${id}`, entityId: id }, { now });
+    return 'queued';
   });
 }
 
@@ -283,12 +389,27 @@ export function applyFlightView(
   return wrote;
 }
 
+/** A settled unsubscribe: its local tombstone goes for good (see the header). */
+function forgetTombstone(db: SqliteLike, item: OutboxItem): readonly StoreTable[] {
+  if (item.entityId === null) {
+    return [];
+  }
+  const removed = db.run(
+    'DELETE FROM flight_subscriptions WHERE id = ? AND deleted_at IS NOT NULL',
+    [item.entityId],
+  ).changes;
+  return removed > 0 ? ['flight_subscriptions'] : [];
+}
+
 /** The outbox's `onSent` hook (see the header). Runs inside the outbox's transaction. */
 export function reconcileSent(
   db: SqliteLike,
   item: OutboxItem,
   response: RawResponse,
 ): readonly StoreTable[] {
+  if (isUnsubscribe(item)) {
+    return forgetTombstone(db, item);
+  }
   if (!isSubscribe(item) || item.entityId === null) {
     return [];
   }
@@ -299,45 +420,80 @@ export function reconcileSent(
   }
   const server = answer.data.subscription;
   const optimisticId = item.entityId;
-  const local = db.get<{ deleted_at: string | null }>(
-    'SELECT deleted_at FROM flight_subscriptions WHERE id = ?',
+  const now = new Date(Date.now());
+  const local = db.get<{ deleted_at: string | null; added_as: string | null }>(
+    'SELECT deleted_at, added_as FROM flight_subscriptions WHERE id = ?',
     [optimisticId],
   );
+  const noOp = server.id !== optimisticId && !answer.data.created;
+  const heldAlready =
+    noOp &&
+    db.get<{ id: string }>('SELECT id FROM flight_subscriptions WHERE id = ?', [server.id]) !==
+      null;
   if (server.id !== optimisticId) {
-    // 200 `created: false`: the account already held this flight under the server's id.
     db.run('DELETE FROM flight_subscriptions WHERE id = ?', [optimisticId]);
-    const queued = db.all<{ id: string; path: string }>(
-      'SELECT id, path FROM outbox WHERE entity_id = ?',
-      [optimisticId],
-    );
-    for (const row of queued) {
-      db.run('UPDATE outbox SET entity_id = ?, path = ? WHERE id = ?', [
-        server.id,
-        row.path.split(optimisticId).join(server.id),
-        row.id,
-      ]);
+    if (noOp) {
+      // The account already held the flight: whatever was queued for the add goes with it.
+      db.run('DELETE FROM outbox WHERE entity_id = ?', [optimisticId]);
+    } else {
+      // A restored tombstone: the add made the server's row live, so a queued DELETE follows it.
+      const queued = db.all<{ id: string; path: string }>(
+        'SELECT id, path FROM outbox WHERE entity_id = ?',
+        [optimisticId],
+      );
+      for (const row of queued) {
+        db.run('UPDATE outbox SET entity_id = ?, path = ? WHERE id = ?', [
+          server.id,
+          row.path.split(optimisticId).join(server.id),
+          row.id,
+        ]);
+      }
     }
+    recordReplacement(optimisticId, server.id);
   }
   upsertSubscription(db, server);
-  if (local !== null && local.deleted_at !== null) {
+  // The designator typed on this phone names the row the add became. On a no-op the account's
+  // row keeps the name this phone already showed for it, and a cancelled add names nothing.
+  if (local !== null && !(noOp && (heldAlready || local.deleted_at !== null))) {
+    db.run('UPDATE flight_subscriptions SET added_as = ? WHERE id = ?', [
+      local.added_as,
+      server.id,
+    ]);
+  }
+  // A server row is never superseded (only a pending add is); the optimistic row it replaced
+  // under the same id may have been.
+  db.run('UPDATE flight_subscriptions SET superseded = 0 WHERE id = ?', [server.id]);
+  if (!noOp && local !== null && local.deleted_at !== null) {
     // Removed on this phone while the add was in flight: the queued DELETE follows.
     db.run('UPDATE flight_subscriptions SET deleted_at = ? WHERE id = ? AND deleted_at IS NULL', [
       local.deleted_at,
       server.id,
     ]);
   }
+  // The server's row may be one this phone has an unsubscribe queued for.
+  reapplyQueuedUnsubscribes(db, now);
   applyFlightView(db, answer.data.flight);
+  markSupersededPending(db);
   return ['flight_subscriptions', 'outbox'];
 }
 
 /** The outbox's `onRefused` hook (see the header). Runs inside the outbox's transaction. */
-export function reconcileRefused(db: SqliteLike, item: OutboxItem): readonly StoreTable[] {
+export function reconcileRefused(
+  db: SqliteLike,
+  item: OutboxItem,
+  response?: RawResponse,
+): readonly StoreTable[] {
+  if (isUnsubscribe(item)) {
+    // 404: the server has no such subscription (another device removed it first).
+    return response?.status === 404 ? forgetTombstone(db, item) : [];
+  }
   if (!isSubscribe(item) || item.entityId === null) {
     return [];
   }
-  db.run('DELETE FROM flight_subscriptions WHERE id = ? AND flight_key LIKE ?', [
+  db.run('DELETE FROM flight_subscriptions WHERE id = ? AND substr(flight_key, 1, ?) = ?', [
     item.entityId,
-    `${PENDING_KEY_PREFIX}%`,
+    PENDING_KEY_PREFIX.length,
+    PENDING_KEY_PREFIX,
   ]);
   // A queued unsubscribe of a flight that was never added has nothing left to do.
   db.run('DELETE FROM outbox WHERE entity_id = ? AND id <> ?', [item.entityId, item.id]);
@@ -355,7 +511,7 @@ export function flightOutboxHooks(db: SqliteLike): Required<
 } {
   return {
     onSent: (item, response) => reconcileSent(db, item, response),
-    onRefused: (item) => reconcileRefused(db, item),
+    onRefused: (item, response) => reconcileRefused(db, item, response),
     notifyDropped: ({ item, status, body }) => {
       if (isSubscribe(item) && item.entityId !== null) {
         useFlightNotices
@@ -404,8 +560,12 @@ export function capMessage(cap: string | undefined, limit: number | undefined): 
   }
 }
 
-/** The text for a refused subscribe, from its request and the answer's envelope. */
-export function refusalMessage(item: OutboxItem, status: number, body: unknown): string {
+/**
+ * The text for a refused subscribe, from its request and the answer's envelope. The status is
+ * not shown: a code this build does not know gets a generic sentence, and the code and the status
+ * go to Sentry with the drop (services.ts), never into the text.
+ */
+export function refusalMessage(item: OutboxItem, _status: number, body: unknown): string {
   const request = QueuedSubscribeBodySchema.safeParse(item.body);
   const designator = request.success ? (request.data.number ?? 'This flight') : 'This flight';
   const date = request.success && request.data.date !== undefined ? request.data.date : null;
@@ -434,7 +594,7 @@ export function refusalMessage(item: OutboxItem, status: number, body: unknown):
     case 'validation_failed':
       return `${designator}${on} could not be added. Check the flight number and date.`;
     default:
-      return `${designator}${on} could not be added (${code ?? `HTTP ${String(status)}`}).`;
+      return `${designator}${on} could not be added right now. Try again later.`;
   }
 }
 
@@ -455,11 +615,17 @@ export type RefreshOutcome =
   | { readonly kind: 'archived'; readonly message: string }
   | { readonly kind: 'refused'; readonly message: string }
   | { readonly kind: 'deadline'; readonly message: string }
-  | { readonly kind: 'offline'; readonly message: string };
+  | { readonly kind: 'offline'; readonly message: string }
+  | { readonly kind: 'account_deleted'; readonly message: string };
 
 export interface RefreshDeps {
   readonly db: SqliteLike;
   readonly api: Pick<ApiClient, 'v1'>;
+  /**
+   * 401 `account_deleted`: after the store is wiped, the same local sign-out the outbox and the
+   * sync client run (services.ts `forgetAccount`).
+   */
+  readonly onAccountDeleted: () => Promise<void> | void;
   /** The route's deadline; the app waits this plus `REFRESH_GRACE_MS`. */
   readonly deadlineMs?: number;
   readonly now?: () => Date;
@@ -477,6 +643,25 @@ function applyAnswer(
   options: { readonly finished?: boolean; readonly now: Date },
 ): void {
   commitWrite(db, ['flight_subscriptions'], () => applyFlightView(db, view, options));
+}
+
+/**
+ * 410 `flight_archived`: the answer's flight (when it carries one) by key, and `finished_at` on
+ * THIS subscription by its id whether or not it does, in one commit (ruling X6).
+ */
+function applyArchived(
+  db: SqliteLike,
+  subscriptionId: string,
+  view: ParsedFlightView | null,
+  now: Date,
+): void {
+  commitWrite(db, ['flight_subscriptions'], () => {
+    applyFlightView(db, view, { finished: true, now });
+    db.run('UPDATE flight_subscriptions SET finished_at = ? WHERE id = ? AND finished_at IS NULL', [
+      now.toISOString(),
+      subscriptionId,
+    ]);
+  });
 }
 
 function refreshedMessage(outcome: string, reason: string | null | undefined): string {
@@ -554,7 +739,7 @@ export async function refreshFlight(
     };
   }
   if (status === 410 && code === 'flight_archived') {
-    applyAnswer(deps.db, view, { finished: true, now: now() });
+    applyArchived(deps.db, subscriptionId, view, now());
     return { kind: 'archived', message: 'This flight is over and is no longer tracked.' };
   }
   if (status === 403 && code === 'cap_exceeded') {
@@ -566,11 +751,22 @@ export async function refreshFlight(
       message: 'This flight is not on the server yet. It can be refreshed once it has been added.',
     };
   }
+  if (status === 401 && code === 'account_deleted') {
+    // As the outbox does: nothing local survives, then the local sign-out.
+    wipeLocalStore(deps.db);
+    await deps.onAccountDeleted();
+    return {
+      kind: 'account_deleted',
+      message: 'This account has been deleted. Its flights are gone from this phone.',
+    };
+  }
   if (status === 401) {
     return { kind: 'refused', message: 'Sign in again to refresh flights.' };
   }
-  return {
-    kind: 'refused',
-    message: `Could not refresh (${code ?? `HTTP ${String(status)}`}). Try again later.`,
-  };
+  // Method, status and code only, like the outbox's drops: never the body (it names the flight).
+  Sentry.captureMessage('flight_refresh_refused', {
+    level: 'warning',
+    extra: { method: 'POST', path: '/v1/flights/:id/refresh', status, code },
+  });
+  return { kind: 'refused', message: 'Could not refresh right now. Try again later.' };
 }

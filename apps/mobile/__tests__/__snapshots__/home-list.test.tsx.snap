@@ -1,5 +1,317 @@
 // Jest Snapshot v1, https://goo.gl/fbAQLP
 
+exports[`home, light and dark (theme tokens) renders a first add being looked up in the top slot in dark 1`] = `
+{
+  "children": [
+    {
+      "children": [
+        {
+          "type": "RCTRefreshControl",
+        },
+        {
+          "children": [
+            {
+              "children": [
+                {
+                  "children": [
+                    "PlaneAhead",
+                  ],
+                  "style": {
+                    "color": "#F2F4F8",
+                  },
+                  "type": "Text",
+                },
+                {
+                  "children": [
+                    {
+                      "children": [
+                        {
+                          "children": [
+                            "Settings",
+                          ],
+                          "style": {
+                            "color": "#F2F4F8",
+                          },
+                          "type": "Text",
+                        },
+                      ],
+                      "label": "Settings",
+                      "style": {
+                        "backgroundColor": "#171B22",
+                        "borderColor": "#2A303A",
+                      },
+                      "testID": "home-settings",
+                      "type": "View",
+                    },
+                    {
+                      "children": [
+                        {
+                          "children": [
+                            "Add",
+                          ],
+                          "style": {
+                            "color": "#0B0E13",
+                          },
+                          "type": "Text",
+                        },
+                      ],
+                      "label": "Add a flight",
+                      "style": {
+                        "backgroundColor": "#7C9DFF",
+                        "borderColor": "#2A303A",
+                      },
+                      "testID": "home-add",
+                      "type": "View",
+                    },
+                  ],
+                  "type": "View",
+                },
+              ],
+              "type": "View",
+            },
+            {
+              "children": [
+                {
+                  "children": [
+                    {
+                      "children": [
+                        "NEW FLIGHT",
+                      ],
+                      "style": {
+                        "color": "#A3ACB8",
+                      },
+                      "type": "Text",
+                    },
+                    {
+                      "children": [
+                        {
+                          "children": [
+                            "Adding",
+                          ],
+                          "style": {
+                            "color": "#E2D2FF",
+                          },
+                          "type": "Text",
+                        },
+                      ],
+                      "label": "Status: Adding",
+                      "style": {
+                        "backgroundColor": "#33205A",
+                      },
+                      "testID": "flight-0199b000-0000-7000-8000-000000000901-status",
+                      "type": "View",
+                    },
+                  ],
+                  "type": "View",
+                },
+                {
+                  "children": [
+                    "UA901",
+                  ],
+                  "style": {
+                    "color": "#F2F4F8",
+                  },
+                  "type": "Text",
+                },
+                {
+                  "children": [
+                    "Thu 24 Sep",
+                  ],
+                  "style": {
+                    "color": "#A3ACB8",
+                  },
+                  "type": "Text",
+                },
+                {
+                  "children": [
+                    "Looking up the flight. Its times appear here once it has been found.",
+                  ],
+                  "style": {
+                    "color": "#F2F4F8",
+                  },
+                  "testID": "home-next-pending",
+                  "type": "Text",
+                },
+              ],
+              "label": "New flight: UA901, Thu 24 Sep, status Adding, looking up the flight",
+              "style": {
+                "backgroundColor": "#171B22",
+                "borderColor": "#2A303A",
+              },
+              "testID": "home-next-flight",
+              "type": "View",
+            },
+          ],
+          "type": "View",
+        },
+      ],
+      "testID": "home-screen",
+      "type": "RCTScrollView",
+    },
+  ],
+  "style": {
+    "backgroundColor": "#0B0E13",
+  },
+  "type": "View",
+}
+`;
+
+exports[`home, light and dark (theme tokens) renders a first add being looked up in the top slot in light 1`] = `
+{
+  "children": [
+    {
+      "children": [
+        {
+          "type": "RCTRefreshControl",
+        },
+        {
+          "children": [
+            {
+              "children": [
+                {
+                  "children": [
+                    "PlaneAhead",
+                  ],
+                  "style": {
+                    "color": "#101418",
+                  },
+                  "type": "Text",
+                },
+                {
+                  "children": [
+                    {
+                      "children": [
+                        {
+                          "children": [
+                            "Settings",
+                          ],
+                          "style": {
+                            "color": "#101418",
+                          },
+                          "type": "Text",
+                        },
+                      ],
+                      "label": "Settings",
+                      "style": {
+                        "backgroundColor": "#F2F4F8",
+                        "borderColor": "#D6DAE1",
+                      },
+                      "testID": "home-settings",
+                      "type": "View",
+                    },
+                    {
+                      "children": [
+                        {
+                          "children": [
+                            "Add",
+                          ],
+                          "style": {
+                            "color": "#FFFFFF",
+                          },
+                          "type": "Text",
+                        },
+                      ],
+                      "label": "Add a flight",
+                      "style": {
+                        "backgroundColor": "#1C4FD6",
+                        "borderColor": "#D6DAE1",
+                      },
+                      "testID": "home-add",
+                      "type": "View",
+                    },
+                  ],
+                  "type": "View",
+                },
+              ],
+              "type": "View",
+            },
+            {
+              "children": [
+                {
+                  "children": [
+                    {
+                      "children": [
+                        "NEW FLIGHT",
+                      ],
+                      "style": {
+                        "color": "#525B67",
+                      },
+                      "type": "Text",
+                    },
+                    {
+                      "children": [
+                        {
+                          "children": [
+                            "Adding",
+                          ],
+                          "style": {
+                            "color": "#5B2AA8",
+                          },
+                          "type": "Text",
+                        },
+                      ],
+                      "label": "Status: Adding",
+                      "style": {
+                        "backgroundColor": "#F1E8FF",
+                      },
+                      "testID": "flight-0199b000-0000-7000-8000-000000000901-status",
+                      "type": "View",
+                    },
+                  ],
+                  "type": "View",
+                },
+                {
+                  "children": [
+                    "UA901",
+                  ],
+                  "style": {
+                    "color": "#101418",
+                  },
+                  "type": "Text",
+                },
+                {
+                  "children": [
+                    "Thu 24 Sep",
+                  ],
+                  "style": {
+                    "color": "#525B67",
+                  },
+                  "type": "Text",
+                },
+                {
+                  "children": [
+                    "Looking up the flight. Its times appear here once it has been found.",
+                  ],
+                  "style": {
+                    "color": "#101418",
+                  },
+                  "testID": "home-next-pending",
+                  "type": "Text",
+                },
+              ],
+              "label": "New flight: UA901, Thu 24 Sep, status Adding, looking up the flight",
+              "style": {
+                "backgroundColor": "#F2F4F8",
+                "borderColor": "#D6DAE1",
+              },
+              "testID": "home-next-flight",
+              "type": "View",
+            },
+          ],
+          "type": "View",
+        },
+      ],
+      "testID": "home-screen",
+      "type": "RCTScrollView",
+    },
+  ],
+  "style": {
+    "backgroundColor": "#FFFFFF",
+  },
+  "type": "View",
+}
+`;
+
 exports[`home, light and dark (theme tokens) renders the empty state in dark 1`] = `
 {
   "children": [
@@ -35,6 +347,7 @@ exports[`home, light and dark (theme tokens) renders the empty state in dark 1`]
                           "type": "Text",
                         },
                       ],
+                      "label": "Settings",
                       "style": {
                         "backgroundColor": "#171B22",
                         "borderColor": "#2A303A",
@@ -54,6 +367,7 @@ exports[`home, light and dark (theme tokens) renders the empty state in dark 1`]
                           "type": "Text",
                         },
                       ],
+                      "label": "Add a flight",
                       "style": {
                         "backgroundColor": "#7C9DFF",
                         "borderColor": "#2A303A",
@@ -99,6 +413,7 @@ exports[`home, light and dark (theme tokens) renders the empty state in dark 1`]
                       "type": "Text",
                     },
                   ],
+                  "label": "Add a flight",
                   "style": {
                     "backgroundColor": "#7C9DFF",
                     "borderColor": "#2A303A",
@@ -164,6 +479,7 @@ exports[`home, light and dark (theme tokens) renders the empty state in light 1`
                           "type": "Text",
                         },
                       ],
+                      "label": "Settings",
                       "style": {
                         "backgroundColor": "#F2F4F8",
                         "borderColor": "#D6DAE1",
@@ -183,6 +499,7 @@ exports[`home, light and dark (theme tokens) renders the empty state in light 1`
                           "type": "Text",
                         },
                       ],
+                      "label": "Add a flight",
                       "style": {
                         "backgroundColor": "#1C4FD6",
                         "borderColor": "#D6DAE1",
@@ -228,6 +545,7 @@ exports[`home, light and dark (theme tokens) renders the empty state in light 1`
                       "type": "Text",
                     },
                   ],
+                  "label": "Add a flight",
                   "style": {
                     "backgroundColor": "#1C4FD6",
                     "borderColor": "#D6DAE1",
@@ -293,6 +611,7 @@ exports[`home, light and dark (theme tokens) renders the seeded list in dark 1`]
                           "type": "Text",
                         },
                       ],
+                      "label": "Settings",
                       "style": {
                         "backgroundColor": "#171B22",
                         "borderColor": "#2A303A",
@@ -312,6 +631,7 @@ exports[`home, light and dark (theme tokens) renders the seeded list in dark 1`]
                           "type": "Text",
                         },
                       ],
+                      "label": "Add a flight",
                       "style": {
                         "backgroundColor": "#7C9DFF",
                         "borderColor": "#2A303A",
@@ -433,7 +753,7 @@ exports[`home, light and dark (theme tokens) renders the seeded list in dark 1`]
                   "type": "Text",
                 },
               ],
-              "label": "Next flight: AA100, JFK → LHR, Wed 23 Sep",
+              "label": "Next flight: AA100, JFK → LHR, Wed 23 Sep, status Scheduled, departs 6:25 PM, arrives 7:10 AM the next day, Terminal 8, gate B22, departure 25 min late, Departs in 8 h 25 min",
               "style": {
                 "backgroundColor": "#171B22",
                 "borderColor": "#2A303A",
@@ -497,7 +817,7 @@ exports[`home, light and dark (theme tokens) renders the seeded list in dark 1`]
                       "type": "Text",
                     },
                   ],
-                  "label": "BA117, LHR → JFK, Fri 25 Sep",
+                  "label": "BA117, LHR → JFK, Fri 25 Sep, status Scheduled, departs 12:20 PM, Terminal 5",
                   "style": {
                     "borderColor": "#2A303A",
                   },
@@ -549,7 +869,7 @@ exports[`home, light and dark (theme tokens) renders the seeded list in dark 1`]
                       "type": "Text",
                     },
                   ],
-                  "label": "DL1, ATL → LAX, Tue 22 Sep",
+                  "label": "DL1, ATL → LAX, Tue 22 Sep, status Arrived, departed 8:04 AM",
                   "style": {
                     "borderColor": "#2A303A",
                   },
@@ -614,6 +934,7 @@ exports[`home, light and dark (theme tokens) renders the seeded list in light 1`
                           "type": "Text",
                         },
                       ],
+                      "label": "Settings",
                       "style": {
                         "backgroundColor": "#F2F4F8",
                         "borderColor": "#D6DAE1",
@@ -633,6 +954,7 @@ exports[`home, light and dark (theme tokens) renders the seeded list in light 1`
                           "type": "Text",
                         },
                       ],
+                      "label": "Add a flight",
                       "style": {
                         "backgroundColor": "#1C4FD6",
                         "borderColor": "#D6DAE1",
@@ -754,7 +1076,7 @@ exports[`home, light and dark (theme tokens) renders the seeded list in light 1`
                   "type": "Text",
                 },
               ],
-              "label": "Next flight: AA100, JFK → LHR, Wed 23 Sep",
+              "label": "Next flight: AA100, JFK → LHR, Wed 23 Sep, status Scheduled, departs 6:25 PM, arrives 7:10 AM the next day, Terminal 8, gate B22, departure 25 min late, Departs in 8 h 25 min",
               "style": {
                 "backgroundColor": "#F2F4F8",
                 "borderColor": "#D6DAE1",
@@ -818,7 +1140,7 @@ exports[`home, light and dark (theme tokens) renders the seeded list in light 1`
                       "type": "Text",
                     },
                   ],
-                  "label": "BA117, LHR → JFK, Fri 25 Sep",
+                  "label": "BA117, LHR → JFK, Fri 25 Sep, status Scheduled, departs 12:20 PM, Terminal 5",
                   "style": {
                     "borderColor": "#D6DAE1",
                   },
@@ -870,7 +1192,7 @@ exports[`home, light and dark (theme tokens) renders the seeded list in light 1`
                       "type": "Text",
                     },
                   ],
-                  "label": "DL1, ATL → LAX, Tue 22 Sep",
+                  "label": "DL1, ATL → LAX, Tue 22 Sep, status Arrived, departed 8:04 AM",
                   "style": {
                     "borderColor": "#D6DAE1",
                   },

@@ -3,9 +3,13 @@
  * the countdown, delays, distances in both unit systems and a snapshot's age.
  */
 
+import { countdownText } from '../src/components/Countdown';
 import {
   addDays,
   dayShift,
+  dayShiftSuffix,
+  dayShiftWords,
+  daysAfter,
   formatAge,
   formatClock,
   formatCountdown,
@@ -120,6 +124,50 @@ describe('formatCountdown', () => {
     [2 * DAY + 4 * HOUR + 30 * MINUTE, '2 d 4 h'],
   ])('%d ms is "%s"', (ms, text) => {
     expect(formatCountdown(ms)).toBe(text);
+  });
+
+  it.each([Number.NaN, Number.POSITIVE_INFINITY, Number.NEGATIVE_INFINITY])(
+    'prints nothing for the non-finite duration %p',
+    (ms) => {
+      expect(formatCountdown(ms)).toBe('');
+    },
+  );
+
+  it('the countdown line is null for an instant that does not parse, never "NaN d NaN h"', () => {
+    const now = Date.parse('2026-09-23T14:00:00Z');
+    expect(countdownText({ at: 'not a time', kind: 'departs' }, now)).toBeNull();
+    expect(countdownText({ at: '2026-09-23T22:25:00Z', kind: 'departs' }, now)).toBe(
+      'Departs in 8 h 25 min',
+    );
+    expect(countdownText({ at: '2026-09-23T13:00:00Z', kind: 'arrives' }, now)).toBe(
+      'Arriving now',
+    );
+  });
+});
+
+describe('the timeline day cue', () => {
+  it('counts local days from the departure date, in each airport zone', () => {
+    // 06:10Z on the 24th is 07:10 in London (the 24th) and 02:10 in New York (the 24th).
+    expect(daysAfter('2026-09-23', '2026-09-24T06:10:00Z', 'Europe/London')).toBe(1);
+    expect(daysAfter('2026-09-23', '2026-09-23T22:25:00Z', 'America/New_York')).toBe(0);
+    // Westbound across the date line lands the day before.
+    expect(daysAfter('2026-09-24', '2026-09-23T20:00:00Z', 'Pacific/Honolulu')).toBe(-1);
+    expect(daysAfter(null, '2026-09-24T06:10:00Z', 'UTC')).toBe(0);
+    expect(daysAfter('2026-09-23', null, 'UTC')).toBe(0);
+    expect(daysAfter('2026-09-23', 'garbage', 'UTC')).toBe(0);
+  });
+
+  it('prints +1 and -1 after the clock and says the day in words', () => {
+    expect(dayShiftSuffix(0)).toBe('');
+    expect(dayShiftSuffix(1)).toBe(' +1');
+    expect(dayShiftSuffix(2)).toBe(' +2');
+    expect(dayShiftSuffix(-1)).toBe(' -1');
+    expect(dayShiftSuffix(Number.NaN)).toBe('');
+    expect(dayShiftWords(0)).toBeNull();
+    expect(dayShiftWords(1)).toBe('the next day');
+    expect(dayShiftWords(-1)).toBe('the day before');
+    expect(dayShiftWords(2)).toBe('2 days later');
+    expect(dayShiftWords(-2)).toBe('2 days before');
   });
 });
 

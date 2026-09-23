@@ -155,6 +155,8 @@ export interface ButtonProps {
   readonly selected?: boolean;
   readonly style?: StyleProp<ViewStyle>;
   readonly accessibilityHint?: string;
+  /** What a screen reader calls the button when the title alone is too short (`Add a flight`). */
+  readonly accessibilityLabel?: string;
 }
 
 export function Button({
@@ -167,6 +169,7 @@ export function Button({
   selected,
   style,
   accessibilityHint,
+  accessibilityLabel,
 }: ButtonProps) {
   const { color, radius, font } = useTheme();
   const background =
@@ -176,8 +179,11 @@ export function Button({
   return (
     <Pressable
       accessibilityRole="button"
+      // An explicit name, so a busy button (its title swapped for a spinner) keeps it.
+      accessibilityLabel={accessibilityLabel ?? title}
       accessibilityState={{
         disabled: disabled || busy,
+        ...(busy ? { busy: true } : {}),
         ...(selected === undefined ? {} : { selected }),
       }}
       {...(accessibilityHint === undefined ? {} : { accessibilityHint })}
@@ -232,7 +238,7 @@ export function TextField({
           {
             color: color.text,
             backgroundColor: color.surfaceRaised,
-            borderColor: error === null || error === undefined ? color.border : color.danger,
+            borderColor: error === null || error === undefined ? color.inputBorder : color.danger,
             borderRadius: radius.md,
             fontSize: font.body + 2,
           },
@@ -326,7 +332,7 @@ const styles = StyleSheet.create({
   buttonText: { fontWeight: '600' },
   input: {
     minHeight: 48,
-    borderWidth: StyleSheet.hairlineWidth,
+    borderWidth: 1,
     paddingHorizontal: 12,
   },
   notice: {

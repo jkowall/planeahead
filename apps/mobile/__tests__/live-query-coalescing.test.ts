@@ -12,6 +12,7 @@ import { act, render, screen } from '@testing-library/react-native';
 import { createElement, Profiler, type ProfilerOnRenderCallback } from 'react';
 import HomeScreen from '../src/app/(app)/index';
 import { StoreProvider } from '../src/lib/db/store-context';
+import { LIST_FLIGHTS_SQL } from '../src/lib/flight-queries';
 import { applySyncPage, SyncPageShell } from '../src/lib/sync/apply';
 import { createSyncClient } from '../src/lib/sync/client';
 import { ApplyGate } from '../src/lib/sync/gate';
@@ -83,9 +84,8 @@ async function mountHome(db: MemorySqlite) {
 
 /** How many times the home list's live query has read the store (src/lib/flight-queries.ts). */
 function listQueries(db: MemorySqlite): number {
-  return db.statements.filter((sql) =>
-    sql.startsWith('SELECT * FROM flight_subscriptions WHERE deleted_at IS NULL'),
-  ).length;
+  // The list's own statement: the page apply's local-intent reads select from the same table.
+  return db.statements.filter((sql) => sql === LIST_FLIGHTS_SQL).length;
 }
 
 function rowCount(): number {

@@ -37,6 +37,13 @@
  * back; the item is then removed on its own (the server's answer stands, the next pull
  * reconciles the rows) and `onHookError` reports it, so a broken hook can never wedge the queue.
  * `onDropped` still fires after a refusal commits, for the user-facing message and the report.
+ *
+ * Sent or not (increment 10 review, ruling X7): the drain stamps `last_attempt_at` on the head
+ * BEFORE it hands the request to the transport, synchronously after reading it, so nothing can
+ * run in between. An item with no stamp (and no attempt) has never left the phone, and its writer
+ * may cancel it outright (src/lib/flights.ts `removeFlight`); a stamped one may have been
+ * committed by the server even if no answer came back. The stamp is bookkeeping no screen reads,
+ * so it sends no store signal.
  */
 
 import { uuidv7 } from '@planeahead/shared';
@@ -266,6 +273,8 @@ export function createOutbox(deps: OutboxDeps): { drain(): Promise<DrainResult> 
         return { kind: 'deferred', sent, dropped };
       }
       const { item } = head;
+      // Before the request exists (see the header): from here on the server may have it.
+      deps.db.run('UPDATE outbox SET last_attempt_at = ? WHERE id = ?', [now(), item.id]);
 
       let response: RawResponse;
       try {

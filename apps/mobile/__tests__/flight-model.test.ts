@@ -8,14 +8,19 @@
 import { listFlights } from '../src/lib/flight-queries';
 import {
   countdownFor,
+  designatorSpellings,
   displayDesignator,
   isOver,
+  LANDED_GRACE_MS,
+  operatedAs,
   OVER_AFTER_ARRIVAL_MS,
   pendingFlightKey,
+  pendingMatchesLive,
   selectHome,
   type FlightItem,
 } from '../src/lib/flight-model';
 import { addFlight } from '../src/lib/flights';
+import { toFlightItem as toFlightItemRow } from '../src/lib/flight-model';
 import { buildTimeline, terminalAndGate } from '../src/lib/timeline';
 import { createMemorySqlite } from './support/memory-sqlite';
 import {
@@ -63,10 +68,24 @@ describe('toFlightItem', () => {
     expect(aa100.snapshot?.times.scheduledOff).toBe('2026-09-23T22:20:00Z');
   });
 
-  it('prefers the marketing designator, and falls back to the ICAO code', () => {
+  it("shows the operating designator, never the shared snapshot's marketing one", () => {
+    // BAW 1511 is what the FIRST searcher of this flight typed; every subscriber shares the
+    // snapshot, so it names nobody's add in particular (increment 10 review).
     const { items } = seeded({ marketingCarrierIcao: 'BAW', marketingFlightNumber: '1511' });
-    expect(byId(items, AA100_ID).designator).toBe('BA1511');
+    expect(byId(items, AA100_ID)).toMatchObject({
+      designator: 'AA100',
+      operatingDesignator: 'AA100',
+    });
+    expect(operatedAs(byId(items, AA100_ID))).toBeNull();
     expect(displayDesignator('XYZ', '12')).toBe('XYZ12');
+  });
+
+  it('shows the designator typed on this phone, with the operating one beside it', () => {
+    const { db } = seeded();
+    db.run("UPDATE flight_subscriptions SET added_as = 'BA1511' WHERE id = ?", [AA100_ID]);
+    const item = byId(listFlights(db), AA100_ID);
+    expect(item).toMatchObject({ designator: 'BA1511', operatingDesignator: 'AA100' });
+    expect(operatedAs(item)).toBe('Operated as AA100');
   });
 
   it('reads a pending row from its placeholder key', () => {
@@ -120,7 +139,96 @@ describe('selectHome', () => {
   });
 
   it('answers no next flight for an empty list', () => {
-    expect(selectHome([], NOW)).toEqual({ next: null, rest: [] });
+    expect(selectHome([], NOW)).toEqual({ next: null, hero: null, rest: [] });
+  });
+
+  it('fills the top slot with the oldest pending add when nothing live is ahead', () => {
+    const db = createMemorySqlite();
+    addFlight(db, { designator: 'UA901', date: '2026-09-24' }, { newId: () => PENDING_ID });
+    const { next, hero, rest } = selectHome(listFlights(db), NOW);
+    expect(next).toBeNull();
+    expect(hero).toMatchObject({ id: PENDING_ID, pending: true });
+    expect(rest).toEqual([]);
+  });
+
+  it('keeps the top slot empty when only past flights remain (they stay in the list)', () => {
+    const { db } = seeded({ status: 'cancelled' });
+    db.run('DELETE FROM flight_subscriptions WHERE id = ?', [BA117_ID]);
+    const { hero, rest } = selectHome(listFlights(db), NOW);
+    expect(hero).toBeNull();
+    expect(rest.map((item) => item.id)).toEqual([AA100_ID, DL1_ID]);
+  });
+});
+
+describe('selectHome: a landed flight and its connection (increment 10 review)', () => {
+  // AA100 landed at 06:00Z (no gate arrival yet); the connection, BA117, is rescheduled below.
+  const LANDED = {
+    status: 'landed',
+    times: {
+      scheduledOut: '2026-09-23T22:00:00Z',
+      actualOut: '2026-09-23T22:20:00Z',
+      scheduledIn: '2026-09-24T06:10:00Z',
+      estimatedIn: '2026-09-24T06:15:00Z',
+      actualOn: '2026-09-24T06:00:00Z',
+    },
+  };
+  const ARRIVAL = Date.parse('2026-09-24T06:15:00Z');
+
+  function withConnection(connectionOut: string) {
+    const { db } = seeded(LANDED);
+    db.run('UPDATE flight_subscriptions SET scheduled_out = ?, estimated_out = NULL WHERE id = ?', [
+      connectionOut,
+      BA117_ID,
+    ]);
+    return listFlights(db);
+  }
+
+  it('stays next through the gate walk while nothing departs sooner', () => {
+    const items = withConnection('2026-09-24T09:00:00Z');
+    expect(selectHome(items, ARRIVAL + 10 * 60_000).next?.id).toBe(AA100_ID);
+  });
+
+  it('hands over 30 minutes after its best arrival, and stays in the list', () => {
+    const items = withConnection('2026-09-24T09:00:00Z');
+    const { next, rest } = selectHome(items, ARRIVAL + LANDED_GRACE_MS + 60_000);
+    expect(next?.id).toBe(BA117_ID);
+    expect(countdownFor(next as FlightItem, ARRIVAL + LANDED_GRACE_MS + 60_000)).toEqual({
+      kind: 'departs',
+      at: '2026-09-24T09:00:00Z',
+    });
+    expect(rest.map((item) => item.id)).toEqual([AA100_ID, DL1_ID]);
+  });
+
+  it('hands over at once to a connection that departs before the grace ends', () => {
+    const items = withConnection('2026-09-24T06:40:00Z');
+    const { next, rest } = selectHome(items, ARRIVAL + 5 * 60_000);
+    expect(next?.id).toBe(BA117_ID);
+    expect(rest.map((item) => item.id)).toContain(AA100_ID);
+  });
+});
+
+describe('pending adds against live rows (ruling X7)', () => {
+  it('reads AA100 and AAL100 as the same designator', () => {
+    expect(designatorSpellings('AA100').sort()).toEqual(['AA100', 'AAL100']);
+    expect(designatorSpellings('AAL100').sort()).toEqual(['AA100', 'AAL100']);
+    expect(designatorSpellings('U21234').sort()).toEqual(['EZY1234', 'U21234']);
+    // A carrier the offline table does not know keeps its one spelling.
+    expect(designatorSpellings('ZZ100')).toEqual(['ZZ100']);
+  });
+
+  it('matches by designator and date: the operating one, a codeshare, the one typed here', () => {
+    const { db } = seeded();
+    addFlight(db, { designator: 'BA1511', date: '2026-09-23' }, { newId: () => PENDING_ID });
+    const all = db.all<Parameters<typeof toFlightItemRow>[0]>('SELECT * FROM flight_subscriptions');
+    const items = all.map(toFlightItemRow);
+    const pending = byId(items, PENDING_ID);
+    // BA1511 is AA100's codeshare on the same date.
+    expect(pendingMatchesLive(pending, byId(items, AA100_ID))).toBe(true);
+    expect(pendingMatchesLive(pending, byId(items, BA117_ID))).toBe(false);
+    // Another date never matches.
+    expect(pendingMatchesLive({ ...pending, dateLocal: '2026-09-24' }, byId(items, AA100_ID))).toBe(
+      false,
+    );
   });
 });
 

@@ -3,11 +3,16 @@
  * baggage claim, each with its best known time (actual, else estimated, else scheduled), the
  * scheduled time beside it when they differ, the minutes early or late, and the place. The steps
  * come from `buildTimeline` (src/lib/timeline.ts), from the snapshot on the subscription row.
+ *
+ * A time on another local day than the flight's departure date (the header's date) carries the
+ * day cue, `+1` as on the home card (`the next day` for a screen reader): an overnight arrival,
+ * or a delay that pushes the departure past midnight (increment 10 review). A step's marker
+ * colour is repeated in its accessibility label as words (done, next, still ahead, cancelled).
  */
 
 import { StyleSheet, Text, View } from 'react-native';
 import type { DisplayPrefs } from '../lib/display-prefs';
-import { formatClock } from '../lib/format';
+import { dayShiftSuffix, dayShiftWords, daysAfter, formatClock } from '../lib/format';
 import type { TimelineStep } from '../lib/timeline';
 import { useTheme } from '../theme/useTheme';
 
@@ -28,27 +33,41 @@ function qualifier(step: TimelineStep): string {
   return 'scheduled';
 }
 
+const STATE_WORDS: Readonly<Record<TimelineStep['state'], string>> = {
+  done: 'done',
+  next: 'next',
+  upcoming: 'still ahead',
+  cancelled: 'cancelled',
+};
+
 export function Timeline({
   steps,
   prefs,
+  departureDate = null,
 }: {
   steps: readonly TimelineStep[];
   prefs: DisplayPrefs;
+  /** The departure date `YYYY-MM-DD` as the header shows it; the day cues count from it. */
+  departureDate?: string | null;
 }) {
   const theme = useTheme();
+  const clockOf = (iso: string, zone: string | undefined): { text: string; days: number } => ({
+    text: formatClock(iso, { timeFormat: prefs.timeFormat, timeZone: zone }),
+    days: daysAfter(departureDate, iso, zone),
+  });
   return (
     <View testID="flight-timeline" accessibilityRole="list" style={{ gap: 0 }}>
       {steps.map((step, index) => {
         const zone = prefs.zoneFor(step.timeZone);
         const best = step.actual ?? step.estimated ?? step.scheduled;
+        const bestClock = best === null ? null : clockOf(best, zone);
         const clock =
-          best === null
-            ? null
-            : formatClock(best, { timeFormat: prefs.timeFormat, timeZone: zone });
+          bestClock === null ? null : `${bestClock.text}${dayShiftSuffix(bestClock.days)}`;
+        const scheduled =
+          step.scheduled === null || best === step.scheduled ? null : clockOf(step.scheduled, zone);
         const scheduledClock =
-          step.scheduled === null || best === step.scheduled
-            ? null
-            : formatClock(step.scheduled, { timeFormat: prefs.timeFormat, timeZone: zone });
+          scheduled === null ? null : `${scheduled.text}${dayShiftSuffix(scheduled.days)}`;
+        const spokenDay = bestClock === null ? null : dayShiftWords(bestClock.days);
         const delta = deltaText(step.deltaMinutes);
         const done = step.state === 'done';
         const marker =
@@ -64,7 +83,17 @@ export function Timeline({
           <View
             key={step.key}
             testID={`timeline-${step.key}`}
-            accessibilityLabel={[step.title, clock, qualifier(step), step.place]
+            accessibilityLabel={[
+              step.title,
+              bestClock === null
+                ? null
+                : spokenDay === null
+                  ? bestClock.text
+                  : `${bestClock.text} ${spokenDay}`,
+              bestClock === null ? null : qualifier(step),
+              step.place,
+              STATE_WORDS[step.state],
+            ]
               .filter((part) => part !== null)
               .join(', ')}
             style={styles.step}

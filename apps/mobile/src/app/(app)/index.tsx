@@ -1,7 +1,10 @@
 /**
  * Home (increment 10, ruling T5): the next flight by scheduled departure (the first that has not
- * arrived, been cancelled or finished) with its status pill, gate and terminal and a countdown,
- * then the rest of the list; the empty state with the add button when nothing is ahead.
+ * arrived, been cancelled or finished; a landed flight hands over 30 minutes after its arrival,
+ * or sooner when a connection departs) with its status pill, gate and terminal and a countdown,
+ * then the rest of the list. The empty state with the add button only when the store has no rows
+ * at all; an add still being looked up fills the top slot as "Adding" when nothing live is ahead,
+ * and a list of past flights only says there is nothing upcoming (increment 10 review).
  *
  * Every read is the increment 9 live query on `flight_subscriptions` (src/lib/flight-queries.ts),
  * so the list re-renders once per committed write: a 200-row sync page is one re-render
@@ -13,7 +16,7 @@
 
 import { useRouter } from 'expo-router';
 import { RefreshControl, StyleSheet, View } from 'react-native';
-import { EmptyState } from '../../components/EmptyState';
+import { EmptyState, NoUpcomingFlights } from '../../components/EmptyState';
 import { FlightCard } from '../../components/FlightCard';
 import { Body, Button, Loading, Notice, Screen, Section, Title } from '../../components/ui';
 import { authClient, isAnonymousSession } from '../../lib/auth-client';
@@ -45,7 +48,7 @@ export default function HomeScreen() {
   }
 
   const nowMs = Date.now();
-  const { next, rest } = selectHome(items ?? [], nowMs);
+  const { hero, rest } = selectHome(items ?? [], nowMs);
   const openFlight = (id: string) => {
     router.push({ pathname: '/flight/[id]', params: { id } });
   };
@@ -78,7 +81,7 @@ export default function HomeScreen() {
               router.push('/settings');
             }}
           />
-          <Button testID="home-add" title="Add" onPress={add} />
+          <Button testID="home-add" title="Add" accessibilityLabel="Add a flight" onPress={add} />
         </View>
       </View>
 
@@ -101,22 +104,24 @@ export default function HomeScreen() {
         </Notice>
       )}
 
-      {next === null ? (
-        <EmptyState onAdd={add} hasPastFlights={rest.some((item) => !item.pending)} />
-      ) : (
+      {hero !== null ? (
         <FlightCard
-          item={next}
+          item={hero}
           prefs={prefs}
           variant="hero"
           nowMs={nowMs}
           onPress={() => {
-            openFlight(next.id);
+            openFlight(hero.id);
           }}
         />
+      ) : rest.length === 0 ? (
+        <EmptyState onAdd={add} />
+      ) : (
+        <NoUpcomingFlights onAdd={add} />
       )}
 
       {rest.length === 0 ? null : (
-        <Section title={next === null ? 'Your flights' : 'Other flights'} testID="home-rest">
+        <Section title={hero === null ? 'Your flights' : 'Other flights'} testID="home-rest">
           {rest.map((item) => (
             <FlightCard
               key={item.id}

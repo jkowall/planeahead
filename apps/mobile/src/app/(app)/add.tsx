@@ -6,6 +6,11 @@
  * explanation from the payload's cap and limit on 403, the dates the search tried on 404. Offline,
  * the flight stays queued and the sheet closes; the list shows it as being added. The sheet can
  * be closed at any time: the add carries on, and a later refusal appears on the home screen.
+ *
+ * The date field keeps the number pad (iOS's has no hyphen key): the field inserts the hyphens of
+ * `YYYY-MM-DD` as the digits are typed (`formatDateInput`), and the validation reads eight bare
+ * digits as a date too (`normaliseDateInput`), so any date can be typed, not only the three chips
+ * (increment 10 review).
  */
 
 import { useRouter } from 'expo-router';
@@ -14,7 +19,7 @@ import { StyleSheet, View } from 'react-native';
 import { Body, Button, Notice, Screen, TextField, Title } from '../../components/ui';
 import { useFlightNotices } from '../../lib/flight-notices';
 import { addFlight, drainFor, validateAddFlight, type AddFlightErrors } from '../../lib/flights';
-import { addDays, formatIsoDate, localDate } from '../../lib/format';
+import { addDays, formatDateInput, formatIsoDate, localDate } from '../../lib/format';
 import { services } from '../../lib/services';
 import { useTheme } from '../../theme/useTheme';
 
@@ -129,9 +134,10 @@ export default function AddFlightSheet() {
         autoCorrect={false}
         autoComplete="off"
         inputMode="numeric"
+        maxLength={10}
         value={date}
         onChangeText={(value) => {
-          setDate(value);
+          setDate(formatDateInput(value));
           clearError('date');
         }}
         error={errors.date}

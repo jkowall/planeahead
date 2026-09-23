@@ -5,8 +5,10 @@
  *
  * The status colours cover every `FLIGHT_STATUS_VALUES` member plus `pending` (a flight the
  * outbox has not added yet). Each pill's text on its background, and every text colour on the
- * screen background, clears WCAG AA contrast (4.5:1) in both schemes; __tests__/theme.test.ts
- * computes the ratios, so a token edit that breaks legibility fails a test.
+ * screen background, clears WCAG AA contrast (4.5:1) in both schemes; the non-text colours that
+ * carry meaning (an input's border, the timeline's rail and the marker of a step still ahead)
+ * clear WCAG 1.4.11's 3:1 against every background they sit on (increment 10 review).
+ * __tests__/theme.test.ts computes the ratios, so a token edit that breaks legibility fails a test.
  */
 
 import { FLIGHT_STATUS_VALUES, type FlightStatusValue } from '@planeahead/shared';
@@ -24,13 +26,19 @@ export interface ColorTokens {
   readonly surfaceRaised: string;
   readonly text: string;
   readonly textMuted: string;
+  /** Decorative separators (cards, rows): not a boundary anything depends on. */
   readonly border: string;
+  /** A text field's boundary: 3:1 against the screen background and the field's own fill. */
+  readonly inputBorder: string;
   readonly accent: string;
   readonly accentText: string;
   readonly danger: string;
   readonly warning: string;
   readonly success: string;
-  /** The timeline's rail and the marker of a step that has not happened yet. */
+  /**
+   * The timeline's rail and the marker of a step that has not happened yet: 3:1 against the
+   * background and the section surface the timeline sits on.
+   */
   readonly rail: string;
 }
 
@@ -74,12 +82,13 @@ export const LIGHT: ThemeTokens = {
     text: '#101418',
     textMuted: '#525B67',
     border: '#D6DAE1',
+    inputBorder: '#7D8591',
     accent: '#1C4FD6',
     accentText: '#FFFFFF',
     danger: '#B42318',
     warning: '#8A4B00',
     success: '#146C2E',
-    rail: '#B8BFCA',
+    rail: '#818894',
   },
   status: {
     scheduled: { background: '#E4E8EF', text: '#27303B' },
@@ -107,12 +116,13 @@ export const DARK: ThemeTokens = {
     text: '#F2F4F8',
     textMuted: '#A3ACB8',
     border: '#2A303A',
+    inputBorder: '#707A8C',
     accent: '#7C9DFF',
     accentText: '#0B0E13',
     danger: '#FF8A80',
     warning: '#FFB866',
     success: '#6FD08C',
-    rail: '#4A5261',
+    rail: '#6B7485',
   },
   status: {
     scheduled: { background: '#2A303A', text: '#E4E8EF' },

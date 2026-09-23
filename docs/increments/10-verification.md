@@ -9,18 +9,22 @@ provider-call assertions run in the api Workers suite, the screens are proven in
 device check run here is the iPhone 17 Pro simulator launch of the development build to the home
 screen over a seeded store.
 
+A review round followed the build (commit "Increment 10: apply review findings"); what it changed,
+under the orchestrator's rulings X1 to X7, is in "The review round" below, and the numbers in the
+first table are from its final run.
+
 ## What ran here
 
 | Check | Command | Result |
 | --- | --- | --- |
-| Full check | `pnpm turbo run typecheck lint test --force && pnpm prettier --check . && node scripts/toolchain-guard.mjs && node scripts/vitest-exit-guard.mjs` | passed: 14 turbo tasks in 1 min 40 s; 1896 tests passed (tools 19, shared 577, db 176, api 707 with 1 skipped, mobile 417); Prettier clean; toolchain guard ok; exit guard ok |
-| Mobile Jest (inside the turbo `test` task) | `pnpm --filter @planeahead/mobile test` | 24 suites, 417 tests, 10 snapshots (light and dark of home, empty home, add sheet, detail, settings) |
-| Mobile migrations guard | `node scripts/mobile-migrations-guard.mjs --base main` | ok, 3 migrations, the 6 committed files unchanged (0002 appended) |
-| `expo prebuild` (development variant) | `cd apps/mobile && LANG=en_US.UTF-8 EXPO_NO_GIT_STATUS=1 CI=1 pnpm prebuild` | passed, 26 s, 132 pods (run again after the last code change) |
-| iOS simulator compile | `xcodebuild -workspace ios/PlaneAheadDev.xcworkspace -scheme PlaneAheadDev -configuration Debug -sdk iphonesimulator -destination 'platform=iOS Simulator,name=iPhone 17 Pro' build` (with `SENTRY_DISABLE_AUTO_UPLOAD=true`) | BUILD SUCCEEDED, 2 min 14 s incremental (run again after the last code change) |
+| Full check | `pnpm turbo run typecheck lint test --force && pnpm prettier --check . && node scripts/toolchain-guard.mjs && node scripts/vitest-exit-guard.mjs` | passed (review round): 14 turbo tasks in 1 min 47 s; 1983 tests passed (tools 19, shared 577, db 176, api 707 with 1 skipped, mobile 504); Prettier clean; toolchain guard ok; exit guard ok. The build's own run: 1896 tests, mobile 417. One earlier attempt of the review round's final run hung after all 64 api test files had passed, in the api suite's teardown (embedded Postgres left holding idle connections) while another project's Workers suite ran on the machine; it was interrupted and the rerun passed as above. `apps/api` is untouched by the round |
+| Mobile Jest (inside the turbo `test` task) | `pnpm --filter @planeahead/mobile test` | 27 suites, 504 tests, 12 snapshots (light and dark of home, empty home, the first add in the top slot, add sheet, detail, settings) |
+| Mobile migrations guard | `node scripts/mobile-migrations-guard.mjs --base main` | ok, 4 migrations, the 6 committed files unchanged (0002 and 0003 appended) |
+| `expo prebuild` (development variant) | `cd apps/mobile && LANG=en_US.UTF-8 EXPO_NO_GIT_STATUS=1 CI=1 pnpm prebuild` | passed, 25 s, 132 pods (run again after the review round's last code change) |
+| iOS simulator compile | `xcodebuild -workspace ios/PlaneAheadDev.xcworkspace -scheme PlaneAheadDev -configuration Debug -sdk iphonesimulator -destination 'platform=iOS Simulator,name=iPhone 17 Pro' build` (with `SENTRY_DISABLE_AUTO_UPLOAD=true`) | BUILD SUCCEEDED, 2 min 58 s (review round; the native project is unchanged by the round's later JavaScript edits, which Metro serves; the build's own run: 2 min 14 s incremental) |
 | iPhone 17 Pro simulator launch to the home screen over a seeded store | see "The simulator launch" below | passed: the home screen over the seeded store, light and dark (below) |
-| Android compile | `cd apps/mobile/android && ./gradlew assembleDebug -PreactNativeArchitectures=arm64-v8a` (with `ANDROID_HOME` and `ANDROID_SDK_ROOT` exported, `SENTRY_DISABLE_AUTO_UPLOAD=true`) | BUILD SUCCESSFUL, 1 min 16 s |
-| Android launch (best effort), Pixel_10_Pro_Fold_-_EMU headless | see "The emulator launch" below | passed: the home screen over the seeded store, light and dark |
+| Android compile | `cd apps/mobile/android && ./gradlew assembleDebug -PreactNativeArchitectures=arm64-v8a` (with `ANDROID_HOME` and `ANDROID_SDK_ROOT` exported, `SENTRY_DISABLE_AUTO_UPLOAD=true`) | BUILD SUCCESSFUL, 1 min 16 s (the build; not re-run in the review round, which changed JavaScript and one local SQLite migration only) |
+| Android launch (best effort), Pixel_10_Pro_Fold_-_EMU headless | see "The emulator launch" below | passed: the home screen over the seeded store, light and dark (the build; not re-run in the review round) |
 
 ### The simulator launch
 
@@ -68,6 +72,22 @@ the countdown one minute lower). `xcrun simctl ui ... appearance dark` re-themed
 screen at once (background `#0B0E13`, cards `#171B22`, accent `#7C9DFF`, the Arrived pill
 `#123D22` on `#B8EFC9`). The screenshots are in the build's scratch directory, not committed.
 
+**Review round (2026-09-23).** The rebuilt development build was installed over the earlier one
+on the same simulator and launched the same way. Its store already held the demo flights and
+migrations 0000 to 0002, so the launch also applied `0003_local_intent` to an existing store; the
+home screen then rendered the persisted rows as before (AA100 next, "7:49 PM → 7:49 AM +1",
+"Terminal 8, gate B22", "Departs in 1 h 54 min", then BA117 and DL1), in light and in dark, with
+the header's Add button (named "Add a flight" for a screen reader). Metro bundled 2266 modules.
+The simulator was shut down again and the screenshots stay in the scratch directory.
+
+What the development-only pieces are for, and why they are safe to ship (ruling X2): the seeded
+route and the launch-argument redirect exist only so this one device check can reach the home
+screen without an API. `__tests__/dev-routes.test.tsx` proves them inert elsewhere: with
+`__DEV__` false, or in the preview or production variant, or on Android, `seededHomeRequested()`
+is false whatever the launch argument says and the sign-in layout never redirects to the route;
+the route itself then renders nothing of its own (only the redirect home), opens no store and
+seeds nothing.
+
 The run used a dedicated iPhone 17 Pro simulator, `iPhone 17 Pro (PlaneAhead inc10)` (iOS 26.5),
 left shut down. A first attempt on the already booted iPhone 17 Pro installed this development
 build there and left iOS's "Open in PlaneAhead Dev?" prompt from `simctl openurl` on its screen;
@@ -109,8 +129,8 @@ stays installed on the AVD.
 | Killing the network and relaunching still renders the list from the store | `home-list.test.tsx` "renders from the store alone" (no request at all; `fetch` rejects); increment 9's `settings.test.tsx` for the offline relaunch of the settings store | Step 5 |
 | Pull to refresh calls `POST /v1/flights/:id/refresh` at most once per gesture | `detail.test.tsx` "at most once per gesture" (two pulls and a button press while one is running: one request, no `Idempotency-Key`); `home-list.test.tsx` for the home's sync pull | Step 6 |
 | The 504 last-known-state case is shown gracefully | `detail.test.tsx` "504" (the payload's flight applied, "still running" said), "null snapshot never replaces", "older snapshot never rolls back", the 8 s deadline UX with fake timers; the route side is increment 8's `flights.refresh.test.ts` | Step 7 (needs a slow tracker; see the step) |
-| The detail timeline renders from the snapshot with dark mode via theme tokens | `detail.test.tsx` timeline tests and light and dark snapshots; `flight-model.test.ts` `buildTimeline`; `theme.test.ts` (every status pill and text colour at WCAG AA in both schemes) | Step 8 |
-| Jest covers add-flight validation against the shared `parseDesignator` | `add-flight.test.tsx`: a table of inputs checked against `parseDesignator`, `DesignatorInputSchema` and `IsoDateSchema` | none |
+| The detail timeline renders from the snapshot with dark mode via theme tokens | `detail.test.tsx` timeline tests (with the `+1` day cue) and light and dark snapshots; `flight-model.test.ts` `buildTimeline`; `theme.test.ts` (every status pill and text colour at WCAG AA, the input border, the timeline rail and its markers at 3:1, in both schemes) | Step 8 |
+| Jest covers add-flight validation against the shared `parseDesignator` | `add-flight.test.tsx`: a table of inputs checked against `parseDesignator`, `DesignatorInputSchema` and `IsoDateSchema`; the number pad's eight-digit date and the hyphens the field inserts | none |
 | Jest covers the list rendering from a seeded store | `home-list.test.tsx` (seeded by the real page apply; light and dark snapshots) | none |
 | The list re-renders once, not 200 times, for a 200-row page | `live-query-coalescing.test.ts`: the real home screen under a React Profiler, the page applied through `applySyncPage` with 200 per-row tasks delivered after it, measured outside `act()` so every commit counts: 1 commit and 1 list query; control: a writer that signalled per row costs 200 commits; a 3-page pull costs 3 | none |
 
@@ -217,16 +237,120 @@ says. `$DB` below is the Neon connection string of that database.
   in the bundle but do nothing outside `__DEV__` and the development variant.
 - **No new dependencies, no API, shared-contract, provider, Durable Object or sync-route changes.**
   One api test file was added (ruling T1). The `FlightView` answer shape is parsed locally with zod
-  (`src/lib/flights.ts`) rather than adding a schema to `packages/shared`.
+  (`src/lib/flights.ts`) rather than adding a schema to `packages/shared`. The review round kept
+  all of this (ruling X5).
+- **Accepted as built (ruling X1).** Every item above is kept: the timeline from the snapshot, both
+  504 codes read as "still running", the home pull as a sync pull, the local migration and the
+  store-version bump, the outbox's `onSent`, `onRefused` and `onHookError` hooks and the apply
+  exports with the `onlyIfNewer` guard, the pending placeholder key and the "Adding" state, the
+  toggles' `PATCH /v1/me/preferences` with the pending-patch overlay, the local zod parsing of
+  `FlightView`, the `act()` wrap in the increment 9 settings test, and screenshots kept out of the
+  repository.
+
+## The review round
+
+The review panel's findings, applied under the orchestrator's rulings X1 to X7. Every behavioural
+fix has a regression test; the files named are under `apps/mobile/`.
+
+**Offline data flow (ruling X7).**
+
+- **A cancelled add never deletes the flight the account already had** (offline-data-flow-1).
+  `reconcileSent` now branches on the answer's `created`. On 200 `created: false` under another id
+  the add was a no-op on the server: the optimistic row and every outbox item naming it are deleted
+  (never pointed at the server's id), its tombstone is never copied onto the server's row, and the
+  server's row and flight are still written. `created: true` under another id (a restored
+  tombstone) keeps the re-point. Proven by `__tests__/offline-flow.test.ts` with the reviewer's
+  codeshare scenario (BA1511 for a tracked AA100): the requests are two POSTs and no DELETE, and
+  AA100 stays tracked. `add-flight.test.tsx`'s created-false test now asserts the same.
+- **A pending add is shown once** (offline-data-flow-2). The pending placeholder key never equals a
+  canonical key, so the increment 9 key-equality guard in `applySyncPage` could not fire; it is
+  replaced by a match on designator and origin-local date (`pendingMatchesLive`: the key's
+  operating designator, the one typed on this phone, the snapshot's marketing designator and its
+  codeshares, in IATA and ICAO spellings). After a page's rows are written, for replace and delta
+  pages alike, and when `addFlight` or the success hook writes, a pending row that matches a live
+  row is marked `superseded` and hidden from `listFlights`; its POST stays queued, and the 200
+  `created: false` settles it. `src/lib/sync/local-intent.ts`; tests in `offline-flow.test.ts` and
+  `sync-apply.test.ts`.
+- **Local intent survives a pull** (offline-data-flow-3 and -6, rulings X3 and X7 item 3; the
+  build's open question). Inside `applySyncPage`'s transaction, after the page's rows, every row a
+  queued `DELETE /v1/flights/:id` names gets `deleted_at = coalesce(deleted_at, now)`, and such a
+  row is kept through a replace (`deleteSyncedRows`); it goes for good when the DELETE settles (or
+  is answered 404). The local-only columns (`finished_at`, `added_as`, `superseded`) are read
+  before `deleteSyncedRows` and restored onto the page's rows with the same id. Tested through the
+  SqliteLike fake with a 503-deferred DELETE followed by a successful pull, a snapshot replace and a
+  delta page that changes the row (`__tests__/local-intent.test.ts`).
+- **An add removed before it was sent costs nothing** (offline-data-flow-4). The outbox stamps a
+  new `last_attempt_at` column on the head before `transport.send`, synchronously after reading it.
+  `removeFlight` on a row whose POST is unstamped (and unattempted) deletes the POST item and the
+  optimistic row in one transaction and queues nothing; a stamped one still queues the DELETE,
+  because the server may have committed the POST.
+- **The detail follows the server's id** (offline-data-flow-5). The success hook records
+  `replaced:{optimisticId} = serverId` in the kv-store (`src/lib/flight-replacements.ts`), and
+  `useFlight` follows it (the entry is cleared once read, the hook keeps the id it ended on), so a
+  detail opened on an "Adding" row shows the flight, not "Flight not found". The refresh and the
+  unsubscribe use the shown row's id. `detail.test.tsx` and `offline-flow.test.ts`.
+
+**Screens and contract (ruling X6).**
+
+- **410 without a flight** (screens-and-contract-1): `finished_at` is stamped on the subscription
+  by its id in the same commit, whether or not the answer carries a flight; a non-null view is
+  still applied by key.
+- **The date on the number pad** (screens-and-contract-2): the field keeps `inputMode="numeric"`,
+  inserts the hyphens as the digits are typed (`formatDateInput`), and `validateAddFlight` reads
+  eight digits as `YYYY-MM-DD` before `IsoDateSchema`. No date-picker dependency.
+- **Whose designator** (screens-and-contract-3): the card and the detail show the designator typed
+  on this phone (`added_as`, written by `addFlight`, kept by the success hook and across a
+  replace), else the key's operating designator, with "Operated as AA100" beside it when they
+  differ; never the snapshot's marketing designator, which names whoever searched the flight first.
+  The duplicate check (`findTracked`) compares flight keys (the placeholder key, or the key's
+  operating carrier, number and date), never designators.
+- **A landed flight hands over** (screens-and-contract-4): for the next-flight slot a landed flight
+  is over 30 minutes after its best arrival time, or at once when another flight in the list
+  departs before then; it stays in the list.
+- **401 `account_deleted` on refresh** (screens-and-contract-5): wipes the store and runs the same
+  `forgetAccount` path the outbox and the sync client use (`Services.onAccountDeleted`).
+- **Accessibility** (screens-and-contract-6): each card is one button whose name carries the
+  status, departure time, gate, terminal and, on the hero, the countdown (the hero owns the minute
+  clock, so the name and the text tick together); a busy `Button` keeps its name and sets
+  `accessibilityState.busy`; the status pill is an accessibility element; the header button is
+  named "Add a flight"; timeline steps no longer say "scheduled" without a time and name their
+  state in words. Role and name assertions in `home-list.test.tsx` and `detail.test.tsx`.
+- **The empty state** (screens-and-contract-7): only when the store has no rows. An add being
+  looked up fills the top slot ("NEW FLIGHT", the "Adding" pill) when nothing live is ahead; a list
+  of past flights says "No upcoming flights" above them.
+- **The rest** (screens-and-contract-8 to -11): the timeline appends `+1` (or `-1`) to a time on
+  another local day than the departure date; subscribe refusals other than 403 and 404 are tested,
+  and a code this build does not know gets a generic sentence (the code goes to Sentry with the
+  drop; the refresh's unknown refusals likewise, as `flight_refresh_refused`); an `inputBorder`
+  token and the timeline rail meet 3:1 and `theme.test.ts` checks them; `formatCountdown` returns
+  nothing for a non-finite duration.
+
+**What else the round changed, and why.**
+
+- **A second local store migration, `0003_local_intent`** (generated by drizzle-kit, appended; the
+  migrations guard passes): `flight_subscriptions.added_as`, `flight_subscriptions.superseded`
+  and `outbox.last_attempt_at`, all local only. The store schema version changes with it, so the
+  first pull after this update is again the no-cursor snapshot, which now carries the local-only
+  columns across.
+- **Four increment 9 tests in `sync-apply.test.ts` changed with the rulings**: their optimistic
+  row now uses the real writer's placeholder key; a snapshot that carries its flight hides it as
+  superseded instead of deleting it; and a queued DELETE now keeps its row as a tombstone through a
+  replace (the old test asserted it did not).
+- **`LIST_FLIGHTS_SQL`** is exported so the coalescing test counts the list's own statement, not
+  the page apply's new local-intent reads of the same table.
+- **Recorded for increment 12 by the orchestrator (ruling X4), not changed here**: the resolver's
+  `user_search` `provider_calls` row carries `flight_key` NULL, so the admin page joins search calls
+  by request id; the increment 12 spec gains "the DesignatorResolver appends its provider_call
+  record after resolution with the resolved key".
 
 ## Known issues and open questions
 
 - The mobile Jest run prints "A worker process has failed to exit gracefully" when run on its own
   with many workers; it reproduces on a clean `main` tree (increment 9) and does not fail the run.
   Not introduced here; worth a look in a later increment.
-- The owner's `provider_calls` query cannot filter the search call by flight key (see step 3). If
-  the acceptance must be phrased per flight key, increment 12 could stamp the resolved key onto the
-  resolver's call record before it is persisted.
-- Offline deletes: a `DELETE` still queued behind a server error while a later pull succeeds lets
-  the pull re-show the row until the DELETE drains. The drain runs before every pull, so this needs
-  a 5xx on the DELETE and a successful pull in the same window.
+- The owner's `provider_calls` query cannot filter the search call by flight key (see step 3);
+  ruling X4 records the fix for increment 12.
+- A DELETE the server refuses with anything but 404 leaves its local tombstone without a queued
+  DELETE: the row stays hidden until the next snapshot replace brings it back as the server's.
+  The route's only other refusals are a malformed id and a missing scope, neither of which the app
+  sends.

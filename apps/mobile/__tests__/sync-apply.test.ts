@@ -14,6 +14,8 @@ import {
 import { ApplyGate } from '../src/lib/sync/gate';
 import { createOutbox, enqueueMutation, pendingCount } from '../src/lib/sync/outbox';
 import { readCursor, readSyncState, SUBSCRIBE_MUTATION } from '../src/lib/sync/store';
+import { listFlights } from '../src/lib/flight-queries';
+import { pendingFlightKey } from '../src/lib/flight-model';
 import { STORE_SCHEMA_VERSION } from '../src/lib/sync/version';
 import { commitWrite, subscribeToTable } from '../src/lib/db/store-signal';
 import { SyncEnvelopeV1 } from '@planeahead/shared';
@@ -704,19 +706,40 @@ describe('the sync client', () => {
 });
 
 describe('a row a queued subscribe names', () => {
-  /** Increment 10's add-flight writer: the optimistic row and its POST in one commit. */
-  function optimisticSubscribe(db: MemorySqlite, n: number, flightKey: string): void {
+  /**
+   * Increment 10's add-flight writer (src/lib/flights.ts `addFlight`): the optimistic row, under
+   * its pending placeholder key, and its POST in one commit.
+   */
+  function optimisticSubscribe(
+    db: MemorySqlite,
+    n: number,
+    designator: string,
+    date: string,
+  ): void {
     commitWrite(db, ['flight_subscriptions', 'outbox'], () => {
       db.run(
-        'INSERT INTO flight_subscriptions (id, flight_key, created_at, updated_at) VALUES (?, ?, ?, ?)',
-        [id(n), flightKey, '2026-09-23T10:00:00.000Z', '2026-09-23T10:00:00.000Z'],
+        'INSERT INTO flight_subscriptions (id, flight_key, created_at, updated_at, added_as) VALUES (?, ?, ?, ?, ?)',
+        [
+          id(n),
+          pendingFlightKey(designator, date),
+          '2026-09-23T10:00:00.000Z',
+          '2026-09-23T10:00:00.000Z',
+          designator,
+        ],
       );
       enqueueMutation(db, {
         ...SUBSCRIBE_MUTATION,
-        body: { flightKey, subscriptionId: id(n) },
+        body: { subscriptionId: id(n), number: designator, date },
         entityId: id(n),
       });
     });
+  }
+
+  function superseded(db: MemorySqlite, n: number): number | undefined {
+    const row = db.raw
+      .prepare('SELECT superseded FROM flight_subscriptions WHERE id = ?')
+      .get(id(n)) as { superseded: number } | undefined;
+    return row?.superseded;
   }
 
   /** The POST meets a 503, so it waits in its backoff and the sync goes ahead without it. */
@@ -752,7 +775,7 @@ describe('a row a queued subscribe names', () => {
   it('survives the first pull of a fresh store, which replaces the synced rows', async () => {
     const db = createMemorySqlite();
     const gate = new ApplyGate();
-    optimisticSubscribe(db, 50, BA117);
+    optimisticSubscribe(db, 50, 'BA117', '2026-09-21');
     await drainDeferred(db, gate);
     const { transport, cursors } = scripted([
       { status: 200, body: page({ changes: [subscriptionUpsert(1, AA100)], cursor: cursorAt(9) }) },
@@ -775,7 +798,7 @@ describe('a row a queued subscribe names', () => {
   it('survives a 410 reset while every other synced row is replaced', async () => {
     const db = seeded(USER, cursorAt(9), [subscriptionUpsert(1, AA100), preferencesUpsert()]);
     const gate = new ApplyGate();
-    optimisticSubscribe(db, 50, BA117);
+    optimisticSubscribe(db, 50, 'BA117', '2026-09-21');
     await drainDeferred(db, gate);
     const { transport, cursors } = scripted([
       { status: 410, body: envelope('resync_required') },
@@ -787,9 +810,12 @@ describe('a row a queued subscribe names', () => {
     ).resolves.toMatchObject({ kind: 'synced', resets: 1 });
     expect(cursors).toEqual([cursorAt(9), null]);
     // Row 1 and the preferences went with the reset. The snapshot carries BA117 under the server's
-    // own id, so the queued subscribe's optimistic row for the same flight goes too (the server
-    // answers that POST with its existing row); the POST itself stays queued.
-    expect(subscriptions(db).map((row) => row.id)).toEqual([id(2)]);
+    // own id, so the queued subscribe's optimistic row for the same designator and date is kept
+    // but superseded, hidden from the list (increment 10 review, ruling X7: its placeholder key
+    // never equals the server's); the POST stays queued for the 200 created false to settle.
+    expect(subscriptions(db).map((row) => row.id)).toEqual([id(2), id(50)]);
+    expect(superseded(db, 50)).toBe(1);
+    expect(listFlights(db).map((item) => item.id)).toEqual([id(2)]);
     expect(count(db, 'user_preferences')).toBe(0);
     expect(pendingCount(db)).toBe(1);
   });
@@ -797,7 +823,7 @@ describe('a row a queued subscribe names', () => {
   it('survives a 410 reset when the snapshot does not carry its flight', async () => {
     const db = seeded(USER, cursorAt(9), [subscriptionUpsert(1, AA100), preferencesUpsert()]);
     const gate = new ApplyGate();
-    optimisticSubscribe(db, 50, BA117);
+    optimisticSubscribe(db, 50, 'BA117', '2026-09-21');
     await drainDeferred(db, gate);
     const { transport } = scripted([
       { status: 410, body: envelope('resync_required') },
@@ -811,36 +837,47 @@ describe('a row a queued subscribe names', () => {
     expect(pendingCount(db)).toBe(1);
   });
 
-  it('drops a kept row whose flight the snapshot carries under the server id, by a qualified delete', async () => {
-    const db = createMemorySqlite();
-    const gate = new ApplyGate();
-    optimisticSubscribe(db, 50, BA117);
-    await drainDeferred(db, gate);
-    const { transport } = scripted([
-      {
-        status: 200,
-        body: page({
-          changes: [subscriptionUpsert(1, AA100), subscriptionUpsert(2, BA117)],
-          cursor: cursorAt(9),
-        }),
-      },
-    ]);
+  it.each([
+    ['a snapshot (replace)', null],
+    ['a delta page', cursorAt(4)],
+  ] as const)(
+    'hides a kept pending add whose flight %s carries under the server id, in the same transaction',
+    async (_kind, cursor) => {
+      const db =
+        cursor === null
+          ? createMemorySqlite()
+          : seeded(USER, cursor, [subscriptionUpsert(1, AA100)]);
+      const gate = new ApplyGate();
+      optimisticSubscribe(db, 50, 'BA117', '2026-09-21');
+      await drainDeferred(db, gate);
+      const { transport } = scripted([
+        {
+          status: 200,
+          body: page({
+            changes: [subscriptionUpsert(1, AA100), subscriptionUpsert(2, BA117)],
+            cursor: cursorAt(9),
+          }),
+        },
+      ]);
 
-    await createSyncClient({ db, transport, gate, onAccountDeleted: jest.fn() }).sync(USER);
-    expect(subscriptions(db).map((row) => row.id)).toEqual([id(1), id(2)]);
-    // The queued POST stays: the server answers it with row 2 (200, created false).
-    expect(pendingCount(db)).toBe(1);
-    const applied = db.transactions.at(-1);
-    expect(applied?.outcome).toBe('committed');
-    const dedupe = applied?.statements.filter((line) =>
-      /DELETE FROM flight_subscriptions/.test(line),
-    );
-    expect(dedupe?.some((line) => /EXISTS/.test(line) && /\bWHERE\b/.test(line))).toBe(true);
-  });
+      await createSyncClient({ db, transport, gate, onAccountDeleted: jest.fn() }).sync(USER);
+      // Kept (its POST is queued) but superseded: the list shows the flight once.
+      expect(subscriptions(db).map((row) => row.id)).toEqual([id(1), id(2), id(50)]);
+      expect(superseded(db, 50)).toBe(1);
+      expect(listFlights(db).map((item) => item.id)).toEqual([id(1), id(2)]);
+      // The queued POST stays: the server answers it with row 2 (200, created false).
+      expect(pendingCount(db)).toBe(1);
+      const applied = db.transactions.at(-1);
+      expect(applied?.outcome).toBe('committed');
+      expect(
+        applied?.statements.some((line) => /UPDATE flight_subscriptions SET superseded/.test(line)),
+      ).toBe(true);
+    },
+  );
 
   it('survives the owner wipe with its outbox item, and goes with the account wipe', async () => {
     const db = seeded(USER, cursorAt(4), [subscriptionUpsert(1, AA100)]);
-    optimisticSubscribe(db, 50, BA117);
+    optimisticSubscribe(db, 50, 'BA117', '2026-09-21');
     const { transport } = scripted([
       { status: 200, body: page({ changes: [subscriptionUpsert(3, BA117)], cursor: cursorAt(7) }) },
     ]);
@@ -850,8 +887,9 @@ describe('a row a queued subscribe names', () => {
       gate: new ApplyGate(),
       onAccountDeleted: jest.fn(),
     }).sync(OTHER_USER);
-    // The snapshot carries BA117 under the server's id 3, so the optimistic row 50 goes with it.
-    expect(subscriptions(db).map((row) => row.id)).toEqual([id(3)]);
+    // The snapshot carries BA117 under the server's id 3, so the optimistic row 50 is hidden.
+    expect(subscriptions(db).map((row) => row.id)).toEqual([id(3), id(50)]);
+    expect(listFlights(db).map((item) => item.id)).toEqual([id(3)]);
     expect(pendingCount(db)).toBe(1);
 
     const gone = scripted([{ status: 401, body: envelope('account_deleted') }]);
@@ -865,7 +903,7 @@ describe('a row a queued subscribe names', () => {
     expect(pendingCount(db)).toBe(0);
   });
 
-  it('keeps only rows a queued SUBSCRIBE names: a queued PATCH or DELETE does not shield one', async () => {
+  it('a queued PATCH does not shield a row; a queued DELETE keeps its tombstone (ruling X7)', async () => {
     const db = seeded(USER, cursorAt(9), [
       subscriptionUpsert(1, AA100),
       subscriptionUpsert(2, BA117),
@@ -887,8 +925,14 @@ describe('a row a queued subscribe names', () => {
       gate: new ApplyGate(),
       onAccountDeleted: jest.fn(),
     }).sync(USER);
-    // Row 2 is not in the snapshot and its queued DELETE does not keep it; row 1 is the server's.
-    expect(subscriptions(db).map((row) => row.id)).toEqual([id(1)]);
+    // Row 1 is the server's (the queued PATCH did not keep the local copy). Row 2 is not in the
+    // snapshot, but its queued DELETE keeps it as the local tombstone until the DELETE settles.
+    expect(subscriptions(db).map((row) => row.id)).toEqual([id(1), id(2)]);
+    expect(listFlights(db).map((item) => item.id)).toEqual([id(1)]);
+    const tombstone = db.raw
+      .prepare('SELECT deleted_at FROM flight_subscriptions WHERE id = ?')
+      .get(id(2)) as { deleted_at: string | null };
+    expect(tombstone.deleted_at).not.toBeNull();
     expect(pendingCount(db)).toBe(2);
   });
 });

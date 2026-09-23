@@ -39,6 +39,7 @@ exports[`settings in light and dark renders in dark 1`] = `
                       "type": "Text",
                     },
                   ],
+                  "label": "System",
                   "style": {
                     "backgroundColor": "#171B22",
                     "borderColor": "#2A303A",
@@ -58,6 +59,7 @@ exports[`settings in light and dark renders in dark 1`] = `
                       "type": "Text",
                     },
                   ],
+                  "label": "Light",
                   "style": {
                     "backgroundColor": "#171B22",
                     "borderColor": "#2A303A",
@@ -77,6 +79,7 @@ exports[`settings in light and dark renders in dark 1`] = `
                       "type": "Text",
                     },
                   ],
+                  "label": "Dark",
                   "style": {
                     "backgroundColor": "#171B22",
                     "borderColor": "#7C9DFF",
@@ -114,6 +117,7 @@ exports[`settings in light and dark renders in dark 1`] = `
                       "type": "Text",
                     },
                   ],
+                  "label": "Metric (km)",
                   "style": {
                     "backgroundColor": "#171B22",
                     "borderColor": "#2A303A",
@@ -133,6 +137,7 @@ exports[`settings in light and dark renders in dark 1`] = `
                       "type": "Text",
                     },
                   ],
+                  "label": "Imperial (mi)",
                   "style": {
                     "backgroundColor": "#171B22",
                     "borderColor": "#7C9DFF",
@@ -171,6 +176,7 @@ exports[`settings in light and dark renders in dark 1`] = `
                       "type": "Text",
                     },
                   ],
+                  "label": "12-hour (3:50 PM)",
                   "style": {
                     "backgroundColor": "#171B22",
                     "borderColor": "#7C9DFF",
@@ -190,6 +196,7 @@ exports[`settings in light and dark renders in dark 1`] = `
                       "type": "Text",
                     },
                   ],
+                  "label": "24-hour (15:50)",
                   "style": {
                     "backgroundColor": "#171B22",
                     "borderColor": "#2A303A",
@@ -238,6 +245,7 @@ exports[`settings in light and dark renders in dark 1`] = `
                       "type": "Text",
                     },
                   ],
+                  "label": "Sign out",
                   "style": {
                     "backgroundColor": "#171B22",
                     "borderColor": "#2A303A",
@@ -257,6 +265,7 @@ exports[`settings in light and dark renders in dark 1`] = `
                       "type": "Text",
                     },
                   ],
+                  "label": "Delete account",
                   "style": {
                     "borderColor": "#2A303A",
                   },
@@ -293,6 +302,7 @@ exports[`settings in light and dark renders in dark 1`] = `
                       "type": "Text",
                     },
                   ],
+                  "label": "Allow notifications",
                   "style": {
                     "backgroundColor": "#171B22",
                     "borderColor": "#2A303A",
@@ -388,6 +398,7 @@ exports[`settings in light and dark renders in light 1`] = `
                       "type": "Text",
                     },
                   ],
+                  "label": "System",
                   "style": {
                     "backgroundColor": "#F2F4F8",
                     "borderColor": "#D6DAE1",
@@ -407,6 +418,7 @@ exports[`settings in light and dark renders in light 1`] = `
                       "type": "Text",
                     },
                   ],
+                  "label": "Light",
                   "style": {
                     "backgroundColor": "#F2F4F8",
                     "borderColor": "#1C4FD6",
@@ -426,6 +438,7 @@ exports[`settings in light and dark renders in light 1`] = `
                       "type": "Text",
                     },
                   ],
+                  "label": "Dark",
                   "style": {
                     "backgroundColor": "#F2F4F8",
                     "borderColor": "#D6DAE1",
@@ -463,6 +476,7 @@ exports[`settings in light and dark renders in light 1`] = `
                       "type": "Text",
                     },
                   ],
+                  "label": "Metric (km)",
                   "style": {
                     "backgroundColor": "#F2F4F8",
                     "borderColor": "#D6DAE1",
@@ -482,6 +496,7 @@ exports[`settings in light and dark renders in light 1`] = `
                       "type": "Text",
                     },
                   ],
+                  "label": "Imperial (mi)",
                   "style": {
                     "backgroundColor": "#F2F4F8",
                     "borderColor": "#1C4FD6",
@@ -520,6 +535,7 @@ exports[`settings in light and dark renders in light 1`] = `
                       "type": "Text",
                     },
                   ],
+                  "label": "12-hour (3:50 PM)",
                   "style": {
                     "backgroundColor": "#F2F4F8",
                     "borderColor": "#1C4FD6",
@@ -539,6 +555,7 @@ exports[`settings in light and dark renders in light 1`] = `
                       "type": "Text",
                     },
                   ],
+                  "label": "24-hour (15:50)",
                   "style": {
                     "backgroundColor": "#F2F4F8",
                     "borderColor": "#D6DAE1",
@@ -587,6 +604,7 @@ exports[`settings in light and dark renders in light 1`] = `
                       "type": "Text",
                     },
                   ],
+                  "label": "Sign out",
                   "style": {
                     "backgroundColor": "#F2F4F8",
                     "borderColor": "#D6DAE1",
@@ -606,6 +624,7 @@ exports[`settings in light and dark renders in light 1`] = `
                       "type": "Text",
                     },
                   ],
+                  "label": "Delete account",
                   "style": {
                     "borderColor": "#D6DAE1",
                   },
@@ -642,6 +661,7 @@ exports[`settings in light and dark renders in light 1`] = `
                       "type": "Text",
                     },
                   ],
+                  "label": "Allow notifications",
                   "style": {
                     "backgroundColor": "#F2F4F8",
                     "borderColor": "#D6DAE1",

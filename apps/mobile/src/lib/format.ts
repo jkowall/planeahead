@@ -166,6 +166,23 @@ export function localDate(ms: number, timeZone?: string | null): string {
   return `${String(year).padStart(4, '0')}-${pad2(month)}-${pad2(day)}`;
 }
 
+/**
+ * The add sheet's date field as the number pad types it (increment 10 review): the digits only,
+ * at most eight, with the hyphens of `YYYY-MM-DD` inserted as the user types. A hyphen is written
+ * only once a digit follows it, so deleting past one never gets stuck on it; a pasted
+ * `2026-09-26` comes out unchanged.
+ */
+export function formatDateInput(typed: string): string {
+  const digits = typed.replace(/[^0-9]/g, '').slice(0, 8);
+  if (digits.length <= 4) {
+    return digits;
+  }
+  if (digits.length <= 6) {
+    return `${digits.slice(0, 4)}-${digits.slice(4)}`;
+  }
+  return `${digits.slice(0, 4)}-${digits.slice(4, 6)}-${digits.slice(6)}`;
+}
+
 /** `YYYY-MM-DD` plus `days` calendar days. */
 export function addDays(date: string, days: number): string {
   const ms = Date.parse(`${date}T12:00:00Z`) + days * DAY_MINUTES * MINUTE_MS;
@@ -193,11 +210,59 @@ export function dayShift(
 }
 
 /**
+ * How many calendar days an instant's local date (in `zone`) lies after a calendar date
+ * `YYYY-MM-DD`: the timeline's day cue against the flight's departure date. 0 when either is
+ * missing or unreadable.
+ */
+export function daysAfter(
+  referenceDate: string | null | undefined,
+  iso: string | null | undefined,
+  zone: string | null | undefined,
+): number {
+  const ms = instantMs(iso);
+  const reference =
+    referenceDate === null || referenceDate === undefined
+      ? Number.NaN
+      : Date.parse(`${referenceDate}T00:00:00Z`);
+  if (ms === null || Number.isNaN(reference)) {
+    return 0;
+  }
+  const day = Date.parse(`${localDate(ms, zone)}T00:00:00Z`);
+  return Math.round((day - reference) / (DAY_MINUTES * MINUTE_MS));
+}
+
+/** ` +1`, ` -1`, ` +2` after a clock on another local day; empty on the same day. */
+export function dayShiftSuffix(days: number): string {
+  if (days === 0 || !Number.isFinite(days)) {
+    return '';
+  }
+  return days > 0 ? ` +${String(days)}` : ` -${String(-days)}`;
+}
+
+/** What a screen reader says for the same cue: `the next day`, `2 days later`, `the day before`. */
+export function dayShiftWords(days: number): string | null {
+  if (days === 0 || !Number.isFinite(days)) {
+    return null;
+  }
+  if (days === 1) {
+    return 'the next day';
+  }
+  if (days === -1) {
+    return 'the day before';
+  }
+  return days > 0 ? `${String(days)} days later` : `${String(-days)} days before`;
+}
+
+/**
  * The countdown's text for a duration: `under 1 min`, `45 min`, `3 h`, `3 h 5 min`, `2 d`,
  * `2 d 4 h`, and `now` at or past zero. Whole minutes, rounded down, so the text never runs ahead
- * of the clock.
+ * of the clock. A duration that is not a finite number (an unreadable instant) is the empty
+ * string, and the countdown shows nothing.
  */
 export function formatCountdown(ms: number): string {
+  if (!Number.isFinite(ms)) {
+    return '';
+  }
   if (ms <= 0) {
     return 'now';
   }

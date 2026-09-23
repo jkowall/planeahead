@@ -74,12 +74,27 @@ export const flightSubscriptions = sqliteTable(
     snapshotSource: text('snapshot_source'),
     /**
      * When this device learned the flight is over and no longer tracked (increment 10: a refresh
-     * answered 410 `flight_archived`). Local only: the sync feed carries flight snapshots, not the
-     * tracker's phase, so no page writes it and a subscription upsert leaves it alone. A snapshot
-     * replace drops it with the row; the next refresh or the arrival time sets the flight aside
-     * again (src/lib/flight-model.ts).
+     * answered 410 `flight_archived`, stamped by the subscription id). Local only: the sync feed
+     * carries flight snapshots, not the tracker's phase, so no page writes it and a subscription
+     * upsert leaves it alone; a snapshot replace carries it over to the page's row with the same
+     * id (src/lib/sync/local-intent.ts).
      */
     finishedAt: text('finished_at'),
+    /**
+     * The designator the user typed when this phone added the flight (`BA1512`), shown instead of
+     * the key's operating designator (increment 10 review). Local only, like `finished_at`:
+     * written by `addFlight`, kept by the outbox's success hook and across a snapshot replace. The
+     * flight snapshot's marketing fields are NOT this: they name whoever first searched the
+     * flight, and every subscriber shares them.
+     */
+    addedAs: text('added_as'),
+    /**
+     * A pending add whose flight the store already holds as a live row with the same designator
+     * and date (another device added it, or a codeshare of a tracked flight): hidden from the
+     * list while its `POST /v1/flights` stays queued, so the server's 200 `created: false` settles
+     * it (src/lib/sync/local-intent.ts). Local only.
+     */
+    superseded: integer('superseded', { mode: 'boolean' }).notNull().default(false),
   },
   (table) => [
     index('flight_subscriptions_flight_key_idx').on(table.flightKey),
@@ -198,6 +213,13 @@ export const outbox = sqliteTable(
      * yet, so the snapshot cannot carry it (src/lib/sync/store.ts).
      */
     entityId: text('entity_id'),
+    /**
+     * Epoch milliseconds of the last time the drain handed this item to the network, stamped
+     * BEFORE the request goes out (increment 10 review). NULL means it has never left the phone:
+     * an unsent `POST /v1/flights` can be cancelled outright (src/lib/flights.ts `removeFlight`),
+     * while a stamped one may have been committed by the server and needs its DELETE.
+     */
+    lastAttemptAt: integer('last_attempt_at'),
   },
   (table) => [
     index('outbox_next_attempt_idx').on(table.nextAttemptAt, table.id),

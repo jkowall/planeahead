@@ -29,6 +29,11 @@ export interface Services {
   readonly sync: SyncClient;
   readonly outbox: { drain(): Promise<DrainResult> };
   readonly analytics: Analytics;
+  /**
+   * What `401 account_deleted` ends in, wherever it is answered: the sync client, the outbox and
+   * the detail screen's direct refresh all run this one path (`forgetAccount` over this store).
+   */
+  readonly onAccountDeleted: () => Promise<void>;
 }
 
 /**
@@ -115,7 +120,7 @@ function build(store: Store): Services {
     },
   });
   const analytics = createAnalytics({ baseUrl: config.apiUrl, analyticsId });
-  return { store, api, gate, sync, outbox, analytics };
+  return { store, api, gate, sync, outbox, analytics, onAccountDeleted };
 }
 
 export function services(): Promise<Services> {
