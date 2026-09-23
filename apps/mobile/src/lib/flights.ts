@@ -11,9 +11,12 @@
  *   row while the POST is queued (increment 9). The drain then sends it with `Idempotency-Key`
  *   and `X-Install-Id`. The row also records the designator the user typed (`added_as`, local
  *   only), which the card and the detail show. A flight the store already tracks is answered
- *   locally, by flight key, never by designator (`findTracked`); a pending add the store already
- *   holds as a live row (a codeshare of a tracked flight) is marked superseded and hidden
- *   (src/lib/sync/local-intent.ts), and its POST settles it.
+ *   locally (`findTracked`): by flight key first, then by any name a live row is known by on that
+ *   date (the one typed here, the operating designator, the snapshot's marketing designator and
+ *   codeshares, IATA and ICAO; ruling Y3), so re-typing the name a card shows says so. A pending
+ *   add that a pull later shows the store already holds (the flight arrived after the add was
+ *   queued) is marked superseded and hidden (src/lib/sync/local-intent.ts), and its POST settles
+ *   it.
  * - `reconcileSent` is the outbox's `onSent` hook. On the subscribe's 201 it writes the server's
  *   row and the flight snapshot from the answer, so the list shows the scheduled times at once
  *   rather than after the next pull. The answer's `created` decides the rest (ruling X7):
@@ -40,7 +43,8 @@
  * - `removeFlight` tombstones the row locally and queues `DELETE /v1/flights/:id`, except for an
  *   add whose POST has never left the phone (no `last_attempt_at`): that POST and the optimistic
  *   row are deleted in one transaction and nothing is queued, so a cancelled typo costs no tracker,
- *   no provider call and no daily add.
+ *   no provider call and no daily add. The outbox never stamps while the phone knows it is
+ *   offline (ruling Y1), so an add made offline stays cancellable.
  *
  * Refresh is not a write through the outbox: it carries no key and changes nothing locally until
  * it answers, and replaying a stale refresh later would spend a provider call for nothing. It is
@@ -72,7 +76,13 @@ import { z } from 'zod';
 import type { ApiClient, RawResponse } from './api-client';
 import type { SqliteLike } from './db/sqlite-like';
 import { commitWrite, type StoreTable } from './db/store-signal';
-import { PENDING_KEY_PREFIX, pendingFlightKey } from './flight-model';
+import {
+  liveRowNamed,
+  PENDING_KEY_PREFIX,
+  pendingFlightKey,
+  toFlightItem,
+  type FlightRowRecord,
+} from './flight-model';
 import { recordReplacement } from './flight-replacements';
 import { formatDateList, formatIsoDate } from './format';
 import { applySnapshot, upsertSubscription } from './sync/apply';
@@ -190,17 +200,18 @@ function probableKeyParts(
 }
 
 /**
- * A live row that already tracks this add, compared by FLIGHT KEY, never by a displayed
- * designator (increment 10 review): a pending row with the same placeholder key, or a synced row
- * whose key has the designator's operating carrier, number and date. A codeshare (`BA1511` for
- * a tracked `AA100`) is not caught here: its add is queued, hidden as superseded, and the server's
- * 200 `created: false` settles it (see the header).
+ * A live row that already tracks this add. First by FLIGHT KEY (increment 10 review): a pending
+ * row with the same placeholder key, or a synced row whose key has the designator's operating
+ * carrier, number and date. Then by name (ruling Y3): a synced row that `pendingMatchesLive` would
+ * match, known on that date by the typed designator (the one typed here, the operating one, the
+ * snapshot's marketing designator or a codeshare, in IATA or ICAO spelling). A codeshare no row
+ * here is known by is queued, and the server's 200 `created: false` settles it (see the header).
  */
 export function findTracked(db: SqliteLike, request: AddFlightRequest): string | null {
   const placeholder = pendingFlightKey(request.designator, request.date);
   const wanted = probableKeyParts(request);
-  const rows = db.all<{ id: string; flight_key: string }>(
-    'SELECT id, flight_key FROM flight_subscriptions WHERE deleted_at IS NULL AND id IS NOT NULL',
+  const rows = db.all<FlightRowRecord>(
+    'SELECT * FROM flight_subscriptions WHERE deleted_at IS NULL AND id IS NOT NULL',
   );
   for (const row of rows) {
     if (row.flight_key === placeholder) {
@@ -222,7 +233,10 @@ export function findTracked(db: SqliteLike, request: AddFlightRequest): string |
       // A key this build cannot read tracks nothing it could compare.
     }
   }
-  return null;
+  const named = rows
+    .map(toFlightItem)
+    .find((item) => liveRowNamed(item, request.designator, request.date));
+  return named?.id ?? null;
 }
 
 /**
@@ -261,14 +275,7 @@ export function addFlight(
         request.designator,
       ],
     );
-    const queued = enqueueMutation(
-      db,
-      { ...SUBSCRIBE_MUTATION, body, entityId: subscriptionId },
-      { now },
-    );
-    // A codeshare of a flight the list already has: hidden until the POST settles it.
-    markSupersededPending(db);
-    return queued;
+    return enqueueMutation(db, { ...SUBSCRIBE_MUTATION, body, entityId: subscriptionId }, { now });
   });
   return { kind: 'queued', subscriptionId, outboxId: item.id };
 }
@@ -449,7 +456,7 @@ export function reconcileSent(
         ]);
       }
     }
-    recordReplacement(optimisticId, server.id);
+    recordReplacement(optimisticId, server.id, now.getTime());
   }
   upsertSubscription(db, server);
   // The designator typed on this phone names the row the add became. On a no-op the account's

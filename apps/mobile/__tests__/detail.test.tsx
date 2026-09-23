@@ -219,9 +219,11 @@ describe('the detail timeline, from a seeded snapshot', () => {
   });
 
   it('follows an add the server answered under its own id instead of saying "not found"', async () => {
-    const { db, network, outbox } = harness();
-    // Added here as the codeshare of the tracked AA100: hidden from the list, open on its own id.
+    // The snapshot lists no codeshares, so nothing here names BA1511 (ruling Y3): it is queued.
+    const { db, network, outbox } = harness({ codeshares: [] });
+    // Added here as a codeshare of the tracked AA100, and opened on its own id.
     const added = addFlight(db, { designator: 'BA1511', date: '2026-09-23' });
+    expect(added.kind).toBe('queued');
     await renderDetail(db, added.subscriptionId);
     expect(screen.getByTestId('detail-pending')).toBeOnTheScreen();
 

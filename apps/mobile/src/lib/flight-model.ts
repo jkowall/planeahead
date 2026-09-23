@@ -19,7 +19,8 @@
  * (`added_as`, local only), else the key's operating designator. Never the snapshot's marketing
  * designator: the snapshot is shared by every subscriber of the flight key, and its marketing
  * fields name whoever searched the flight first. The operating designator is shown beside it when
- * the two differ.
+ * the two differ, and never beside another spelling of itself (`AAL100` typed for `AA100`; ruling
+ * Y4). Mid-sentence it keeps its case: "operated as AA100" (ruling Y2).
  */
 
 import {
@@ -232,11 +233,27 @@ export function toFlightItem(row: FlightRowRecord): FlightItem {
   };
 }
 
-/** `Operated as AA100` when the name shown is not the key's operating designator. */
-export function operatedAs(item: FlightItem): string | null {
-  return item.operatingDesignator === null || item.operatingDesignator === item.designator
+/**
+ * The key's operating designator when the name shown is another flight number (a codeshare),
+ * else null: never when the name is the same flight number in another spelling (ruling Y4).
+ */
+function operatingIfOther(item: FlightItem): string | null {
+  const operating = item.operatingDesignator;
+  return operating === null || designatorSpellings(item.designator).includes(operating)
     ? null
-    : `Operated as ${item.operatingDesignator}`;
+    : operating;
+}
+
+/** `Operated as AA100`, a line of its own, when the name shown is a codeshare (see the header). */
+export function operatedAs(item: FlightItem): string | null {
+  const operating = operatingIfOther(item);
+  return operating === null ? null : `Operated as ${operating}`;
+}
+
+/** `operated as AA100`, mid-sentence, the designator's case kept (ruling Y2). */
+export function operatedAsPhrase(item: FlightItem): string | null {
+  const operating = operatingIfOther(item);
+  return operating === null ? null : `operated as ${operating}`;
 }
 
 function ms(iso: string | null | undefined): number | null {
@@ -386,7 +403,8 @@ export function selectHome(items: readonly FlightItem[], nowMs: number): HomeSel
 }
 
 // ---------------------------------------------------------------------------------------------
-// Designators, for the pending-row dedupe (src/lib/sync/local-intent.ts).
+// Designators, for the pending-row dedupe (src/lib/sync/local-intent.ts) and the add's duplicate
+// check (src/lib/flights.ts `findTracked`).
 // ---------------------------------------------------------------------------------------------
 
 /**
@@ -440,11 +458,20 @@ export function knownDesignators(item: FlightItem): ReadonlySet<string> {
   return new Set(names.flatMap(designatorSpellings));
 }
 
-/** Whether a pending add names the same flight as a live row: same date, a shared designator. */
-export function pendingMatchesLive(pending: FlightItem, live: FlightItem): boolean {
-  if (!pending.pending || live.pending || pending.dateLocal !== live.dateLocal) {
+/** Whether `designator` on `dateLocal` names the flight a live (not pending) row tracks. */
+export function liveRowNamed(live: FlightItem, designator: string, dateLocal: string): boolean {
+  if (live.pending || live.dateLocal !== dateLocal) {
     return false;
   }
   const known = knownDesignators(live);
-  return designatorSpellings(pending.designator).some((form) => known.has(form));
+  return designatorSpellings(designator).some((form) => known.has(form));
+}
+
+/** Whether a pending add names the same flight as a live row: same date, a shared designator. */
+export function pendingMatchesLive(pending: FlightItem, live: FlightItem): boolean {
+  return (
+    pending.pending &&
+    pending.dateLocal !== null &&
+    liveRowNamed(live, pending.designator, pending.dateLocal)
+  );
 }

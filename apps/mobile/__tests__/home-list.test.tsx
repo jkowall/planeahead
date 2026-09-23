@@ -300,6 +300,25 @@ describe('home, from a seeded store', () => {
     const hero = within(await screen.findByTestId('home-next-flight'));
     expect(hero.getByText('BA1511  JFK → LHR')).toBeOnTheScreen();
     expect(hero.getByTestId('home-next-operated-as')).toHaveTextContent('Operated as AA100');
+    // Mid-sentence the designator keeps its case (ruling Y2).
+    expect(screen.getByTestId('home-next-flight')).toHaveAccessibleName(
+      /^Next flight: BA1511, operated as AA100, JFK → LHR, /,
+    );
+  });
+
+  it('says "operated as" with the designator as it is on a codeshare row in the rest list', async () => {
+    const db = seeded();
+    db.run("UPDATE flight_subscriptions SET added_as = 'AA6139' WHERE id = ?", [BA117_ID]);
+    await renderHome(db);
+    const row = await screen.findByTestId(`flight-row-${BA117_ID}`);
+    expect(within(screen.getByTestId('home-rest')).getByTestId(`flight-row-${BA117_ID}`)).toBe(row);
+    expect(within(row).getByText('AA6139  LHR → JFK')).toBeOnTheScreen();
+    expect(row).toHaveTextContent(/Fri 25 Sep, 12:20 PM, operated as BA117/);
+    expect(row).toHaveAccessibleName(
+      'AA6139, operated as BA117, LHR → JFK, Fri 25 Sep, status Scheduled, departs 12:20 PM, ' +
+        'Terminal 5',
+    );
+    expect(row).not.toHaveTextContent(/ba117/);
   });
 
   it('offers sign-in to an anonymous session', async () => {

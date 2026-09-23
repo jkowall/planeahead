@@ -13,6 +13,7 @@ import {
   isOver,
   LANDED_GRACE_MS,
   operatedAs,
+  operatedAsPhrase,
   OVER_AFTER_ARRIVAL_MS,
   pendingFlightKey,
   pendingMatchesLive,
@@ -86,6 +87,19 @@ describe('toFlightItem', () => {
     const item = byId(listFlights(db), AA100_ID);
     expect(item).toMatchObject({ designator: 'BA1511', operatingDesignator: 'AA100' });
     expect(operatedAs(item)).toBe('Operated as AA100');
+    // Mid-sentence the designator keeps its case (ruling Y2).
+    expect(operatedAsPhrase(item)).toBe('operated as AA100');
+  });
+
+  it('never says an ICAO spelling of the flight is operated as itself (ruling Y4)', () => {
+    const { db } = seeded();
+    db.run("UPDATE flight_subscriptions SET added_as = 'AAL100' WHERE id = ?", [AA100_ID]);
+    const item = byId(listFlights(db), AA100_ID);
+    expect(item).toMatchObject({ designator: 'AAL100', operatingDesignator: 'AA100' });
+    expect(operatedAs(item)).toBeNull();
+    expect(operatedAsPhrase(item)).toBeNull();
+    // Another number of the same carrier is another flight, still shown.
+    expect(operatedAs({ ...item, designator: 'AAL6139' })).toBe('Operated as AA100');
   });
 
   it('reads a pending row from its placeholder key', () => {
@@ -217,8 +231,10 @@ describe('pending adds against live rows (ruling X7)', () => {
   });
 
   it('matches by designator and date: the operating one, a codeshare, the one typed here', () => {
-    const { db } = seeded();
+    // Queued before this store knew AA100 (a known codeshare is answered locally, ruling Y3).
+    const db = createMemorySqlite();
     addFlight(db, { designator: 'BA1511', date: '2026-09-23' }, { newId: () => PENDING_ID });
+    seedStore(db);
     const all = db.all<Parameters<typeof toFlightItemRow>[0]>('SELECT * FROM flight_subscriptions');
     const items = all.map(toFlightItemRow);
     const pending = byId(items, PENDING_ID);

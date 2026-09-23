@@ -10,18 +10,20 @@ device check run here is the iPhone 17 Pro simulator launch of the development b
 screen over a seeded store.
 
 A review round followed the build (commit "Increment 10: apply review findings"); what it changed,
-under the orchestrator's rulings X1 to X7, is in "The review round" below, and the numbers in the
-first table are from its final run.
+under the orchestrator's rulings X1 to X7, is in "The review round" below. A re-review of that
+round found two minors and three nits, applied under rulings Y1 to Y5 (commit "Increment 10: apply
+re-review findings", "The re-review round" below); the numbers in the first table are from its
+final run.
 
 ## What ran here
 
 | Check | Command | Result |
 | --- | --- | --- |
-| Full check | `pnpm turbo run typecheck lint test --force && pnpm prettier --check . && node scripts/toolchain-guard.mjs && node scripts/vitest-exit-guard.mjs` | passed (review round): 14 turbo tasks in 1 min 47 s; 1983 tests passed (tools 19, shared 577, db 176, api 707 with 1 skipped, mobile 504); Prettier clean; toolchain guard ok; exit guard ok. The build's own run: 1896 tests, mobile 417. One earlier attempt of the review round's final run hung after all 64 api test files had passed, in the api suite's teardown (embedded Postgres left holding idle connections) while another project's Workers suite ran on the machine; it was interrupted and the rerun passed as above. `apps/api` is untouched by the round |
-| Mobile Jest (inside the turbo `test` task) | `pnpm --filter @planeahead/mobile test` | 27 suites, 504 tests, 12 snapshots (light and dark of home, empty home, the first add in the top slot, add sheet, detail, settings) |
-| Mobile migrations guard | `node scripts/mobile-migrations-guard.mjs --base main` | ok, 4 migrations, the 6 committed files unchanged (0002 and 0003 appended) |
-| `expo prebuild` (development variant) | `cd apps/mobile && LANG=en_US.UTF-8 EXPO_NO_GIT_STATUS=1 CI=1 pnpm prebuild` | passed, 25 s, 132 pods (run again after the review round's last code change) |
-| iOS simulator compile | `xcodebuild -workspace ios/PlaneAheadDev.xcworkspace -scheme PlaneAheadDev -configuration Debug -sdk iphonesimulator -destination 'platform=iOS Simulator,name=iPhone 17 Pro' build` (with `SENTRY_DISABLE_AUTO_UPLOAD=true`) | BUILD SUCCEEDED, 2 min 58 s (review round; the native project is unchanged by the round's later JavaScript edits, which Metro serves; the build's own run: 2 min 14 s incremental) |
+| Full check | `pnpm turbo run typecheck lint test --force && pnpm prettier --check . && node scripts/toolchain-guard.mjs && node scripts/vitest-exit-guard.mjs && node scripts/mobile-migrations-guard.mjs --base origin/main` | passed (re-review round): 14 turbo tasks in 1 min 40 s; 1998 tests passed (tools 19, shared 577, db 176, api 707 with 1 skipped, mobile 519); Prettier clean; toolchain guard ok; exit guard ok; migrations guard ok. The review round's run: 1983 tests, mobile 504; the build's: 1896, mobile 417. One earlier attempt of the review round's final run hung after all 64 api test files had passed, in the api suite's teardown (embedded Postgres left holding idle connections) while another project's Workers suite ran on the machine; it was interrupted and the rerun passed. `apps/api` is untouched by both rounds |
+| Mobile Jest (inside the turbo `test` task) | `pnpm --filter @planeahead/mobile test` | 28 suites, 519 tests, 12 snapshots (light and dark of home, empty home, the first add in the top slot, add sheet, detail, settings) |
+| Mobile migrations guard | `node scripts/mobile-migrations-guard.mjs --base origin/main` | ok, 4 migrations, the 6 committed files unchanged (0002 and 0003 appended; the re-review round adds none) |
+| `expo prebuild` (development variant) | `cd apps/mobile && LANG=en_US.UTF-8 EXPO_NO_GIT_STATUS=1 CI=1 pnpm prebuild` | passed, 25 s, 132 pods (run again after the review round's last code change; not re-run in the re-review round, which changed JavaScript only and no dependency, config or native file) |
+| iOS simulator compile | `xcodebuild -workspace ios/PlaneAheadDev.xcworkspace -scheme PlaneAheadDev -configuration Debug -sdk iphonesimulator -destination 'platform=iOS Simulator,name=iPhone 17 Pro' build` (with `SENTRY_DISABLE_AUTO_UPLOAD=true`) | BUILD SUCCEEDED, 2 min 58 s (review round; the native project is unchanged by the round's later JavaScript edits and by the re-review round, which Metro serves; the build's own run: 2 min 14 s incremental) |
 | iPhone 17 Pro simulator launch to the home screen over a seeded store | see "The simulator launch" below | passed: the home screen over the seeded store, light and dark (below) |
 | Android compile | `cd apps/mobile/android && ./gradlew assembleDebug -PreactNativeArchitectures=arm64-v8a` (with `ANDROID_HOME` and `ANDROID_SDK_ROOT` exported, `SENTRY_DISABLE_AUTO_UPLOAD=true`) | BUILD SUCCESSFUL, 1 min 16 s (the build; not re-run in the review round, which changed JavaScript and one local SQLite migration only) |
 | Android launch (best effort), Pixel_10_Pro_Fold_-_EMU headless | see "The emulator launch" below | passed: the home screen over the seeded store, light and dark (the build; not re-run in the review round) |
@@ -342,6 +344,77 @@ fix has a regression test; the files named are under `apps/mobile/`.
   `user_search` `provider_calls` row carries `flight_key` NULL, so the admin page joins search calls
   by request id; the increment 12 spec gains "the DesignatorResolver appends its provider_call
   record after resolution with the resolved key".
+
+## The re-review round
+
+The re-review of the review round found two minors and three nits, applied under the
+orchestrator's rulings Y1 to Y5; every earlier ruling (T1 to T7, X1 to X7) stands. Every fix has
+a regression test; the Y1 to Y4 tests were each checked to fail with their fix reverted (Y5's
+tests exercise the new record format and its cleanup, which have no earlier form to revert to).
+The files named are under `apps/mobile/`.
+
+- **An add made offline stays cancellable** (rr-offline-data-flow-4-partial, ruling Y1). The add
+  sheet drains at once, and that drain stamped `last_attempt_at` even with no network, so the
+  offline add could no longer be cancelled outright. The outbox now takes an `isOnline` seam
+  (`src/lib/sync/outbox.ts`): after the head is found due and before it is stamped, a phone that
+  KNOWS it is offline ends the pass `deferred` with no stamp, no attempt counted and nothing sent;
+  every request actually handed to the transport is still stamped first, synchronously. services.ts
+  passes TanStack's `onlineManager`, which expo-network already feeds in `src/lib/query.ts`. That
+  listener hears changes only, and Android sends none while a phone starts offline, so
+  `watchNetwork` also reads `getNetworkStateAsync` once: a known offline answer is applied unless a
+  change was heard first, and an unknown or failed read leaves TanStack's default (online), so a
+  missing answer never holds the queue back. The network's return still starts the next drain
+  (`src/lib/session.ts`). Tests: `add-flight.test.tsx` "known offline" runs the sheet's own
+  sequence through the real services (the sheet's `addFlight` and its immediate drain, then
+  `removeFlight`): the drain resolves `deferred`, `fetch` is never called, the outbox row has no
+  stamp and no attempt, `removeFlight` returns `cancelled`, the row and the item are gone, and a
+  drain back online sends nothing; "no answer" shows that online the stamp is in the row when
+  `fetch` is called. `offline-flow.test.ts` covers the drain itself, and `online-state.test.ts`
+  the launch read (known offline applied, a change heard first wins, online, unknown or failed
+  change nothing).
+- **"Operated as" keeps the designator's case** (rr-screens-operated-lowercase, ruling Y2). The
+  row text and both accessibility labels lower-cased the whole phrase ("operated as ba117").
+  `operatedAsPhrase` in `src/lib/flight-model.ts` gives the mid-sentence form ("operated as
+  BA117") and serves the row's second line, the row's label and the hero's label; the hero's own
+  line keeps `operatedAs` ("Operated as AA100"). `home-list.test.tsx` asserts a codeshare row in
+  the rest list (BA117 added as AA6139: its text and its name) and the hero's name.
+- **Re-typing a name a card shows says "You already track"** (rr-screens-typed-name-not-tracked,
+  ruling Y3). `findTracked` still compares flight keys first; after that it returns the id of a
+  live, non-pending row that `pendingMatchesLive` would match on that date: the designator typed
+  on this phone (`added_as`), the key's operating designator, the snapshot's marketing designator
+  and its codeshares, in IATA and ICAO spelling (the shared `liveRowNamed`). This amends the
+  review round's "never designators" for the duplicate check only; the name a card shows is
+  unchanged (screens-and-contract-3). `add-flight.test.tsx` adds BA1511 through the sheet (it
+  lands on AA100's key, the provider listing no codeshares), then re-types BA1511: the sheet says
+  "You already track BA1511 on Wed 23 Sep." and nothing is queued or sent; the duplicate-check test
+  now covers the marketing designator and a codeshare in both spellings, and a codeshare no row
+  here is known by is still queued.
+- **An ICAO spelling is never "operated as" itself** (rr-screens-icao-self-codeshare, ruling Y4).
+  `operatedAs` (and `operatedAsPhrase`) return null when `designatorSpellings` of the shown
+  designator contains the operating designator, so `AAL100` typed for `AA100` shows no "Operated
+  as AA100". `flight-model.test.ts`.
+- **The replacement records are bounded** (rr-offline-data-flow-5-kv-leak, ruling Y5).
+  `src/lib/flight-replacements.ts` stores `replaced:{optimisticId}` as `{ serverId, at }`; every
+  record older than a day (or unreadable) is dropped whenever one is read or written, a record is
+  removed once the server row it points at has been read (`readFlightFollowing` forgets the
+  records it followed when it finds a row, and keeps them while the row is not in the store yet),
+  and `forgetAccount` clears every `replaced:*` record, so sign-out and `401 account_deleted` leave
+  none behind. `SyncKv` gains `getAllKeysSync` (expo-sqlite's `Storage` has it; the Jest kv
+  stand-ins run the same `SELECT key FROM storage`). Tests: `offline-flow.test.ts` section 5 (kept
+  until the row is read, then gone; the day-old sweep on read and on write; `clearReplacements`
+  leaves the other kv keys) and `add-flight.test.tsx` "forgetAccount drops every record".
+
+**What else the round changed, and why.**
+
+- `addFlight` no longer runs `markSupersededPending`: with Y3, an add a live row already names is
+  answered locally and never queued, so the call could not mark anything. A pending add is still
+  marked superseded when a pull (or the success hook) brings a live row that names it after the
+  add was queued.
+- Tests that queued BA1511 over the seeded store now seed AA100 without codeshares (or queue the
+  add before the store knew AA100), because the fixture lists BA1511 as AA100's codeshare and Y3
+  answers it locally: `offline-flow.test.ts` section 1, `detail.test.tsx` "follows an add the
+  server answered under its own id", `flight-model.test.ts` "matches by designator and date".
+- `readFlightFollowing` loses its injectable `take` parameter (only the default was ever used).
 
 ## Known issues and open questions
 

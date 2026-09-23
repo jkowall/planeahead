@@ -16,7 +16,7 @@ import { useLiveQuery } from './db/live-query';
 import { flightSubscriptions } from './db/schema';
 import { useStore } from './db/store-context';
 import { toFlightItem, type FlightItem, type FlightRowRecord } from './flight-model';
-import { takeReplacement } from './flight-replacements';
+import { forgetReplacement, readReplacement } from './flight-replacements';
 
 /** The list's one statement (the coalescing test counts how often it runs). */
 export const LIST_FLIGHTS_SQL =
@@ -62,23 +62,28 @@ const MAX_HOPS = 3;
 
 /**
  * `readFlight`, following a recorded replacement when `id` is gone: returns the id it ended on
- * and the row there. A replacement is cleared once read, so the caller keeps the id it ended on.
+ * and the row there. Once a row is found, the replacements followed to it are forgotten (ruling
+ * Y5), so the caller keeps the id it ended on.
  */
 export function readFlightFollowing(
   db: SqliteLike,
   id: string,
-  take: (id: string) => string | null = takeReplacement,
 ): { readonly id: string; readonly item: FlightItem | null } {
+  const followed: string[] = [];
   let current = id;
   for (let hop = 0; hop <= MAX_HOPS; hop += 1) {
     const item = readFlight(db, current);
     if (item !== null) {
+      for (const from of followed) {
+        forgetReplacement(from);
+      }
       return { id: current, item };
     }
-    const next = hop < MAX_HOPS ? take(current) : null;
+    const next = hop < MAX_HOPS ? readReplacement(current) : null;
     if (next === null) {
       return { id: current, item: null };
     }
+    followed.push(current);
     current = next;
   }
   return { id: current, item: null };

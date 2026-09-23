@@ -22,6 +22,7 @@ export function memoryKvModule(): typeof KvModule {
         store.set(key, value);
       },
       removeItemSync: (key) => store.delete(key),
+      getAllKeysSync: () => [...store.keys()],
     },
     zustandKvStorage: {
       getItem: (key) => store.get(key) ?? null,

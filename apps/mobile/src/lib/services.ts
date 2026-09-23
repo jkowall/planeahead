@@ -5,6 +5,7 @@
  */
 
 import * as Sentry from '@sentry/react-native';
+import { onlineManager } from '@tanstack/react-query';
 import { createAnalytics, type Analytics } from './analytics';
 import { createApiClient, type ApiClient } from './api-client';
 import { authClient } from './auth-client';
@@ -12,6 +13,7 @@ import { runtimeConfig } from './config';
 import { whenStoreReady, type Store } from './db/client';
 import { KV_KEYS, kv } from './db/kv';
 import { useFlightNotices } from './flight-notices';
+import { clearReplacements } from './flight-replacements';
 import { flightOutboxHooks } from './flights';
 import { analyticsId, installId } from './identity';
 import { withPendingPatches } from './preference-mutations';
@@ -40,8 +42,9 @@ export interface Services {
  * The local half of signing out, and what `401 account_deleted` ends in: the store and the
  * outbox are gone (the caller wiped them, or this does), the Better Auth client forgets its
  * cookies (its `/sign-out` hook clears SecureStore before the request is even sent, so it works
- * against a deleted account), and the settings fall back to the defaults. The root layout then
- * sees no session and routes to the sign-in group.
+ * against a deleted account), the settings fall back to the defaults, and the record of where an
+ * optimistic subscription went is dropped with the rows it named (src/lib/flight-replacements.ts).
+ * The root layout then sees no session and routes to the sign-in group.
  */
 export async function forgetAccount(store: Store | null): Promise<void> {
   if (store !== null) {
@@ -52,6 +55,7 @@ export async function forgetAccount(store: Store | null): Promise<void> {
   useFlightNotices.getState().clear();
   kv.removeItemSync(KV_KEYS.appleUserId);
   kv.removeItemSync(KV_KEYS.pendingMagicLink);
+  clearReplacements();
   queryClient.clear();
 }
 
@@ -94,6 +98,9 @@ function build(store: Store): Services {
     db: store.sqlite,
     gate,
     transport: { send: (request) => api.request(request) },
+    // Nothing is stamped or sent while the phone knows it is offline, so an add made offline can
+    // still be cancelled (ruling Y1; src/lib/query.ts feeds this from expo-network).
+    isOnline: () => onlineManager.isOnline(),
     onAccountDeleted,
     onSent: flightHooks.onSent,
     onRefused: flightHooks.onRefused,

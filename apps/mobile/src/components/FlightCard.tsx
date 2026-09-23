@@ -19,6 +19,7 @@ import {
   departureTime,
   hasDeparted,
   operatedAs,
+  operatedAsPhrase,
   type FlightItem,
 } from '../lib/flight-model';
 import {
@@ -104,11 +105,11 @@ function RowCard({ item, prefs, nowMs, onPress }: CardProps) {
   const routeText = route(item);
   const departureClock = departureClockOf(item, prefs);
   const date = dateText(item, prefs);
-  const operated = operatedAs(item);
+  const operated = operatedAsPhrase(item);
   const place = terminalAndGate(item.origin.terminal, item.origin.gate);
   const label = join([
     item.designator,
-    operated === null ? null : operated.toLowerCase(),
+    operated,
     routeText,
     date,
     `status ${pillLabel(item.status, item.pending)}`,
@@ -146,9 +147,7 @@ function RowCard({ item, prefs, nowMs, onPress }: CardProps) {
         />
       </View>
       <Text style={{ color: theme.color.textMuted, fontSize: theme.font.small + 1 }}>
-        {item.pending
-          ? `${date}, looking up the flight`
-          : join([date, departureClock, operated === null ? null : operated.toLowerCase()])}
+        {item.pending ? `${date}, looking up the flight` : join([date, departureClock, operated])}
       </Text>
     </Pressable>
   );
@@ -171,7 +170,7 @@ function HeroCard({ item, prefs, nowMs, onPress }: CardProps) {
     ? join([`New flight: ${item.designator}`, date, `status ${status}`, 'looking up the flight'])
     : join([
         `Next flight: ${item.designator}`,
-        operated === null ? null : operated.toLowerCase(),
+        operatedAsPhrase(item),
         routeText,
         date,
         `status ${status}`,

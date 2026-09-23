@@ -16,6 +16,11 @@
  * sentence; the code goes to Sentry only), 422 `idempotency_payload_mismatch` (a fresh key,
  * reported to Sentry without the body), and no network (the row stays, queued).
  *
+ * The re-review (rulings Y1, Y3, Y5): while the phone knows it is offline the sheet's own drain
+ * neither stamps nor sends, so the add it queued is cancelled outright; online the stamp lands
+ * before `fetch` is called; a name a card shows, re-typed, is answered locally; and
+ * `forgetAccount` drops the records of where optimistic subscriptions went.
+ *
  * The date field keeps the number pad: the sheet inserts the hyphens as the digits are typed and
  * the validation reads eight bare digits as a date (increment 10 review).
  */
@@ -27,20 +32,24 @@ import {
   parseDesignator,
   type FlightKey,
 } from '@planeahead/shared';
+import { onlineManager } from '@tanstack/react-query';
 import { fireEvent, render, screen, waitFor } from '@testing-library/react-native';
 import { StyleSheet } from 'react-native';
 import AddFlightSheet from '../src/app/(app)/add';
+import { KV_KEYS, kv } from '../src/lib/db/kv';
 import type { SqliteLike } from '../src/lib/db/sqlite-like';
 import { useFlightNotices } from '../src/lib/flight-notices';
 import { listFlights } from '../src/lib/flight-queries';
+import { recordReplacement } from '../src/lib/flight-replacements';
 import { addFlight, refusalMessage, removeFlight, validateAddFlight } from '../src/lib/flights';
 import { formatDateInput } from '../src/lib/format';
-import { services } from '../src/lib/services';
+import { forgetAccount, services } from '../src/lib/services';
 import { useSettings } from '../src/lib/settings';
 import { DARK, LIGHT } from '../src/theme/tokens';
 import { compactTree } from './support/compact-tree';
 import { createMemorySqlite, type MemorySqlite } from './support/memory-sqlite';
 import {
+  AA100_ID,
   AA100_KEY,
   NOW,
   aa100Snapshot,
@@ -154,6 +163,13 @@ function subscriptionIdOf(request: RecordedRequest): string {
   return (request.body as { subscriptionId: string }).subscriptionId;
 }
 
+function stamps(db: MemorySqlite) {
+  return db.raw.prepare('SELECT last_attempt_at, attempts FROM outbox ORDER BY seq').all() as {
+    last_attempt_at: number | null;
+    attempts: number;
+  }[];
+}
+
 function outboxRows(db: MemorySqlite) {
   return db.raw.prepare('SELECT method, path, idempotency_key FROM outbox ORDER BY seq').all() as {
     method: string;
@@ -183,6 +199,10 @@ beforeEach(() => {
   mockEdge.network = scriptedFetch();
   useFlightNotices.getState().clear();
   useSettings.getState().reset();
+});
+
+afterEach(() => {
+  onlineManager.setOnline(true);
 });
 
 describe('add-flight validation (the shared parseDesignator and IsoDateSchema)', () => {
@@ -344,33 +364,33 @@ describe('addFlight writes through the outbox', () => {
     expect(outboxRows(db)).toEqual([]);
   });
 
-  it('compares flight keys, never the displayed designator (increment 10 review)', () => {
+  it('compares flight keys first, then every name a live row is known by (ruling Y3)', () => {
     const db = createMemorySqlite();
-    // The shared snapshot names BA1512, the designator whoever searched first typed.
+    // The shared snapshot names BA1512 (whoever searched first typed it) and lists BA1511.
     seedStore(db, { marketingCarrierIcao: 'BAW', marketingFlightNumber: '1512' });
-    const tracked = {
-      kind: 'already_tracked',
-      subscriptionId: '0199a000-0000-7000-8000-000000000001',
-    };
+    const tracked = { kind: 'already_tracked', subscriptionId: AA100_ID };
+    // By key: the operating designator, in either spelling.
     expect(addFlight(db, { designator: 'AA100', date: '2026-09-23' })).toEqual(tracked);
     expect(addFlight(db, { designator: 'AAL100', date: '2026-09-23' })).toEqual(tracked);
-    // Another date is another flight.
-    expect(addFlight(db, { designator: 'AA100', date: '2026-09-24' }).kind).toBe('queued');
-    // A codeshare cannot be told apart by key offline: queued, hidden, and settled by the server.
-    const codeshare = addFlight(db, { designator: 'BA1511', date: '2026-09-23' });
-    expect(codeshare.kind).toBe('queued');
-    expect(listFlights(db).map((item) => item.id)).not.toContain(codeshare.subscriptionId);
-    // The same add again is answered by its pending key.
-    expect(addFlight(db, { designator: 'BA1511', date: '2026-09-23' })).toEqual({
+    // By name: the snapshot's marketing designator and its codeshare, in IATA and ICAO spelling.
+    for (const designator of ['BA1512', 'BA1511', 'BAW1511']) {
+      expect(addFlight(db, { designator, date: '2026-09-23' })).toEqual(tracked);
+    }
+    expect(outboxRows(db)).toEqual([]);
+    // Another date is another flight, and the same add again is answered by its pending key.
+    const tomorrow = addFlight(db, { designator: 'AA100', date: '2026-09-24' });
+    expect(tomorrow.kind).toBe('queued');
+    expect(addFlight(db, { designator: 'AA100', date: '2026-09-24' })).toEqual({
       kind: 'already_tracked',
-      subscriptionId: codeshare.subscriptionId,
+      subscriptionId: tomorrow.subscriptionId,
     });
-    // One row per flight on screen: the tracked AA100, the next day's AA100 being added, the rest.
+    // A codeshare no row here is known by is queued and shown; the server's answer settles it.
+    expect(addFlight(db, { designator: 'IB4218', date: '2026-09-23' }).kind).toBe('queued');
     expect(
       listFlights(db)
         .map((item) => `${item.designator}${item.pending ? ' (adding)' : ''}`)
         .sort(),
-    ).toEqual(['AA100', 'AA100 (adding)', 'BA117', 'DL1']);
+    ).toEqual(['AA100', 'AA100 (adding)', 'BA117', 'DL1', 'IB4218 (adding)']);
   });
 });
 
@@ -552,8 +572,10 @@ describe('the sheet, through the real outbox', () => {
     expect(listFlights(mockEdge.db).map((item) => item.pending)).toEqual([false]);
   });
 
-  it('offline: the flight stays on this phone as pending and the sheet closes', async () => {
+  it('no answer: stamped before fetch was called, the flight stays pending and the sheet closes', async () => {
+    const stampedAtFetch: (number | null)[] = [];
     mockEdge.network.answer(() => {
+      stampedAtFetch.push(stamps(mockEdge.db)[0]?.last_attempt_at ?? null);
       throw new TypeError('Network request failed');
     });
     await openSheet();
@@ -561,12 +583,46 @@ describe('the sheet, through the real outbox', () => {
     await waitFor(() => {
       expect(mockRouter.back).toHaveBeenCalled();
     });
-    expect(listFlights(mockEdge.db).map((item) => [item.designator, item.pending])).toEqual([
-      ['AA100', true],
-    ]);
+    // Online as far as the phone knew: the stamp landed before the request existed (ruling Y1).
+    expect(stampedAtFetch).toEqual([expect.any(Number)]);
+    const [pending] = listFlights(mockEdge.db);
+    expect([pending?.designator, pending?.pending]).toEqual(['AA100', true]);
     expect(outboxRows(mockEdge.db).map((row) => `${row.method} ${row.path}`)).toEqual([
       'POST /v1/flights',
     ]);
+    // The server may have it, so stopping it now needs the DELETE.
+    expect(removeFlight(mockEdge.db, pending?.id ?? '')).toBe('queued');
+  });
+
+  it('known offline: the sheet queues the add unstamped and unsent, and removing it cancels it (ruling Y1)', async () => {
+    const { outbox } = await services();
+    const drain = jest.spyOn(outbox, 'drain');
+    onlineManager.setOnline(false);
+    await openSheet();
+    await submit('AA100');
+    await waitFor(() => {
+      expect(mockRouter.back).toHaveBeenCalled();
+    });
+    // The sheet's own drain ran, and stopped before the stamp: nothing sent, no attempt.
+    expect(drain).toHaveBeenCalled();
+    await expect(drain.mock.results[0]?.value).resolves.toEqual({
+      kind: 'deferred',
+      sent: 0,
+      dropped: 0,
+    });
+    expect(mockEdge.network.requests).toEqual([]);
+    expect(stamps(mockEdge.db)).toEqual([{ last_attempt_at: null, attempts: 0 }]);
+
+    const [pending] = listFlights(mockEdge.db);
+    expect(pending?.pending).toBe(true);
+    expect(removeFlight(mockEdge.db, pending?.id ?? '')).toBe('cancelled');
+    expect(listFlights(mockEdge.db)).toEqual([]);
+    expect(outboxRows(mockEdge.db)).toEqual([]);
+
+    // Back online, nothing is left to send.
+    onlineManager.setOnline(true);
+    await expect(outbox.drain()).resolves.toEqual({ kind: 'drained', sent: 0, dropped: 0 });
+    expect(mockEdge.network.requests).toEqual([]);
   });
 
   it('a refusal that lands after the sheet closed is shown on the home screen instead', async () => {
@@ -646,6 +702,53 @@ describe('the sheet, through the real outbox', () => {
       'You already track AA100 on Wed 23 Sep.',
     );
     expect(mockEdge.network.requests).toEqual([]);
+  });
+
+  it('re-typing the name a card shows says so too, from this phone alone (ruling Y3)', async () => {
+    // BA1511 added here lands on AA100's key; the provider lists no codeshares for it.
+    mockEdge.network.answer((request) =>
+      json(201, {
+        subscription: serverRow(subscriptionIdOf(request)),
+        flight: { ...flightView(), snapshot: aa100Snapshot({ codeshares: [] }) },
+        created: true,
+      }),
+    );
+    const first = await render(<AddFlightSheet />);
+    await submit('BA1511');
+    await waitFor(() => {
+      expect(mockRouter.back).toHaveBeenCalled();
+    });
+    // The card shows the name typed here (added_as), operated as AA100.
+    expect(
+      listFlights(mockEdge.db).map((item) => [item.designator, item.operatingDesignator]),
+    ).toEqual([['BA1511', 'AA100']]);
+    await first.unmount();
+
+    await openSheet();
+    await submit('BA1511');
+    expect(await screen.findByTestId('add-flight-message')).toHaveTextContent(
+      'You already track BA1511 on Wed 23 Sep.',
+    );
+    expect(mockEdge.network.requests).toHaveLength(1);
+    expect(outboxRows(mockEdge.db)).toEqual([]);
+  });
+});
+
+describe('signing out (ruling Y5)', () => {
+  it('forgetAccount drops every record of where an optimistic subscription went', async () => {
+    kv.setItemSync(KV_KEYS.installId, 'install-0123456789');
+    recordReplacement('0199c000-0000-7000-8000-000000000001', AA100_ID);
+    recordReplacement('0199c000-0000-7000-8000-000000000002', AA100_ID);
+    expect(kv.getAllKeysSync()).toEqual(
+      expect.arrayContaining([
+        'replaced:0199c000-0000-7000-8000-000000000001',
+        'replaced:0199c000-0000-7000-8000-000000000002',
+      ]),
+    );
+    await forgetAccount(null);
+    expect(kv.getAllKeysSync().filter((key) => key.startsWith('replaced:'))).toEqual([]);
+    // The installation's own keys stay.
+    expect(kv.getItemSync(KV_KEYS.installId)).toBe('install-0123456789');
   });
 });
 

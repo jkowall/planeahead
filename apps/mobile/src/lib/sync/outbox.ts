@@ -44,6 +44,13 @@
  * may cancel it outright (src/lib/flights.ts `removeFlight`); a stamped one may have been
  * committed by the server even if no answer came back. The stamp is bookkeeping no screen reads,
  * so it sends no store signal.
+ *
+ * Known offline (increment 10 re-review, ruling Y1): before it stamps the head, the drain asks
+ * `isOnline` (services.ts passes TanStack's `onlineManager`, which expo-network feeds in
+ * src/lib/query.ts). While the phone knows it is offline the pass ends `deferred` with no stamp,
+ * no attempt counted and nothing sent, so an add made offline stays cancellable; every request
+ * actually handed to the transport is stamped. The network's return starts the next drain
+ * (src/lib/session.ts).
  */
 
 import { uuidv7 } from '@planeahead/shared';
@@ -111,6 +118,11 @@ export interface OutboxDeps {
   readonly onRefused?: SettleHook;
   /** A settling hook threw; its writes rolled back and the item was removed without it. */
   readonly onHookError?: (item: OutboxItem, error: unknown) => void;
+  /**
+   * False only while the phone KNOWS it is offline: the drain then stops before it stamps or
+   * sends anything (see the header). Defaults to always online.
+   */
+  readonly isOnline?: () => boolean;
   readonly now?: () => number;
   readonly newKey?: () => string;
 }
@@ -256,6 +268,7 @@ export function createOutbox(deps: OutboxDeps): { drain(): Promise<DrainResult> 
   let inFlight: Promise<DrainResult> | null = null;
   const now = deps.now ?? Date.now;
   const newKey = deps.newKey ?? uuidv7;
+  const isOnline = deps.isOnline ?? (() => true);
 
   const pass = async (): Promise<DrainResult> => {
     let sent = 0;
@@ -270,6 +283,10 @@ export function createOutbox(deps: OutboxDeps): { drain(): Promise<DrainResult> 
         return { kind: 'drained', sent, dropped };
       }
       if (head.nextAttemptAt > now()) {
+        return { kind: 'deferred', sent, dropped };
+      }
+      if (!isOnline()) {
+        // Known offline (see the header): unstamped and unattempted, it has not left the phone.
         return { kind: 'deferred', sent, dropped };
       }
       const { item } = head;
