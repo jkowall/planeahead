@@ -6,3 +6,6 @@
 expo-env.d.ts
 # `expo export` output for the source-map upload step.
 /dist/
+# Firebase configs arrive as EAS file variables (GOOGLE_SERVICES_JSON), never from the repository.
+google-services*.json
+GoogleService-Info*.plist

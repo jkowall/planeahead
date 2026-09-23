@@ -69,6 +69,12 @@ export default tseslint.config(
     },
   },
   {
+    // `jest.mocked(object.method)` is how a Jest test names a mocked method; the rule cannot tell
+    // it from an unbound call.
+    files: ['apps/mobile/__tests__/**'],
+    rules: { '@typescript-eslint/unbound-method': 'off' },
+  },
+  {
     files: ['apps/mobile/*.js'],
     languageOptions: { sourceType: 'commonjs', globals: globals.node },
   },

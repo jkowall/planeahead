@@ -1,0 +1,80 @@
+name: Mobile preview
+
+# An EAS Update of the preview variant for every pull request that touches the app, and the
+# Sentry source maps for that update (increment 9). EAS Update bundles do not get source maps
+# automatically: `sentry-expo-upload-sourcemaps` uploads the `dist/` that `eas update` exported.
+#
+# Skipped, with a notice, until the owner has created the Expo project and set the secrets
+# (apps/mobile/README.md, owner tasks):
+#   - EXPO_TOKEN          an Expo robot token with access to the project
+#   - vars.EAS_PROJECT_ID the project id `eas init` prints (app.config.ts reads EAS_PROJECT_ID)
+#   - SENTRY_AUTH_TOKEN, vars.SENTRY_ORG, vars.SENTRY_PROJECT for the source-map step (skipped
+#     on its own when the token is absent)
+#
+# Never an EAS build: native builds run on GitHub runners in increment 11's nightly job, not on
+# EAS credit (Starter plan).
+
+on:
+  pull_request:
+    paths:
+      - 'apps/mobile/**'
+      - 'packages/shared/**'
+      - 'apps/api/src/client.ts'
+      - 'pnpm-lock.yaml'
+      - '.github/workflows/mobile-preview.yml'
+
+concurrency:
+  group: mobile-preview-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  update:
+    runs-on: ubuntu-latest
+    # Job-level, so every step's `if` can read them (a step cannot read its own `env` there).
+    env:
+      EXPO_TOKEN: ${{ secrets.EXPO_TOKEN }}
+      SENTRY_AUTH_TOKEN: ${{ secrets.SENTRY_AUTH_TOKEN }}
+      EAS_PROJECT_ID: ${{ vars.EAS_PROJECT_ID }}
+      APP_VARIANT: preview
+      EXPO_NO_GIT_STATUS: '1'
+    steps:
+      - name: Skip without an Expo token
+        if: env.EXPO_TOKEN == ''
+        run: echo "::notice title=Mobile preview skipped::EXPO_TOKEN is not set; no EAS Update was published"
+
+      - uses: actions/checkout@v5
+        if: env.EXPO_TOKEN != ''
+      - uses: pnpm/action-setup@v4
+        if: env.EXPO_TOKEN != ''
+      - uses: actions/setup-node@v6
+        if: env.EXPO_TOKEN != ''
+        with:
+          node-version-file: .node-version
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+        if: env.EXPO_TOKEN != ''
+
+      - name: Set up EAS
+        if: env.EXPO_TOKEN != ''
+        uses: expo/expo-github-action@v8
+        with:
+          eas-version: latest
+          token: ${{ secrets.EXPO_TOKEN }}
+
+      # `--auto` names the update branch after the git branch and the message after the commit.
+      # The update exports the bundle into apps/mobile/dist, which the next step uploads from.
+      - name: Publish the EAS Update
+        if: env.EXPO_TOKEN != ''
+        working-directory: apps/mobile
+        run: eas update --auto --non-interactive
+
+      - name: Upload the update's source maps to Sentry
+        if: env.EXPO_TOKEN != '' && env.SENTRY_AUTH_TOKEN != ''
+        working-directory: apps/mobile
+        env:
+          SENTRY_ORG: ${{ vars.SENTRY_ORG }}
+          SENTRY_PROJECT: ${{ vars.SENTRY_PROJECT }}
+        run: pnpm exec sentry-expo-upload-sourcemaps dist

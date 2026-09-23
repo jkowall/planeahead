@@ -1,5 +1,5 @@
 {
-  "//": "Solution file. apps/mobile is excluded until increment 9 adds the Expo app.",
+  "//": "Solution file. apps/mobile is not a reference: Expo's tsconfig base is noEmit, so the app type-checks with its own `tsc --noEmit` (its typecheck script, ordered after the api by turbo).",
   "files": [],
   "references": [
     { "path": "./packages/shared" },

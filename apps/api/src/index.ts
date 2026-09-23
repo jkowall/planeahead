@@ -37,6 +37,7 @@ import { authRoutes } from './routes/auth';
 import { health } from './routes/health';
 import { magicLinkLanding } from './routes/magic-link-landing';
 import { v1Routes } from './routes/v1';
+import { wellKnownRoutes } from './routes/well-known';
 
 export { AirportState } from './do/airport-state';
 export { DesignatorResolver } from './do/designator-resolver';
@@ -59,6 +60,9 @@ const routes = app
 
 // Discarded on purpose: live at run time, absent from `AppType` (see the file header).
 app.route('/api/auth', authRoutes);
+// The universal-link and App Links association files (increment 9). Discarded for the same
+// reason: Apple's and Google's crawlers fetch them, no client of `AppType` does.
+app.route('/.well-known', wellKnownRoutes);
 
 /** The RPC surface `hc<AppType>()` in apps/mobile is typed from. */
 export type AppType = typeof routes;

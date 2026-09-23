@@ -10,6 +10,19 @@
  *   - a wrangler that is not the exact version @cloudflare/vitest-plugin depends on
  *   - .node-version not 24   (Corepack is gone from Node 25, the pin is deliberate)
  *
+ * And the mobile pins (increment 9, docs/increments/09-11-mobile.facts.md "Pins"), each chosen
+ * because the failure it prevents is silent until a device build or a test run:
+ *   - more than one version of react, react-native, expo or a native module Expo's manifest pins
+ *     (reanimated, worklets, gesture-handler): two copies mean two renderers or a native build
+ *     that links the wrong one
+ *   - expo not on the SDK 57 line, or jest-expo not on the same major as expo
+ *   - @react-native/jest-preset not exactly the react-native version (jest-expo peers on it)
+ *   - jest not on 29 (jest-expo 57 is Jest 29 throughout; Jest 30 is unverified with it)
+ *   - react-reconciler (test-renderer's) not the line of the installed React: 0.(31 + minor)
+ *   - @better-auth/expo not exactly better-auth (the server plugin and client move together)
+ *   - @sentry/react-native off the 7.x line Expo SDK 57 pins, or an @sentry/cli that is not the
+ *     exact version @sentry/react-native depends on (its Xcode phase resolves it from apps/mobile)
+ *
  * The wrangler assertion is a PAIR check, not a frozen constant. @cloudflare/vitest-plugin
  * declares `wrangler` as an ordinary dependency at an exact version (1.1.13 declares 4.135.0),
  * and the pool boots workerd through that copy. If the catalog moves wrangler without moving the
@@ -147,7 +160,134 @@ if (pair === null) {
   );
 }
 
-const checked = ['typescript', 'vitest', 'wrangler', '@cloudflare/vitest-plugin']
+// ---------------------------------------------------------------------------------------------
+// Mobile pins (increment 9).
+// ---------------------------------------------------------------------------------------------
+
+/**
+ * The version `parent` (any snapshot of it) declares for `dependency`, read from the lockfile's
+ * snapshots section. Same approach as the wrangler pair above, generalised.
+ *
+ * @returns {string | null}
+ */
+function lockedDependencyOf(contents, parent, dependency) {
+  const escaped = parent.replace(/[.*+?^${}()|[\]\\/]/g, '\\$&');
+  const header = new RegExp(`^ {2}'?${escaped}@\\d`);
+  const quoted = dependency.startsWith('@') ? `'${dependency}'` : dependency;
+  const line = new RegExp(`^ {6}${quoted.replace(/[.*+?^${}()|[\]\\/]/g, '\\$&')}: (\\d[^(\\s]*)`);
+  let inside = false;
+  for (const text of contents.split('\n')) {
+    if (header.test(text)) {
+      inside = true;
+      continue;
+    }
+    if (!inside) {
+      continue;
+    }
+    if (text !== '' && !text.startsWith('    ')) {
+      inside = false;
+      continue;
+    }
+    const found = line.exec(text);
+    if (found !== null) {
+      return found[1];
+    }
+  }
+  return null;
+}
+
+function versionsOf(name) {
+  return [...(resolved.get(name) ?? [])];
+}
+
+function minor(version) {
+  return Number.parseInt(version.split('.')[1] ?? '', 10);
+}
+
+if (resolved.has('expo')) {
+  for (const name of [
+    'react',
+    'react-native',
+    'expo',
+    'react-native-reanimated',
+    'react-native-worklets',
+    'react-native-gesture-handler',
+  ]) {
+    const versions = versionsOf(name);
+    if (versions.length > 1) {
+      failures.push(`${name} resolves to ${versions.length} versions: ${versions.join(', ')}`);
+    }
+  }
+
+  for (const version of versionsOf('expo')) {
+    if (major(version) !== 57) {
+      failures.push(`expo@${version} is not on the SDK 57 line the mobile pins are verified for`);
+    }
+  }
+  for (const version of versionsOf('jest-expo')) {
+    if (!versionsOf('expo').some((expo) => major(expo) === major(version))) {
+      failures.push(`jest-expo@${version} is not on the same major as expo`);
+    }
+  }
+
+  const reactNative = versionsOf('react-native');
+  for (const version of versionsOf('@react-native/jest-preset')) {
+    if (!reactNative.includes(version)) {
+      failures.push(
+        `@react-native/jest-preset@${version} is not the react-native version (${reactNative.join(', ')})`,
+      );
+    }
+  }
+
+  assertBelowMajor('jest', 30, 'jest-expo 57 is Jest 29 throughout; Jest 30 is unverified with it');
+
+  const react = versionsOf('react');
+  for (const version of versionsOf('react-reconciler')) {
+    if (
+      !react.some(
+        (reactVersion) => major(version) === 0 && minor(version) === 31 + minor(reactVersion),
+      )
+    ) {
+      failures.push(
+        `react-reconciler@${version} does not match React ${react.join(', ')} (0.(31 + minor)): pin test-renderer to the line that depends on it`,
+      );
+    }
+  }
+
+  const betterAuth = versionsOf('better-auth');
+  for (const version of versionsOf('@better-auth/expo')) {
+    if (!betterAuth.includes(version)) {
+      failures.push(
+        `@better-auth/expo@${version} is not the better-auth version (${betterAuth.join(', ')})`,
+      );
+    }
+  }
+
+  for (const version of versionsOf('@sentry/react-native')) {
+    if (major(version) !== 7) {
+      failures.push(`@sentry/react-native@${version} is off the 7.x line Expo SDK 57 pins`);
+    }
+  }
+  const sentryCli =
+    lockfile === null ? null : lockedDependencyOf(lockfile, '@sentry/react-native', '@sentry/cli');
+  if (sentryCli !== null && !versionsOf('@sentry/cli').every((version) => version === sentryCli)) {
+    failures.push(
+      `@sentry/react-native depends on @sentry/cli@${sentryCli}, but the workspace resolves ${versionsOf('@sentry/cli').join(', ')}`,
+    );
+  }
+}
+
+const checked = [
+  'typescript',
+  'vitest',
+  'wrangler',
+  '@cloudflare/vitest-plugin',
+  'expo',
+  'react-native',
+  'react',
+  'jest',
+  'jest-expo',
+]
   .map((name) => {
     const versions = [...(resolved.get(name) ?? [])];
     return `${name}=${versions.length > 0 ? versions.join(',') : 'not installed'}`;

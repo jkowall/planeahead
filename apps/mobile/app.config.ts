@@ -102,6 +102,11 @@ export default ({ config }: ConfigContext): ExpoConfig => {
   const easProjectId = env('EAS_PROJECT_ID');
   const sentryOrganization = env('SENTRY_ORG');
   const sentryProject = env('SENTRY_PROJECT');
+  // An FCM device token needs the Firebase config even in a development build (spike 3, ADR
+  // 0001): expo-notifications asks FirebaseMessaging for it, which has no default app without
+  // google-services.json. A path, set as an EAS file variable per variant; unset, the token read
+  // fails and src/lib/push.ts reports it unavailable.
+  const googleServicesFile = env('GOOGLE_SERVICES_JSON');
 
   return {
     ...config,
@@ -182,6 +187,7 @@ export default ({ config }: ConfigContext): ExpoConfig => {
     },
     android: {
       package: identity.bundleIdentifier,
+      ...(googleServicesFile === undefined ? {} : { googleServicesFile }),
       adaptiveIcon: {
         foregroundImage: './assets/adaptive-foreground.png',
         backgroundColor: identity.adaptiveBackground,
