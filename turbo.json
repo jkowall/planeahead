@@ -8,16 +8,39 @@
     },
     "typecheck": {
       "dependsOn": ["^typecheck"],
-      "inputs": ["src/**", "test/**", "*.ts", "tsconfig.json", "../../tsconfig.base.json"],
+      "inputs": [
+        "src/**",
+        "scripts/**",
+        "test/**",
+        "*.ts",
+        "tsconfig.json",
+        "../../tsconfig.base.json"
+      ],
       "outputs": ["dist/**"]
     },
     "lint": {
       "dependsOn": ["//#lint:root"],
-      "inputs": ["src/**", "test/**", "*.ts", "../../eslint.config.js", "../../tools/eslint/**"]
+      "inputs": [
+        "src/**",
+        "scripts/**",
+        "test/**",
+        "*.ts",
+        "../../eslint.config.js",
+        "../../tools/eslint/**"
+      ]
     },
     "test": {
       "dependsOn": ["//#test:eslint-rules"],
-      "inputs": ["src/**", "test/**", "vitest.config.ts"],
+      "inputs": [
+        "src/**",
+        "scripts/**",
+        "test/**",
+        "README.md",
+        "tsconfig.json",
+        "vitest.config.ts",
+        "../../docs/architecture.md",
+        "../../docs/adr/**"
+      ],
       "outputs": []
     },
     "//#lint:root": {

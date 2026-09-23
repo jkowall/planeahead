@@ -13,12 +13,14 @@ else belongs in a code comment.
 
 ## Index
 
-| ADR                      | Title    | Status |
-| ------------------------ | -------- | ------ |
-| [0000](0000-template.md) | Template | n/a    |
+| ADR                        | Title                                                 | Status   |
+| -------------------------- | ----------------------------------------------------- | -------- |
+| [0000](0000-template.md)   | Template                                              | n/a      |
+| [0003](0003-flight-key.md) | Flight identity: the canonical flight key             | Accepted |
+| [0006](0006-uuidv7.md)     | UUIDv7 primary keys generated in `@planeahead/shared` | Accepted |
 
-The Phase 0 plan lists the ADRs due in later increments: 0001 Expo, 0002 Neon not D1, 0003 flight
-key, 0004 Hono RPC, 0005 identifiers, 0006 uuidv7, 0007 Durable Objects never open Postgres
-(every DO write goes through the persist queue), 0008 expo-widgets. Their rationale is already written up in
-[docs/plans/phase0-plan.md](../plans/phase0-plan.md) section 3; each increment lifts the relevant
-row into its own ADR.
+0003 (flight key) and 0006 (uuidv7) were written in increment 2. The Phase 0 plan lists the ADRs
+due in later increments: 0001 Expo, 0002 Neon not D1, 0004 Hono RPC, 0005 identifiers, 0007 Durable
+Objects never open Postgres (every DO write goes through the persist queue), 0008 expo-widgets.
+Their rationale is already written up in [docs/plans/phase0-plan.md](../plans/phase0-plan.md)
+section 3; each increment lifts the relevant row into its own ADR.

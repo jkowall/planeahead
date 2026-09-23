@@ -1,0 +1,233 @@
+{
+  "$comment": "HINT TABLE ONLY. Maps a marketing carrier's flight-number block to the regional operator that probably flies it, so the DesignatorResolver can look for an existing FlightTracker before spending a provider call. The provider's operating carrier is always authoritative; a wrong hint costs one cache miss, never a wrong key. packages/db seeds the regional_operators table from this file (confidence 'hint') until a BTS-derived table with observed ranges replaces it. Airlines do not publish per-operator blocks: 'published' means a third-party reference page (cptdb.ca wiki, a dated enthusiast post) states the block, 'observed' means it was inferred from dated flight records or forum posts, 'assumed' means a conservative guess that the increment 2 result lists as unverified. Ranges are deliberately narrow where sources disagree; a number outside every block simply gets no hint.",
+  "asOf": "2026-09-19",
+  "rules": [
+    {
+      "marketingIata": "AA",
+      "from": 3140,
+      "to": 3199,
+      "operatingIcao": "SKW",
+      "confidence": "assumed",
+      "source": "https://www.airliners.net/forum/viewtopic.php?t=187103",
+      "asOf": "2026-09-19",
+      "note": "An airliners.net thread says SkyWest's west-coast CRJ-700 flying uses 'legacy Eagle' 3xxx numbers; the block itself is unpublished. Mainline numbers reach 3139 since April 2024 (viewfromthewing.com), so the hint starts at 3140."
+    },
+    {
+      "marketingIata": "AA",
+      "from": 3200,
+      "to": 4299,
+      "operatingIcao": "ENY",
+      "confidence": "observed",
+      "source": "https://www.flightaware.com/live/flight/ENY4200/history/20251224/1900Z/KORD/KHPN",
+      "asOf": "2025-12-24",
+      "note": "Envoy flies the bulk of the 3xxx-4xxx Eagle numbers; MQ4200 = ENY4200 observed. Both edges are guesses: cptdb has Eagle pages for 3100-3999 without a stated operator."
+    },
+    {
+      "marketingIata": "AA",
+      "from": 4300,
+      "to": 4699,
+      "operatingIcao": "RPA",
+      "confidence": "published",
+      "source": "https://cptdb.ca/wiki/index.php/American_Eagle_Flights_4600-4699",
+      "asOf": "2026-09-19",
+      "note": "Republic is not in the increment 2 operator list but the block is documented (cptdb 4600-4699; blueskypit.com states 4300-4699), so it is kept to keep Envoy's upper edge honest."
+    },
+    {
+      "marketingIata": "AA",
+      "from": 4700,
+      "to": 4999,
+      "operatingIcao": "PDT",
+      "confidence": "published",
+      "source": "https://www.cptdb.ca/wiki/index.php/American_Eagle_Flights_4800-4899",
+      "asOf": "2026-09-19",
+      "note": "cptdb pages 4700-4799 and 4800-4899 both state Piedmont; the 4800 page describes 4800-4999."
+    },
+    {
+      "marketingIata": "AA",
+      "from": 5000,
+      "to": 5099,
+      "operatingIcao": "JIA",
+      "confidence": "assumed",
+      "source": "https://cptdb.ca/wiki/index.php/American_Eagle_Flights_5100-5199",
+      "asOf": "2026-09-19",
+      "note": "Extrapolated downward from the documented 5100-5299 PSA blocks."
+    },
+    {
+      "marketingIata": "AA",
+      "from": 5100,
+      "to": 5299,
+      "operatingIcao": "JIA",
+      "confidence": "published",
+      "source": "https://cptdb.ca/wiki/index.php/American_Eagle_Flights_5200-5299",
+      "asOf": "2026-09-19",
+      "note": "cptdb pages 5100-5199 and 5200-5299 both state PSA."
+    },
+    {
+      "marketingIata": "AA",
+      "from": 5300,
+      "to": 5399,
+      "operatingIcao": "JIA",
+      "confidence": "assumed",
+      "source": "https://cptdb.ca/wiki/index.php/American_Eagle_Flights_5400-5499",
+      "asOf": "2026-09-19",
+      "note": "Gap between two documented PSA blocks."
+    },
+    {
+      "marketingIata": "AA",
+      "from": 5400,
+      "to": 5599,
+      "operatingIcao": "JIA",
+      "confidence": "published",
+      "source": "https://cptdb.ca/wiki/index.php/American_Eagle_Flights_5500-5599",
+      "asOf": "2026-09-19",
+      "note": "cptdb pages 5400-5499 and 5500-5599 both state PSA."
+    },
+    {
+      "marketingIata": "AA",
+      "from": 5600,
+      "to": 5699,
+      "operatingIcao": "JIA",
+      "confidence": "assumed",
+      "source": "https://cptdb.ca/wiki/index.php/American_Eagle_Flights_5700-5799",
+      "asOf": "2026-09-19",
+      "note": "Gap between two documented PSA blocks."
+    },
+    {
+      "marketingIata": "AA",
+      "from": 5700,
+      "to": 5799,
+      "operatingIcao": "JIA",
+      "confidence": "published",
+      "source": "https://cptdb.ca/wiki/index.php/American_Eagle_Flights_5700-5799",
+      "asOf": "2026-09-19"
+    },
+    {
+      "marketingIata": "DL",
+      "from": 3000,
+      "to": 3999,
+      "operatingIcao": "EDV",
+      "confidence": "observed",
+      "source": "https://www.flyertalk.com/forum/delta-air-lines-skymiles/1778984-consolidated-dl-flight-numbering-thread-including-1xxx-2xxx-7xxx-8xxx-9xxx-etc-3.html",
+      "asOf": "2016-07-17",
+      "note": "The 2016 thread says Endeavor 3000s; cptdb has Delta Connection pages for 3200-3499 without a stated operator."
+    },
+    {
+      "marketingIata": "DL",
+      "from": 4000,
+      "to": 4799,
+      "operatingIcao": "SKW",
+      "confidence": "observed",
+      "source": "https://www.flyertalk.com/forum/delta-air-lines-skymiles/1778984-consolidated-dl-flight-numbering-thread-including-1xxx-2xxx-7xxx-8xxx-9xxx-etc-3.html",
+      "asOf": "2016-07-17",
+      "note": "The 2016 thread says SkyWest 4000s; DL4819 was Endeavor in 2025, so the upper end of this block has moved."
+    },
+    {
+      "marketingIata": "DL",
+      "from": 4800,
+      "to": 4999,
+      "operatingIcao": "EDV",
+      "confidence": "observed",
+      "source": "https://en.wikipedia.org/wiki/Delta_Connection_Flight_4819",
+      "asOf": "2025-02-17",
+      "note": "DL4819 (Endeavor CRJ900) is the only data point; block edges are a guess."
+    },
+    {
+      "marketingIata": "DL",
+      "from": 7000,
+      "to": 7999,
+      "operatingIcao": "SKW",
+      "confidence": "observed",
+      "source": "https://www.flyertalk.com/forum/delta-air-lines-skymiles/1778984-consolidated-dl-flight-numbering-thread-including-1xxx-2xxx-7xxx-8xxx-9xxx-etc-3.html",
+      "asOf": "2016-07-17",
+      "note": "Described as SkyWest at-risk flying."
+    },
+    {
+      "marketingIata": "UA",
+      "from": 3500,
+      "to": 3599,
+      "operatingIcao": "RPA",
+      "confidence": "published",
+      "source": "https://www.cptdb.ca/wiki/index.php/United_Express_Flights_3500-3599",
+      "asOf": "2026-09-19",
+      "note": "A 2015 FlyerTalk list had CommuteAir at 3585-3604; cptdb now states Republic for the whole block."
+    },
+    {
+      "marketingIata": "UA",
+      "from": 3605,
+      "to": 3699,
+      "operatingIcao": "GJS",
+      "confidence": "observed",
+      "source": "https://www.flyertalk.com/forum/united-airlines-mileageplus/2035846-ua-flight-numbers-numbering-system-4.html",
+      "asOf": "2015-03-14",
+      "note": "The 2015 list had GoJet at 3605-3714; trimmed at 3699 because cptdb now states Republic from 3700."
+    },
+    {
+      "marketingIata": "UA",
+      "from": 3700,
+      "to": 3759,
+      "operatingIcao": "RPA",
+      "confidence": "published",
+      "source": "https://cptdb.ca/wiki/index.php/United_Express_Flights_3700-3759",
+      "asOf": "2026-09-19"
+    },
+    {
+      "marketingIata": "UA",
+      "from": 3760,
+      "to": 3804,
+      "operatingIcao": "ASH",
+      "confidence": "assumed",
+      "source": "https://www.flyertalk.com/forum/united-airlines-mileageplus/2035846-ua-flight-numbers-numbering-system-4.html",
+      "asOf": "2015-03-14",
+      "note": "The 2015 list had Mesa at 3725-3804; kept only above the cptdb Republic block. Mesa and Republic announced a merger in 2025; if it closed, this flying may be re-badged RPA (unverified)."
+    },
+    {
+      "marketingIata": "UA",
+      "from": 3855,
+      "to": 3904,
+      "operatingIcao": "RPA",
+      "confidence": "observed",
+      "source": "https://www.flyertalk.com/forum/united-airlines-mileageplus/2035846-ua-flight-numbers-numbering-system-4.html",
+      "asOf": "2015-03-14"
+    },
+    {
+      "marketingIata": "UA",
+      "from": 4628,
+      "to": 4809,
+      "operatingIcao": "SKW",
+      "confidence": "published",
+      "source": "https://www.airliners.net/forum/viewtopic.php?t=1487163",
+      "asOf": "2023-08-04",
+      "note": "Recorded from the 2023 thread by a previous pass; the thread could not be re-fetched on 2026-09-19 (HTTP 402)."
+    },
+    {
+      "marketingIata": "UA",
+      "from": 4810,
+      "to": 4859,
+      "operatingIcao": "UCA",
+      "confidence": "assumed",
+      "source": "https://www.flyertalk.com/forum/united-airlines-mileageplus/2035846-ua-flight-numbers-numbering-system-4.html",
+      "asOf": "2015-03-14",
+      "note": "The 2015 list had CommuteAir at 4770-4859; kept only above the 2023 SkyWest block."
+    },
+    {
+      "marketingIata": "UA",
+      "from": 5015,
+      "to": 5210,
+      "operatingIcao": "SKW",
+      "confidence": "published",
+      "source": "https://www.airliners.net/forum/viewtopic.php?t=1487163",
+      "asOf": "2023-08-04",
+      "note": "SkyWest prorate flying per the 2023 thread; not re-fetched on 2026-09-19."
+    },
+    {
+      "marketingIata": "UA",
+      "from": 5211,
+      "to": 6009,
+      "operatingIcao": "SKW",
+      "confidence": "published",
+      "source": "https://www.airliners.net/forum/viewtopic.php?t=1487163",
+      "asOf": "2023-08-04",
+      "note": "Per the 2023 thread; not re-fetched on 2026-09-19."
+    }
+  ]
+}
