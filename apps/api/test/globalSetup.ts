@@ -38,6 +38,12 @@ export interface TestBindings extends Record<string, string> {
   readonly TEST_DEV_VARS_EXAMPLE_KEYS: string;
   /** Where the database came from: `shell` (TEST_DATABASE_URL), `.env.test` or `embedded`. */
   readonly TEST_DATABASE_SOURCE: string;
+  /**
+   * `true` runs the gated half of spike 3 in test/workers/spikes.test.ts (a bare floating
+   * rejection inside `alarm()`), which the pool reports as a run error by design. Off unless the
+   * shell sets SPIKE_UNHANDLED_REJECTION=true.
+   */
+  readonly SPIKE_UNHANDLED_REJECTION: string;
 }
 
 /**
@@ -127,6 +133,7 @@ export async function setup(project: TestProject): Promise<() => Promise<void>> 
     TEST_FAKE_PROVIDERS_ORIGIN: providers.origin,
     TEST_DEV_VARS_EXAMPLE_KEYS: exampleKeys.join(','),
     TEST_DATABASE_SOURCE: cluster.source,
+    SPIKE_UNHANDLED_REJECTION: process.env['SPIKE_UNHANDLED_REJECTION'] === 'true' ? 'true' : '',
   };
 
   project.provide('apiDatabaseUrl', database.url);
