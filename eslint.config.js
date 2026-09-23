@@ -36,7 +36,7 @@ export default tseslint.config(
     },
   },
   {
-    files: ['apps/api/src/**/*.ts'],
+    files: ['apps/api/src/**/*.ts', 'packages/db/src/**/*.ts'],
     plugins: { planeahead },
     rules: {
       'planeahead/no-module-scope-drizzle': 'error',

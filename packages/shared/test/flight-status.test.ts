@@ -24,6 +24,7 @@ import {
   ProviderIdSchema,
   TIME_FIELDS,
   tolerantEnum,
+  normalizeIcaoHex,
 } from '../src/flight-status';
 import type { FlightKey } from '../src/flight-key';
 import { AA100_INPUT, makeStatus } from './fixtures';
@@ -263,6 +264,13 @@ describe('AircraftPositionSchema', () => {
 
   it('parses a position', () => {
     expect(AircraftPositionSchema.parse(position).icaoHex).toBe('A0B1C2');
+    // Feeds broadcast lower-case hex; the contract is upper case and the normaliser gets there.
+    expect(AircraftPositionSchema.safeParse({ ...position, icaoHex: 'a0b1c2' }).success).toBe(
+      false,
+    );
+    expect(normalizeIcaoHex(' a0b1c2 ')).toBe('A0B1C2');
+    expect(normalizeIcaoHex('A0B1C')).toBeUndefined();
+    expect(normalizeIcaoHex('XYZ123')).toBeUndefined();
   });
 
   it('bounds latitude, longitude and track', () => {

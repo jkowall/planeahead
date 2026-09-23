@@ -152,7 +152,14 @@ export const IsoInstantSchema = z.iso.datetime();
 export const IsoDateSchema = z.iso.date();
 
 export const FLIGHT_NUMBER_RE = /^[1-9][0-9]{0,3}[A-Z]?$/;
-export const ICAO_HEX_RE = /^[0-9A-Fa-f]{6}$/;
+/** ICAO 24-bit address as six upper-case hex digits; feeds send lower case, normalise first. */
+export const ICAO_HEX_RE = /^[0-9A-F]{6}$/;
+
+/** Upper-cases a 24-bit ICAO address; returns undefined for anything that is not six hex digits. */
+export function normalizeIcaoHex(value: string): string | undefined {
+  const upper = value.trim().toUpperCase();
+  return ICAO_HEX_RE.test(upper) ? upper : undefined;
+}
 
 export const TIME_FIELDS = [
   'scheduledOut',

@@ -20,8 +20,23 @@ catalog:
   # and Vitest 5 breaks the Workers pool.
   vitest: ~4.1.11
   zod: ^4.6.5
-  # tsx runs packages/shared/scripts/gen-cadence-table.ts; nothing else should need it.
+  # tsx runs packages/shared/scripts/gen-cadence-table.ts and packages/db's drizzle-kit and
+  # migrate entry points.
   tsx: ^4.23.13
+  # Postgres stack (increment 3). drizzle-orm and drizzle-kit are exact pins: the API surface used
+  # is restricted to what 1.0 rc keeps, but the migration folder format and the generated SQL are
+  # version-specific and must not move under a caret. postgres.js is the single driver on every
+  # path (Workers via Hyperdrive, CI, scripts, tests).
+  drizzle-orm: 0.45.2
+  drizzle-kit: 0.31.10
+  postgres: ^3.4.9
+  # Real PostgreSQL 18.4 binaries inside the npm tarball, no Docker or Homebrew. Exact prerelease
+  # pin; the package has open hang reports so the test harness wraps every call in a timeout.
+  embedded-postgres: 18.4.0-beta.17
+  # geo-tz is used only by scripts/fetch-seed-data.mjs to propose a timezone for airports that
+  # mwgg/Airports does not cover. Its boundary data is ODbL, so it never runs at build or runtime
+  # and the reviewed output is committed as curated data.
+  geo-tz: ^8.1.9
 
   # Not installed yet. Versions verified 2026-09-19 and recorded here so the
   # increment that adds them does not have to rediscover the pin.
@@ -30,8 +45,6 @@ catalog:
   # wrangler: ^4.135.0                     increment 4
   # hono: ^4.13.8                          increment 4
   # expo: ~57.0.24                         increment 9
-  # drizzle-orm: 0.45.2                    increment 3
-  # drizzle-kit: 0.31.10                   increment 3
   # better-auth: 1.7.5                     increment 5
 
 minimumReleaseAgeExclude:
@@ -48,3 +61,7 @@ minimumReleaseAgeExclude:
 # esbuild's postinstall only verifies the platform binary that tsx (and later wrangler) need.
 allowBuilds:
   esbuild: true
+  # embedded-postgres platform packages recreate the symlinks inside the PostgreSQL binary tree
+  # in their postinstall; without it initdb cannot find its shared libraries.
+  '@embedded-postgres/darwin-arm64': true
+  '@embedded-postgres/linux-x64': true
