@@ -17,6 +17,15 @@
  * - A session user who is not the store's owner (sync_state.owner_user_id) empties the synced
  *   tables at once, before any request: one account's rows are never shown under another.
  * - 401 `account_deleted` and sign-out wipe everything, the outbox included.
+ *
+ * What a delete of the synced rows keeps (increment 9 re-review, auth-and-store-4): every
+ * `flight_subscriptions` row whose id a QUEUED subscribe names (`outbox.entity_id` on a
+ * `POST /v1/flights`). The server has not seen that row, so no snapshot carries it; deleting it
+ * would drop the flight from the list while its mutation still waits for the network, and bring
+ * it back only after the POST drains and a later pull. Like the outbox, it is this installation's
+ * own intent, so it also survives the owner wipe; the account wipe empties the outbox FIRST, so
+ * nothing is named and nothing survives. Rows a queued PATCH or DELETE names are not kept: the
+ * snapshot carries the server's version of those and overwrites them anyway.
  */
 
 import { notifyTablesChanged, type StoreTable } from '../db/store-signal';
@@ -88,9 +97,25 @@ export function writeSyncState(db: SqliteLike, state: SyncStateWrite): void {
   );
 }
 
-/** Deletes every synced row; the caller holds the transaction. */
+/** The one mutation whose row the server cannot know until it drains (see the header). */
+export const SUBSCRIBE_MUTATION = { method: 'POST', path: '/v1/flights' } as const;
+
+/**
+ * Deletes every synced row except a subscription a queued subscribe names (see the header); the
+ * caller holds the transaction.
+ */
 export function deleteSyncedRows(db: SqliteLike): void {
   for (const table of SYNCED_TABLES) {
+    if (table === 'flight_subscriptions') {
+      db.run(
+        `DELETE FROM flight_subscriptions WHERE id IS NOT NULL AND id NOT IN (
+           SELECT entity_id FROM outbox
+           WHERE entity_id IS NOT NULL AND method = ? AND path = ?
+         )`,
+        [SUBSCRIBE_MUTATION.method, SUBSCRIBE_MUTATION.path],
+      );
+      continue;
+    }
     db.run(`DELETE FROM ${table} WHERE id IS NOT NULL`);
   }
 }
@@ -123,14 +148,15 @@ export function wipeSyncedRows(db: SqliteLike): void {
 
 /**
  * 401 `account_deleted` (and sign-out): nothing local survives, the outbox included; its
- * mutations belong to an account that no longer exists.
+ * mutations belong to an account that no longer exists. The outbox goes first, so the delete of
+ * the synced rows finds no queued subscribe to keep a row for.
  */
 export function wipeLocalStore(db: SqliteLike): void {
   db.transaction(
     () => {
+      db.run('DELETE FROM outbox WHERE id IS NOT NULL');
       deleteSyncedRows(db);
       db.run('DELETE FROM sync_state WHERE id = 1');
-      db.run('DELETE FROM outbox WHERE id IS NOT NULL');
     },
     { behavior: 'immediate' },
   );

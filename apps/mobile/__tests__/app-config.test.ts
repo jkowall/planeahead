@@ -4,7 +4,9 @@
  * privacy manifest, the blocked Android permissions, the plugin order with the reserved
  * withApsEnvironment slot LAST and no MapLibre plugin, scene support in expo-build-properties,
  * the fingerprint runtime version and the React Compiler off. Also the files that must agree with
- * it: eas.json, the preview update workflow, react-native.config.js and the package scripts.
+ * it: eas.json, the preview update workflow, react-native.config.js, fingerprint.config.js (the
+ * Google services file stays out of the runtime version, re-review expo-correctness-1) and the
+ * package scripts.
  */
 
 import type { ConfigContext, ExpoConfig } from 'expo/config';
@@ -15,12 +17,19 @@ import appConfig, {
   reversedClientId,
 } from '../app.config';
 
-// Jest's CommonJS wrapper provides it; the app's tsconfig carries no Node types.
+// Jest's CommonJS wrapper provides them; the app's tsconfig carries no Node types.
 declare const __dirname: string;
-declare function require(id: string): unknown;
+declare const require: ((id: string) => unknown) & { resolve(id: string): string };
 
-const fs = jest.requireActual<{ readFileSync(path: string, encoding: 'utf8'): string }>('fs');
-const path = jest.requireActual<{ resolve(...parts: string[]): string }>('path');
+const fs = jest.requireActual<{
+  readFileSync(path: string, encoding: 'utf8'): string;
+  realpathSync(path: string): string;
+}>('fs');
+const path = jest.requireActual<{
+  resolve(...parts: string[]): string;
+  relative(from: string, to: string): string;
+  dirname(path: string): string;
+}>('path');
 const APP_ROOT = path.resolve(__dirname, '..');
 
 const env = (process as unknown as { env: Record<string, string | undefined> }).env;
@@ -206,6 +215,53 @@ describe('app.config.ts', () => {
       privacyManifestAggregationEnabled: true,
     });
     expect(config.plugins?.[7]).toEqual(['expo-notifications', { mode: 'production' }]);
+  });
+
+  it('leaves the Google services file out of the runtime fingerprint, wherever the build put it', () => {
+    const { googleServicesIgnorePaths, ignorePaths } = require(
+      path.resolve(APP_ROOT, 'fingerprint.config.js'),
+    ) as {
+      ignorePaths: string[];
+      googleServicesIgnorePaths(env: Record<string, string>, projectRoot?: string): string[];
+    };
+    // The matcher @expo/fingerprint applies to every file source, reached through expo's own
+    // re-export (the package is not a direct dependency under the isolated linker).
+    const { isIgnoredPath } = jest.requireActual<{
+      isIgnoredPath(filePath: string, ignorePaths: string[]): boolean;
+    }>(
+      path.resolve(
+        fs.realpathSync(path.dirname(require.resolve('expo/fingerprint'))),
+        '..',
+        '@expo',
+        'fingerprint',
+        'build',
+        'utils',
+        'Path.js',
+      ),
+    );
+
+    // On an EAS builder the file variable is an absolute path outside the project, which the
+    // sourcer records relative to the project root (`../../...`).
+    const builderRoot = '/home/expo/workingdir/build/apps/mobile';
+    const builderFile = '/home/expo/workingdir/environment-secrets/GOOGLE_SERVICES_JSON';
+    const onBuilder = googleServicesIgnorePaths({ GOOGLE_SERVICES_JSON: builderFile }, builderRoot);
+    expect(onBuilder).toContain('**/environment-secrets/GOOGLE_SERVICES_JSON');
+    expect(isIgnoredPath(path.relative(builderRoot, builderFile), onBuilder)).toBe(true);
+    // A file kept in the project for a local build, by its own name or the conventional one.
+    const local = googleServicesIgnorePaths({ GOOGLE_SERVICES_JSON: './firebase.dev.json' });
+    expect(isIgnoredPath('firebase.dev.json', local)).toBe(true);
+    expect(isIgnoredPath('google-services.dev.json', googleServicesIgnorePaths({}))).toBe(true);
+    // Nothing else the config names.
+    for (const kept of ['app.config.ts', 'assets/icon-production.png', 'eas.json']) {
+      expect(isIgnoredPath(kept, onBuilder)).toBe(false);
+    }
+    // Under `eas update` the variable is unset: the static entries alone, and the same list the
+    // config exports for this process.
+    expect(googleServicesIgnorePaths({})).toEqual([
+      '**/google-services*.json',
+      '**/GoogleService-Info*.plist',
+    ]);
+    expect(ignorePaths).toEqual(googleServicesIgnorePaths(process.env));
   });
 
   it('adds the Firebase config for FCM only when GOOGLE_SERVICES_JSON names one', () => {

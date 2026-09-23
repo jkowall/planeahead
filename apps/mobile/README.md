@@ -49,7 +49,7 @@ Read by `app.config.ts` at prebuild and bundle time. Nothing here is a secret: e
 | `PLANEAHEAD_API_URL`           | API origin override, e.g. `http://localhost:8787` for `wrangler dev`                                                                        | production, preview: `api.planeahead.app`; development: `api-staging.planeahead.app` |
 | `GOOGLE_IOS_CLIENT_ID`         | iOS OAuth client id; its reverse is the iOS URL scheme                                                                                      | a placeholder that keeps prebuild working                                            |
 | `GOOGLE_WEB_CLIENT_ID`         | Web OAuth client id (the `aud` the API accepts from Android too)                                                                            | the Google button is hidden                                                          |
-| `GOOGLE_SERVICES_JSON`         | path to the variant's `google-services.json` (an EAS file variable)                                                                         | no FCM token on Android (spike 3)                                                    |
+| `GOOGLE_SERVICES_JSON`         | path to the variant's `google-services.json` (an EAS file variable; `fingerprint.config.js` keeps the file out of the runtime version)      | no FCM token on Android (spike 3)                                                    |
 | `SENTRY_DSN`                   | the mobile project's DSN                                                                                                                    | Sentry stays disabled                                                                |
 | `SENTRY_ORG`, `SENTRY_PROJECT` | for the native build phases and source maps                                                                                                 | the Sentry plugin falls back to the environment                                      |
 | `EAS_PROJECT_ID`               | from `eas init`; enables EAS Update (`updates.url`)                                                                                         | no update URL                                                                        |
@@ -60,6 +60,17 @@ profile names (eas.json `environment`), and `APP_VARIANT` and `APNS_ENVIRONMENT`
 own `env`. `mobile-preview.yml` publishes with the same inputs (`eas update --environment preview`
 plus the preview profile's `env`), because the fingerprint runtime version hashes the whole config:
 an update resolved from different values would target a runtime no build has (ADR 0001).
+
+**Visibility.** `eas update --environment` can read only EAS variables with **Plain text** or
+**Sensitive** visibility (eas-cli loads those two and no other; a Secret is readable on EAS servers
+only, and a file variable is never written to disk for an update). So the six variables above must
+be Plain text or Sensitive, never Secret, or the update's config lacks the value and its runtime
+version matches no build. None of them is a secret (they all ship inside the app).
+`GOOGLE_SERVICES_JSON` is the one file variable the config reads; `fingerprint.config.js` leaves
+that file out of the fingerprint on the builder and on the update alike, so a build with it and an
+update without it resolve the same runtime version (verified with
+`expo-updates runtimeversion:resolve` on both platforms, ADR 0001). `SENTRY_AUTH_TOKEN` is not read
+by the config and stays a Secret.
 
 Which API each variant talks to, and whose magic links it opens (ADR 0005): the development build
 owns staging (`api-staging.planeahead.app`, including Sign in with Apple against staging); the
@@ -91,9 +102,12 @@ Once staging is deployed (or `wrangler dev` has a database and `PLANEAHEAD_API_U
    development build's host) opens the app on `auth/magic-link`, which verifies in the app and
    returns home signed in; the flights added anonymously are still there (the merge). Needs the
    staging API's `/.well-known/apple-app-site-association` live with `APPLE_TEAM_ID` set, and the
-   build signed with that team. A link opened any other way (the `planeahead://` scheme, a link
-   requested on another device) asks before it signs in, and a link that signs in to an address
-   this phone did not request is signed out again (threat model 1.5).
+   build signed with that team. It verifies without asking even though the development build was
+   launched from the dev client's own `planeahead://` URL: the screen reads the router's record of
+   the delivered link (`src/app/+native-intent.tsx`), not `Linking.getLinkingURL()`, which on iOS
+   would still answer that launch URL. A link opened any other way (the `planeahead://` scheme, a
+   link requested on another device) asks before it signs in, and a link that signs in to an
+   address this phone did not request is signed out again (threat model 1.5).
 3. Native Apple on the simulator (signed in to an Apple Account in the simulator's Settings): the
    sign-in succeeds; `getCredentialStateAsync` is skipped on the simulator by design.
 4. Native Google on the AVD: `pnpm android`, then Continue with Google; a fresh emulator walks
@@ -118,14 +132,22 @@ Before the first device build that signs in (copied into the build log by the or
   set `GOOGLE_WEB_CLIENT_ID` and `GOOGLE_IOS_CLIENT_ID` as EAS environment variables and the
   three `GOOGLE_CLIENT_ID_*` secrets on the API.
 - Firebase: a project with the three Android apps, and each variant's `google-services.json` as
-  the EAS file variable `GOOGLE_SERVICES_JSON` (the FCM token needs it, spike 3).
+  the EAS file variable `GOOGLE_SERVICES_JSON` (the FCM token needs it, spike 3). The file never
+  enters the runtime version (`fingerprint.config.js`), so the preview updates keep applying once
+  it is set.
 - Google Play: register as an Organization (a personal account created after November 2023
   faces a 12-tester, 14-day gate), then provide the Play upload and app signing SHA-256
   fingerprints per package and set `ANDROID_SHA256_FINGERPRINTS` on the API
   (`package=FP,FP;package=FP`; each host lists only its own packages, whatever else is set).
 - Sentry: a mobile project; `SENTRY_DSN`, `SENTRY_ORG`, `SENTRY_PROJECT` as EAS environment
   variables in `development`, `preview` and `production`, and `SENTRY_AUTH_TOKEN` as an EAS
-  secret and a GitHub secret (source maps).
+  Secret and a GitHub secret (source maps).
+- Visibility of every variable `app.config.ts` reads (`SENTRY_DSN`, `SENTRY_ORG`,
+  `SENTRY_PROJECT`, `GOOGLE_WEB_CLIENT_ID`, `GOOGLE_IOS_CLIENT_ID`, `EAS_PROJECT_ID`): **Plain
+  text or Sensitive, never Secret.** `eas update --environment` reads only those two visibilities,
+  so a Secret would be missing from the update's config and the update would resolve a runtime
+  version no build has, and silently never apply (Build environment above). Only
+  `SENTRY_AUTH_TOKEN`, which the config never reads, is a Secret.
 - Expo: an account on the Starter plan, `eas init` in `apps/mobile` (its project id becomes the
   `EAS_PROJECT_ID` variable in all three EAS environments and the GitHub variable
   `EAS_PROJECT_ID`), the EAS environment variables above, and a robot token as the GitHub secret
@@ -144,6 +166,8 @@ src/app/_layout.tsx          Sentry, SQLiteProvider (migrations before any scree
 src/app/(auth)/              sign-in (Apple, Google, magic link, continue without an account)
 src/app/(app)/               behind a session: home placeholder, settings
 src/app/auth/magic-link.tsx  the universal-link target; verifies in the app
+src/app/+native-intent.tsx   records every delivered URL (src/lib/delivered-url.ts) for that screen
+fingerprint.config.js        keeps the Google services file out of the runtime version
 src/lib/auth-client.ts       Better Auth Expo client over SecureStore
 src/lib/native-signin/       Apple and Google native sign-in bodies and nonces
 src/lib/api-client.ts        the typed /v1 client (pre-compiled Client from @planeahead/api/client)
@@ -180,6 +204,14 @@ that does not signal leaves lists stale. Denormalise onto the root table a list 
 transaction, so a failed snapshot request leaves the last known flights. The store empties at once
 only when the session user is not the store's owner. The outbox drains by insertion order (`seq`),
 never by its uuidv7 ids.
+
+**A queued subscribe's row survives every snapshot replace.** The snapshot cannot carry a row the
+server has not seen, so `deleteSyncedRows` keeps each `flight_subscriptions` row whose id a queued
+`POST /v1/flights` names in `outbox.entity_id`. Increment 10's add-flight writer therefore queues
+its mutation as `enqueueMutation(db, { ...SUBSCRIBE_MUTATION, body: { ..., subscriptionId },
+entityId: subscriptionId })` inside the `commitWrite` that inserts the optimistic row; a queued
+subscribe without `entityId` loses its row on the next first pull, 410 reset or store-version
+change (`__tests__/sync-apply.test.ts`, "a row a queued subscribe names").
 
 **Migrations are append only.** A committed file under `src/lib/db/migrations/` never changes;
 devices that applied it would never see the edit. CI's `test-mobile` job fails otherwise.

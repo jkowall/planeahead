@@ -22,7 +22,10 @@
  *
  * Every drain write signals `outbox` after it commits (src/lib/db/store-signal.ts). A caller that
  * queues a mutation runs `enqueueMutation` inside `commitWrite(db, ['outbox', ...], fn)` with its
- * optimistic row, so both commit and signal together.
+ * optimistic row, so both commit and signal together, and names that row's id as `entityId`: a
+ * snapshot that replaces the synced rows keeps every subscription a queued `POST /v1/flights`
+ * names, because the server has not seen it yet (src/lib/sync/store.ts; increment 9 re-review,
+ * auth-and-store-4).
  */
 
 import { uuidv7 } from '@planeahead/shared';
@@ -39,6 +42,8 @@ export interface OutboxItem {
   readonly body: unknown;
   readonly idempotencyKey: string;
   readonly attempts: number;
+  /** The id of the row the mutation creates or changes, or null (see the header). */
+  readonly entityId: string | null;
 }
 
 interface OutboxDbRow {
@@ -49,6 +54,7 @@ interface OutboxDbRow {
   idempotency_key: string;
   attempts: number;
   next_attempt_at: number;
+  entity_id: string | null;
 }
 
 export interface OutboxTransport {
@@ -84,6 +90,11 @@ export interface NewMutation {
   readonly method: 'POST' | 'PATCH' | 'PUT' | 'DELETE';
   readonly path: string;
   readonly body?: unknown;
+  /**
+   * The id of the local row this mutation creates or changes (a subscribe's client-minted
+   * `subscriptionId`). A queued subscribe's row survives a snapshot replace by this id.
+   */
+  readonly entityId?: string;
 }
 
 const MAX_BACKOFF_MS = 5 * 60_000;
@@ -109,6 +120,7 @@ export function enqueueMutation(
     body: mutation.body,
     idempotencyKey: options.key ?? uuidv7(),
     attempts: 0,
+    entityId: mutation.entityId ?? null,
   };
   const params: SqlValue[] = [
     item.id,
@@ -117,10 +129,11 @@ export function enqueueMutation(
     mutation.body === undefined ? null : JSON.stringify(mutation.body),
     item.idempotencyKey,
     (options.now ?? new Date()).toISOString(),
+    item.entityId,
   ];
   db.run(
-    'INSERT INTO outbox (id, method, path, body, idempotency_key, attempts, next_attempt_at, created_at, seq) ' +
-      'VALUES (?, ?, ?, ?, ?, 0, 0, ?, (SELECT coalesce(max(seq), 0) + 1 FROM outbox))',
+    'INSERT INTO outbox (id, method, path, body, idempotency_key, attempts, next_attempt_at, created_at, entity_id, seq) ' +
+      'VALUES (?, ?, ?, ?, ?, 0, 0, ?, ?, (SELECT coalesce(max(seq), 0) + 1 FROM outbox))',
     params,
   );
   return item;
@@ -134,6 +147,7 @@ function toItem(row: OutboxDbRow): OutboxItem {
     body: row.body === null ? undefined : (JSON.parse(row.body) as unknown),
     idempotencyKey: row.idempotency_key,
     attempts: row.attempts,
+    entityId: row.entity_id,
   };
 }
 
@@ -146,8 +160,8 @@ function oldest(
   db: SqliteLike,
 ): { readonly item: OutboxItem; readonly nextAttemptAt: number } | null {
   const row = db.get<OutboxDbRow>(
-    'SELECT id, method, path, body, idempotency_key, attempts, next_attempt_at FROM outbox ' +
-      'ORDER BY seq, rowid LIMIT 1',
+    'SELECT id, method, path, body, idempotency_key, attempts, next_attempt_at, entity_id ' +
+      'FROM outbox ORDER BY seq, rowid LIMIT 1',
   );
   return row === null ? null : { item: toItem(row), nextAttemptAt: row.next_attempt_at };
 }

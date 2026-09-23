@@ -13,9 +13,9 @@ import {
 } from '../src/lib/sync/client';
 import { ApplyGate } from '../src/lib/sync/gate';
 import { createOutbox, enqueueMutation, pendingCount } from '../src/lib/sync/outbox';
-import { readCursor, readSyncState } from '../src/lib/sync/store';
+import { readCursor, readSyncState, SUBSCRIBE_MUTATION } from '../src/lib/sync/store';
 import { STORE_SCHEMA_VERSION } from '../src/lib/sync/version';
-import { subscribeToTable } from '../src/lib/db/store-signal';
+import { commitWrite, subscribeToTable } from '../src/lib/db/store-signal';
 import { SyncEnvelopeV1 } from '@planeahead/shared';
 import type { RawRequest, RawResponse } from '../src/lib/api-client';
 import {
@@ -700,6 +700,149 @@ describe('the sync client', () => {
     });
     await Promise.all([client.sync(USER), client.sync(USER), client.sync(USER)]);
     expect(cursors).toEqual([null]);
+  });
+});
+
+describe('a row a queued subscribe names', () => {
+  /** Increment 10's add-flight writer: the optimistic row and its POST in one commit. */
+  function optimisticSubscribe(db: MemorySqlite, n: number, flightKey: string): void {
+    commitWrite(db, ['flight_subscriptions', 'outbox'], () => {
+      db.run(
+        'INSERT INTO flight_subscriptions (id, flight_key, created_at, updated_at) VALUES (?, ?, ?, ?)',
+        [id(n), flightKey, '2026-09-23T10:00:00.000Z', '2026-09-23T10:00:00.000Z'],
+      );
+      enqueueMutation(db, {
+        ...SUBSCRIBE_MUTATION,
+        body: { flightKey, subscriptionId: id(n) },
+        entityId: id(n),
+      });
+    });
+  }
+
+  /** The POST meets a 503, so it waits in its backoff and the sync goes ahead without it. */
+  async function drainDeferred(db: MemorySqlite, gate: ApplyGate): Promise<void> {
+    const outbox = createOutbox({
+      db,
+      gate,
+      onAccountDeleted: jest.fn(),
+      transport: {
+        send: () =>
+          Promise.resolve({ status: 503, body: envelope('unavailable'), replayed: false }),
+      },
+    });
+    await expect(outbox.drain()).resolves.toMatchObject({ kind: 'deferred' });
+  }
+
+  it('records the entity id on the outbox row', () => {
+    const db = createMemorySqlite();
+    const item = enqueueMutation(db, {
+      ...SUBSCRIBE_MUTATION,
+      body: { flightKey: AA100, subscriptionId: id(50) },
+      entityId: id(50),
+    });
+    const plain = enqueueMutation(db, { method: 'PATCH', path: '/v1/me/preferences', body: {} });
+    expect(item.entityId).toBe(id(50));
+    expect(plain.entityId).toBeNull();
+    expect(db.raw.prepare('SELECT id, entity_id FROM outbox ORDER BY seq').all()).toEqual([
+      { id: item.id, entity_id: id(50) },
+      { id: plain.id, entity_id: null },
+    ]);
+  });
+
+  it('survives the first pull of a fresh store, which replaces the synced rows', async () => {
+    const db = createMemorySqlite();
+    const gate = new ApplyGate();
+    optimisticSubscribe(db, 50, BA117);
+    await drainDeferred(db, gate);
+    const { transport, cursors } = scripted([
+      { status: 200, body: page({ changes: [subscriptionUpsert(1, AA100)], cursor: cursorAt(9) }) },
+    ]);
+
+    await createSyncClient({ db, transport, gate, onAccountDeleted: jest.fn() }).sync(USER);
+    expect(cursors).toEqual([null]);
+    expect(subscriptions(db).map((row) => row.id)).toEqual([id(1), id(50)]);
+    expect(pendingCount(db)).toBe(1);
+    // Kept inside the snapshot's own transaction, by a qualified delete.
+    const applied = db.transactions.at(-1);
+    expect(applied?.outcome).toBe('committed');
+    const remove = applied?.statements.find((line) =>
+      /DELETE FROM flight_subscriptions/.test(line),
+    );
+    expect(remove).toMatch(/NOT IN/);
+    expect(remove).toMatch(/\bWHERE\b/);
+  });
+
+  it('survives a 410 reset while every other synced row is replaced', async () => {
+    const db = seeded(USER, cursorAt(9), [subscriptionUpsert(1, AA100), preferencesUpsert()]);
+    const gate = new ApplyGate();
+    optimisticSubscribe(db, 50, BA117);
+    await drainDeferred(db, gate);
+    const { transport, cursors } = scripted([
+      { status: 410, body: envelope('resync_required') },
+      { status: 200, body: page({ changes: [subscriptionUpsert(2, BA117)], cursor: cursorAt(1) }) },
+    ]);
+
+    await expect(
+      createSyncClient({ db, transport, gate, onAccountDeleted: jest.fn() }).sync(USER),
+    ).resolves.toMatchObject({ kind: 'synced', resets: 1 });
+    expect(cursors).toEqual([cursorAt(9), null]);
+    // Row 1 and the preferences went with the reset; the queued subscribe's row stayed.
+    expect(subscriptions(db).map((row) => row.id)).toEqual([id(2), id(50)]);
+    expect(count(db, 'user_preferences')).toBe(0);
+    expect(pendingCount(db)).toBe(1);
+  });
+
+  it('survives the owner wipe with its outbox item, and goes with the account wipe', async () => {
+    const db = seeded(USER, cursorAt(4), [subscriptionUpsert(1, AA100)]);
+    optimisticSubscribe(db, 50, BA117);
+    const { transport } = scripted([
+      { status: 200, body: page({ changes: [subscriptionUpsert(3, BA117)], cursor: cursorAt(7) }) },
+    ]);
+    await createSyncClient({
+      db,
+      transport,
+      gate: new ApplyGate(),
+      onAccountDeleted: jest.fn(),
+    }).sync(OTHER_USER);
+    expect(subscriptions(db).map((row) => row.id)).toEqual([id(3), id(50)]);
+    expect(pendingCount(db)).toBe(1);
+
+    const gone = scripted([{ status: 401, body: envelope('account_deleted') }]);
+    await createSyncClient({
+      db,
+      transport: gone.transport,
+      gate: new ApplyGate(),
+      onAccountDeleted: jest.fn(),
+    }).sync(OTHER_USER);
+    expect(subscriptions(db)).toEqual([]);
+    expect(pendingCount(db)).toBe(0);
+  });
+
+  it('keeps only rows a queued SUBSCRIBE names: a queued PATCH or DELETE does not shield one', async () => {
+    const db = seeded(USER, cursorAt(9), [
+      subscriptionUpsert(1, AA100),
+      subscriptionUpsert(2, BA117),
+    ]);
+    enqueueMutation(db, {
+      method: 'PATCH',
+      path: `/v1/flights/${id(1)}`,
+      body: { label: 'Home' },
+      entityId: id(1),
+    });
+    enqueueMutation(db, { method: 'DELETE', path: `/v1/flights/${id(2)}`, entityId: id(2) });
+    const { transport } = scripted([
+      { status: 410, body: envelope('resync_required') },
+      { status: 200, body: page({ changes: [subscriptionUpsert(1, AA100)], cursor: cursorAt(1) }) },
+    ]);
+    await createSyncClient({
+      db,
+      transport,
+      gate: new ApplyGate(),
+      onAccountDeleted: jest.fn(),
+    }).sync(USER);
+    // Row 2 is not in the snapshot and its queued DELETE does not keep it; row 1 is the server's.
+    expect(subscriptions(db).map((row) => row.id)).toEqual([id(1)]);
+    expect(pendingCount(db)).toBe(2);
   });
 });
 

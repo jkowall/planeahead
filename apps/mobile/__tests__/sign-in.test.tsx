@@ -6,14 +6,18 @@
  * `magicLink.verify({ query: { token } })` (no `callbackURL`): automatically only for a link this
  * install asked for that arrived as a universal link on this build's host, and undone when it
  * signs in to an address this install did not ask for (ruling S9 item 3, threat model 1.5).
- * `auth-transport.test.tsx` runs the same flows on the real Better Auth client.
+ * How a link arrived comes from the router's record of delivered URLs (src/lib/delivered-url.ts,
+ * fed by src/app/+native-intent.tsx), which is real here: the tests deliver URLs the way the
+ * router does, the launch URL first and later ones after it. `auth-transport.test.tsx` runs the
+ * same flows on the real Better Auth client.
  */
 
-import { fireEvent, render, renderHook, screen, waitFor } from '@testing-library/react-native';
+import { act, fireEvent, render, renderHook, screen, waitFor } from '@testing-library/react-native';
 import SignInScreen from '../src/app/(auth)/sign-in';
 import MagicLinkScreen from '../src/app/auth/magic-link';
 import { authClient, restoreAuthCookies, snapshotAuthCookies } from '../src/lib/auth-client';
 import { KV_KEYS, kv } from '../src/lib/db/kv';
+import { recordDeliveredUrl, resetDeliveredUrls } from '../src/lib/delivered-url';
 import { recordMagicLinkRequest } from '../src/lib/magic-link';
 import { signInWithApple } from '../src/lib/native-signin/apple';
 import { signInWithGoogle } from '../src/lib/native-signin/google';
@@ -22,15 +26,12 @@ import { useBootstrap, useFirstLaunchAnonymousSignIn } from '../src/lib/session'
 const mockRouter = { replace: jest.fn(), push: jest.fn() };
 let mockSearchParams: Record<string, string> = {};
 let mockSession: unknown = null;
-let mockLinkingUrl: string | null = null;
 const mockGateOrder: string[] = [];
 
 jest.mock('expo-router', () => ({
   useRouter: () => mockRouter,
   useLocalSearchParams: () => mockSearchParams,
 }));
-
-jest.mock('expo-linking', () => ({ useLinkingURL: () => mockLinkingUrl }));
 
 jest.mock('react-native-safe-area-context', () => {
   const { View } = jest.requireActual<typeof import('react-native')>('react-native');
@@ -135,11 +136,29 @@ jest.mock('../src/lib/db/kv', () => {
 
 const TOKEN = 'AbCdEfGhIjKlMnOpQrStUvWxYzAbCdEf';
 const UNIVERSAL_LINK = `https://api.planeahead.app/auth/magic-link?token=${TOKEN}`;
+/** What every development build launches with on iOS (the dev client's own URL). */
+const DEV_CLIENT_LAUNCH_URL =
+  'planeahead://expo-development-client/?url=http%3A%2F%2F127.0.0.1%3A8081';
+
+function deferred<T>() {
+  let resolve!: (value: T) => void;
+  const promise = new Promise<T>((r) => {
+    resolve = r;
+  });
+  return { promise, resolve };
+}
+
+/** The link opened the app: the router records it before it navigates here. */
+function openedWith(url: string | null): void {
+  if (url !== null) {
+    recordDeliveredUrl(url, true);
+  }
+}
 
 beforeEach(() => {
   mockSession = null;
   mockSearchParams = {};
-  mockLinkingUrl = null;
+  resetDeliveredUrls();
   mockGateOrder.length = 0;
   kv.removeItemSync(KV_KEYS.pendingMagicLink);
   kv.removeItemSync(KV_KEYS.firstLaunchDone);
@@ -253,7 +272,7 @@ describe('the magic-link universal link', () => {
   it('verifies in the app, with the token only, when this install asked for the link', async () => {
     recordMagicLinkRequest('ada@example.com');
     mockSearchParams = { token: TOKEN };
-    mockLinkingUrl = UNIVERSAL_LINK;
+    openedWith(UNIVERSAL_LINK);
     await render(<MagicLinkScreen />);
     await waitFor(() => {
       expect(mockRouter.replace).toHaveBeenCalledWith('/');
@@ -283,10 +302,63 @@ describe('the magic-link universal link', () => {
   ])('asks first for a link delivered on %s, even with a request pending', async (_label, url) => {
     recordMagicLinkRequest('ada@example.com');
     mockSearchParams = { token: TOKEN };
-    mockLinkingUrl = url;
+    openedWith(url);
     await render(<MagicLinkScreen />);
     expect(screen.getByText('Sign in with this link?')).toBeOnTheScreen();
     expect(authClient.magicLink.verify).not.toHaveBeenCalled();
+  });
+
+  it('verifies a requested universal link that follows an earlier custom-scheme URL in the same process', async () => {
+    // iOS: Linking.getLinkingURL() would still answer the dev client's launch URL here
+    // (increment 9 re-review, auth-and-store-3); the router's record has the link itself.
+    recordMagicLinkRequest('ada@example.com');
+    recordDeliveredUrl(DEV_CLIENT_LAUNCH_URL, true);
+    recordDeliveredUrl(UNIVERSAL_LINK, false);
+    mockSearchParams = { token: TOKEN };
+    await render(<MagicLinkScreen />);
+    await waitFor(() => {
+      expect(mockRouter.replace).toHaveBeenCalledWith('/');
+    });
+    expect(authClient.magicLink.verify).toHaveBeenCalledWith({ query: { token: TOKEN } });
+    expect(screen.queryByText('Sign in with this link?')).toBeNull();
+  });
+
+  it('decides again when a later delivery arrives while the confirm screen is up', async () => {
+    recordMagicLinkRequest('ada@example.com');
+    openedWith(`planeahead://auth/magic-link?token=${TOKEN}`);
+    mockSearchParams = { token: TOKEN };
+    await render(<MagicLinkScreen />);
+    expect(screen.getByText('Sign in with this link?')).toBeOnTheScreen();
+    expect(authClient.magicLink.verify).not.toHaveBeenCalled();
+
+    // The user now taps the emailed link: a genuine universal link, delivered to the same screen.
+    await act(() => {
+      recordDeliveredUrl(UNIVERSAL_LINK, false);
+    });
+    await waitFor(() => {
+      expect(authClient.magicLink.verify).toHaveBeenCalledWith({ query: { token: TOKEN } });
+    });
+    expect(authClient.magicLink.verify).toHaveBeenCalledTimes(1);
+  });
+
+  it('runs one verify at a time when the same link is delivered twice', async () => {
+    recordMagicLinkRequest('ada@example.com');
+    const settle = deferred<{ data: unknown; error: null }>();
+    jest.mocked(authClient.magicLink.verify).mockReturnValueOnce(settle.promise);
+    openedWith(UNIVERSAL_LINK);
+    mockSearchParams = { token: TOKEN };
+    await render(<MagicLinkScreen />);
+    await waitFor(() => {
+      expect(authClient.magicLink.verify).toHaveBeenCalledTimes(1);
+    });
+    await act(() => {
+      recordDeliveredUrl(UNIVERSAL_LINK, false);
+    });
+    expect(authClient.magicLink.verify).toHaveBeenCalledTimes(1);
+    settle.resolve({ data: { user: { email: 'ada@example.com' } }, error: null });
+    await waitFor(() => {
+      expect(mockRouter.replace).toHaveBeenCalledWith('/');
+    });
   });
 
   it('signs out of an account another address owns and restores the anonymous session', async () => {
@@ -297,7 +369,7 @@ describe('the magic-link universal link', () => {
       error: null,
     });
     mockSearchParams = { token: TOKEN };
-    mockLinkingUrl = UNIVERSAL_LINK;
+    openedWith(UNIVERSAL_LINK);
     await render(<MagicLinkScreen />);
     await waitFor(() => {
       expect(screen.getByTestId('magic-link-mismatch')).toBeOnTheScreen();
@@ -317,7 +389,7 @@ describe('the magic-link universal link', () => {
     recordMagicLinkRequest('first@example.com');
     recordMagicLinkRequest('Ada@Example.COM');
     mockSearchParams = { token: TOKEN };
-    mockLinkingUrl = UNIVERSAL_LINK;
+    openedWith(UNIVERSAL_LINK);
     await render(<MagicLinkScreen />);
     await waitFor(() => {
       expect(mockRouter.replace).toHaveBeenCalledWith('/');
@@ -332,7 +404,7 @@ describe('the magic-link universal link', () => {
       error: null,
     });
     mockSearchParams = { token: TOKEN };
-    mockLinkingUrl = `planeahead://auth/magic-link?token=${TOKEN}`;
+    openedWith(`planeahead://auth/magic-link?token=${TOKEN}`);
     await render(<MagicLinkScreen />);
     await fireEvent.press(screen.getByTestId('magic-link-confirm'));
     await waitFor(() => {
@@ -343,7 +415,7 @@ describe('the magic-link universal link', () => {
 
   it('asks before verifying a link this install did not request', async () => {
     mockSearchParams = { token: TOKEN };
-    mockLinkingUrl = UNIVERSAL_LINK;
+    openedWith(UNIVERSAL_LINK);
     await render(<MagicLinkScreen />);
     expect(screen.getByText('Sign in with this link?')).toBeOnTheScreen();
     expect(authClient.magicLink.verify).not.toHaveBeenCalled();
@@ -357,7 +429,7 @@ describe('the magic-link universal link', () => {
   it('asks when the request window has expired', async () => {
     recordMagicLinkRequest('ada@example.com', Date.now() - 16 * 60 * 1000);
     mockSearchParams = { token: TOKEN };
-    mockLinkingUrl = UNIVERSAL_LINK;
+    openedWith(UNIVERSAL_LINK);
     await render(<MagicLinkScreen />);
     expect(screen.getByTestId('magic-link-confirm')).toBeOnTheScreen();
     expect(authClient.magicLink.verify).not.toHaveBeenCalled();
@@ -378,7 +450,7 @@ describe('the magic-link universal link', () => {
       error: { status: 400, statusText: 'Bad Request', code: 'INVALID_TOKEN' },
     });
     mockSearchParams = { token: TOKEN };
-    mockLinkingUrl = UNIVERSAL_LINK;
+    openedWith(UNIVERSAL_LINK);
     await render(<MagicLinkScreen />);
     await waitFor(() => {
       expect(screen.getByText('This link does not work')).toBeOnTheScreen();

@@ -13,13 +13,20 @@
  * another device, an old one) waits for an explicit tap, because verifying it signs this phone
  * into whoever requested it. A link that signs in to an address this install did not request is
  * undone (signed out, the anonymous session restored) and says so.
+ *
+ * How the link arrived is read from the router's own record of every delivered URL
+ * (src/lib/delivered-url.ts, written by src/app/+native-intent.tsx), never from
+ * `Linking.getLinkingURL()`, which on iOS stays at the first URL the process received. The phase
+ * is decided from the token on screen and the last delivery, and decided again when a later
+ * delivery arrives (a second link, or the same link tapped again after a failure); one verify
+ * runs at a time.
  */
 
-import { useLinkingURL } from 'expo-linking';
 import { useLocalSearchParams, useRouter } from 'expo-router';
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { Body, Button, Loading, Screen, Title } from '../../components/ui';
 import { runtimeConfig } from '../../lib/config';
+import { useDeliveredUrl, type DeliveredUrl } from '../../lib/delivered-url';
 import {
   ACCOUNT_MISMATCH,
   MAGIC_LINK_TOKEN_SHAPE,
@@ -30,43 +37,72 @@ import {
 
 type Phase = 'verifying' | 'confirm' | 'invalid' | 'failed' | 'mismatch';
 
+/** Verify without asking, or ask first (the file header). */
+function decidePhase(token: string, delivered: DeliveredUrl | null): Phase {
+  if (!MAGIC_LINK_TOKEN_SHAPE.test(token)) {
+    return 'invalid';
+  }
+  const requested = pendingMagicLinks().length > 0;
+  const delivery = magicLinkDelivery(
+    delivered?.url ?? null,
+    token,
+    runtimeConfig().universalLinkHosts,
+  );
+  return requested && delivery === 'universal_link' ? 'verifying' : 'confirm';
+}
+
+/** What a decision was made for: the token on screen and one delivery (its time included). */
+function decisionKey(token: string, delivered: DeliveredUrl | null): string {
+  return delivered === null ? token : `${token}\n${String(delivered.at)}\n${delivered.url}`;
+}
+
 export default function MagicLinkScreen() {
   const router = useRouter();
   const params = useLocalSearchParams<{ token?: string | string[] }>();
-  const linkingUrl = useLinkingURL();
+  const delivered = useDeliveredUrl();
   const token = typeof params.token === 'string' ? params.token : '';
-  const [phase, setPhase] = useState<Phase>(() => {
-    if (!MAGIC_LINK_TOKEN_SHAPE.test(token)) {
-      return 'invalid';
-    }
-    const requested = pendingMagicLinks().length > 0;
-    const delivery = magicLinkDelivery(linkingUrl, token, runtimeConfig().universalLinkHosts);
-    return requested && delivery === 'universal_link' ? 'verifying' : 'confirm';
-  });
-  const started = useRef(false);
+  const [phase, setPhase] = useState<Phase>(() => decidePhase(token, delivered));
+  const decidedFor = useRef(decisionKey(token, delivered));
+  const inFlight = useRef<string | null>(null);
 
   const verify = useCallback(async () => {
-    setPhase('verifying');
-    const result = await verifyMagicLink(token).catch(() => ({
-      ok: false as const,
-      code: 'network',
-    }));
-    if (result.ok) {
-      router.replace('/');
+    if (inFlight.current !== null) {
       return;
     }
-    setPhase(
-      result.code === 'network'
-        ? 'failed'
-        : result.code === ACCOUNT_MISMATCH
-          ? 'mismatch'
-          : 'invalid',
-    );
+    inFlight.current = token;
+    setPhase('verifying');
+    try {
+      const result = await verifyMagicLink(token).catch(() => ({
+        ok: false as const,
+        code: 'network',
+      }));
+      if (result.ok) {
+        router.replace('/');
+        return;
+      }
+      setPhase(
+        result.code === 'network'
+          ? 'failed'
+          : result.code === ACCOUNT_MISMATCH
+            ? 'mismatch'
+            : 'invalid',
+      );
+    } finally {
+      inFlight.current = null;
+    }
   }, [router, token]);
 
+  // A later delivery, or a new token, is decided afresh; the first render decided the initial one.
   useEffect(() => {
-    if (phase === 'verifying' && !started.current) {
-      started.current = true;
+    const key = decisionKey(token, delivered);
+    if (decidedFor.current !== key) {
+      decidedFor.current = key;
+      setPhase(decidePhase(token, delivered));
+    }
+  }, [token, delivered]);
+
+  useEffect(() => {
+    if (phase === 'verifying') {
       void verify();
     }
   }, [phase, verify]);
@@ -88,7 +124,6 @@ export default function MagicLinkScreen() {
             testID="magic-link-confirm"
             title="Sign in"
             onPress={() => {
-              started.current = true;
               void verify();
             }}
           />

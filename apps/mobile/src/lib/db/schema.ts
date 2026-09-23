@@ -183,6 +183,13 @@ export const outbox = sqliteTable(
      * in rowid (insertion) order (src/lib/sync/outbox.ts).
      */
     seq: integer('seq').notNull().default(0),
+    /**
+     * The id of the row the mutation creates or changes (the client-minted `subscriptionId` of a
+     * `POST /v1/flights`), or NULL. A snapshot that replaces the synced rows keeps every
+     * `flight_subscriptions` row a queued subscribe names here: the server has not seen that row
+     * yet, so the snapshot cannot carry it (src/lib/sync/store.ts).
+     */
+    entityId: text('entity_id'),
   },
   (table) => [
     index('outbox_next_attempt_idx').on(table.nextAttemptAt, table.id),

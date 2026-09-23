@@ -1,7 +1,7 @@
 {
   "version": "6",
   "dialect": "sqlite",
-  "id": "5099b5f3-d60f-4d2c-afa0-64c39bf7ca59",
+  "id": "6824dfa1-d487-460b-850e-71996fa4bd5a",
   "prevId": "42e2d667-8bb1-4af4-bbf6-96ba77f183e0",
   "tables": {
     "flight_subscriptions": {
@@ -458,6 +458,13 @@
           "notNull": true,
           "autoincrement": false,
           "default": 0
+        },
+        "entity_id": {
+          "name": "entity_id",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false,
+          "autoincrement": false
         }
       },
       "indexes": {

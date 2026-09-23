@@ -236,10 +236,13 @@ Threats considered:
   - verifies a link WITHOUT asking only when this install requested a magic link in the last
     fifteen minutes AND the link arrived as a universal link: an `https` URL on the one host the
     build claims (`runtimeConfig().universalLinkHosts`), on `/auth/magic-link`, carrying the
-    token on screen. The custom scheme `planeahead://auth/magic-link?token=...` routes to the
-    same screen and any app on the device, or a tapped web link, can open it without the user
-    asking, so such a delivery, like a link this install never requested, waits for an explicit
-    "Sign in" tap;
+    token on screen. How it arrived is the router's own record of the delivered URL
+    (`src/app/+native-intent.tsx`, `src/lib/delivered-url.ts`), never `Linking.getLinkingURL()`,
+    which on iOS keeps the first URL the process received and would report a later universal
+    link as, say, the development client's launch URL. The custom scheme
+    `planeahead://auth/magic-link?token=...` routes to the same screen and any app on the device,
+    or a tapped web link, can open it without the user asking, so such a delivery, like a link
+    this install never requested, waits for an explicit "Sign in" tap;
   - whenever this install has a pending request, compares the verified account's email,
     case-insensitively, with the addresses it requested; on a mismatch it signs that session out
     (revoking it server-side) and puts the pre-verify cookie map back, so the phone is the
@@ -248,8 +251,9 @@ Threats considered:
     is sent under a session about to be undone.
 
   `apps/mobile/__tests__/sign-in.test.tsx` pins it ("asks first for a link delivered on the
-  custom scheme ...", "signs out of an account another address owns and restores the anonymous
-  session", "checks the address after a confirmed tap too ...").
+  custom scheme ...", "verifies a requested universal link that follows an earlier custom-scheme
+  URL in the same process", "signs out of an account another address owns and restores the
+  anonymous session", "checks the address after a confirmed tap too ...").
   Residual: an attacker link that arrives as a genuine universal link while the user waits for
   theirs is verified at once and then undone by the email check, so the phone is briefly signed
   in to the attacker's account (a pull of the attacker's rows may land and is wiped when the

@@ -12,9 +12,10 @@
  *
  * A page fetched WITHOUT a cursor is the snapshot of everything the user owns (increment 8 serves
  * it as one page): it replaces the synced rows, and the delete, the snapshot and its cursor are
- * the same transaction (increment 9 review, auth-and-store-4). Rows an optimistic writer added
- * whose outbox mutation has not reached the server yet are not in the snapshot; increment 10's
- * writer re-applies them from the outbox.
+ * the same transaction (increment 9 review, auth-and-store-4). The delete keeps every
+ * subscription a QUEUED subscribe names (`outbox.entity_id`, src/lib/sync/store.ts): the server
+ * has not seen that row, so the snapshot cannot carry it, and the store, not a later writer,
+ * enforces that it stays (increment 9 re-review).
  *
  * Forward compatibility (auth-and-store-5): the page's shell (`rpcVersion`, `serverTime`,
  * `cursor`, `hasMore`) is parsed strictly by the caller, but `changes[]` and `flights[]` arrive

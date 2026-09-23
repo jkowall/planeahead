@@ -23,7 +23,12 @@ name: Mobile preview
 #   - EAS_PROJECT_ID also from the GitHub variable, because eas-cli needs the project id from the
 #     config before it can fetch the environment (same value as the EAS variable).
 # A missing input changes the fingerprint and the update silently never applies (increment 9
-# review, expo-correctness-1).
+# review, expo-correctness-1). Two inputs `eas update --environment` can never read, because it
+# loads only Plain text and Sensitive variables (re-review, expo-correctness-1): a Secret, which
+# is why the six variables above must never be given Secret visibility (apps/mobile/README.md,
+# owner tasks); and the GOOGLE_SERVICES_JSON FILE variable, which a builder receives as a path to
+# a real file and this job not at all, so apps/mobile/fingerprint.config.js keeps that file out of
+# the fingerprint on both sides (ADR 0001 records the parity check).
 #
 # Skipped, with a notice, until the owner has created the Expo project and set the secrets
 # (apps/mobile/README.md, owner tasks):
