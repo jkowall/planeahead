@@ -3,6 +3,7 @@ import { Table, eq, getTableName, is } from 'drizzle-orm';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { destinationColumns, originColumns, resolveAirportEndpoint } from '../src/queries/airports';
 import { InstantFormatError } from '../src/schema/columns';
+import { DB_SCHEMA_VERSION } from '../src/index';
 import * as schema from '../src/schema/index';
 import { createMigratedDatabase, sqlState, type TestDatabase } from './helpers';
 
@@ -45,12 +46,12 @@ afterAll(async () => {
 
 describe('migrations', () => {
   it('records every migration and creates every table', async () => {
-    expect(tdb.migration.migrations).toBe(3);
+    expect(tdb.migration.migrations).toBe(DB_SCHEMA_VERSION);
     expect(tdb.migration.serverVersionNum).toBeGreaterThanOrEqual(180000);
     const [applied] = await tdb.sql<{ n: string }[]>`
       select count(*)::text as n from drizzle.__drizzle_migrations
     `;
-    expect(Number(applied?.n)).toBe(3);
+    expect(Number(applied?.n)).toBe(DB_SCHEMA_VERSION);
     const tables = await tdb.sql<{ table_name: string }[]>`
       select table_name from information_schema.tables
       where table_schema = 'public' and table_type = 'BASE TABLE' order by table_name
@@ -60,17 +61,18 @@ describe('migrations', () => {
       .map((table) => getTableName(table))
       .sort();
     expect(tables.map((row) => row.table_name)).toEqual(expected);
-    expect(expected).toHaveLength(70);
+    // 70 from increment 3, plus flight_sync_changes (increment 8, migration 0003).
+    expect(expected).toHaveLength(71);
   });
 
   it('is idempotent: a second migrate run applies nothing', async () => {
     const { migrateDatabase } = await import('../src/migrate');
     const again = await migrateDatabase(tdb.url);
-    expect(again.migrations).toBe(3);
+    expect(again.migrations).toBe(DB_SCHEMA_VERSION);
     const [applied] = await tdb.sql<{ n: string }[]>`
       select count(*)::text as n from drizzle.__drizzle_migrations
     `;
-    expect(Number(applied?.n)).toBe(3);
+    expect(Number(applied?.n)).toBe(DB_SCHEMA_VERSION);
   });
 });
 

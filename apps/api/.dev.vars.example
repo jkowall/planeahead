@@ -62,6 +62,7 @@ RESEND_API_KEY=
 # different host for one external endpoint. The suite sets them to test/fake-providers.ts.
 APPLE_JWKS_URL=
 APPLE_TOKEN_URL=
+APPLE_REVOKE_URL=
 GOOGLE_JWKS_URL=
 RESEND_API_URL=
 
@@ -100,3 +101,19 @@ ADB_ALERTS_ENABLED=false
 # FlightTracker and DesignatorResolver objects; test/globalSetup.ts is the only place that sets it.
 # AERODATABOX_BASE_URL=
 # TEST_CLOCK=
+
+# ---------------------------------------------------------------------------------------------
+# Account deletion and anonymous caps (increment 8). Secrets: `wrangler secret put <NAME>`.
+
+# HMAC-SHA-256 key for deleted_subjects.provider_subject_hash: the Apple and Google subjects and
+# the session tokens of a deleted account are kept only as keyed hashes (400 and 31 days), so a
+# late webhook can be matched and a second device answered 401 account_deleted. At least 32
+# characters (`openssl rand -base64 32`). Missing means POST /v1/me/delete refuses with a 500
+# before it touches anything. Never reuse across environments.
+DELETED_SUBJECT_HMAC_KEY=
+# Root of the daily salt for the anonymous per-IP tracker-creation cap: usage_counters stores
+# HMAC(HMAC(this, UTC day), CF-Connecting-IP), never an address. At least 32 characters.
+IP_SALT_SECRET=
+# `true` calls RevenueCat's DELETE /v1/subscribers/{id} on account deletion. Off in Phase 0: the
+# call is a typed stub that logs what it would have done.
+REVENUECAT_DELETE_ENABLED=false

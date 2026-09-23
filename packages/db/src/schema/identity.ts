@@ -308,6 +308,12 @@ export const userSyncChanges = pgTable(
     entity: text('entity').notNull(),
     entityId: uuid('entity_id').notNull(),
     op: text('op').notNull(),
+    /**
+     * The entity as of this change (migration 0003, increment 8): the feed replays exactly what
+     * the writing transaction wrote, never a later state read at pull time. The tombstone for a
+     * `delete`. Nullable only because rows written before the column existed have none.
+     */
+    row: jsonb('row'),
     ...createdOnly(),
   },
   (t) => [
@@ -344,6 +350,15 @@ export const DELETION_REASONS = ['user_request', 'admin', 'inactivity', 'apple_r
  * later can be matched and dropped. No PII, no FK to users (the row must outlive the user).
  * The column is `subject_deleted_at`, not `deleted_at`: that name is reserved for the sync
  * entities' tombstone, which the mobile client replays deletes from.
+ *
+ * Migration 0003 (increment 8, ruling K8): one row PER deleted identifier rather than one per
+ * user, so `subject_id` (the deleted `users.id`) is no longer unique. `provider_subject_hash` is
+ * `{kind}:{base64url HMAC-SHA-256}` under the `DELETED_SUBJECT_HMAC_KEY` Workers secret of an
+ * Apple or Google subject (`apple:`, `google:`) or of a session token the account held
+ * (`session:`, which is how the auth middleware answers a second device 401 `account_deleted`
+ * rather than `unauthenticated`); a keyed hash because the inputs are identifiers, not secrets.
+ * `expires_at` is when the housekeeping cron (increment 12) purges the row: 400 days for a
+ * provider subject, 31 days for a session.
  */
 export const deletedSubjects = pgTable(
   'deleted_subjects',
@@ -355,10 +370,22 @@ export const deletedSubjects = pgTable(
     subjectDeletedAt: instant('subject_deleted_at')
       .notNull()
       .default(sql`now()`),
+    providerSubjectHash: text('provider_subject_hash'),
+    expiresAt: instant('expires_at')
+      .notNull()
+      .default(sql`now() + interval '400 days'`),
     ...createdOnly(),
   },
   (t) => [
-    uniqueIndex('deleted_subjects_subject_id_key').on(t.subjectId),
+    index('deleted_subjects_subject_id_idx').on(t.subjectId),
+    index('deleted_subjects_provider_subject_hash_idx')
+      .on(t.providerSubjectHash)
+      .where(sql`${t.providerSubjectHash} is not null`),
+    index('deleted_subjects_expires_at_idx').on(t.expiresAt),
     check('deleted_subjects_reason_check', sql`${t.reason} in (${inList(DELETION_REASONS)})`),
+    check(
+      'deleted_subjects_provider_subject_hash_check',
+      sql`${t.providerSubjectHash} is null or ${t.providerSubjectHash} ~ '^(apple|google|session):[A-Za-z0-9_-]{43}$'`,
+    ),
   ],
 );

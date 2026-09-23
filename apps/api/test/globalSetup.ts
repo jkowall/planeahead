@@ -31,6 +31,8 @@ export interface TestBindings extends Record<string, string> {
   readonly ENVIRONMENT: 'test';
   readonly APPLE_JWKS_URL: string;
   readonly APPLE_TOKEN_URL: string;
+  /** The fake Apple revocation endpoint (increment 8). */
+  readonly APPLE_REVOKE_URL: string;
   readonly GOOGLE_JWKS_URL: string;
   readonly RESEND_API_URL: string;
   /** Private half of the fake JWKS key, so a test can mint identity tokens. */
@@ -133,6 +135,7 @@ export async function setup(project: TestProject): Promise<() => Promise<void>> 
     ENVIRONMENT: 'test',
     APPLE_JWKS_URL: `${providers.origin}/apple/keys`,
     APPLE_TOKEN_URL: `${providers.origin}/apple/token`,
+    APPLE_REVOKE_URL: `${providers.origin}/apple/revoke`,
     GOOGLE_JWKS_URL: `${providers.origin}/google/certs`,
     RESEND_API_URL: `${providers.origin}/resend/emails`,
     TEST_IDP_PRIVATE_KEY_PEM: providers.privateKeyPem,

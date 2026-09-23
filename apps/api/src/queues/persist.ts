@@ -17,7 +17,9 @@
  *     ignored, and a NEWER lifetime for an instance whose tracking state is terminal is refused
  *     with the `flight_lifetime_rejected` ops alert. A finished flight never gets a second
  *     lifetime; a reborn tracker is a bug, not data. (A newer lifetime for a row that is still
- *     active is applied and logged: that is a recovery, not a rebirth.)
+ *     active is applied and logged: that is a recovery, not a rebirth.) Increment 8: the upsert
+ *     runs in a transaction with the `flight_sync_changes` row it records (the sync feed's flight
+ *     half, ADR 0012), inserted only when the upsert changed the row.
  *   - `flight_events`: insert on conflict `(flight_instance_id, seq)` do nothing, the instance
  *     id resolved by flight key in a preceding select. An event that arrives before its
  *     instance row throws and is retried with backoff: the row will exist by then.
@@ -56,6 +58,7 @@ import {
   destinationColumns,
   flightEvents,
   flightInstances,
+  flightSyncChanges,
   openDb,
   originColumns,
   providerCallDaily,
@@ -134,7 +137,10 @@ interface StoredInstance {
   readonly trackingState: string;
 }
 
-async function storedInstanceFor(db: Db, flightKey: string): Promise<StoredInstance | null> {
+/** Anything that can select: the batch's handle or a transaction on it. */
+type Selector = Pick<Db, 'select'>;
+
+async function storedInstanceFor(db: Selector, flightKey: string): Promise<StoredInstance | null> {
   const [row] = await db
     .select({
       id: flightInstances.id,
@@ -147,7 +153,7 @@ async function storedInstanceFor(db: Db, flightKey: string): Promise<StoredInsta
   return row ?? null;
 }
 
-async function instanceIdFor(db: Db, flightKey: string): Promise<string | null> {
+async function instanceIdFor(db: Selector, flightKey: string): Promise<string | null> {
   return (await storedInstanceFor(db, flightKey))?.id ?? null;
 }
 
@@ -172,11 +178,29 @@ function lifetimeVerdict(
   return null;
 }
 
-/** The monotonic, lifetime-aware upsert. `epochMs` is the origin's lifetime, null if unknown. */
+/**
+ * The monotonic, lifetime-aware upsert. `epochMs` is the origin's lifetime, null if unknown.
+ *
+ * Increment 8 (ruling K4): the upsert and its `flight_sync_changes` row are one transaction on
+ * one connection (`db.transaction`, postgres.js `sql.begin`; Hyperdrive may hand one invocation
+ * several connections, so two statements outside a transaction could land on two). The change row
+ * is written only when the upsert changed the row (`RETURNING` answered), so a duplicate or stale
+ * delivery adds nothing to the sync feed, and the row carries the snapshot this upsert stored.
+ */
 export async function upsertFlightInstance(
   db: Db,
   message: FlightInstanceMessageV1,
   epochMs: number | null = parseFlightTrackerOrigin(message.origin)?.epochMs ?? null,
+): Promise<LifetimeWrite> {
+  return db.transaction((tx) => upsertFlightInstanceIn(tx, message, epochMs));
+}
+
+type Tx = Parameters<Parameters<Db['transaction']>[0]>[0];
+
+async function upsertFlightInstanceIn(
+  db: Tx,
+  message: FlightInstanceMessageV1,
+  epochMs: number | null,
 ): Promise<LifetimeWrite> {
   const p = message.payload;
   const stored = await storedInstanceFor(db, message.flightKey);
@@ -231,7 +255,7 @@ export async function upsertFlightInstance(
     finishedAt: p.finishedAt,
     eventsR2Key: p.eventsR2Key,
   };
-  await db
+  const written = await db
     .insert(flightInstances)
     .values({
       operatingCarrierIcao: p.operatingCarrierIcao,
@@ -251,7 +275,16 @@ export async function upsertFlightInstance(
         or (${flightInstances.doLifetimeEpochMs} is not null
             and excluded.do_lifetime_epoch_ms is not null
             and ${flightInstances.doLifetimeEpochMs} < excluded.do_lifetime_epoch_ms)`,
+    })
+    .returning({ id: flightInstances.id });
+  const row = written[0];
+  if (row !== undefined && snapshot !== null && snapshot !== undefined) {
+    // Insert only: the xid DEFAULT fires on insert, never on an upsert's DO UPDATE branch.
+    await db.insert(flightSyncChanges).values({
+      flightInstanceId: row.id,
+      snapshot: { ...snapshot, key: message.flightKey },
     });
+  }
   return 'applied';
 }
 

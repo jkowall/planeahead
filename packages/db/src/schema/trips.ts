@@ -27,6 +27,7 @@ import {
   id,
   inList,
   instant,
+  literal,
   softDelete,
   timestamps,
 } from './columns';
@@ -119,6 +120,13 @@ export const flightSubscriptions = pgTable(
       .default(sql`'{}'::jsonb`),
     muted: boolean('muted').notNull().default(false),
     source: text('source').notNull().default('manual'),
+    /**
+     * Whether this subscription holds one of the user's `live_tracked` counter slots (migration
+     * 0003, increment 8): set when the subscribe took the slot because the flight was inside its
+     * live window, read by the unsubscribe so it releases exactly what was taken. Server-side
+     * bookkeeping, never sent to the client.
+     */
+    liveTracked: boolean('live_tracked').notNull().default(false),
     ...timestamps(),
     ...softDelete(),
   },
@@ -238,13 +246,25 @@ export const COUNTER_KINDS = [
   'exports',
   'mcp_calls',
   'share_links',
+  // Increment 8 (migration 0003, ruling K2).
+  'live_tracked',
+  'tracker_creations',
 ] as const;
+/**
+ * The per-flight refresh counter (ruling K2): `refresh:{flightKey}` under scope `user`, so one
+ * user's refreshes of one flight on one UTC day are one row. The constraint accepts the prefix
+ * followed by a flight key's character set.
+ */
+export const REFRESH_COUNTER_SQL_RE = '^refresh:[A-Z0-9-]{10,40}$';
 
 /**
  * Exact quotas (the ratelimit binding is per-colo and permissive). `subject` is the user id
- * for scope `user` and a SHA-256 hex for `email`, `ip` and `token`, so no PII is stored. No FK:
- * email and IP subjects are not users; user-scoped rows are deleted by subject at account
- * deletion.
+ * for scope `user`, a SHA-256 hex for `email` and `token`, and for `ip` the base64url
+ * HMAC-SHA-256 of the client IP under a daily salt derived from a Workers secret (increment 8),
+ * so no PII is stored. No FK: email and IP subjects are not users; user-scoped rows are deleted
+ * by subject at account deletion. Monotonic counters use the UTC day as `window_start`; the two
+ * non-monotonic ones (`active_subscriptions`, `live_tracked`) use the epoch and are decremented
+ * on unsubscribe.
  */
 export const usageCounters = pgTable(
   'usage_counters',
@@ -266,7 +286,10 @@ export const usageCounters = pgTable(
     ),
     index('usage_counters_window_start_idx').on(t.windowStart),
     check('usage_counters_scope_check', sql`${t.scope} in (${inList(COUNTER_SCOPES)})`),
-    check('usage_counters_counter_check', sql`${t.counter} in (${inList(COUNTER_KINDS)})`),
+    check(
+      'usage_counters_counter_check',
+      sql`${t.counter} in (${inList(COUNTER_KINDS)}) or ${t.counter} ~ ${literal(REFRESH_COUNTER_SQL_RE)}`,
+    ),
     check('usage_counters_count_check', sql`${t.count} >= 0`),
   ],
 );

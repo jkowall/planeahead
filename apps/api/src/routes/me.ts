@@ -1,20 +1,27 @@
 /**
- * `GET /v1/me` and `PATCH /v1/me/preferences`.
+ * `GET /v1/me`, `PATCH /v1/me/preferences` and `POST /v1/me/delete`.
  *
  * `me` returns the user and their preferences (the defaults when no row exists yet; a row is
  * only written by a PATCH, so a user who never changed anything has no row to sync). An
  * anonymous user's email is a Better Auth placeholder and is reported as null.
  *
  * The PATCH body is validated with the shared `UserPreferencesPatchSchema` so the mobile client
- * and the API agree on one contract; `settings` is replaced as a whole when present.
+ * and the API agree on one contract; `settings` is replaced as a whole when present. The row and
+ * its `user_sync_changes` row are written in one transaction (increment 8, ruling K4), so the
+ * sync feed carries every preference change.
+ *
+ * `POST /v1/me/delete` (increment 8, ruling K8) deletes the account synchronously and accepts an
+ * anonymous session (Apple requires guest accounts to be deletable); src/lib/account-deletion.ts
+ * holds the order. The answer tells the client to wipe its local store; any other device of the
+ * user gets 401 `account_deleted` on its next call.
  */
 
-import { zValidator } from '@hono/zod-validator';
 import { eq } from 'drizzle-orm';
 import { Hono } from 'hono';
 import { userPreferences, users } from '@planeahead/db';
 import {
   DEFAULT_USER_PREFERENCES,
+  DO_CALL_DEADLINE_MS,
   type UserPreferences,
   UserPreferencesPatchSchema,
   UserPreferencesSchema,
@@ -22,7 +29,12 @@ import {
 } from '@planeahead/shared';
 import { authRuntime } from '../auth/runtime';
 import type { AppBindings } from '../env';
+import { deleteAccount } from '../lib/account-deletion';
+import { appendUserChange, preferencesSyncRow } from '../lib/sync-rows';
+import { defaultTrackerFor } from '../lib/trackers';
+import { validate } from '../lib/validate';
 import { currentUser, requireScope } from '../middleware/auth';
+import { idempotencyGate } from '../middleware/idempotency';
 import { withoutNul } from '../validation/nul';
 
 /** The shared contract plus the NUL refinement (`settings` is a jsonb bag Postgres would 500 on). */
@@ -68,10 +80,14 @@ export const meRoutes = new Hono<AppBindings>()
       .where(eq(users.id, principal.id))
       .limit(1);
     if (row === undefined) {
-      // The session outlived the row (deletion in flight). Not a 500: the caller is simply not
-      // a user any more.
+      // The session outlived the row (a cached session after a deletion). Not a 500: the caller
+      // is simply not a user any more.
       return c.json(
-        { error: 'unauthenticated', message: 'user no longer exists', requestId: c.var.requestId },
+        {
+          error: 'account_deleted',
+          message: 'this account was deleted; clear the data stored on this device',
+          requestId: c.var.requestId,
+        },
         401,
       );
     }
@@ -104,7 +120,8 @@ export const meRoutes = new Hono<AppBindings>()
   .patch(
     '/preferences',
     requireScope('user'),
-    zValidator('json', PreferencesPatchBody),
+    validate('json', PreferencesPatchBody),
+    idempotencyGate({ required: false }),
     async (c) => {
       const principal = currentUser(c.var.user);
       const patch = c.req.valid('json');
@@ -118,20 +135,59 @@ export const meRoutes = new Hono<AppBindings>()
         ...(patch.settings === undefined ? {} : { settings: patch.settings }),
         deletedAt: null,
       };
-      const [row] = await db
-        .insert(userPreferences)
-        .values({ id: uuidv7(), userId: principal.id, ...changes })
-        .onConflictDoUpdate({ target: userPreferences.userId, set: changes })
-        .returning({
-          distanceUnit: userPreferences.distanceUnit,
-          temperatureUnit: userPreferences.temperatureUnit,
-          timeFormat: userPreferences.timeFormat,
-          showLocalTimes: userPreferences.showLocalTimes,
-          settings: userPreferences.settings,
+      const row = await db.transaction(async (tx) => {
+        const [written] = await tx
+          .insert(userPreferences)
+          .values({ id: uuidv7(), userId: principal.id, ...changes })
+          .onConflictDoUpdate({ target: userPreferences.userId, set: changes })
+          .returning();
+        if (written === undefined) {
+          throw new Error('preferences upsert returned no row');
+        }
+        await appendUserChange(tx, {
+          userId: principal.id,
+          entity: 'user_preferences',
+          entityId: written.id,
+          op: 'upsert',
+          row: preferencesSyncRow(written),
         });
-      if (row === undefined) {
-        throw new Error('preferences upsert returned no row');
-      }
+        return written;
+      });
       return c.json({ preferences: toPreferences(row) });
     },
-  );
+  )
+  .post('/delete', requireScope('user'), async (c) => {
+    const principal = currentUser(c.var.user);
+    const { db, envelope, log } = authRuntime(c);
+    const report = await deleteAccount(
+      {
+        env: c.env,
+        db,
+        envelope,
+        log,
+        trackerFor: defaultTrackerFor(c.env),
+        deadlineMs: DO_CALL_DEADLINE_MS,
+        waitUntil: (promise) => {
+          c.executionCtx.waitUntil(promise);
+        },
+        requestId: c.var.requestId,
+      },
+      principal.id,
+    );
+    if (report === null) {
+      return c.json(
+        {
+          error: 'account_deleted',
+          message: 'this account was deleted; clear the data stored on this device',
+          requestId: c.var.requestId,
+        },
+        401,
+      );
+    }
+    log.info('account_deleted', {
+      subscriptions: report.subscriptions,
+      trackers_failed: report.trackersFailed,
+      apple_revoke: report.apple.outcome,
+    });
+    return c.json({ deleted: true as const, wipeLocalStore: true as const });
+  });

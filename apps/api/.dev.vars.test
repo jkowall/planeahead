@@ -32,3 +32,8 @@ WEBHOOK_TOKEN_AEROAPI=gj_nWrnU5i8Hglvb7XEMfwCv186gO2tY84E11Gws6tM
 AEROAPI_MODE=mock
 ADB_PLAN=growth
 ADB_ALERTS_ENABLED=false
+# Increment 8: account deletion's subject HMAC key and the per-IP cap salt, generated for this
+# file; they protect nothing outside the suite.
+DELETED_SUBJECT_HMAC_KEY=Z+RwDjrcPMwfEOaLEi3Zmwu6Wg7yZ9xv8B4/pJik8j8=
+IP_SALT_SECRET=sQBFfb0OcvXFZE9t6tYRgKffg8qK+pRsyeSneH7TKiU=
+REVENUECAT_DELETE_ENABLED=false

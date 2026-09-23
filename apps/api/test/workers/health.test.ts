@@ -82,12 +82,12 @@ describe('GET /health', () => {
   });
 
   it('answers a not-implemented stub for a route a later increment owns', async () => {
-    const response = await exports.default.fetch('https://api.planeahead.test/v1/flights');
+    const response = await exports.default.fetch('https://api.planeahead.test/v1/events');
     const body = await response.json<{ error: string; increment: string }>();
 
     expect(response.status).toBe(501);
     expect(body.error).toBe('not_implemented');
-    expect(body.increment).toContain('08');
+    expect(body.increment).toContain('/v1/events');
   });
 
   it('answers 404 with a request id for an unknown path', async () => {

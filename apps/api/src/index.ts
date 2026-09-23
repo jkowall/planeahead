@@ -13,9 +13,12 @@
  * types away and the client ends up with an empty surface. Add routes to the chain below, never
  * as separate statements.
  *
- * `/api/auth` is in the chain too. The mobile client reaches those paths through the Better Auth
- * client rather than `hc`, so the type contributes only the catch-all, which is harmless and
- * keeps one mount style for every sub-app.
+ * `/api/auth` is NOT in the chain (increment 8, ruling K9): it is mounted by a separate
+ * statement whose return value is discarded. `route()` returns the same instance at run time, so
+ * the mount is live, but only the chained expression's type is `AppType`, and Better Auth's
+ * catch-all stays out of it. The mobile client reaches those paths through the Better Auth client,
+ * never through `hc`. `hcWithType` (src/client.ts) is the typed client the app builds from
+ * `AppType`.
  *
  * The error handlers and the middleware chain live in `src/app.ts` and are applied by
  * `createApp()`. They are not inlined here so that the tests can build the same chain instead of
@@ -50,10 +53,12 @@ const app = createApp();
 const routes = app
   .route('/', health)
   .route('/v1', v1Routes)
-  .route('/api/auth', authRoutes)
   // The browser landing page for the emailed magic link: outside the Better Auth mount so a
   // GET can never consume the token (src/routes/magic-link-landing.ts).
   .route(MAGIC_LINK_LANDING_PATH, magicLinkLanding);
+
+// Discarded on purpose: live at run time, absent from `AppType` (see the file header).
+app.route('/api/auth', authRoutes);
 
 /** The RPC surface `hc<AppType>()` in apps/mobile is typed from. */
 export type AppType = typeof routes;

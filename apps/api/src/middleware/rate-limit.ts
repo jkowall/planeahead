@@ -21,7 +21,7 @@ import type { Context, MiddlewareHandler } from 'hono';
 import { createMiddleware } from 'hono/factory';
 import type { AppBindings, Env } from '../env';
 import { createLogger } from '../observability/log';
-import { WEBHOOK_PATH_PREFIX } from '../providers/webhook-token';
+import { isProviderWebhookPath } from '../providers/webhook-token';
 
 export interface RateLimitOutcome {
   readonly success: boolean;
@@ -102,10 +102,11 @@ export function rateLimit(options: RateLimitOptions): MiddlewareHandler<AppBindi
  * bucketed under a shared placeholder key, which would make one developer's machine rate limit
  * itself.
  *
- * The provider webhook receivers (`/v1/webhooks/`) are exempt (orchestrator ruling I2): a
- * provider delivers from a few shared addresses, so a per-IP brake would drop real deliveries
- * before it slowed an attacker, and the receivers are guarded by a 256-bit path token instead.
- * docs/security/threat-model.md records what that trades away.
+ * The provider webhook receivers (`/v1/webhooks/aerodatabox/` and `/v1/webhooks/aeroapi/`) are
+ * exempt (orchestrator ruling I2): a provider delivers from a few shared addresses, so a per-IP
+ * brake would drop real deliveries before it slowed an attacker, and the receivers are guarded by
+ * a 256-bit path token instead. docs/security/threat-model.md records what that trades away. The
+ * reserved Apple and RevenueCat stubs (increment 8, ruling K12) have no token and are limited.
  */
 export function ipLimiter(
   limiter: LimiterSelector = (env) => env.PUBLIC_RL,
@@ -114,7 +115,7 @@ export function ipLimiter(
     name: 'PUBLIC_RL',
     limiter,
     key: (c) => {
-      if (new URL(c.req.url).pathname.startsWith(WEBHOOK_PATH_PREFIX)) {
+      if (isProviderWebhookPath(new URL(c.req.url).pathname)) {
         return null;
       }
       const ip = clientIp(c);

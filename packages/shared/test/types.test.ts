@@ -137,11 +137,20 @@ import {
   type SloWindow,
   type SubscribeRequestV1,
   type SubscribeResponseV1,
+  type ApiError,
+  type ApiErrorCode,
+  type CapName,
+  type FlightSubscriptionRowV1,
+  type FreeTierLimits,
+  type LiveWindowInput,
+  type SubscribeFlightBody,
+  type SyncChangeV1,
   type SyncCursor,
   type SyncEntity,
   type SyncEnvelopeV1,
-  type SyncTombstoneV1,
-  type SyncUpsertV1,
+  type SyncFlightV1,
+  type SyncOp,
+  type ValidationIssue,
   type TrackerPhase,
   type UnsubscribeRequestV1,
   type Uuidv7Generator,
@@ -305,10 +314,20 @@ interface TypeSurface {
   revisedTime: RevisedTime;
   // sync
   syncEntity: SyncEntity;
+  syncOp: SyncOp;
   syncCursor: SyncCursor;
-  syncUpsertV1: SyncUpsertV1;
-  syncTombstoneV1: SyncTombstoneV1;
+  syncChangeV1: SyncChangeV1;
+  syncFlightV1: SyncFlightV1;
   syncEnvelopeV1: SyncEnvelopeV1;
+  flightSubscriptionRowV1: FlightSubscriptionRowV1;
+  // api, errors, limits (increment 8)
+  subscribeFlightBody: SubscribeFlightBody;
+  apiError: ApiError;
+  apiErrorCode: ApiErrorCode;
+  validationIssue: ValidationIssue;
+  capName: CapName;
+  freeTierLimits: FreeTierLimits;
+  liveWindowInput: LiveWindowInput;
 }
 
 /** A value a caller holds as optional, typed `T | undefined` rather than narrowed. */

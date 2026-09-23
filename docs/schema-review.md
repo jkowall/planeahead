@@ -163,20 +163,20 @@ by design, pseudonymous). Rows: order of magnitude twelve months in, after reten
 
 ### Identity
 
-| Table               | Purpose                                                | Writer                   | Readers                | PII | Enc                                                                  | Retention                                                                               | GDPR                                                                   | Rows 1k / 10k / 100k |
-| ------------------- | ------------------------------------------------------ | ------------------------ | ---------------------- | --- | -------------------------------------------------------------------- | --------------------------------------------------------------------------------------- | ---------------------------------------------------------------------- | -------------------- |
-| `users`             | Better Auth user plus status, plan cache, home airport | Better Auth, API         | API, auth, jobs        | 2   | none (email in plaintext, unique on `lower(email)`)                  | until deletion                                                                          | hard delete                                                            | 1k / 10k / 100k      |
-| `sessions`          | Better Auth sessions                                   | Better Auth              | auth                   | 2   | `token` plaintext (Better Auth-owned)                                | expired rows purged at 30 d                                                             | cascade                                                                | 3k / 30k / 300k      |
-| `accounts`          | Better Auth OAuth and credential accounts              | Better Auth, Apple route | auth, deletion job     | 3   | `refresh_token_enc`; Better Auth's own token columns plaintext       | until deletion                                                                          | cascade                                                                | 1.5k / 15k / 150k    |
-| `verifications`     | Magic link and OAuth state (`storeToken: 'hashed'`)    | Better Auth              | auth                   | 2   | magic-link tokens hashed by the plugin; `identifier` may be an email | expired rows purged by the increment 12 cron over `verifications_expires_at_idx`        | by subject (rows whose `identifier` is the user's email)               | hundreds / 1k / 10k  |
-| `rate_limits`       | Better Auth database rate limiting                     | Better Auth              | auth                   | 2   | none: `key` is an IP or an email in plaintext                        | rows idle over 24 h purged by the increment 12 cron over `rate_limits_last_request_idx` | by subject (rows whose `key` embeds the user's email; IP rows age out) | 1k / 10k / 100k      |
-| `user_keys`         | Wrapped per-user DEK and KEK version                   | crypto module            | crypto module          | 3   | `wrapped_dek` is AES-KW ciphertext                                   | until deletion                                                                          | cascade                                                                | 1k / 10k / 100k      |
-| `devices`           | Installs, platform, OS, attestation reserved           | `POST /v1/devices`       | push, analytics        | 1   | none                                                                 | until deletion                                                                          | cascade                                                                | 1.5k / 15k / 150k    |
-| `user_preferences`  | Units, time format, settings blob (sync entity)        | API                      | API, sync              | 1   | none                                                                 | tombstoned, purged at 30 d                                                              | cascade                                                                | 1k / 10k / 100k      |
-| `user_consents`     | Terms, privacy, marketing, email import consents       | API                      | export, compliance     | 1   | none                                                                 | until deletion                                                                          | cascade                                                                | 3k / 30k / 300k      |
-| `user_sync_changes` | Change feed with `xid8` watermark for `GET /v1/sync`   | API (same tx as the row) | sync                   | 1   | none                                                                 | 30 d                                                                                    | cascade                                                                | 20k / 200k / 2M      |
-| `idempotency_keys`  | Replay store for mutating routes                       | idempotency middleware   | idempotency middleware | 1   | request hash                                                         | 24 h                                                                                    | cascade                                                                | hundreds / 5k / 50k  |
-| `deleted_subjects`  | Pseudonymous record that a subject was deleted         | deletion job             | webhooks, audit        | 1   | RevenueCat id hashed                                                 | kept                                                                                    | kept (that is its job)                                                 | tens / hundreds / 1k |
+| Table               | Purpose                                                | Writer                   | Readers                          | PII | Enc                                                                                           | Retention                                                                               | GDPR                                                                   | Rows 1k / 10k / 100k |
+| ------------------- | ------------------------------------------------------ | ------------------------ | -------------------------------- | --- | --------------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------- | ---------------------------------------------------------------------- | -------------------- |
+| `users`             | Better Auth user plus status, plan cache, home airport | Better Auth, API         | API, auth, jobs                  | 2   | none (email in plaintext, unique on `lower(email)`)                                           | until deletion                                                                          | hard delete                                                            | 1k / 10k / 100k      |
+| `sessions`          | Better Auth sessions                                   | Better Auth              | auth                             | 2   | `token` plaintext (Better Auth-owned)                                                         | expired rows purged at 30 d                                                             | cascade                                                                | 3k / 30k / 300k      |
+| `accounts`          | Better Auth OAuth and credential accounts              | Better Auth, Apple route | auth, deletion job               | 3   | `refresh_token_enc`; Better Auth's own token columns plaintext                                | until deletion                                                                          | cascade                                                                | 1.5k / 15k / 150k    |
+| `verifications`     | Magic link and OAuth state (`storeToken: 'hashed'`)    | Better Auth              | auth                             | 2   | magic-link tokens hashed by the plugin; `identifier` may be an email                          | expired rows purged by the increment 12 cron over `verifications_expires_at_idx`        | by subject (rows whose `identifier` is the user's email)               | hundreds / 1k / 10k  |
+| `rate_limits`       | Better Auth database rate limiting                     | Better Auth              | auth                             | 2   | none: `key` is an IP or an email in plaintext                                                 | rows idle over 24 h purged by the increment 12 cron over `rate_limits_last_request_idx` | by subject (rows whose `key` embeds the user's email; IP rows age out) | 1k / 10k / 100k      |
+| `user_keys`         | Wrapped per-user DEK and KEK version                   | crypto module            | crypto module                    | 3   | `wrapped_dek` is AES-KW ciphertext                                                            | until deletion                                                                          | cascade                                                                | 1k / 10k / 100k      |
+| `devices`           | Installs, platform, OS, attestation reserved           | `POST /v1/devices`       | push, analytics                  | 1   | none                                                                                          | until deletion                                                                          | cascade                                                                | 1.5k / 15k / 150k    |
+| `user_preferences`  | Units, time format, settings blob (sync entity)        | API                      | API, sync                        | 1   | none                                                                                          | tombstoned, purged at 30 d                                                              | cascade                                                                | 1k / 10k / 100k      |
+| `user_consents`     | Terms, privacy, marketing, email import consents       | API                      | export, compliance               | 1   | none                                                                                          | until deletion                                                                          | cascade                                                                | 3k / 30k / 300k      |
+| `user_sync_changes` | Change feed with `xid8` watermark for `GET /v1/sync`   | API (same tx as the row) | sync                             | 1   | none                                                                                          | 30 d                                                                                    | cascade                                                                | 20k / 200k / 2M      |
+| `idempotency_keys`  | Replay store for mutating routes                       | idempotency middleware   | idempotency middleware           | 1   | request hash                                                                                  | 24 h                                                                                    | cascade                                                                | hundreds / 5k / 50k  |
+| `deleted_subjects`  | Pseudonymous record that a subject was deleted         | deletion route           | auth middleware, webhooks, audit | 1   | Apple, Google and session subjects HMAC-SHA-256 under a Workers secret; RevenueCat id SHA-256 | `expires_at`: 400 d (provider subject), 31 d (session); purged by the increment 12 cron | kept (that is its job)                                                 | tens / hundreds / 1k |
 
 ### Reference
 
@@ -192,24 +192,25 @@ by design, pseudonymous). Rows: order of magnitude twelve months in, after reten
 
 ### Flight core
 
-| Table                    | Purpose                                                         | Writer                | Readers                        | PII | Enc  | Retention                            | GDPR | Rows 1k / 10k / 100k |
-| ------------------------ | --------------------------------------------------------------- | --------------------- | ------------------------------ | --- | ---- | ------------------------------------ | ---- | -------------------- |
-| `flight_instances`       | Registry of every tracked flight; generated unique `flight_key` | persist consumer only | API, reconcile cron, sync join | 0   | none | finished rows kept 13 months         | n/a  | 12k / 120k / 1.2M    |
-| `flight_instance_merges` | Audit of merged instances                                       | persist consumer      | admin                          | 0   | none | kept                                 | n/a  | tens / hundreds / 5k |
-| `flight_designators`     | Marketing designator to instance                                | API (search), persist | search route                   | 0   | none | follows the instance                 | n/a  | 20k / 200k / 2M      |
-| `flight_events`          | Append-only timeline per instance                               | persist consumer only | detail route, admin            | 0   | none | 90 d, then R2 and `timeline_summary` | n/a  | 120k / 1.2M / 12M    |
-| `flight_tracks`          | Pointer to the archived track sample plus preview               | persist consumer      | detail route                   | 0   | none | follows the instance                 | n/a  | 12k / 120k / 1.2M    |
+| Table                    | Purpose                                                                             | Writer                                        | Readers                        | PII | Enc  | Retention                            | GDPR | Rows 1k / 10k / 100k |
+| ------------------------ | ----------------------------------------------------------------------------------- | --------------------------------------------- | ------------------------------ | --- | ---- | ------------------------------------ | ---- | -------------------- |
+| `flight_instances`       | Registry of every tracked flight; generated unique `flight_key`                     | persist consumer only                         | API, reconcile cron, sync join | 0   | none | finished rows kept 13 months         | n/a  | 12k / 120k / 1.2M    |
+| `flight_instance_merges` | Audit of merged instances                                                           | persist consumer                              | admin                          | 0   | none | kept                                 | n/a  | tens / hundreds / 5k |
+| `flight_designators`     | Marketing designator to instance                                                    | API (search), persist                         | search route                   | 0   | none | follows the instance                 | n/a  | 20k / 200k / 2M      |
+| `flight_events`          | Append-only timeline per instance                                                   | persist consumer only                         | detail route, admin            | 0   | none | 90 d, then R2 and `timeline_summary` | n/a  | 120k / 1.2M / 12M    |
+| `flight_sync_changes`    | Flight half of the sync feed: the snapshot each applied upsert stored (increment 8) | persist consumer only (same tx as the upsert) | sync route                     | 0   | none | 30 d                                 | n/a  | 120k / 1.2M / 12M    |
+| `flight_tracks`          | Pointer to the archived track sample plus preview                                   | persist consumer                              | detail route                   | 0   | none | follows the instance                 | n/a  | 12k / 120k / 1.2M    |
 
 ### Trips and subscriptions
 
-| Table                  | Purpose                                                 | Writer            | Readers           | PII | Enc                               | Retention                  | GDPR                          | Rows 1k / 10k / 100k |
-| ---------------------- | ------------------------------------------------------- | ----------------- | ----------------- | --- | --------------------------------- | -------------------------- | ----------------------------- | -------------------- |
-| `trips`                | Named groups of flights (sync entity)                   | API               | API, sync         | 2   | none                              | tombstoned, purged at 30 d | cascade                       | 3k / 30k / 300k      |
-| `trip_members`         | Shared trip membership and role (sync entity)           | API               | API, sync         | 1   | none                              | tombstoned, purged at 30 d | cascade (both FKs)            | 4k / 40k / 400k      |
-| `flight_subscriptions` | A user's flight with PNR, seat, overrides (sync entity) | API, import jobs  | API, sync, notify | 3   | `confirmation_code_enc`           | tombstoned, purged at 30 d | cascade                       | 12k / 120k / 1.2M    |
-| `logbook_entries`      | Flown flights for stats (sync entity)                   | housekeeping, API | stats, sync       | 2   | none                              | tombstoned, purged at 30 d | cascade                       | 12k / 120k / 1.2M    |
-| `user_stats_yearly`    | Year-in-review aggregates                               | housekeeping      | API               | 1   | none                              | until deletion             | cascade                       | 1k / 10k / 100k      |
-| `usage_counters`       | Exact quotas per user, hashed email, hashed IP          | middleware        | middleware        | 1   | email and IP subjects are SHA-256 | windows purged at 30 d     | by subject (`scope = 'user'`) | 10k / 100k / 1M      |
+| Table                  | Purpose                                                 | Writer                   | Readers           | PII | Enc                                                                               | Retention                    | GDPR                          | Rows 1k / 10k / 100k |
+| ---------------------- | ------------------------------------------------------- | ------------------------ | ----------------- | --- | --------------------------------------------------------------------------------- | ---------------------------- | ----------------------------- | -------------------- |
+| `trips`                | Named groups of flights (sync entity)                   | API                      | API, sync         | 2   | none                                                                              | tombstoned, purged at 30 d   | cascade                       | 3k / 30k / 300k      |
+| `trip_members`         | Shared trip membership and role (sync entity)           | API                      | API, sync         | 1   | none                                                                              | tombstoned, purged at 30 d   | cascade (both FKs)            | 4k / 40k / 400k      |
+| `flight_subscriptions` | A user's flight with PNR, seat, overrides (sync entity) | API, import jobs         | API, sync, notify | 3   | `confirmation_code_enc`                                                           | tombstoned, purged at 30 d   | cascade                       | 12k / 120k / 1.2M    |
+| `logbook_entries`      | Flown flights for stats (sync entity)                   | housekeeping, API        | stats, sync       | 2   | none                                                                              | tombstoned, purged at 30 d   | cascade                       | 12k / 120k / 1.2M    |
+| `user_stats_yearly`    | Year-in-review aggregates                               | housekeeping             | API               | 1   | none                                                                              | until deletion               | cascade                       | 1k / 10k / 100k      |
+| `usage_counters`       | Exact quotas per user, hashed email, salted-HMAC IP     | caps (`src/lib/caps.ts`) | caps              | 1   | email subjects SHA-256; IP subjects HMAC under a daily salt from a Workers secret | daily windows purged at 30 d | by subject (`scope = 'user'`) | 10k / 100k / 1M      |
 
 ### Providers and models
 
@@ -324,6 +325,48 @@ Natural keys used for idempotent upserts by the seed loaders: `airports.icao`, `
   `airports (id, icao, tz)`, so a resolved origin cannot disagree with the airport row on code or
   zone; the zone is what decides the origin-local date inside the frozen key.
 
+### Sync feed and caps (increment 8)
+
+| Invariant                                                                                         | Enforced by                                                                                                                                                                                                                                                |
+| ------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| A change row is written in the same transaction as the entity write it records, on one connection | `appendUserChange` inside every route's `db.transaction()`; the persist consumer's upsert and its `flight_sync_changes` insert share `db.transaction()`; `test/workers/sync.test.ts`, `flights.subscribe.test.ts` (compensation path leaves no change row) |
+| A change row is never updated or upserted (its `xid` DEFAULT would not fire on `DO UPDATE`)       | insert-only writers; no update path exists in `src/`                                                                                                                                                                                                       |
+| A replayed or stale `flight_instances` delivery adds no `flight_sync_changes` row                 | the insert runs only when the monotonic upsert's `RETURNING` answered; `sync.test.ts` replays one version and delivers an older one                                                                                                                        |
+| One `(xid, seq)` pair names at most one row across the two change tables                          | no transaction writes both (routes write user rows, the persist consumer flight rows); ADR 0012 item 3                                                                                                                                                     |
+| The feed never serves a row at or above the watermark                                             | `xid < pg_snapshot_xmin(pg_current_snapshot())` in both page queries; `sync.late-commit.test.ts`                                                                                                                                                           |
+| The page predicate is carried by the index                                                        | `user_sync_changes_user_id_xid_seq_idx` (Index Cond includes the ROW comparison, EXPLAIN in `sync.test.ts`); `flight_sync_changes_flight_instance_id_xid_seq_idx`                                                                                          |
+| A cap take is one statement and the counter row is the serialization point                        | `INSERT ... ON CONFLICT DO UPDATE ... WHERE count < cap RETURNING` in `src/lib/caps.ts`; `caps.concurrency.test.ts` (20 concurrent subscribes, exactly 5 succeed)                                                                                          |
+| A counter never goes below zero                                                                   | `usage_counters_count_check`; releases update `where count > 0`                                                                                                                                                                                            |
+| Only the increment 8 counter names, and `refresh:{flightKey}`, are stored                         | `usage_counters_counter_check` (migration 0003)                                                                                                                                                                                                            |
+| A subscription that took a `live_tracked` slot releases exactly that slot                         | `flight_subscriptions.live_tracked` set at subscribe, read at unsubscribe (migration 0003)                                                                                                                                                                 |
+| A `deleted_subjects` hash is keyed and namespaced                                                 | `deleted_subjects_provider_subject_hash_check` (`apple:`, `google:` or `session:` plus 43 base64url characters)                                                                                                                                            |
+
+- **Two change tables, one watermark (ADR 0012).** `user_sync_changes` (a user's entities) and
+  `flight_sync_changes` (a flight's snapshot, written once per applied upsert however many users
+  follow the flight) share one predicate,
+  `xid < pg_snapshot_xmin(pg_current_snapshot()) and (xid, seq) > ($1::xid8, $2::bigint)`,
+  ordered by `(xid, seq)`. The watermark rule is the whole
+  safety argument: everything below `xmin` is committed or dead, so a transaction that took its
+  xid early and committed late is replayed on a later pull instead of skipped. A page is 200 rows,
+  server-enforced; the cursor is `base64url("<xid8>:<seq>")`, strings only, and a drained page
+  answers `(watermark, 0)`.
+- **`deleted_at` is not the delete mechanism** (facts sheet, PLAN CONFLICT low). The feed's delete
+  is a change row with `op = 'delete'` carrying the tombstoned row. `deleted_at` stays on the sync
+  entities for the partial unique index on `flight_subscriptions (user_id, flight_instance_id)`
+  (`where deleted_at is null`), for last-writer-wins on the client, and so a re-subscribe RESTORES the
+  tombstoned row (same id) rather than inserting a second one.
+- **The watermark is cluster-global.** One long writing transaction anywhere freezes every user's
+  feed; the guards are `statement_timeout` and `idle_in_transaction_session_timeout` on the app
+  role (section 12) and the watermark-lag metric on the admin page (increment 12).
+- **Retention and 410.** Both change tables keep 30 days; the increment 12 housekeeping cron
+  purges in `seq` order, so the oldest retained row is an exact horizon, and a cursor below it (or
+  beyond `pg_snapshot_xmax`) answers 410 `resync_required`.
+- **Caps are counters, reconciled nightly.** `active_subscriptions` and `live_tracked` (window at
+  the epoch) go up at subscribe and down at unsubscribe; `instances_created`, `tracker_creations`
+  and `refresh:{flightKey}` (window the UTC day) only go up. A crash between a take and its
+  compensating release leaves drift, which the increment 12 housekeeping reconciliation repairs
+  against `flight_subscriptions` (not built in increment 8).
+
 ## 7. Write-path ownership
 
 | Table group                                                                                                                      | Only writer                                                                                  | Everyone else                                                                                                                            |
@@ -351,6 +394,75 @@ Two rules the flight writers must keep:
   sync join (query 11) sees no phantom change; `test/trigger.test.ts` replays one upsert six
   times to prove it. The consumer does not need a guard of its own for this, but it must not
   write differing values on a replay (a fresh `now()` in the SET list would defeat the clause).
+
+Increment 8 adds three writers to the table above, each in its entity's transaction:
+`user_sync_changes` (the routes, with the entity), `flight_sync_changes` (the persist consumer,
+with the upsert), and the `flight_instances` registry row's five key columns (the subscribe and
+search routes, `insert ... on conflict (flight_key) do nothing`, because a subscription needs the
+row before the persist consumer's first write lands; every tracked column stays the consumer's).
+`deleted_subjects` and the deletion `audit_log` row are written by `POST /v1/me/delete`.
+
+### Account deletion (`POST /v1/me/delete`, increment 8)
+
+Better Auth's `deleteUser` stays disabled. The order: read (subscriptions, the Apple refresh token
+decrypted while its DEK exists, provider subjects, session tokens), no transaction held; unsubscribe
+every FlightTracker (idempotent, failures logged); Apple `/auth/revoke` best effort (TN3194), the
+outcome to `audit_log`; then ONE short transaction of ordered DELETE statements, leaf to root
+(`DELETION_ORDER` in `apps/api/src/lib/account-deletion.ts`), never a single multi-CTE statement,
+followed by the `deleted_subjects` rows, the `audit_log` row, and `delete from users`. Every table
+with a foreign key to `users` is emptied explicitly; the `ON DELETE CASCADE` keys are a safety net,
+not the mechanism. `test/workers/me.delete.test.ts` compares this list with every foreign key the
+catalog reports and asserts no row names the user afterwards.
+
+| Table                                   | How the user's rows go                                      | Note                                                                   |
+| --------------------------------------- | ----------------------------------------------------------- | ---------------------------------------------------------------------- |
+| `import_rows`                           | explicit statement (`user_id`)                              | before `imports`                                                       |
+| `imports`                               | explicit statement                                          |                                                                        |
+| `email_extractions`                     | explicit statement                                          |                                                                        |
+| `email_messages_processed`              | explicit statement                                          | before `email_accounts`                                                |
+| `email_accounts`                        | explicit statement                                          |                                                                        |
+| `inbound_messages`                      | explicit statement                                          | before `inbound_addresses`                                             |
+| `inbound_addresses`                     | explicit statement                                          |                                                                        |
+| `calendar_events`                       | explicit statement                                          | before `calendar_connections`                                          |
+| `calendar_connections`                  | explicit statement                                          |                                                                        |
+| `ics_feed_tokens`                       | explicit statement                                          |                                                                        |
+| `share_link_views`                      | cascade from `share_links`                                  | no user column                                                         |
+| `share_links`                           | explicit statement                                          |                                                                        |
+| `meet_me_sessions`                      | explicit statement                                          |                                                                        |
+| `live_activities`                       | explicit statement                                          | before `devices`                                                       |
+| `push_tokens`                           | explicit statement                                          | before `devices`                                                       |
+| `notifications`                         | explicit statement                                          |                                                                        |
+| `notification_preferences`              | explicit statement                                          |                                                                        |
+| `logbook_entries`                       | explicit statement                                          |                                                                        |
+| `user_stats_yearly`                     | explicit statement                                          |                                                                        |
+| `flight_subscriptions`                  | explicit statement                                          | tombstones included; the instance side is RESTRICT and untouched       |
+| `trip_members`                          | explicit statement                                          | the user as a member, and every member of the user's own trips         |
+| `trips`                                 | explicit statement                                          |                                                                        |
+| `entitlements`                          | explicit statement                                          |                                                                        |
+| `api_tokens`                            | explicit statement                                          |                                                                        |
+| `data_export_jobs`                      | explicit statement                                          |                                                                        |
+| `idempotency_keys`                      | explicit statement                                          |                                                                        |
+| `user_sync_changes`                     | explicit statement (`user_id`)                              | ruling K8                                                              |
+| `user_consents`                         | explicit statement                                          |                                                                        |
+| `user_preferences`                      | explicit statement                                          |                                                                        |
+| `devices`                               | explicit statement                                          |                                                                        |
+| `user_keys`                             | explicit statement                                          | the DEK: every ciphertext of the user is unreadable from here          |
+| `accounts`                              | explicit statement                                          |                                                                        |
+| `sessions`                              | explicit statement                                          | revokes every session                                                  |
+| `usage_counters`                        | explicit statement (`scope = 'user' and subject = user id`) | no FK                                                                  |
+| `verifications`                         | explicit statement (identifier or value names the email)    | no FK; not for an anonymous user                                       |
+| `rate_limits`                           | explicit statement (key embeds the email)                   | no FK; IP rows age out                                                 |
+| `users`                                 | explicit statement, last                                    |                                                                        |
+| `audit_log`                             | survives                                                    | pseudonymous `subject_id`; the deletion appends its own row            |
+| `notification_deliveries`               | survives                                                    | pseudonymous `subject_id`                                              |
+| `revenuecat_events`                     | survives                                                    | keyed by RevenueCat's random app user id                               |
+| `subscriptions`                         | survives                                                    | finance ledger, pseudonymous                                           |
+| `provider_calls`, `provider_call_daily` | survive                                                     | no user linkage                                                        |
+| `deleted_subjects`                      | survives                                                    | written by the deletion; HMAC-SHA-256 subjects; purged at `expires_at` |
+| `account_deletion_requests`             | not written in Phase 0                                      | the synchronous path needs no request row (open question)              |
+
+The disclosure that follows: deleted immediately from the live database; encrypted change history
+(Neon's history window, set to 1 day explicitly) retained up to 24 hours.
 
 ## 8. Top-20 query catalog
 
@@ -453,6 +565,11 @@ Sources: `docs/increments/03-db-schema.facts.md` section 5.
   `ALTER ROLE <role> SET statement_timeout = '10s'` as an environment setup step (verify on the
   dev branch: `SELECT context FROM pg_settings WHERE name = 'statement_timeout'` must be `user`,
   then reconnect and `SHOW statement_timeout`), never per request and never inside a migration.
+- **`idle_in_transaction_session_timeout`** (increment 8, ADR 0012). The sync watermark is
+  cluster-global, so one session idle inside a writing transaction freezes `GET /v1/sync` for every
+  user. Set once per environment, next to `statement_timeout`, with
+  `ALTER ROLE <role> SET idle_in_transaction_session_timeout = '30s'`, and watch the watermark
+  lag on the admin page.
 - **Session `TimeZone`.** Set the same way, once per environment:
   `ALTER ROLE <role> SET TimeZone = 'UTC'`. Drizzle reads are normalised whatever the zone
   (principle 2) and writes must carry a zone designator, but raw SQL text and console output

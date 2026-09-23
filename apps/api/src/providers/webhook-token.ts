@@ -7,11 +7,25 @@
  */
 
 /**
- * The path prefix of every provider webhook receiver (`/v1/webhooks/{provider}/{token}`). The
- * public per-IP limiter skips it (orchestrator ruling I2) and the Sentry scrubber redacts the
- * segment after the provider.
+ * The path prefix of every webhook route (`/v1/webhooks/{provider}/{token}` and the reserved
+ * stubs). The Sentry scrubber redacts the segment after the provider; the public per-IP limiter
+ * skips only the provider receivers below (orchestrator rulings I2 and K12).
  */
 export const WEBHOOK_PATH_PREFIX = '/v1/webhooks/';
+
+/**
+ * The provider receivers' own prefixes (`/v1/webhooks/{provider}/{token}`). Only these are exempt
+ * from the public per-IP limiter (ruling I2); the reserved Apple and RevenueCat stubs under
+ * `/v1/webhooks/` (increment 8, ruling K12) carry no path token and stay inside it.
+ */
+export const PROVIDER_WEBHOOK_PATH_PREFIXES = [
+  '/v1/webhooks/aerodatabox/',
+  '/v1/webhooks/aeroapi/',
+] as const;
+
+export function isProviderWebhookPath(path: string): boolean {
+  return PROVIDER_WEBHOOK_PATH_PREFIXES.some((prefix) => path.startsWith(prefix));
+}
 
 const TOKEN_RE = /^(?:[A-Za-z0-9_-]{43}|[0-9a-fA-F]{64})$/;
 

@@ -9,12 +9,15 @@ export const PLANEAHEAD = 'planeahead' as const;
 
 export * from './adb-time';
 export * from './airports';
+export * from './api';
 export * from './cadence';
 export * from './carriers';
 export * from './cost';
+export * from './errors';
 export * from './flight-key';
 export * from './flight-status';
 export * from './ids';
+export * from './limits';
 export * from './live-activity';
 export * from './operator';
 export * from './outbox';

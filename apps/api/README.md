@@ -13,9 +13,14 @@ layer (`src/providers`: the AeroDataBox adapter, the fixture-backed AeroAPI adap
 the cost logger, the budget guards and token bucket), the ProviderBudget Durable Object and the
 two webhook receivers under `/v1/webhooks`; its design is in
 [docs/increments/06-provider-layer.md](../../docs/increments/06-provider-layer.md) and
-[ADR 0010](../../docs/adr/0010-provider-identity.md). The flight routes arrive in increments 7 and
-8, and every path they will own answers `501` with the increment that owns it. The auth design is in [docs/increments/05-auth.md](../../docs/increments/05-auth.md)
-and its threat model in [docs/security/threat-model.md](../../docs/security/threat-model.md).
+[ADR 0010](../../docs/adr/0010-provider-identity.md). Increment 7 adds the FlightTracker and the
+DesignatorResolver. Increment 8 adds the user-facing flight routes (`/v1/flights`: search,
+subscribe, list, detail, unsubscribe, refresh), the pull sync feed (`GET /v1/sync`, ADR 0012), the
+free-tier caps in `usage_counters`, the `/v1` idempotency instance, synchronous account deletion
+(`POST /v1/me/delete`) and the reserved Apple and RevenueCat webhook stubs; its design is in
+[docs/increments/08-flight-routes-and-sync.md](../../docs/increments/08-flight-routes-and-sync.md).
+The auth design is in [docs/increments/05-auth.md](../../docs/increments/05-auth.md) and its
+threat model in [docs/security/threat-model.md](../../docs/security/threat-model.md).
 
 ## Commands
 
@@ -75,7 +80,12 @@ src/mail/                 sender.ts (MailSender, the magic-link message), resend
                           cloudflare-email.ts (implementation only, never wired)
 src/routes/               health.ts, auth.ts (/api/auth: the gate, the verify wrapper, the browser
                           consume route), magic-link-landing.ts (/auth/magic-link, the emailed
-                          non-consuming page), v1.ts (/v1: devices.ts, me.ts, webhooks.ts, the stub)
+                          non-consuming page), v1.ts (/v1: devices.ts, flights.ts, me.ts, sync.ts,
+                          webhooks.ts, the stub)
+src/lib/                  increment 8: validate.ts (the one validator), caps.ts, deadline.ts,
+                          sync-cursor.ts, sync-rows.ts, trackers.ts, flight-search.ts,
+                          flight-registry.ts, flight-snapshots.ts, account-deletion.ts, hmac.ts
+src/client.ts             hcWithType, the typed RPC client the mobile app builds from AppType
 src/providers/            aerodatabox.adapter.ts, aeroapi.mock.ts, router.ts, cost-log.ts,
                           budget.ts, token-bucket.ts, config.ts (plans and settings), http.ts;
                           specs/ (the vendored OpenAPI snapshots), fixtures/ (test data only)
@@ -95,7 +105,9 @@ test/globalSetup.ts       embedded Postgres, the fake Apple/Google/Resend server
 
 **`AppType` is the type of the chained app.** Hono accumulates RPC types through the return value
 of `.route()`. Add a route to the chain in `src/index.ts`; a separate `app.route(...)` statement
-compiles, runs correctly and silently empties the type the mobile client is built from.
+compiles, runs correctly and silently leaves that route out of the type the mobile client is built
+from. The Better Auth mount is exactly such a statement, on purpose (increment 8): its catch-all
+has no business in `AppType`. `test/unit/app-type.test.ts` asserts both halves.
 
 **Middleware order is the contract, and it has exactly one definition.** request-id first so
 everything after it can correlate, Sentry second so events carry the id, CORS third so a preflight
@@ -117,8 +129,11 @@ mutating request that carries `Idempotency-Key` without it, or with a malformed 
 400 `idempotency_scope_missing` rather than run unprotected. The client IP was rejected as the
 scope: it changes when a phone moves from WiFi to LTE mid-retry, which is the retry the key exists
 to make safe, and behind a carrier NAT two phones share one. In the global slot the store is the
-in-memory map; the Postgres store and the per-user scope in `idempotency.ts` are for the `/v1`
-mount behind auth in increment 8 and are never taken before then. The one path the middleware
+in-memory map. Since increment 8 the global slot leaves `/v1` alone: `/v1` has its own instance
+behind auth and the burst limiter, which scopes a key by the user id (else the install id), keeps a
+user's keys in Postgres, and leaves the reservation to `idempotencyGate()`, which a route places
+after its validator so the hash covers the validated body (IETF semantics: replay with
+`Idempotent-Replayed: true`, 409 `in_flight`, 422 `idempotency_payload_mismatch`). The one path the middleware
 skips is the Better Auth mount (`/api/auth/*`): its endpoints carry their own replay semantics, a
 stored 200 replayed for `/sign-in/magic-link` would answer ahead of the per-address cap and never
 count, and reading the body there would consume it ahead of the handler that has to parse it.
