@@ -209,28 +209,6 @@ jobs:
       - run: node scripts/gen-migration-hash.mjs
       - run: node scripts/vitest-exit-guard.mjs
 
-  # Proves that a failing test fails the run. embedded-postgres registers async-exit-hook at
-  # import, which hooks `beforeExit` with exit code 0 and once overrode Vitest's exit code in both
-  # packages that start the harness: their suites reported failures and exited 0, and the two test
-  # jobs above stayed green. packages/db/test/embedded.ts removes the handler; this job runs a
-  # deliberately failing fixture in apps/api and packages/db (scripts/vitest-exit-guard.mjs, on
-  # the embedded cluster, where the hook had a server to guard) and asserts a non-zero exit. It
-  # runs after the test jobs because a green test job means nothing until this one is green too.
-  vitest-exit-guard:
-    runs-on: ubuntu-latest
-    needs: [test-workers, test]
-    steps:
-      - uses: actions/checkout@v5
-      - uses: pnpm/action-setup@v4
-      - uses: actions/setup-node@v6
-        with:
-          node-version-file: .node-version
-          cache: pnpm
-      - run: pnpm install --frozen-lockfile
-      # The apps/api run bundles the Worker, which imports the generated migration hash.
-      - run: node scripts/gen-migration-hash.mjs
-      - run: node scripts/vitest-exit-guard.mjs
-
   toolchain-guard:
     runs-on: ubuntu-latest
     steps:
