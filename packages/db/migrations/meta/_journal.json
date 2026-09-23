@@ -15,6 +15,13 @@
       "when": 1789869930660,
       "tag": "0001_add_set_updated_at",
       "breakpoints": true
+    },
+    {
+      "idx": 2,
+      "version": "7",
+      "when": 1790133384721,
+      "tag": "0002_add_do_lifetime_epoch",
+      "breakpoints": true
     }
   ]
 }

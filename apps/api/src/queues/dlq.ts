@@ -6,14 +6,20 @@
  * after four days, silently; a thrice-failed outbox row would be gone with no trace. So each
  * message is written raw to `PRIVATE_BUCKET` at `dlq/{queue}/{messageId}.json`, logged at error
  * level, and acknowledged; the batch raises one ops alert (a `fatal` Sentry event) naming the
- * queue and the message ids. Acknowledged even when the archive write fails: a dead letter
- * message must never loop, and the log line carries what the archive would have.
+ * queue and the message ids. A failed archive write is retried with backoff while the
+ * `max_retries: 2` every `-dlq` consumer declares in wrangler.jsonc allows (a transient R2
+ * failure must not discard the only copy), and acknowledged on the last attempt with the body on
+ * the log line: a dead letter message must never loop.
  */
 
 import { deadLetterArchiveKey, putJsonArchive } from '../r2/archive';
 import { raiseOpsAlert, type CaptureMessage } from '../observability/ops-alert';
 import { errorFields } from '../observability/log';
+import { backoffSeconds } from './consume';
 import type { QueueContext, QueueKind } from './index';
+
+/** `max_retries` on every `-dlq` consumer in wrangler.jsonc; the last attempt is one past it. */
+export const DEAD_LETTER_MAX_RETRIES = 2;
 
 export interface DeadLetterDeps {
   readonly capture?: CaptureMessage | undefined;
@@ -39,6 +45,7 @@ export async function handleDeadLetterBatch(
   const bucket = deps.bucket ?? env.PRIVATE_BUCKET;
   const archived: string[] = [];
   const failed: string[] = [];
+  const retried: string[] = [];
   for (const message of batch.messages) {
     const key = deadLetterArchiveKey(kind, message.id);
     const record: DeadLetterRecord = {
@@ -60,6 +67,20 @@ export async function handleDeadLetterBatch(
         archive_key: key,
       });
     } catch (error) {
+      if (message.attempts <= DEAD_LETTER_MAX_RETRIES) {
+        const delaySeconds = backoffSeconds(message.attempts);
+        retried.push(message.id);
+        log.warn('queue_dead_letter_archive_retry', {
+          queue: batch.queue,
+          queue_kind: kind,
+          message_id: message.id,
+          attempts: message.attempts,
+          delay_seconds: delaySeconds,
+          ...errorFields(error),
+        });
+        message.retry({ delaySeconds });
+        continue;
+      }
       failed.push(message.id);
       log.error('queue_dead_letter_archive_failed', {
         queue: batch.queue,
@@ -72,6 +93,10 @@ export async function handleDeadLetterBatch(
     }
     message.ack();
   }
+  if (archived.length === 0 && failed.length === 0) {
+    // Every message is coming back: the alert belongs to the attempt that settles them.
+    return;
+  }
   raiseOpsAlert(
     'queue_dead_letter',
     {
@@ -80,6 +105,7 @@ export async function handleDeadLetterBatch(
       messages: batch.messages.length,
       archived,
       archive_failed: failed,
+      archive_retried: retried,
     },
     log,
     deps.capture,

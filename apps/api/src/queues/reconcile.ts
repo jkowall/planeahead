@@ -5,12 +5,17 @@
  * Durable Object round trips belong in a consumer with retries.
  *
  * Per message: `health()` on the tracker, and when the phase is not `finished` and `alarmAt` is
- * null, `forceRefresh('reconcile')`, which polls once and re-arms the cadence. The phase is
- * checked before the alarm because a running alarm handler also reports a null alarm; a tracker
- * that answers `absent` (finished and deleted, or never seeded) is left alone and logged.
+ * null, `forceRefresh('reconcile')`, which polls once, re-arms the cadence, and finishes the
+ * flight when the answer says it is over. The phase is checked before the alarm because a
+ * running alarm handler also reports a null alarm; a tracker that answers `absent` (finished and
+ * deleted, or never seeded) is left alone and logged. A fetch in flight is left alone too,
+ * unless it has been in flight longer than `INFLIGHT_STALE_MS` (ruling L3): every provider
+ * request carries a 30 s timeout, so that is a hung promise, and the refresh is made anyway (the
+ * tracker abandons the stale handle).
  */
 
 import {
+  INFLIGHT_STALE_MS,
   RPC_SCHEMA_VERSION,
   ReconcileMessageV1,
   type Exact,
@@ -46,9 +51,12 @@ export async function reconcileFlight(
     return 'finished';
   }
   if (health.inflight) {
-    return 'inflight';
-  }
-  if (health.alarmAt !== null) {
+    const age = health.inflightSinceMs ?? null;
+    if (age === null || age < INFLIGHT_STALE_MS) {
+      return 'inflight';
+    }
+    // A hung promise: the refresh below replaces it.
+  } else if (health.alarmAt !== null) {
     return 'alarm_present';
   }
   await tracker.forceRefresh({ rpcVersion: RPC_SCHEMA_VERSION, reason: 'reconcile' });

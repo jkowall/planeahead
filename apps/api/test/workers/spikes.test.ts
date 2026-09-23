@@ -6,6 +6,9 @@
  *   1. `setAlarm()` inside `transactionSync()` is covered by the rollback: a throw after it
  *      leaves `getAlarm()` at its previous value. The alarm handler's step 1 (attempt row, budget
  *      debit, outbox intent, next alarm, one commit) depends on this; ADR 0011 records it.
+ *      1b (the review's in-handler case): inside a scheduler-invoked handler the "previous
+ *      value" is the running alarm's own time, and a handler that swallows the rolled-back
+ *      transaction and returns leaves that stale time visible, so the tracker never swallows one.
  *   2. Whether an alarm scheduled from a test fires on its own wall clock under the Vitest pool.
  *      It does (200 ms out, no `runDurableObjectAlarm` call), so the `afterEach` drain in every
  *      Durable Object test is a guard against cross-test interference, not the only trigger.
@@ -120,6 +123,92 @@ describe('spike 1: setAlarm inside transactionSync rolls back with the transacti
     });
 
     expect(outcome.after).toBe(outcome.at);
+  });
+});
+
+/**
+ * Spike 1 inside a scheduler-invoked handler (increment 7 review, alarm-and-transactions-9):
+ * replaces the host's `alarm()` with one that reads `getAlarm()`, runs
+ * `transactionSync(() => { setAlarm(target); throw })`, reads `getAlarm()` again and returns
+ * normally; then arms the alarm 100 ms out and samples afterwards.
+ */
+function scheduleRollbackProbe(
+  stub: DurableObjectStub<ProviderBudget>,
+): Promise<{ scheduledFor: number; target: number }> {
+  return runInDurableObject(stub, async (instance: ProviderBudget, state) => {
+    state.storage.sql.exec(
+      'CREATE TABLE IF NOT EXISTS spike_probe (id INTEGER PRIMARY KEY, before INTEGER, after INTEGER)',
+    );
+    const target = Date.now() + 6 * 60 * 60_000;
+    Object.defineProperty(instance, 'alarm', {
+      configurable: true,
+      writable: true,
+      value: async () => {
+        const before = await state.storage.getAlarm();
+        try {
+          state.storage.transactionSync(() => {
+            void state.storage.setAlarm(target);
+            throw new Error('rolled back inside the handler on purpose');
+          });
+        } catch {
+          // swallowed on purpose: the probe is about what the handler then sees
+        }
+        const after = await state.storage.getAlarm();
+        state.storage.sql.exec(
+          'INSERT INTO spike_probe (id, before, after) VALUES (NULL, ?, ?)',
+          before,
+          after,
+        );
+      },
+    });
+    const scheduledFor = Date.now() + 100;
+    await state.storage.setAlarm(scheduledFor);
+    return { scheduledFor, target };
+  });
+}
+
+describe('spike 1b: a rolled-back setAlarm inside a scheduler-invoked handler', () => {
+  // Observed on 2026-09-22 (workerd 1.20260918.1): inside the running handler `getAlarm()`
+  // reads null (the alarm being delivered is no longer pending); after the rolled-back
+  // `setAlarm` it reads the RUNNING alarm's own, already past, scheduled time; and once the
+  // handler returns normally that stale time stays visible and is not re-fired. The rollback
+  // restores the metadata cache to "the alarm being delivered", which the handler's normal
+  // completion then does not clear. The consequence for the FlightTracker (ADR 0011): inside
+  // `alarm()` a transaction that set an alarm must never be swallowed. Rethrow it, or call
+  // `deleteAlarm()` or `setAlarm` afterwards. `#tx` failures in the tracker propagate.
+  it("leaves the running alarm's stale time visible after the handler completes", async () => {
+    const stub = budgetHost();
+    const { scheduledFor, target } = await scheduleRollbackProbe(stub);
+
+    const deadline = Date.now() + 3_500;
+    let probe: { before: number | null; after: number | null }[] = [];
+    let alarm: number | null = null;
+    let runs = 0;
+    while (Date.now() < deadline) {
+      await sleep(250);
+      const sample = await runInDurableObject(stub, async (_instance, state) => ({
+        probe: state.storage.sql
+          .exec<{ before: number | null; after: number | null }>(
+            'SELECT before, after FROM spike_probe ORDER BY id',
+          )
+          .toArray(),
+        alarm: await state.storage.getAlarm(),
+      }));
+      probe = sample.probe;
+      alarm = sample.alarm;
+      runs = probe.length;
+    }
+
+    expect(runs).toBe(1);
+    expect(probe[0]?.before).toBeNull();
+    expect(probe[0]?.after).toBe(scheduledFor);
+    expect(probe[0]?.after).not.toBe(target);
+    // The ghost: reported after the handler returned, in the past, and never re-fired.
+    expect(alarm).toBe(scheduledFor);
+    console.log(
+      `[spike 1b] in-handler getAlarm(): before=${String(probe[0]?.before)} after=${String(probe[0]?.after)} ` +
+        `(running alarm ${String(scheduledFor)}, rolled-back target ${String(target)}); after return: ${String(alarm)}`,
+    );
   });
 });
 

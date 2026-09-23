@@ -12,10 +12,13 @@
  * `flight_instances` in 500-row pages inside a 25 second wall budget, sends the keys in batches
  * of 100, and never re-arms anything inline. Candidates: an ACTIVE tracking state (`pending`,
  * `tracking`, `airborne`, `landed`; the schema has no `active` value, the spec's word for the
- * set) and a `next_refresh_at` more than twenty minutes in the past.
+ * set) and a `next_refresh_at` more than twenty minutes in the past, OR a NULL `next_refresh_at`
+ * with an `updated_at` more than twenty minutes old (ruling L12): the tracker never persists a
+ * NULL for a phase that is not finished, so a NULL on an active row is itself a sign the tracker
+ * died between its last step 1 and its finish, and the consumer's refresh finishes it.
  */
 
-import { and, gt, inArray, lt, asc } from 'drizzle-orm';
+import { and, asc, gt, inArray, isNull, lt, or } from 'drizzle-orm';
 import { ACTIVE_TRACKING_STATES, flightInstances, openDb, type Db } from '@planeahead/db';
 import { RPC_SCHEMA_VERSION, type FlightKey, type ReconcileMessageV1 } from '@planeahead/shared';
 import type { CronHandler } from './index';
@@ -52,7 +55,10 @@ export async function overduePage(
 ): Promise<{ id: string; flightKey: string; nextRefreshAt: string | null }[]> {
   const cutoff = new Date(now - RECONCILE_OVERDUE_MS).toISOString();
   const active = inArray(flightInstances.trackingState, [...ACTIVE_TRACKING_STATES]);
-  const overdue = lt(flightInstances.nextRefreshAt, cutoff);
+  const overdue = or(
+    lt(flightInstances.nextRefreshAt, cutoff),
+    and(isNull(flightInstances.nextRefreshAt), lt(flightInstances.updatedAt, cutoff)),
+  );
   const where =
     afterId === null ? and(active, overdue) : and(active, overdue, gt(flightInstances.id, afterId));
   return db

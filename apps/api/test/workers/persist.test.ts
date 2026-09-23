@@ -9,7 +9,7 @@
  * with every other file against the one test database.
  */
 
-import { createMessageBatch, getQueueResult, createExecutionContext } from 'cloudflare:test';
+import { createExecutionContext, createMessageBatch, getQueueResult } from 'cloudflare:test';
 import { and, eq } from 'drizzle-orm';
 import {
   flightEvents,
@@ -308,6 +308,155 @@ describe('persist consumer', () => {
       .where(eq(flightInstances.flightKey, flight.flightKey));
     expect(row?.trackingState).toBe('tracking');
     expect(row?.version ?? 0).toBeGreaterThanOrEqual(1);
+  });
+
+  it('writes one Analytics Engine point per provider call, not per delivery', async () => {
+    const flight = uniqueFlight();
+    let points = 0;
+    const counting: AnalyticsEngineDataset = {
+      writeDataPoint: () => {
+        points += 1;
+      },
+    };
+    const call = callRecord(flight.flightKey);
+    const body = message(flight, 7, {
+      kind: 'provider_call',
+      flightKey: flight.flightKey,
+      payload: call,
+    });
+
+    // Delivered twice in one batch and once more in the next: one row, one point.
+    const first = await run([body, body], { env: { ...testEnv, PROVIDER_CALLS: counting } });
+    const second = await run([body], { env: { ...testEnv, PROVIDER_CALLS: counting } });
+
+    expect(first.explicitAcks).toEqual(['m-0', 'm-1']);
+    expect(second.explicitAcks).toEqual(['m-0']);
+    expect(points).toBe(1);
+    const db = openDb(testEnv);
+    const rows = await db
+      .select({ id: providerCalls.id })
+      .from(providerCalls)
+      .where(eq(providerCalls.id, call.id));
+    expect(rows).toHaveLength(1);
+  });
+
+  it('keeps one provider_call_daily row per ProviderBudget shard, replaced on redelivery (L10)', async () => {
+    const day = `21${String(Math.floor(Math.random() * 90)).padStart(2, '0')}-0${String(1 + Math.floor(Math.random() * 9))}-2${String(Math.floor(Math.random() * 8))}`;
+    const daily = (shard: number, units: number, calls: number) => ({
+      kind: 'provider_budget_daily',
+      seq: 1,
+      origin: `provider_budget:aerodatabox:${day}:${String(shard)}@1`,
+      payload: {
+        provider: 'aerodatabox',
+        utcDate: day,
+        shard,
+        units,
+        pollEquivalents: units / 20,
+        calls,
+        releasedUnits: 0,
+        byTrigger: { alarm: { units, pe: units / 20, calls } },
+        denials: {},
+        dailyUnitCap: 1_666,
+        finalised: true,
+      },
+    });
+
+    // Shard 1 twice (a redelivery), shard 0 once, out of order.
+    const result = await run([daily(1, 60, 30), daily(0, 40, 20), daily(1, 60, 30)]);
+
+    expect(result.explicitAcks).toEqual(['m-0', 'm-1', 'm-2']);
+    const db = openDb(testEnv);
+    const rows = await db
+      .select({
+        operation: providerCallDaily.operation,
+        calls: providerCallDaily.calls,
+        costUnits: providerCallDaily.costUnits,
+      })
+      .from(providerCallDaily)
+      .where(and(eq(providerCallDaily.day, day), eq(providerCallDaily.provider, 'aerodatabox')))
+      .orderBy(providerCallDaily.operation);
+    // Per shard, never summed: a summing upsert would have counted shard 1 twice.
+    expect(rows).toEqual([
+      { operation: 'budget_daily:0', calls: 20, costUnits: 40 },
+      { operation: 'budget_daily:1', calls: 30, costUnits: 60 },
+    ]);
+  });
+
+  it('ignores an older tracker lifetime and refuses a newer one for a finished instance (L9)', async () => {
+    const flight = uniqueFlight();
+    const db = openDb(testEnv);
+    const lifetime = (
+      epochMs: number,
+      seq: number,
+      body: Omit<PersistMessageV1Input, 'seq' | 'origin'>,
+    ) =>
+      ({
+        ...body,
+        seq,
+        origin: flightTrackerOrigin(flight.flightKey, epochMs),
+      }) as PersistMessageV1Input;
+    const instance = (
+      epochMs: number,
+      version: number,
+      overrides: Partial<FlightInstanceOutboxPayloadV1>,
+    ) =>
+      lifetime(epochMs, version, {
+        kind: 'flight_instance',
+        flightKey: flight.flightKey,
+        payload: instancePayload(flight, version, overrides),
+      });
+    const event = (epochMs: number, seq: number) =>
+      lifetime(epochMs, seq, {
+        kind: 'flight_event',
+        flightKey: flight.flightKey,
+        payload: {
+          occurredAt: '2100-01-01T12:00:00.000Z',
+          type: 'created',
+          field: 'trigger',
+          newValue: 'user_search',
+          source: 'system',
+          providerCallId: null,
+        },
+      });
+    const alerts: string[] = [];
+    const capture = (text: string) => void alerts.push(text);
+
+    // Lifetime 1000 lives and finishes.
+    const lived = await run(
+      [
+        instance(1000, 1, {}),
+        event(1000, 2),
+        instance(1000, 3, { phase: 'finished', trackingState: 'finished', nextRefreshAt: null }),
+      ],
+      { capture },
+    );
+    expect(lived.explicitAcks).toEqual(['m-0', 'm-1', 'm-2']);
+    expect(alerts).toEqual([]);
+
+    // A straggler from lifetime 900 (older) is ignored; a lifetime 2000 (newer) for the finished
+    // instance is refused, with one alert for the key; every message is acknowledged.
+    const later = await run(
+      [instance(900, 9, {}), instance(2000, 1, {}), event(2000, 2), event(2000, 3)],
+      { capture },
+    );
+    expect(later.explicitAcks).toEqual(['m-0', 'm-1', 'm-2', 'm-3']);
+    expect(later.retryMessages).toEqual([]);
+    expect(alerts).toEqual(['flight_lifetime_rejected']);
+    const [row] = await db
+      .select({
+        version: flightInstances.version,
+        trackingState: flightInstances.trackingState,
+        epoch: flightInstances.doLifetimeEpochMs,
+        id: flightInstances.id,
+      })
+      .from(flightInstances)
+      .where(eq(flightInstances.flightKey, flight.flightKey));
+    expect(row).toMatchObject({ version: 3, trackingState: 'finished', epoch: 1000 });
+    const events = await db
+      .select({ seq: flightEvents.seq })
+      .from(flightEvents)
+      .where(eq(flightEvents.flightInstanceId, row?.id ?? ''));
+    expect(events).toEqual([{ seq: 2 }]);
   });
 
   it('writes the ProviderBudget daily counters to provider_call_daily, replacing on redelivery', async () => {

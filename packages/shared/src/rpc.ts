@@ -33,6 +33,22 @@ import {
 export const RPC_SCHEMA_VERSION = 1;
 const rpcVersion = z.int().min(1).default(RPC_SCHEMA_VERSION);
 
+/**
+ * A user refresh made within this long of the tracker's last provider answer is answered from
+ * the stored snapshot (`coalesced`, reason `fresh`) without a provider call and without charging
+ * the user's daily cap (increment 7, ruling L15): 500 refreshes from many users inside one minute
+ * cost one call. The in-flight promise coalesces the concurrent case; this coalesces the
+ * sequential one.
+ */
+export const USER_REFRESH_FRESHNESS_MS = 60_000;
+
+/**
+ * An in-flight fetch older than this (`HealthResponseV1.inflightSinceMs`) is a hung promise, not
+ * a slow provider: every provider request carries a 30 s timeout. The reconcile consumer refreshes
+ * such a tracker anyway and the tracker abandons the stale handle (ruling L3).
+ */
+export const INFLIGHT_STALE_MS = 5 * 60_000;
+
 export const TRACKER_PHASES = [...FLIGHT_STATUS_VALUES, 'finished'] as const;
 export const TrackerPhaseSchema = tolerantEnum(TRACKER_PHASES, 'unknown');
 
@@ -93,6 +109,14 @@ export const NotificationOverridesSchema = z.looseObject({
   events: z.array(z.string()).optional(),
 });
 
+/**
+ * `subscribe` and `getState` on a tracker that holds no flight (never seeded, or finished and
+ * deleted by its +22 h alarm) throw the typed `RpcRequestError('invalid_request')`. Increment 8's
+ * routes MUST catch it: 404 for a flight that was never seeded, 410 for one that finished and was
+ * deleted (Postgres `flight_instances.tracking_state` says which). A route never subscribes
+ * before the DesignatorResolver has seeded the object: the search resolves first, then the
+ * subscribe is made against the key it answered.
+ */
 export const SubscribeRequestV1 = z.looseObject({
   rpcVersion,
   subscriptionId: z.uuid(),
@@ -151,9 +175,12 @@ export type ForceRefreshRequestV1 = z.infer<typeof ForceRefreshRequestV1>;
 export const ForceRefreshResponseV1 = z.looseObject({
   rpcVersion,
   /**
-   * `refreshed`: this call made the provider call. `coalesced`: a fetch was in flight and the
-   * caller waited for it. `denied`: the per-user cap or the per-flight hard cap refused it.
-   * `skipped`: nothing to refresh (the tracker is finished or was never seeded).
+   * `refreshed`: this call made the provider call. `coalesced`: no call was made because a fetch
+   * was in flight and the caller waited for it (reason `inflight`), or because the snapshot is
+   * younger than `USER_REFRESH_FRESHNESS_MS` (reason `fresh`); neither charges the user's daily
+   * cap. `denied`: the per-user cap (reason `user_refresh_cap`) or the per-flight hard cap
+   * (reason `hard_cap`) refused it. `skipped`: nothing to refresh (the tracker is finished or
+   * was never seeded).
    */
   outcome: z.enum(['refreshed', 'coalesced', 'denied', 'skipped']),
   reason: z.string().optional(),
@@ -262,6 +289,13 @@ export const HealthResponseV1 = z.looseObject({
   alarmAt: IsoInstantSchema.nullable(),
   /** True while a provider fetch is in flight. */
   inflight: z.boolean(),
+  /**
+   * How long the in-flight fetch has been running, in milliseconds of the tracker's clock; null
+   * when none is. Every provider request carries a 30 s timeout, so a value in the minutes means
+   * a hung promise, and the reconcile consumer treats one older than five minutes as stale and
+   * refreshes anyway (increment 7, ruling L3).
+   */
+  inflightSinceMs: z.int().nonnegative().nullable().optional(),
   version: z.int().nonnegative(),
   doSchemaVersion: z.int().nonnegative(),
   /** Outbox rows sent but not yet confirmed by the persist consumer. */
@@ -270,7 +304,13 @@ export const HealthResponseV1 = z.looseObject({
 });
 export type HealthResponseV1 = z.infer<typeof HealthResponseV1>;
 
-/** A search: a marketing designator (`AA100`) and its origin-local departure date. */
+/**
+ * A search: a marketing designator (`AA100`) and its origin-local departure date. The existing-
+ * tracker probe (a `health` call on the trackers a regional operator hint and the marketing
+ * carrier would name) runs ONLY when `originIcao` is supplied: a flight key needs an origin and
+ * the key is the only name a tracker has. Increment 8's search route reads `flight_designators`
+ * and `flight_instances` before calling the resolver and passes the origin it finds there.
+ */
 export const ResolveRequestV1 = z.looseObject({
   rpcVersion,
   designator: z.string().min(3).max(10),
@@ -284,8 +324,8 @@ export type ResolveRequestV1 = z.infer<typeof ResolveRequestV1>;
 export const ResolveResponseV1 = z.looseObject({
   rpcVersion,
   /**
-   * `resolved`: a tracker exists for `flightKey`. `not_found`: the provider knows no such
-   * flight on that date (cached like a hit, so a typo does not cost a call per search).
+   * `resolved`: the flight is known and `flightKey` names it. `not_found`: the provider knows no
+   * such flight on that date (cached like a hit, so a typo does not cost a call per search).
    * `denied`: the budget refused the call. `error`: the provider failed; not cached.
    */
   outcome: z.enum(['resolved', 'not_found', 'denied', 'error']),
@@ -293,6 +333,14 @@ export const ResolveResponseV1 = z.looseObject({
   status: FlightStatusSchema.optional(),
   /** True when this resolution created the tracker (`seed`), false when it adopted one. */
   created: z.boolean().optional(),
+  /**
+   * What stands behind `flightKey` on a `resolved` answer: `seeded` (this resolution created the
+   * tracker), `adopted` (one already existed), or `none` (the fetched status was terminal and the
+   * cadence had nothing left to schedule, so NO tracker was created: the flight is over and
+   * `status` is the answer; a subscribe against the key would find an absent object). A finished
+   * flight never gets a second lifetime (ruling L9).
+   */
+  tracker: z.enum(['seeded', 'adopted', 'none']).optional(),
   /** True when the answer came from the stored resolution rather than a provider call. */
   cached: z.boolean(),
   resolvedAt: IsoInstantSchema,

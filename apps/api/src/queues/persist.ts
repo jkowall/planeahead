@@ -11,14 +11,25 @@
  *
  *   - `flight_instances`: upsert on the `flight_key` unique index, applied only when the
  *     incoming `version` is greater than the stored one (`setWhere`). A stale or duplicate
- *     delivery is a no-op that still acknowledges.
+ *     delivery is a no-op that still acknowledges. The row also records the tracker LIFETIME it
+ *     was written from (`do_lifetime_epoch_ms`, the `@{epochMs}` of the message's origin,
+ *     ruling L9): an instance or event row from an OLDER lifetime than the stored one is
+ *     ignored, and a NEWER lifetime for an instance whose tracking state is terminal is refused
+ *     with the `flight_lifetime_rejected` ops alert. A finished flight never gets a second
+ *     lifetime; a reborn tracker is a bug, not data. (A newer lifetime for a row that is still
+ *     active is applied and logged: that is a recovery, not a rebirth.)
  *   - `flight_events`: insert on conflict `(flight_instance_id, seq)` do nothing, the instance
  *     id resolved by flight key in a preceding select. An event that arrives before its
  *     instance row throws and is retried with backoff: the row will exist by then.
  *   - `provider_calls`: insert on conflict `(id)` do nothing; the instance id resolved the same
- *     way when the record names a flight.
- *   - `provider_call_daily`: upsert on `(day, provider, operation, result)`, replacing the
- *     counters with the object's final ones.
+ *     way when the record names a flight. The Analytics Engine point is written only when the
+ *     row was inserted, so a redelivery never inflates the per-provider metrics (AE has no
+ *     dedupe key).
+ *   - `provider_call_daily`: one row PER ProviderBudget object, upserted on `(day, provider,
+ *     operation, result)` with the counters REPLACED: operation `budget_daily` for the unsharded
+ *     object, `budget_daily:{n}` per shard (ruling L10). Never summed: at-least-once delivery
+ *     would count a redelivery twice. The increment 12 roll-up excludes operations starting
+ *     with `budget_daily` from per-operation sums (docs/schema-review.md).
  *
  * One `AnalyticsBudget` per invocation caps points at 200, every `writeDataPoint` sits in its
  * own try/catch with blobs truncated, and a bad point never fails its message. One database
@@ -33,6 +44,7 @@
 
 import { eq, sql } from 'drizzle-orm';
 import {
+  TERMINAL_TRACKING_STATES,
   destinationColumns,
   flightEvents,
   flightInstances,
@@ -100,21 +112,69 @@ export class InstanceMissingError extends Error {
   override readonly name = 'InstanceMissingError';
 }
 
-async function instanceIdFor(db: Db, flightKey: string): Promise<string | null> {
+/**
+ * What a lifetime-aware write did. `stale_lifetime`: the row came from an older lifetime than
+ * the stored one and was ignored. `rejected_lifetime`: a newer lifetime for a terminal instance,
+ * ignored and alerted.
+ */
+export type LifetimeWrite = 'applied' | 'stale_lifetime' | 'rejected_lifetime';
+
+interface StoredInstance {
+  readonly id: string;
+  readonly epochMs: number | null;
+  readonly trackingState: string;
+}
+
+async function storedInstanceFor(db: Db, flightKey: string): Promise<StoredInstance | null> {
   const [row] = await db
-    .select({ id: flightInstances.id })
+    .select({
+      id: flightInstances.id,
+      epochMs: flightInstances.doLifetimeEpochMs,
+      trackingState: flightInstances.trackingState,
+    })
     .from(flightInstances)
     .where(eq(flightInstances.flightKey, flightKey))
     .limit(1);
-  return row?.id ?? null;
+  return row ?? null;
 }
 
-/** The monotonic upsert. */
+async function instanceIdFor(db: Db, flightKey: string): Promise<string | null> {
+  return (await storedInstanceFor(db, flightKey))?.id ?? null;
+}
+
+function isTerminal(trackingState: string): boolean {
+  return (TERMINAL_TRACKING_STATES as readonly string[]).includes(trackingState);
+}
+
+/** The lifetime rule shared by the instance and event writes; null means write. */
+function lifetimeVerdict(
+  stored: StoredInstance | null,
+  epochMs: number | null,
+): Exclude<LifetimeWrite, 'applied'> | null {
+  if (stored === null || epochMs === null || stored.epochMs === null) {
+    return null;
+  }
+  if (epochMs < stored.epochMs) {
+    return 'stale_lifetime';
+  }
+  if (epochMs > stored.epochMs && isTerminal(stored.trackingState)) {
+    return 'rejected_lifetime';
+  }
+  return null;
+}
+
+/** The monotonic, lifetime-aware upsert. `epochMs` is the origin's lifetime, null if unknown. */
 export async function upsertFlightInstance(
   db: Db,
   message: FlightInstanceMessageV1,
-): Promise<void> {
+  epochMs: number | null = parseFlightTrackerOrigin(message.origin)?.epochMs ?? null,
+): Promise<LifetimeWrite> {
   const p = message.payload;
+  const stored = await storedInstanceFor(db, message.flightKey);
+  const verdict = lifetimeVerdict(stored, epochMs);
+  if (verdict !== null) {
+    return verdict;
+  }
   const snapshot = p.snapshot;
   const origin = await resolveAirportEndpoint(db, p.originIcao);
   const destinationIcao = checked(snapshot?.destination.icao, ICAO_AIRPORT_RE);
@@ -157,6 +217,7 @@ export async function upsertFlightInstance(
     subscriberCount: p.subscriberCount,
     doSchemaVersion: p.doSchemaVersion,
     version: p.version,
+    doLifetimeEpochMs: epochMs,
     operatorSource: p.operatorSource,
     finishedAt: p.finishedAt,
     eventsR2Key: p.eventsR2Key,
@@ -174,12 +235,22 @@ export async function upsertFlightInstance(
     .onConflictDoUpdate({
       target: flightInstances.flightKey,
       set: mutable,
-      // Monotonic: a stale or duplicate delivery changes nothing.
-      setWhere: sql`${flightInstances.version} < excluded.version`,
+      // Monotonic within a lifetime: a stale or duplicate delivery changes nothing. A newer
+      // lifetime (a recovery of a row that is still active; a terminal row was refused above)
+      // starts its own version sequence and is applied whatever the stored version.
+      setWhere: sql`${flightInstances.version} < excluded.version
+        or (${flightInstances.doLifetimeEpochMs} is not null
+            and excluded.do_lifetime_epoch_ms is not null
+            and ${flightInstances.doLifetimeEpochMs} < excluded.do_lifetime_epoch_ms)`,
     });
+  return 'applied';
 }
 
-/** Insert on conflict `(flight_instance_id, seq)` do nothing; throws when the instance is absent. */
+/**
+ * Insert on conflict `(flight_instance_id, seq)` do nothing; throws when the instance is absent,
+ * or when the event's lifetime is newer than an active instance's (its own instance row has not
+ * landed yet: it will, and the retry finds it).
+ */
 export async function insertFlightEvent(
   db: Db,
   flightKey: string,
@@ -193,15 +264,25 @@ export async function insertFlightEvent(
     source: string;
     providerCallId: string | null;
   },
-): Promise<void> {
-  const instanceId = await instanceIdFor(db, flightKey);
-  if (instanceId === null) {
+  epochMs: number | null = null,
+): Promise<LifetimeWrite> {
+  const stored = await storedInstanceFor(db, flightKey);
+  if (stored === null) {
     throw new InstanceMissingError(`no flight_instances row for ${flightKey} yet`);
+  }
+  const verdict = lifetimeVerdict(stored, epochMs);
+  if (verdict !== null) {
+    return verdict;
+  }
+  if (epochMs !== null && stored.epochMs !== null && epochMs > stored.epochMs) {
+    throw new InstanceMissingError(
+      `flight_instances row for ${flightKey} is from an older lifetime; its instance row is due`,
+    );
   }
   await db
     .insert(flightEvents)
     .values({
-      flightInstanceId: instanceId,
+      flightInstanceId: stored.id,
       seq,
       occurredAt: payload.occurredAt,
       type: payload.type,
@@ -212,23 +293,36 @@ export async function insertFlightEvent(
       providerCallId: payload.providerCallId,
     })
     .onConflictDoNothing({ target: [flightEvents.flightInstanceId, flightEvents.seq] });
-}
-
-/** Insert on conflict `(id)` do nothing, with the instance id when the record names a flight. */
-export async function insertProviderCall(db: Db, record: ProviderCallRecord): Promise<void> {
-  const flightInstanceId =
-    record.flightKey === undefined ? null : await instanceIdFor(db, record.flightKey);
-  await db
-    .insert(providerCalls)
-    .values({ ...providerCallRow(record), flightInstanceId })
-    .onConflictDoNothing({ target: providerCalls.id });
+  return 'applied';
 }
 
 /**
- * The ProviderBudget's final counters as one `provider_call_daily` row per day and provider.
- * The object counts units and calls, not operations or results, so the row's `operation` is
- * `budget_daily` and its `result` is `ok`; the housekeeping roll-up of `provider_calls`
- * (increment 12) fills the per-operation rows next to it.
+ * Insert on conflict `(id)` do nothing, with the instance id when the record names a flight.
+ * Returns whether this call inserted the row, so the caller writes the Analytics Engine point
+ * once per record, not once per delivery.
+ */
+export async function insertProviderCall(db: Db, record: ProviderCallRecord): Promise<boolean> {
+  const flightInstanceId =
+    record.flightKey === undefined ? null : await instanceIdFor(db, record.flightKey);
+  const inserted = await db
+    .insert(providerCalls)
+    .values({ ...providerCallRow(record), flightInstanceId })
+    .onConflictDoNothing({ target: providerCalls.id })
+    .returning({ id: providerCalls.id });
+  return inserted.length > 0;
+}
+
+/** The `provider_call_daily.operation` of one ProviderBudget object's row (ruling L10). */
+export function budgetDailyOperation(shard: number | null): string {
+  return shard === null ? 'budget_daily' : `budget_daily:${String(shard)}`;
+}
+
+/**
+ * The ProviderBudget's final counters as one `provider_call_daily` row per day, provider AND
+ * object (shard). The object counts units and calls, not operations or results, so the row's
+ * `operation` is `budget_daily` (or `budget_daily:{shard}`) and its `result` is `ok`, the
+ * counters replaced on every delivery; the housekeeping roll-up of `provider_calls` (increment
+ * 12) fills the per-operation rows next to it and excludes these from per-operation sums.
  */
 export async function upsertProviderCallDaily(
   db: Db,
@@ -247,7 +341,7 @@ export async function upsertProviderCallDaily(
     .values({
       day: p.utcDate,
       provider: p.provider,
-      operation: 'budget_daily',
+      operation: budgetDailyOperation(p.shard),
       result: 'ok',
       ...counters,
     })
@@ -282,6 +376,34 @@ export async function handlePersistBatch(
     return db;
   };
   const confirmations = new Map<string, Confirmation>();
+  /** Flight keys already alerted for a rejected lifetime in this batch (one alert per key). */
+  const rejected = new Set<string>();
+  const lifetimeOutcome = (
+    body: { kind: string; flightKey?: string | undefined; origin: string; seq: number },
+    outcome: LifetimeWrite,
+  ): void => {
+    if (outcome === 'applied') {
+      return;
+    }
+    const fields = {
+      kind: body.kind,
+      flight_key: body.flightKey,
+      origin: body.origin,
+      seq: body.seq,
+    };
+    if (outcome === 'stale_lifetime') {
+      log.info('persist_stale_lifetime', fields);
+      return;
+    }
+    if (body.flightKey !== undefined && rejected.has(body.flightKey)) {
+      log.error('persist_lifetime_rejected', fields);
+      return;
+    }
+    if (body.flightKey !== undefined) {
+      rejected.add(body.flightKey);
+    }
+    raiseOpsAlert('flight_lifetime_rejected', fields, log, deps.capture);
+  };
 
   const outcome = await consumeBatch(
     batch,
@@ -297,16 +419,30 @@ export async function handlePersistBatch(
         return;
       }
       const body = parsed.data;
+      const origin = parseFlightTrackerOrigin(body.origin);
       switch (body.kind) {
         case 'flight_instance':
-          await upsertFlightInstance(database(), body);
+          lifetimeOutcome(
+            body,
+            await upsertFlightInstance(database(), body, origin?.epochMs ?? null),
+          );
           break;
         case 'flight_event':
-          await insertFlightEvent(database(), body.flightKey, body.seq, body.payload);
+          lifetimeOutcome(
+            body,
+            await insertFlightEvent(
+              database(),
+              body.flightKey,
+              body.seq,
+              body.payload,
+              origin?.epochMs ?? null,
+            ),
+          );
           break;
         case 'provider_call':
-          await insertProviderCall(database(), body.payload);
-          analytics.write(providerCallPoint(body.payload, environment));
+          if (await insertProviderCall(database(), body.payload)) {
+            analytics.write(providerCallPoint(body.payload, environment));
+          }
           break;
         case 'provider_budget_kill_switch':
           // A queue handler has a Sentry client (withSentry wraps queue()); the object does not.
@@ -325,7 +461,6 @@ export async function handlePersistBatch(
           });
           break;
       }
-      const origin = parseFlightTrackerOrigin(body.origin);
       if (origin !== null) {
         const entry = confirmations.get(body.origin) ?? { ...origin, seqs: [] };
         entry.seqs.push(body.seq);

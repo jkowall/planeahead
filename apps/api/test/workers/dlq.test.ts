@@ -1,7 +1,8 @@
 /**
  * The dead letter consumer: every `-dlq` queue routes to one handler that archives the raw
  * message to R2 at `dlq/{queue}/{messageId}.json`, raises the ops alert once per batch, and
- * acknowledges each message, an archive failure included.
+ * acknowledges each message; an archive failure is retried while `max_retries: 2` allows and
+ * acknowledged, with the body on the log line, on the last attempt.
  */
 
 import { createExecutionContext, createMessageBatch, getQueueResult } from 'cloudflare:test';
@@ -80,6 +81,7 @@ describe('dead letter consumer', () => {
             messages: 2,
             archived: ids,
             archive_failed: [],
+            archive_retried: [],
           },
         },
       },
@@ -95,12 +97,46 @@ describe('dead letter consumer', () => {
     );
   });
 
-  it('still acknowledges when the archive write fails, and says so in the alert', async () => {
+  it('retries a failed archive write with backoff while max_retries allows', async () => {
+    const { lines, log } = capture();
+    const alerts: unknown[] = [];
+    const id = `r-${crypto.randomUUID()}`;
+    const batch = createMessageBatch('planeahead-notify-dlq-local', [
+      { id, timestamp: new Date(), attempts: 1, body: { to: 'device' } },
+    ]);
+    const ctx = createExecutionContext();
+
+    await handleDeadLetterBatch(
+      batch,
+      'notify',
+      { env, ctx, log },
+      {
+        bucket: { put: () => Promise.reject(new Error('R2 unavailable')) } as unknown as Pick<
+          R2Bucket,
+          'put'
+        >,
+        capture: (message) => void alerts.push(message),
+      },
+    );
+    const result = await getQueueResult(batch, ctx);
+
+    // Not acknowledged, retried with the consumer's backoff, and no alert yet: the attempt that
+    // settles the message raises it.
+    expect(result.explicitAcks).toEqual([]);
+    expect(result.retryMessages.map((m) => m.msgId)).toEqual([id]);
+    expect(alerts).toEqual([]);
+    const retry = lines.find((line) => line.event === 'queue_dead_letter_archive_retry');
+    expect(retry?.['delay_seconds']).toBe(2);
+    expect(retry?.['body']).toBeUndefined();
+  });
+
+  it('acknowledges on the last attempt when the archive write still fails, and says so in the alert', async () => {
     const { lines, log } = capture();
     const alerts: { context: { extra: Record<string, unknown> } }[] = [];
     const id = `c-${crypto.randomUUID()}`;
+    // attempts 3 is the last one max_retries: 2 allows.
     const batch = createMessageBatch('planeahead-notify-dlq-local', [
-      { id, timestamp: new Date(), attempts: 6, body: { to: 'device' } },
+      { id, timestamp: new Date(), attempts: 3, body: { to: 'device' } },
     ]);
     const ctx = createExecutionContext();
 

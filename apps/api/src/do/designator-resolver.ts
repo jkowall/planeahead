@@ -8,7 +8,7 @@
  * arrives mid-fetch awaits. The answer (a flight key and the status it was created from, or a
  * not-found) is stored for 24 hours; one alarm at expiry calls `deleteAll()`. No `setAlarm` in
  * the constructor: an alarm waking the object runs the constructor first, and a constructor that
- * armed one would postpone the cleanup forever.
+ * armed one would postpone the cleanup forever. No timer of any kind in this module.
  *
  * `resolve()`, inside the object:
  *
@@ -16,31 +16,36 @@
  *   2. when the caller knows the origin, the trackers a `regionalOperatorHint` and the
  *      marketing carrier would name are probed with `health` and an existing one is adopted
  *      (a flight key needs an origin, and the key is the only name a tracker has, so without an
- *      origin there is nothing to probe);
- *   3. otherwise the single AeroDataBox call is made through `providerFor` with trigger
- *      `user_search` (the router's contract: one lookup, up to three billed attempts for a
- *      person-supplied date), `resolveOperator` and `canonicalizeFromProvider` produce the key
- *      (both run inside the adapter's mapping), and the FlightTracker is created through its
- *      `seed` RPC: the fetched status becomes its initial snapshot and its first alarm is set,
+ *      origin there is nothing to probe: the probe runs ONLY when `originIcao` is supplied, and
+ *      increment 8's search route reads `flight_designators` and `flight_instances` first and
+ *      passes the origin it finds there);
+ *   3. otherwise the single AeroDataBox call is made through `providerFor` (resolved inside the
+ *      try, so a missing key is a zero-cost error record and one ops alert, ruling L17) with
+ *      trigger `user_search` (the router's contract: one lookup, up to three billed attempts
+ *      for a person-supplied date), `resolveOperator` and `canonicalizeFromProvider` produce the
+ *      key (both run inside the adapter's mapping), and, unless the status says the flight is
+ *      over (terminal, and the cadence has nothing left to schedule: ruling L9, the search is
+ *      answered from the status and NO tracker is created), the FlightTracker is created through
+ *      its `seed` RPC: the fetched status becomes its initial snapshot and its first alarm is set,
  *      so this one call is never repeated by the tracker's first alarm. Seed is idempotent.
  *
- * The Worker-side half is `resolveDesignator`: it checks KV `search:number:{designator}:{date}`
- * (900 s, written by the object once it has an answer) before `getByName`, because the first
- * `get()` on a never-used name pays a global uniqueness check, and it catches the account-level
- * "generating too much load" error with one jittered retry before answering `overloaded`, which
- * the search route turns into a 503 with `Retry-After` (increment 8).
+ * The provider call records leave through this object's own outbox to the `persist` queue (ADR
+ * 0007: never Postgres). The expiry alarm sends whatever is still unsent and `deleteAll()`s ONLY
+ * when nothing is left unsent (ruling L2): while rows remain it re-arms hourly, bounded by
+ * nothing but the rows going, and raises the ops alert once after the sixth failed attempt. A
+ * send that fails at resolve time arms an earlier retry than the 24 h expiry.
  *
- * Never opens Postgres (ADR 0007): the provider call records leave through this object's own
- * outbox to the `persist` queue.
+ * The Worker-side half (`resolveDesignator`, KV in front of the object and the retry on the
+ * account-level "generating too much load" error) is `src/search/resolve.ts`.
  */
 
 import { DurableObject } from 'cloudflare:workers';
 import {
+  CADENCE_A2,
   CARRIER_IATA_TO_ICAO_FALLBACK,
   REGIONAL_OPERATOR_SEED,
   RPC_SCHEMA_VERSION,
   ResolveRequestV1,
-  ResolveResponseV1 as ResolveResponseSchema,
   RpcRequestError,
   buildFlightKey,
   canonicalizeFromProvider,
@@ -62,10 +67,17 @@ import {
 type ResolveResponse = Exact<ResolveResponseV1>;
 import type { Env } from '../env';
 import { createLogger, errorFields, type Logger } from '../observability/log';
+import { raiseOpsAlert, type CaptureMessage } from '../observability/ops-alert';
 import { DurableObjectCostLogger, PROVIDER_CALL_OUTBOX_KIND } from '../providers/cost-log';
 import { callRecord } from '../providers/http';
-import { budgetGuardFor, providerFor, type RouterDeps } from '../providers/router';
+import {
+  ProviderConfigError,
+  budgetGuardFor,
+  providerFor,
+  type RouterDeps,
+} from '../providers/router';
 import { type DurableObjectPing, blockOnMigrations } from './base';
+import { flightIsOver } from './cadence-context';
 import {
   EMPTY_MIGRATION_RESULT,
   type MigrationResult,
@@ -73,14 +85,17 @@ import {
   runSqlMigrations,
 } from './migrate';
 import { DESIGNATOR_RESOLVER_MIGRATION_001 } from './migrations/designator-resolver/001';
+import { DESIGNATOR_RESOLVER_MIGRATION_002 } from './migrations/designator-resolver/002';
 import { chunkOutbox, sendOutboxChunks } from './outbox';
 
 /** A stored resolution lives this long; the object deletes itself at the end. */
 export const RESOLUTION_TTL_MS = 24 * 60 * 60_000;
 /** The Worker-side KV cache in front of the object. */
 export const SEARCH_KV_TTL_SECONDS = 900;
-/** `Retry-After` the search route sends when the namespace is overloaded. */
-export const OVERLOADED_RETRY_AFTER_SECONDS = 2;
+/** An expiry alarm that still holds unsent records re-arms this often, without bound (L2). */
+export const RESOLVER_FLUSH_RETRY_MS = 60 * 60_000;
+/** The failed attempt after which the object raises the ops alert, once (L2). */
+export const RESOLVER_FLUSH_ALERT_AFTER_ATTEMPTS = 6;
 
 export function searchKvKey(designator: string, dateLocal: string): string {
   return `search:number:${designator}:${dateLocal}`;
@@ -110,6 +125,7 @@ interface ResolutionRow extends Row {
   flight_key: string | null;
   status: string | null;
   created_flight: number;
+  tracker: string | null;
   kv_written: number;
   created_at_ms: number;
   resolved_at_ms: number;
@@ -121,6 +137,8 @@ interface OutboxRow extends Row {
   payload: string;
 }
 
+type TrackerOutcome = NonNullable<ResolveResponseV1['tracker']>;
+
 /** The FlightTracker RPCs the resolver uses; narrowed so a test can hand in a fake. */
 export interface TrackerRpc {
   health(): Promise<{ phase: string; flightKey: string | null }>;
@@ -129,15 +147,19 @@ export interface TrackerRpc {
 
 export class DesignatorResolver extends DurableObject<Env> {
   /** Schema version this build expects. Reported by `GET /health` without touching an object. */
-  static readonly SCHEMA_VERSION = 1;
+  static readonly SCHEMA_VERSION = 2;
 
   /** Append only, in order. Index 0 is migration id 1. */
-  static readonly MIGRATIONS: SqlMigrations = [DESIGNATOR_RESOLVER_MIGRATION_001];
+  static readonly MIGRATIONS: SqlMigrations = [
+    DESIGNATOR_RESOLVER_MIGRATION_001,
+    DESIGNATOR_RESOLVER_MIGRATION_002,
+  ];
 
   /** Test seams, set through `runInDurableObject`, never over RPC. */
   outboxSink: Pick<Queue, 'sendBatch'>;
   kv: Pick<KVNamespace, 'put'>;
   providerDeps: RouterDeps = {};
+  capture: CaptureMessage | undefined = undefined;
   /** Resolves a flight key to its tracker; the default is `FLIGHT_TRACKER.getByName`. */
   trackerFor: (flightKey: FlightKey) => TrackerRpc;
 
@@ -147,7 +169,7 @@ export class DesignatorResolver extends DurableObject<Env> {
   #inflight: Promise<ResolveResponse> | null = null;
   #kvInFlight: Promise<void> | null = null;
   #deleted = false;
-  #cleanupArmed = false;
+  readonly #configAlerted = new Set<string>();
 
   constructor(ctx: DurableObjectState, env: Env) {
     super(ctx, env);
@@ -205,20 +227,43 @@ export class DesignatorResolver extends DurableObject<Env> {
     return inflight;
   }
 
-  /** The expiry alarm: sends anything unsent (best effort) and deletes everything. */
+  /**
+   * The alarm: flush first, whatever woke the object. Before expiry it keeps the schedule (an
+   * earlier retry when records are still unsent); at expiry it `deleteAll()`s only once nothing
+   * is left unsent, otherwise re-arms hourly and alerts once after the sixth failed attempt.
+   */
   override async alarm(): Promise<void> {
     this.#ensureSchema();
     const now = this.#now();
+    await this.#flushOutbox(now);
+    const unsent = this.#countUnsent();
     const stored = this.#resolution();
     if (stored !== null && now < stored.expires_at_ms) {
-      // Woken early (a duplicate delivery): keep the schedule.
-      void this.ctx.storage.setAlarm(stored.expires_at_ms);
+      // Woken early (a duplicate delivery, or the resolve-time retry): keep the schedule.
+      const at =
+        unsent > 0
+          ? Math.min(stored.expires_at_ms, now + RESOLVER_FLUSH_RETRY_MS)
+          : stored.expires_at_ms;
+      void this.ctx.storage.setAlarm(at);
       return;
     }
-    await this.#flushOutbox(now);
+    if (unsent > 0) {
+      const attempts = this.#bumpFlushAttempts();
+      void this.ctx.storage.setAlarm(now + RESOLVER_FLUSH_RETRY_MS);
+      if (attempts === RESOLVER_FLUSH_ALERT_AFTER_ATTEMPTS) {
+        raiseOpsAlert(
+          'designator_resolver_outbox_stuck',
+          { name: this.ctx.id.name ?? 'unnamed', unsent, attempts },
+          this.#log,
+          this.capture,
+        );
+      } else {
+        this.#log.warn('designator_resolver_expiry_deferred', { unsent, attempts });
+      }
+      return;
+    }
     await this.ctx.storage.deleteAll();
     this.#deleted = true;
-    this.#cleanupArmed = false;
     this.#log.info('designator_resolver_expired', {});
   }
 
@@ -250,7 +295,7 @@ export class DesignatorResolver extends DurableObject<Env> {
         try {
           const health = await this.trackerFor(key).health();
           if (health.phase !== 'absent' && health.phase !== 'unknown') {
-            const adopted = this.#store(now, 'resolved', key, null, false);
+            const adopted = this.#store(now, 'resolved', key, null, 'adopted');
             await this.#flushOutbox(now);
             this.#writeSearchKv(adopted);
             return this.#responseFrom(adopted, false);
@@ -264,7 +309,7 @@ export class DesignatorResolver extends DurableObject<Env> {
       }
     }
 
-    // 3. The single provider call.
+    // 3. The single provider call. The adapter is resolved inside the try (ruling L17).
     const buffered: ProviderCallRecord[] = [];
     const logger = new DurableObjectCostLogger({
       append: (_kind, payload) => {
@@ -278,12 +323,12 @@ export class DesignatorResolver extends DurableObject<Env> {
       log: logger,
       now: () => new Date(this.#now()),
     };
-    const provider = providerFor('aerodatabox', this.env, this.providerDeps);
     const startedAt = new Date(now);
     let statuses: Exact<FlightStatus>[] = [];
     let records: ProviderCallRecord[];
     let failure: string | undefined;
     try {
+      const provider = providerFor('aerodatabox', this.env, this.providerDeps);
       const result = await provider.getFlight(
         {
           carrier: parsed.carrier,
@@ -299,21 +344,26 @@ export class DesignatorResolver extends DurableObject<Env> {
         failure = result.call.error ?? result.call.result;
       }
     } catch (error) {
-      this.#log.error('designator_resolver_provider_threw', errorFields(error));
+      const configuration = error instanceof ProviderConfigError;
+      if (configuration) {
+        this.#alertConfigError(error.message);
+      } else {
+        this.#log.error('designator_resolver_provider_threw', errorFields(error));
+      }
       records = [
         ...buffered,
         callRecord({
           ctx,
-          provider: provider.id,
+          provider: 'aerodatabox',
           operation: 'flight_status',
           startedAt,
           finishedAt: new Date(this.#now()),
           result: 'error',
           billed: false,
-          error: `thrown:${error instanceof Error ? error.message : String(error)}`,
+          error: `${configuration ? 'config' : 'thrown'}:${error instanceof Error ? error.message : String(error)}`,
         }),
       ];
-      failure = 'thrown';
+      failure = configuration ? 'config' : 'thrown';
     }
     const after = this.#now();
     const chosen =
@@ -329,7 +379,7 @@ export class DesignatorResolver extends DurableObject<Env> {
         this.#appendRecords(records, after);
         // A not-found is cached like a hit (a typo must not cost a call per search); a failure
         // is not, so the next search tries again.
-        return outcome === 'not_found' ? this.#store(after, 'not_found', null, null, false) : null;
+        return outcome === 'not_found' ? this.#store(after, 'not_found', null, null, null) : null;
       });
       await this.#flushOutbox(after);
       if (stored !== null) {
@@ -348,7 +398,22 @@ export class DesignatorResolver extends DurableObject<Env> {
 
     const key = canonicalizeFromProvider(chosen);
     const status: FlightStatus = { ...chosen, key };
-    let created = false;
+
+    if (flightIsOver(CADENCE_A2, status, after)) {
+      // Ruling L9: the flight is over, so nothing would ever poll it again. The search is
+      // answered from the status and no tracker is created; a finished flight never gets a
+      // second lifetime.
+      const over = this.ctx.storage.transactionSync((): ResolutionRow => {
+        this.#appendRecords(records, after);
+        return this.#store(after, 'resolved', key, status, 'none');
+      });
+      this.#log.info('designator_resolver_flight_over', { flight_key: key, status: status.status });
+      await this.#flushOutbox(after);
+      this.#writeSearchKv(over);
+      return this.#responseFrom(over, false);
+    }
+
+    let tracker: TrackerOutcome;
     try {
       const seeded = await this.trackerFor(key).seed({
         rpcVersion: RPC_SCHEMA_VERSION,
@@ -357,7 +422,7 @@ export class DesignatorResolver extends DurableObject<Env> {
         designator,
         trigger: 'user_search',
       });
-      created = seeded.status === 'seeded';
+      tracker = seeded.status === 'seeded' ? 'seeded' : 'adopted';
     } catch (error) {
       // The provider answered and was billed; the tracker could not be created. Record the
       // call, answer the search from the status, and let the next search seed again.
@@ -382,7 +447,7 @@ export class DesignatorResolver extends DurableObject<Env> {
     }
     const stored = this.ctx.storage.transactionSync((): ResolutionRow => {
       this.#appendRecords(records, after);
-      return this.#store(after, 'resolved', key, status, created);
+      return this.#store(after, 'resolved', key, status, tracker);
     });
     await this.#flushOutbox(after);
     this.#writeSearchKv(stored);
@@ -415,6 +480,42 @@ export class DesignatorResolver extends DurableObject<Env> {
     );
   }
 
+  #countUnsent(): number {
+    return (
+      this.ctx.storage.sql
+        .exec<{ n: number }>('SELECT COUNT(*) AS n FROM outbox WHERE sent_at_ms IS NULL')
+        .toArray()[0]?.n ?? 0
+    );
+  }
+
+  /** One more expiry alarm that found unsent records; returns the new count. */
+  #bumpFlushAttempts(): number {
+    this.ctx.storage.sql.exec(
+      `INSERT INTO flush_state (id, attempts) VALUES (1, 1)
+       ON CONFLICT (id) DO UPDATE SET attempts = attempts + 1`,
+    );
+    return (
+      this.ctx.storage.sql
+        .exec<{ attempts: number }>('SELECT attempts FROM flush_state WHERE id = 1')
+        .toArray()[0]?.attempts ?? 0
+    );
+  }
+
+  /** One ops alert per configuration error per in-memory instance. */
+  #alertConfigError(message: string): void {
+    if (this.#configAlerted.has(message)) {
+      this.#log.error('provider_config_error_repeated', { message });
+      return;
+    }
+    this.#configAlerted.add(message);
+    raiseOpsAlert(
+      'provider_config_error',
+      { name: this.ctx.id.name ?? 'unnamed', message },
+      this.#log,
+      this.capture,
+    );
+  }
+
   /**
    * Stores the answer and arms the expiry alarm (inside the caller's transaction when there is
    * one; the alarm write is covered by its rollback). The lifetime epoch is the first store's
@@ -425,7 +526,7 @@ export class DesignatorResolver extends DurableObject<Env> {
     outcome: 'resolved' | 'not_found',
     flightKey: FlightKey | null,
     status: FlightStatus | null,
-    created: boolean,
+    tracker: TrackerOutcome | null,
   ): ResolutionRow {
     const name = this.ctx.id.name ?? 'unnamed';
     const [designator, dateLocal] = splitName(name);
@@ -434,11 +535,13 @@ export class DesignatorResolver extends DurableObject<Env> {
     const expires = now + RESOLUTION_TTL_MS;
     this.ctx.storage.sql.exec(
       `INSERT INTO resolution (id, name, designator, date_local, outcome, flight_key, status,
-                               created_flight, kv_written, created_at_ms, resolved_at_ms, expires_at_ms)
-       VALUES (1, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?, ?)
+                               created_flight, tracker, kv_written, created_at_ms, resolved_at_ms,
+                               expires_at_ms)
+       VALUES (1, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?, ?)
        ON CONFLICT (id) DO UPDATE SET outcome = excluded.outcome, flight_key = excluded.flight_key,
                                       status = excluded.status, created_flight = excluded.created_flight,
-                                      kv_written = 0, resolved_at_ms = excluded.resolved_at_ms,
+                                      tracker = excluded.tracker, kv_written = 0,
+                                      resolved_at_ms = excluded.resolved_at_ms,
                                       expires_at_ms = excluded.expires_at_ms`,
       name,
       designator,
@@ -446,13 +549,13 @@ export class DesignatorResolver extends DurableObject<Env> {
       outcome,
       flightKey,
       status === null ? null : JSON.stringify(status),
-      created ? 1 : 0,
+      tracker === 'seeded' ? 1 : 0,
+      tracker,
       epoch,
       now,
       expires,
     );
     void this.ctx.storage.setAlarm(expires);
-    this.#cleanupArmed = true;
     const stored = this.#resolution();
     if (stored === null) {
       throw new Error('DesignatorResolver resolution row missing after insert');
@@ -471,7 +574,11 @@ export class DesignatorResolver extends DurableObject<Env> {
     }
   }
 
-  /** Sends unsent rows to the `persist` queue; a failed send leaves them for the alarm. */
+  /**
+   * Sends unsent rows to the `persist` queue. A failed send leaves them for the alarm, and arms
+   * a retry an hour out (earlier than the 24 h expiry) so a billed search's record does not wait
+   * a day for its first retry.
+   */
   async #flushOutbox(now: number): Promise<void> {
     const rows = this.ctx.storage.sql
       .exec<OutboxRow>('SELECT seq, payload FROM outbox WHERE sent_at_ms IS NULL ORDER BY seq')
@@ -494,10 +601,10 @@ export class DesignatorResolver extends DurableObject<Env> {
         ...outcome.sentSeqs,
       );
     }
-    if (outcome.error !== null && !this.#cleanupArmed) {
-      // Nothing else would ever retry the send: the expiry alarm does, so make sure there is one.
-      void this.ctx.storage.setAlarm(now + RESOLUTION_TTL_MS);
-      this.#cleanupArmed = true;
+    if (outcome.error !== null) {
+      // Nothing else would ever retry the send: the alarm does, so make sure there is one, and
+      // an early one. The handler re-arms to the expiry once the rows are sent.
+      void this.ctx.storage.setAlarm(now + RESOLVER_FLUSH_RETRY_MS);
     }
   }
 
@@ -541,6 +648,9 @@ export class DesignatorResolver extends DurableObject<Env> {
       response.flightKey = stored.flight_key as FlightKey;
       response.created = stored.created_flight === 1;
     }
+    if (stored.tracker === 'seeded' || stored.tracker === 'adopted' || stored.tracker === 'none') {
+      response.tracker = stored.tracker;
+    }
     if (stored.status !== null) {
       response.status = JSON.parse(stored.status) as FlightStatus;
     }
@@ -551,84 +661,4 @@ export class DesignatorResolver extends DurableObject<Env> {
 function splitName(name: string): [string, string] {
   const at = name.lastIndexOf('-', name.length - 11);
   return at <= 0 ? [name, ''] : [name.slice(0, at), name.slice(at + 1)];
-}
-
-// ---------------------------------------------------------------------------------------------
-// The Worker-side half.
-// ---------------------------------------------------------------------------------------------
-
-export interface DesignatorSearchInput {
-  readonly designator: string;
-  readonly dateLocal: string;
-  readonly originIcao?: string | undefined;
-  readonly requestId?: string | undefined;
-}
-
-export type DesignatorSearchResult =
-  ResolveResponse | { readonly outcome: 'overloaded'; readonly retryAfterSeconds: number };
-
-export interface DesignatorSearchDeps {
-  /** Resolves an object name to its stub; the default is `DESIGNATOR_RESOLVER.getByName`. */
-  readonly stubFor?: ((name: string) => Pick<DesignatorResolver, 'resolve'>) | undefined;
-  /** The jittered wait before the one retry; a test replaces it with a no-op. */
-  readonly sleep?: ((ms: number) => Promise<void>) | undefined;
-  readonly log?: Logger | undefined;
-}
-
-/** The undocumented account-level error a namespace under load answers with. */
-export function isTooMuchLoadError(error: unknown): boolean {
-  return error instanceof Error && /too much load/i.test(error.message);
-}
-
-function defaultSleep(ms: number): Promise<void> {
-  return new Promise((resolve) => {
-    setTimeout(resolve, ms);
-  });
-}
-
-/**
- * The search: KV first, then the object, with one jittered retry on "generating too much
- * load" and an `overloaded` answer after that (the route sends 503 with `Retry-After`).
- */
-export async function resolveDesignator(
-  env: Pick<Env, 'DESIGNATOR_RESOLVER' | 'CACHE'>,
-  input: DesignatorSearchInput,
-  deps: DesignatorSearchDeps = {},
-): Promise<DesignatorSearchResult> {
-  const log = deps.log ?? createLogger();
-  const designator = normalizeDesignator(input.designator);
-  const name = `${designator}-${input.dateLocal}`;
-  try {
-    const cached: unknown = await env.CACHE.get(searchKvKey(designator, input.dateLocal), 'json');
-    const parsed = ResolveResponseSchema.safeParse(cached);
-    if (parsed.success) {
-      return { ...parsed.data, cached: true };
-    }
-  } catch (error) {
-    log.warn('designator_search_kv_read_failed', errorFields(error));
-  }
-  const stubFor =
-    deps.stubFor ?? ((objectName: string) => env.DESIGNATOR_RESOLVER.getByName(objectName));
-  const request: ResolveRequest = {
-    rpcVersion: RPC_SCHEMA_VERSION,
-    designator,
-    dateLocal: input.dateLocal,
-    ...(input.originIcao === undefined ? {} : { originIcao: input.originIcao }),
-    ...(input.requestId === undefined ? {} : { requestId: input.requestId }),
-  };
-  for (let attempt = 0; ; attempt += 1) {
-    try {
-      return await stubFor(name).resolve(request);
-    } catch (error) {
-      if (!isTooMuchLoadError(error) || attempt >= 1) {
-        if (isTooMuchLoadError(error)) {
-          log.error('designator_search_overloaded', { name, ...errorFields(error) });
-          return { outcome: 'overloaded', retryAfterSeconds: OVERLOADED_RETRY_AFTER_SECONDS };
-        }
-        throw error;
-      }
-      log.warn('designator_search_retry', { name, ...errorFields(error) });
-      await (deps.sleep ?? defaultSleep)(50 + Math.floor(Math.random() * 200));
-    }
-  }
 }

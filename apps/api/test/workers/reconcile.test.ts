@@ -10,11 +10,14 @@ import {
   getQueueResult,
   runInDurableObject,
 } from 'cloudflare:test';
+import { eq } from 'drizzle-orm';
 import { flightInstances, openDb } from '@planeahead/db';
 import { afterEach, describe, expect, it } from 'vitest';
-import { RPC_SCHEMA_VERSION, type FlightKey } from '@planeahead/shared';
+import { INFLIGHT_STALE_MS, RPC_SCHEMA_VERSION, type FlightKey } from '@planeahead/shared';
 import { RECONCILE_OVERDUE_MS, runReconcileCron } from '../../src/cron/reconcile';
+import { FINISH_ALARM_MS } from '../../src/do/flight-tracker';
 import { createLogger } from '../../src/observability/log';
+import { handlePersistBatch } from '../../src/queues/persist';
 import {
   handleReconcileBatch,
   reconcileFlight,
@@ -109,6 +112,21 @@ describe('reconcileFlight', () => {
     const absent = fakeTracker({ phase: 'absent', flightKey: null });
     expect(await reconcileFlight(absent.tracker, key)).toBe('absent');
   });
+
+  it('refreshes anyway when the in-flight fetch is older than INFLIGHT_STALE_MS (L3)', async () => {
+    const key = 'AAL-1-2100-01-01-KJFK' as FlightKey;
+    const young = fakeTracker({ inflight: true, inflightSinceMs: INFLIGHT_STALE_MS - 1 });
+    expect(await reconcileFlight(young.tracker, key)).toBe('inflight');
+    expect(young.refreshes).toEqual([]);
+    // Every provider request times out at 30 s: five minutes in flight is a hung promise.
+    const stale = fakeTracker({
+      inflight: true,
+      inflightSinceMs: INFLIGHT_STALE_MS,
+      alarmAt: '2100-01-01T13:00:00.000Z',
+    });
+    expect(await reconcileFlight(stale.tracker, key)).toBe('rearmed');
+    expect(stale.refreshes).toEqual([{ rpcVersion: 1, reason: 'reconcile' }]);
+  });
 });
 
 describe('reconcile consumer against real trackers', () => {
@@ -122,11 +140,13 @@ describe('reconcile consumer against real trackers', () => {
     await tracker.setClock(clock + 3 * HOUR_MS);
 
     const finishedFlight = uniqueFlight();
-    // Seeded three hours after it arrived: nothing left to poll, finished at once.
+    // Seeded half an hour after it arrived (one tail poll left), then walked to finished.
     const finishedTracker = await seededTracker(
       finishedFlight,
-      finishedFlight.scheduledIn.getTime() + 3 * HOUR_MS,
+      finishedFlight.scheduledIn.getTime() + HOUR_MS / 2,
     );
+    await finishedTracker.setClock(finishedFlight.scheduledIn.getTime() + HOUR_MS);
+    expect(await finishedTracker.runAlarm()).toBe(true);
     expect((await finishedTracker.stub.health()).phase).toBe('finished');
     const finishedCallsBefore = await adbCalls(finishedFlight);
 
@@ -156,6 +176,56 @@ describe('reconcile consumer against real trackers', () => {
     expect((await tracker.stub.getCostLedger()).byTrigger['reconcile']?.calls).toBe(1);
     expect(await adbCalls(finishedFlight)).toBe(finishedCallsBefore);
   });
+
+  it('finishes a tracker abandoned at its last slot, +22 h alarm included (L12)', async () => {
+    const flight = uniqueFlight();
+    // Seeded half an hour after arrival: one tail poll left, whose alarm then dies.
+    const tracker = await seededTracker(flight, flight.scheduledIn.getTime() + HOUR_MS / 2);
+    await runInDurableObject(tracker.stub, (_instance, state) => state.storage.deleteAlarm());
+    expect(await tracker.alarmAt()).toBeNull();
+    const late = flight.scheduledIn.getTime() + 3 * HOUR_MS;
+    await tracker.setClock(late);
+    await scriptAdb(flight, [adbOk(flight, { phase: 'arrived' })]);
+
+    const batch = createMessageBatch('planeahead-reconcile-local', [
+      {
+        id: 'r-last',
+        timestamp: new Date(),
+        attempts: 1,
+        body: { kind: 'reconcile_flight', flightKey: flight.flightKey },
+      },
+    ]);
+    const ctx = createExecutionContext();
+    await handleReconcileBatch(batch, { env: testEnv, ctx, log: quietLog });
+
+    expect((await getQueueResult(batch, ctx)).explicitAcks).toEqual(['r-last']);
+    expect(await adbCalls(flight)).toBe(2);
+    const health = await tracker.stub.health();
+    expect(health.phase).toBe('finished');
+    expect(health.alarmAt).toBe(new Date(late + FINISH_ALARM_MS).toISOString());
+    // Postgres sees a finished registry row, never a landed one with no refresh due.
+    const db = openDb(testEnv);
+    for (let i = 0; i < tracker.outbox.sent.length; i += 100) {
+      await handlePersistBatch(
+        createMessageBatch(
+          'planeahead-persist-local',
+          tracker.outbox.sent.slice(i, i + 100).map((body, index) => ({
+            id: `p-${String(i + index)}`,
+            timestamp: new Date(),
+            attempts: 1,
+            body,
+          })),
+        ),
+        { env: testEnv, ctx: createExecutionContext(), log: quietLog },
+        { db },
+      );
+    }
+    const [row] = await db
+      .select({ trackingState: flightInstances.trackingState })
+      .from(flightInstances)
+      .where(eq(flightInstances.flightKey, flight.flightKey));
+    expect(row).toEqual({ trackingState: 'finished' });
+  });
 });
 
 describe('reconcile cron', () => {
@@ -165,7 +235,14 @@ describe('reconcile cron', () => {
     const overdue = uniqueFlight();
     const current = uniqueFlight();
     const finished = uniqueFlight();
-    const rowFor = (flight: TestFlight, trackingState: string, nextRefreshAt: string) => ({
+    const nullStale = uniqueFlight();
+    const nullFresh = uniqueFlight();
+    const rowFor = (
+      flight: TestFlight,
+      trackingState: string,
+      nextRefreshAt: string | null,
+      updatedAt?: string,
+    ) => ({
       operatingCarrierIcao: 'AAL',
       flightNumber: flight.number,
       scheduledDepartureDate: flight.dateLocal,
@@ -173,14 +250,19 @@ describe('reconcile cron', () => {
       trackingState,
       nextRefreshAt,
       version: 1,
+      ...(updatedAt === undefined ? {} : { updatedAt }),
     });
-    await db
-      .insert(flightInstances)
-      .values([
-        rowFor(overdue, 'tracking', new Date(now - RECONCILE_OVERDUE_MS - 60_000).toISOString()),
-        rowFor(current, 'airborne', new Date(now - RECONCILE_OVERDUE_MS + 60_000).toISOString()),
-        rowFor(finished, 'finished', new Date(now - 2 * RECONCILE_OVERDUE_MS).toISOString()),
-      ]);
+    const stale = new Date(now - RECONCILE_OVERDUE_MS - 60_000).toISOString();
+    await db.insert(flightInstances).values([
+      rowFor(overdue, 'tracking', stale),
+      rowFor(current, 'airborne', new Date(now - RECONCILE_OVERDUE_MS + 60_000).toISOString()),
+      rowFor(finished, 'finished', new Date(now - 2 * RECONCILE_OVERDUE_MS).toISOString()),
+      // A NULL next_refresh_at on an active row (ruling L12): selected once its updated_at is
+      // old, never while it is fresh. (The set_updated_at trigger only stamps UPDATEs, so an
+      // INSERT may carry the old instant.)
+      rowFor(nullStale, 'landed', null, stale),
+      rowFor(nullFresh, 'landed', null),
+    ]);
     const sent: { flightKey: string }[] = [];
     const sink = {
       sendBatch: (messages: Iterable<MessageSendRequest<unknown>>) => {
@@ -200,6 +282,8 @@ describe('reconcile cron', () => {
     expect(result.sent).toBe(result.candidates);
     const keys = sent.map((m) => m.flightKey);
     expect(keys).toContain(overdue.flightKey);
+    expect(keys).toContain(nullStale.flightKey);
+    expect(keys).not.toContain(nullFresh.flightKey);
     expect(keys).not.toContain(current.flightKey);
     expect(keys).not.toContain(finished.flightKey);
   });

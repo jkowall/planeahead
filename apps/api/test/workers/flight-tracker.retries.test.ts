@@ -24,7 +24,11 @@ import {
   type FlightDataProvider,
   type FlightKey,
 } from '@planeahead/shared';
-import { RETRY_BACKSTOP_MS, type FlightTracker } from '../../src/do/flight-tracker';
+import {
+  FINISH_RETRY_MS,
+  RETRY_BACKSTOP_MS,
+  type FlightTracker,
+} from '../../src/do/flight-tracker';
 import { ADB_PLANS } from '../../src/providers/config';
 import {
   HOUR_MS,
@@ -132,7 +136,7 @@ describe('FlightTracker retries', () => {
     expect(await adbCalls(flight)).toBe(1);
   });
 
-  it('retryCount >= 5 re-arms 30 s out and returns, never set-then-throw', async () => {
+  it('retryCount >= 5 re-arms 30 s out without touching the committed schedule (L16)', async () => {
     const flight = uniqueFlight();
     const creation = flight.scheduledOut.getTime() - 48 * HOUR_MS;
     const { tracker } = await seeded(flight, creation);
@@ -145,13 +149,51 @@ describe('FlightTracker retries', () => {
 
     expect(await tracker.alarmAt()).toBe(slot + RETRY_BACKSTOP_MS);
     expect(await adbCalls(flight)).toBe(2);
+    // The grid slot step 1 committed stands: the backstop arms an alarm, not a slot.
     const state = await tracker.stub.getState();
-    expect(state.nextRefreshAt).toBe(new Date(slot + RETRY_BACKSTOP_MS).toISOString());
-    // The backstop alarm is an ordinary slot: it polls and the cadence resumes.
+    expect(state.nextRefreshAt).toBe(new Date(slot + HOUR_MS).toISOString());
+    // When the backstop fires, the committed schedule decides: step 1 had committed and the
+    // provider was already asked for this slot, so it re-arms to the grid without a call.
     await tracker.setClock(slot + RETRY_BACKSTOP_MS);
     expect(await tracker.runAlarm()).toBe(true);
-    expect(await adbCalls(flight)).toBe(3);
+    expect(await adbCalls(flight)).toBe(2);
     expect(await tracker.alarmAt()).toBe(slot + HOUR_MS);
+    // And the grid slot polls as usual.
+    await tracker.setClock(slot + HOUR_MS);
+    expect(await tracker.runAlarm()).toBe(true);
+    expect(await adbCalls(flight)).toBe(3);
+    expect(await tracker.alarmAt()).toBe(slot + 2 * HOUR_MS);
+  });
+
+  it('the ladder applies to the finish alarm too: at retryCount >= 5 it re-arms an hour out (L16)', async () => {
+    const flight = uniqueFlight();
+    // Seeded half an hour after arrival: one tail poll, then finished.
+    const creation = flight.scheduledIn.getTime() + 30 * MINUTE_MS;
+    await scriptAdb(flight, [adbOk(flight, { phase: 'arrived' })]);
+    const tracker = await trackerHarness(flight.flightKey, creation);
+    await openBudgetFor(flight, creation);
+    const resolver = await resolverHarness(flight, creation);
+    await resolver.stub.resolve({
+      rpcVersion: RPC_SCHEMA_VERSION,
+      designator: flight.designator,
+      dateLocal: flight.dateLocal,
+    });
+    const tail = (await tracker.alarmAt()) ?? 0;
+    await tracker.setClock(tail);
+    expect(await tracker.runAlarm()).toBe(true);
+    expect((await tracker.stub.health()).phase).toBe('finished');
+    const finishAlarm = (await tracker.alarmAt()) ?? 0;
+    await tracker.setClock(finishAlarm);
+
+    // The platform has retried the +22 h alarm five times: re-arm, count, return.
+    await tracker.retryAlarm(5);
+
+    expect(await tracker.alarmAt()).toBe(finishAlarm + FINISH_RETRY_MS);
+    const [row] = await tracker.rows<{ phase: string; finish_alarm_attempts: number }>(
+      'SELECT phase, finish_alarm_attempts FROM flight',
+    );
+    expect(row).toEqual({ phase: 'finished', finish_alarm_attempts: 1 });
+    expect(await adbCalls(flight)).toBe(2);
   });
 
   it('a retry that finds its slot attempted skips the provider and re-sends the outbox', async () => {
@@ -299,6 +341,5 @@ describe('FlightTracker retries', () => {
     );
     expect(row).toEqual({ key: flight.flightKey, phase: 'finished', finish_reason: 'key_drift' });
     expect(await tracker.alarmAt()).toBe(slot + 22 * HOUR_MS);
-    void MINUTE_MS;
   });
 });

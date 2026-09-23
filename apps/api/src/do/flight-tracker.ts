@@ -3,41 +3,76 @@
  *
  * One object per canonical flight key (ADR 0003), for example `AAL-100-2026-09-19-KJFK`. This is
  * where the shared-flight invariant becomes structural: every subscriber to a flight talks to
- * this one object, so a refresh costs one provider call no matter how many users are watching,
- * and a refresh that is already in flight is joined, never repeated (`#inflight`).
+ * this one object, so a refresh costs one provider call no matter how many users are watching.
+ * A refresh already in flight is joined by every caller, the alarm included (`#inflight`), and a
+ * user refresh inside `USER_REFRESH_FRESHNESS_MS` of the last answer is served from the stored
+ * snapshot without a call.
  *
  * The alarm handler is five steps, in this order, and the order is the design (ADR 0011):
  *
+ *   0. Join whatever is in flight: a fetch (`#inflight`) or the finish path (`#finishing`), so
+ *      step 1 reads a settled row and nothing fetches or writes events after the archive.
  *   1. ONE `transactionSync` before any I/O: read `alarmInfo?.retryCount`, find the slot this
- *      alarm is for, and either (a) skip the provider I/O because a retry finds this slot's
- *      `attempts` row started less than a tier interval ago, or (b) insert the attempt, debit the
- *      per-flight budget (`perFlightLedgerDecision`: the soft cap logs and stretches the cadence
- *      one tier, the hard cap stops polling and schedules one reconciliation poll at scheduled
- *      arrival), append the outbox intent row and `setAlarm(next)` without awaiting it. The
- *      commit makes attempt, debit, outbox row and alarm atomic (spike 1: `setAlarm` inside
- *      `transactionSync` is covered by the rollback).
- *   2. `retryCount >= 5`: `setAlarm(now + 30 s)` and return, never set-then-throw. The reconcile
+ *      alarm is for, and decide. On a platform retry the COMMITTED SCHEDULE decides, never the
+ *      age of the last attempt: the first delivery's step 1 advanced `next_refresh_at_ms` past
+ *      now (or to NULL for the last slot), so a retry that finds it there skips the provider I/O
+ *      (`skip_io`) and only resumes the committed plan (re-asserts the alarm, or runs the finish
+ *      path when the plan had no next slot); a retry that finds the due slot still due knows step
+ *      1 rolled back and polls it. A slot whose `last_refreshed_at_ms` lies within its tier
+ *      interval (a user refresh just answered) is satisfied without a call. Otherwise: insert
+ *      the attempt, debit the per-flight budget (`perFlightLedgerDecision`: the soft cap logs and
+ *      stretches the cadence one tier, the hard cap stops polling and schedules one
+ *      reconciliation poll at scheduled arrival), append the outbox intent row and
+ *      `setAlarm(next)` without awaiting it. The commit makes attempt, debit, outbox row and
+ *      alarm atomic (spike 1: `setAlarm` inside `transactionSync` is covered by the rollback,
+ *      and inside a handler a rolled-back `setAlarm` must never be swallowed: rethrow).
+ *   2. `retryCount >= 5`: `setAlarm(now + 30 s)` and return, never set-then-throw, and never
+ *      touching the committed schedule: when that alarm fires, the schedule decides again. The
+ *      ladder applies to every plan kind, the finish and cleanup alarms included. The reconcile
  *      cron is the backstop, not the primary recovery.
  *   3. Fetch through the router behind `#inflight`, an explicit promise handle: input gates do
  *      not cover an `await` on `fetch`, so a `subscribe` or `forceRefresh` arriving mid-fetch
- *      awaits the same promise. Every provider error becomes an error `ProviderCallRecord` at
- *      zero cost; only a storage error throws (and is retried by the platform).
+ *      awaits the same promise. The adapter is resolved INSIDE the try, so a configuration
+ *      error is a zero-cost error record and one ops alert, not a failed alarm; every provider
+ *      request carries `AbortSignal.timeout(PROVIDER_FETCH_TIMEOUT_MS)`, so the handle lives at
+ *      most about 30 seconds. Every provider error becomes an error `ProviderCallRecord` at zero
+ *      cost; only a storage error throws (and is retried by the platform).
  *   4. A second `transactionSync` applies the result: `reconcileFlightKey` (drift is an event,
  *      never a rename; `different_flight` stops polling), the snapshot with a monotonically
  *      increasing `version`, the events rows, the outbox rows.
  *   5. After the commit: send the outbox to the `persist` queue in byte-chunked batches, and
- *      write the debounced KV snapshot off the critical path.
+ *      write the debounced KV snapshot off the critical path. A write the debounce suppressed is
+ *      marked pending and performed by the next entry point once the gap has passed.
+ *
+ * Every path that learns the flight is done (the alarm, a user refresh, a reconcile poll, a
+ * merged alert, a re-seed) runs the same finish path: flush, archive the events to R2 under a
+ * per-lifetime key (`events/{key}@{epochMs}.json`, never overwritten), set phase `finished`,
+ * write the final KV snapshot itself, and arm one alarm 22 hours out. That alarm calls
+ * `deleteAll()` ONLY once the outbox is empty, every row confirmed by the persist consumer; while
+ * rows remain it re-arms hourly, bounded by nothing but the rows draining, and raises the ops
+ * alert once after the sixth deferral. A finish reason of `arrived` means the cadence's tail poll
+ * after arrival ran (the cadence module is normative); a hard-capped flight finishes with
+ * `hard_cap` unless its one reconciliation poll saw it in.
  *
  * Rows written are a budgeted number (ruling J5): every statement runs through `#exec`, which
- * sums the cursor's `rowsRead` and `rowsWritten`; each `setAlarm` adds one; the totals are stored
- * on the alarm's `attempts` row and the lifecycle test asserts a full A2 walk stays under
- * `ROWS_WRITTEN_BUDGET_PER_FLIGHT`.
+ * sums the cursor's `rowsRead` and `rowsWritten`; each `setAlarm` adds one; the migration DDL an
+ * object pays for at creation is added from the runner; the totals are stored on the alarm's
+ * `attempts` row and the lifecycle test asserts a full A2 walk stays under
+ * `ROWS_WRITTEN_BUDGET_PER_FLIGHT`. Persist confirmations are charged to the tracker: they are
+ * its rows.
  *
  * Outbox rows are deleted only when the persist consumer confirms them (`confirmPersisted`);
- * a lost send is re-sent by the next flush. The finish path flushes, archives the events to R2,
- * sets phase `finished` and arms one alarm 22 hours out that calls `deleteAll()` once the outbox
- * is empty. `deleteAll()` is never called inside a transaction, and there is no `setAlarm` in the
- * constructor, no `setTimeout` anywhere, no `blockConcurrencyWhile` outside the migration run.
+ * there is no `confirmed_at` column, deletion IS the confirmation, and a sent row unconfirmed for
+ * longer than `OUTBOX_RESEND_GRACE_MS` is re-sent by the next flush. A row over the single-message
+ * limit is never sent: it is dropped with an `outbox_oversize` event. `deleteAll()` is never
+ * called inside a transaction, there is no `setAlarm` in the constructor, no timer of any kind in
+ * this module (the one in-request wait is `scheduler.wait` in the finish path, bounded by the KV
+ * per-key gap), no `blockConcurrencyWhile` outside the migration run. An object that exists but
+ * holds no flight (probed, or finished and deleted) answers `absent` and arms a 60 s cleanup.
+ *
+ * Test seams (`outboxSink`, `kv`, `bucket`, `providerDeps`, `caps`, `providerFetchTimeoutMs`,
+ * `capture`, `flushStats`, the row meters) are public fields set through `runInDurableObject`,
+ * never over RPC; production never touches them.
  *
  * Never opens Postgres (ADR 0007). Every write leaves through the outbox.
  */
@@ -50,11 +85,13 @@ import {
   ConfirmPersistedRequestV1,
   ForceRefreshRequestV1,
   FlightStatusSchema,
+  INFLIGHT_STALE_MS,
   ProviderEventV1,
   RPC_SCHEMA_VERSION,
   RpcRequestError,
   SeedRequestV1,
   SubscribeRequestV1,
+  USER_REFRESH_FRESHNESS_MS,
   UnsubscribeRequestV1,
   flightTrackerOrigin,
   isIntervalWindow,
@@ -70,7 +107,6 @@ import {
   type CadenceSource,
   type ConfirmPersistedResponseV1,
   type Exact,
-  type FlightDataProvider,
   type FlightEventOutboxPayloadV1,
   type FlightInstanceOutboxPayloadV1,
   type FlightKey,
@@ -84,6 +120,7 @@ import {
   type ProviderCallContext,
   type ProviderCallRecord,
   type ProviderCallTrigger,
+  type ProviderId,
   type SeedResponseV1,
   type SubscribeResponseV1,
   type TrackerHealthPhase,
@@ -91,15 +128,30 @@ import {
   type UnsubscribeResponseV1,
 } from '@planeahead/shared';
 import type { Env } from '../env';
-import { writeSnapshotKv, SNAPSHOT_KV_DEBOUNCE_MS } from '../kv/snapshot';
+import {
+  writeSnapshotKv,
+  SNAPSHOT_KV_DEBOUNCE_MS,
+  SNAPSHOT_KV_MIN_GAP_MS,
+  type SnapshotKvValue,
+} from '../kv/snapshot';
 import { createLogger, errorFields, type Logger } from '../observability/log';
+import { raiseOpsAlert, type CaptureMessage } from '../observability/ops-alert';
 import { mergeAeroApiAlert, type AeroApiAlertPatch } from '../providers/aeroapi.mock';
 import { perFlightLedgerDecision } from '../providers/budget';
+import { providerSettings } from '../providers/config';
 import { DurableObjectCostLogger, PROVIDER_CALL_OUTBOX_KIND } from '../providers/cost-log';
-import { callRecord } from '../providers/http';
-import { budgetGuardFor, providerFor, type RouterDeps } from '../providers/router';
-import { eventsArchiveKey, putJsonArchive } from '../r2/archive';
+import { callRecord, type ProviderFetch } from '../providers/http';
+import {
+  ProviderConfigError,
+  aeroApiAllowedAt,
+  budgetGuardFor,
+  providerFor,
+  type RouterDeps,
+  type RoutingInstant,
+} from '../providers/router';
+import { eventsArchiveKey, putJsonArchiveIfAbsent } from '../r2/archive';
 import { type DurableObjectPing, blockOnMigrations } from './base';
+import { cadenceContextFor, FIXED_SLOT_TIER_MS_DEFAULT } from './cadence-context';
 import {
   EMPTY_MIGRATION_RESULT,
   type MigrationResult,
@@ -110,28 +162,33 @@ import { FLIGHT_TRACKER_MIGRATION_001 } from './migrations/flight-tracker/001';
 import { chunkOutbox, sendOutboxChunks } from './outbox';
 
 // ---------------------------------------------------------------------------------------------
-// Constants. Every one is a design number from the spec or the facts sheet.
+// Constants. Every one is a design number from the spec, the facts sheet or a review ruling.
 // ---------------------------------------------------------------------------------------------
 
 /**
  * Rows written over one flight's life (creation to `deleteAll()`), the budget the lifecycle
- * test holds a full A2 walk under. Measured on 2026-09-22 (test/workers/flight-tracker.lifecycle):
- * 1,173 rows for the whole life of an on-time flight created at T-48 h, everything included
- * (the seed, two subscribes, 74 alarms at 13 rows each when nothing changed, the persist
- * confirmations, the finish path and the +22 h deletion). The budget is that with about a third
- * of headroom for a delayed flight's extra events (two rows each), and it moves only
- * deliberately: rows written are 70 to 85 percent of the per-flight Durable Object cost.
+ * test holds a full A2 walk under. Measured on 2026-09-22 after the review fix round
+ * (test/workers/flight-tracker.lifecycle, printed as `[lifecycle] ... rows_written_lifetime=`):
+ * 1,200 rows for the whole life of an on-time flight created at T-48 h, everything included (the
+ * schema DDL at creation, the seed, two subscribes, 74 alarms at 13 rows each when nothing
+ * changed, the persist confirmations, which are charged to the tracker because they are its
+ * rows, the finish path with its final KV write and the +22 h deletion; 16.2 rows per alarm on
+ * average once everything else is spread over them; the same walk measured 1,173 before the DDL
+ * was counted). The budget is that with about a third of headroom for a delayed flight's extra
+ * events (two rows each), and it moves only deliberately: rows written are 70 to 85 percent of
+ * the per-flight Durable Object cost.
  */
 export const ROWS_WRITTEN_BUDGET_PER_FLIGHT = 1_600;
 
-/** At this many platform retries the handler re-arms 30 s out and returns (ruling J2 step 2). */
+/** At this many platform retries the handler re-arms and returns (ruling J2 step 2, L16). */
 export const RETRY_LADDER_MAX = 5;
 export const RETRY_BACKSTOP_MS = 30_000;
-/** The finished object's last alarm, which calls `deleteAll()`. */
+/** The finished object's last alarm, which calls `deleteAll()` once the outbox is empty. */
 export const FINISH_ALARM_MS = 22 * 60 * 60_000;
-/** A finished object whose outbox will not confirm retries this often, this many times. */
-const FINISH_RETRY_MS = 60 * 60_000;
-const FINISH_MAX_RETRIES = 6;
+/** A finished object whose outbox has not drained re-arms this often, without bound (L2). */
+export const FINISH_RETRY_MS = 60 * 60_000;
+/** The deferral after which the finished object raises the ops alert, once (L2). */
+export const FINISH_ALERT_AFTER_ATTEMPTS = 6;
 /** An alarm that fires more than this early is a duplicate delivery and only re-arms. */
 const EARLY_ALARM_TOLERANCE_MS = 5_000;
 /**
@@ -140,14 +197,20 @@ const EARLY_ALARM_TOLERANCE_MS = 5_000;
  * re-sending rows whose acknowledgement is still in flight.
  */
 export const OUTBOX_RESEND_GRACE_MS = 10_000;
-/** Per user, per flight, per UTC day (ruling J8). */
+/** Per user, per flight, per UTC day (ruling J8). Charged only when a provider call is made. */
 export const USER_REFRESH_DAILY_CAP = 10;
+/**
+ * Every provider request the tracker makes carries this timeout (ruling L3): a timer scoped to
+ * one request inside a running alarm, not a pending object timer. A timed-out fetch is the
+ * adapter's transport record (billed, reservation kept, as increment 6 rules).
+ */
+export const PROVIDER_FETCH_TIMEOUT_MS = 30_000;
 /** An object that exists but holds no flight (probed, or finished and deleted) cleans up. */
 const ABSENT_CLEANUP_MS = 60_000;
-/** The tier interval assumed for a fixed-slot window when deciding whether a retry is fresh. */
-const FIXED_SLOT_TIER_MS = 15 * 60_000;
-/** Block time assumed when a snapshot carries no scheduled arrival. */
-const DEFAULT_BLOCK_MS = 3 * 60 * 60_000;
+/** The tier interval assumed for a fixed-slot window when deciding whether a slot is fresh. */
+const FIXED_SLOT_TIER_MS = FIXED_SLOT_TIER_MS_DEFAULT;
+/** Durable Object SQLite binds at most 100 parameters per statement; `IN (...)` lists chunk here. */
+const SQL_BIND_CHUNK = 90;
 
 // ---------------------------------------------------------------------------------------------
 // Row shapes.
@@ -195,13 +258,6 @@ interface BudgetRow extends Row {
   by_trigger: string;
 }
 
-interface AttemptRow extends Row {
-  slot_ms: number;
-  started_at_ms: number;
-  retry_count: number;
-  outcome: string;
-}
-
 interface OutboxRow extends Row {
   seq: number;
   payload: string;
@@ -220,6 +276,11 @@ interface EventRow extends Row {
 
 interface CountRow extends Row {
   n: number;
+}
+
+interface DebounceRow extends Row {
+  last_write_at_ms: number;
+  pending: number;
 }
 
 /** What one alarm or refresh writes and reads, summed by `#exec`. */
@@ -245,6 +306,12 @@ const NO_FLUSH: FlushStats = Object.freeze({
   maxMessageBytes: 0,
 });
 
+/** The per-flight caps, in poll equivalents (ruling L4); a test seam lowers them. */
+export interface PerFlightCaps {
+  readonly softCapPe: number;
+  readonly hardCapPe: number;
+}
+
 /** An outbox row before `seq` and `origin` are added at send time. */
 type OutboxDraft =
   | { kind: 'flight_instance'; flightKey: FlightKey; payload: FlightInstanceOutboxPayloadV1 }
@@ -263,21 +330,32 @@ interface EventDraft {
 type FinishReason =
   'arrived' | 'cancelled' | 'lifetime' | 'key_drift' | 'hard_cap' | 'unschedulable' | 'exhausted';
 
+/** The call step 1 expects to make: the cadence source, who answers it, and what it costs. */
+interface ExpectedCall {
+  readonly source: CadenceSource;
+  readonly provider: ProviderId;
+  readonly expectedPe: number;
+}
+
 /** What step 1 decided; the rest of the alarm only executes it. */
 type AlarmPlan =
   | { readonly kind: 'cleanup' }
   | { readonly kind: 'finish_alarm' }
+  /** The retry ladder in a finish or cleanup path: re-armed `FINISH_RETRY_MS` out. */
+  | { readonly kind: 'deferred'; readonly path: 'cleanup' | 'finish_alarm' }
   | { readonly kind: 'exhausted' }
   | { readonly kind: 'rearm'; readonly at: number }
+  /** A retry after a committed step 1: resend the outbox and resume the committed plan. */
   | { readonly kind: 'skip_io'; readonly slot: number }
+  /** A slot a recent refresh already answered: rescheduled without a call (L14). */
+  | { readonly kind: 'satisfied'; readonly slot: number }
   | { readonly kind: 'stopped'; readonly slot: number }
   | { readonly kind: 'finish'; readonly reason: FinishReason }
   | {
       readonly kind: 'poll';
       readonly slot: number;
       readonly trigger: ProviderCallTrigger;
-      readonly provider: FlightDataProvider;
-      readonly expectedPe: number;
+      readonly call: ExpectedCall;
       /** True when no slot follows this one: finish after applying the result. */
       readonly finishAfter: boolean;
     };
@@ -395,8 +473,21 @@ function trackingStateFor(phase: string): FlightTrackingState {
   }
 }
 
-function operationFor(provider: FlightDataProvider): string {
-  return provider.id === 'aeroapi' ? 'flight_by_id' : 'flight_status';
+function operationFor(provider: ProviderId): string {
+  return provider === 'aeroapi' ? 'flight_by_id' : 'flight_status';
+}
+
+/**
+ * Who the router WILL answer a window with, computed without constructing an adapter: the
+ * router's two rules (AeroDataBox answers everything in `mock` mode; zero AeroAPI calls before
+ * T-48 h) restated so step 1 can price the call before step 3 resolves the adapter inside its
+ * try (ruling L17). `#adjustDebit` reconciles the expected cost with the recorded one.
+ */
+function expectedProviderFor(source: CadenceSource, env: Env, at: RoutingInstant): ProviderId {
+  if (source === 'aerodatabox' || providerSettings(env).aeroapiMode === 'mock') {
+    return 'aerodatabox';
+  }
+  return aeroApiAllowedAt(at) ? 'aeroapi' : 'aerodatabox';
 }
 
 /** Field-level differences between two snapshots, as event drafts. */
@@ -460,13 +551,17 @@ export class FlightTracker extends DurableObject<Env> {
 
   /**
    * Test seams, set through `runInDurableObject` and never over RPC: where the outbox is sent,
-   * where the KV snapshot and the R2 archive go, and the router's adapter overrides (a
-   * throwing provider, for the retries test). Production never touches them.
+   * where the KV snapshot and the R2 archive go, the router's adapter overrides (a throwing
+   * provider, for the retries test), the per-flight caps, the provider fetch timeout and the
+   * Sentry capture behind the ops alert. Production never touches them.
    */
   outboxSink: Pick<Queue, 'sendBatch'>;
   kv: Pick<KVNamespace, 'put'>;
   bucket: Pick<R2Bucket, 'put'>;
   providerDeps: RouterDeps = {};
+  caps: PerFlightCaps = { softCapPe: A2_SOFT_CAP_PE, hardCapPe: A2_HARD_CAP_PE };
+  providerFetchTimeoutMs = PROVIDER_FETCH_TIMEOUT_MS;
+  capture: CaptureMessage | undefined = undefined;
   /** What the last flush sent; read by the lifecycle test for the observed chunk sizes. */
   flushStats: FlushStats = NO_FLUSH;
   /** Rows written by this in-memory instance over its life, every entry point included. */
@@ -477,6 +572,8 @@ export class FlightTracker extends DurableObject<Env> {
   readonly #log: Logger;
   #testClockMs: number | null = null;
   #inflight: Promise<ApplyOutcome> | null = null;
+  #inflightSince: number | null = null;
+  #finishing: Promise<void> | null = null;
   #counters: RowCounters = { read: 0, written: 0 };
   #seqAlloc: { next: number; dirty: boolean } | null = null;
   /** What the alarm's `attempts` row is finally marked with; written by `#recordAttempt`. */
@@ -484,6 +581,8 @@ export class FlightTracker extends DurableObject<Env> {
   #deleted = false;
   #cleanupArmed = false;
   #kvInFlight: Promise<void> | null = null;
+  /** Configuration errors already alerted by this in-memory instance (once each). */
+  readonly #configAlerted = new Set<string>();
 
   constructor(ctx: DurableObjectState, env: Env) {
     super(ctx, env);
@@ -493,6 +592,7 @@ export class FlightTracker extends DurableObject<Env> {
     this.bucket = env.PRIVATE_BUCKET;
     blockOnMigrations(ctx, FlightTracker.MIGRATIONS, (result) => {
       this.#schema = result;
+      this.rowsWrittenLifetime += result.rowsWritten;
     });
   }
 
@@ -524,13 +624,21 @@ export class FlightTracker extends DurableObject<Env> {
     this.#testClockMs = ms;
   }
 
-  /** Creates the tracker from a status the DesignatorResolver fetched (ruling J9). */
+  /**
+   * Creates the tracker from a status the DesignatorResolver fetched (ruling J9). The instance
+   * row goes into the outbox BEFORE the creation event, so the first batch the persist consumer
+   * sees carries the row the event needs. Idempotent: a re-seed applies a fresher status as an
+   * update (and finishes the flight when that status says it is over), ignores an older one.
+   */
   async seed(input: unknown): Promise<Exact<SeedResponseV1>> {
     const request = parseRpcRequest(SeedRequestV1, input);
     this.#ensureSchema();
+    await this.#awaitFinishing();
+    await this.#awaitInflight();
     const now = this.#now();
     const key = request.flightKey;
     const status: FlightStatus = { ...request.status, key };
+    let finishAfter: FinishReason | null = null;
     const response = this.#tx((): Exact<SeedResponseV1> => {
       const existing = this.#flight();
       if (existing !== null) {
@@ -543,7 +651,16 @@ export class FlightTracker extends DurableObject<Env> {
         if (incoming <= current) {
           return this.#seedResponse(incoming < current ? 'stale' : 'already', existing);
         }
-        this.#applyStatus(existing, stored, status, now, request.trigger, undefined, true);
+        const applied = this.#applyStatus(
+          existing,
+          stored,
+          status,
+          now,
+          request.trigger,
+          undefined,
+          true,
+        );
+        finishAfter = applied.finish;
         const updated = this.#flight();
         return this.#seedResponse('already', updated ?? existing);
       }
@@ -569,39 +686,36 @@ export class FlightTracker extends DurableObject<Env> {
         now,
         now,
       );
-      const { softCapPe, hardCapPe } = this.#caps();
       this.#exec(
         'INSERT INTO budget (id, flight_id, soft_cap_pe, hard_cap_pe) VALUES (1, 1, ?, ?)',
-        softCapPe,
-        hardCapPe,
+        this.caps.softCapPe,
+        this.caps.hardCapPe,
       );
       this.#exec('INSERT INTO kv_debounce (id, flight_id) VALUES (1, 1)');
       const row = this.#requireFlight();
-      this.#appendEvent(row, now, {
-        type: 'created',
-        field: 'trigger',
-        newValue: request.trigger,
-        source: 'system',
-      });
       const next = this.#schedule(row, now);
       if (next.finish !== null) {
         // Nothing left to poll (the flight already arrived, or was cancelled): straight to the
         // finish path once this transaction commits.
         this.#exec('UPDATE flight SET next_refresh_at_ms = NULL WHERE id = 1');
+        finishAfter = next.finish;
       } else {
         this.#exec('UPDATE flight SET next_refresh_at_ms = ? WHERE id = 1', next.at);
         this.#setAlarm(next.at);
       }
       const seeded = this.#requireFlight();
       this.#appendInstance(seeded, now);
+      this.#appendEvent(seeded, now, {
+        type: 'created',
+        field: 'trigger',
+        newValue: request.trigger,
+        source: 'system',
+      });
       return this.#seedResponse('seeded', seeded);
     });
-    if (response.status === 'seeded' && response.nextRefreshAt === null) {
-      const reason = this.#pendingFinishReason();
-      if (reason !== null) {
-        await this.#finish(now, reason);
-        return { ...response, phase: 'finished' };
-      }
+    if (finishAfter !== null) {
+      await this.#finish(now, finishAfter);
+      return { ...response, phase: 'finished', nextRefreshAt: null };
     }
     await this.#flushOutbox(now);
     this.#scheduleKv(now);
@@ -611,8 +725,13 @@ export class FlightTracker extends DurableObject<Env> {
   async subscribe(input: unknown): Promise<Exact<SubscribeResponseV1>> {
     const request = parseRpcRequest(SubscribeRequestV1, input);
     this.#ensureSchema();
+    await this.#awaitFinishing();
+    // A fetch in flight is joined, never raced: the answer carries the fresh snapshot.
+    await this.#awaitInflight();
+    const now = this.#now();
     const row = this.#flight();
     if (row === null) {
+      this.#armAbsentCleanup(now);
       throw new RpcRequestError(
         'invalid_request',
         'tracker is not seeded: resolve the flight first',
@@ -625,11 +744,6 @@ export class FlightTracker extends DurableObject<Env> {
         flightKey: row.key as FlightKey,
       };
     }
-    // A fetch in flight is joined, never raced: the answer carries the fresh snapshot.
-    if (this.#inflight !== null) {
-      await this.#inflight.catch(() => undefined);
-    }
-    const now = this.#now();
     const status = this.#tx((): 'subscribed' | 'already' => {
       const before = this.#count('subscribers');
       this.#exec(
@@ -643,6 +757,7 @@ export class FlightTracker extends DurableObject<Env> {
       );
       return this.#count('subscribers') > before ? 'subscribed' : 'already';
     });
+    this.#scheduleKv(now, false);
     const current = this.#requireFlight();
     return {
       rpcVersion: RPC_SCHEMA_VERSION,
@@ -658,6 +773,7 @@ export class FlightTracker extends DurableObject<Env> {
     const request = parseRpcRequest(UnsubscribeRequestV1, input);
     this.#ensureSchema();
     if (this.#flight() === null) {
+      this.#armAbsentCleanup(this.#now());
       return { rpcVersion: RPC_SCHEMA_VERSION, status: 'absent', subscriberCount: 0 };
     }
     const status = this.#tx((): 'unsubscribed' | 'absent' => {
@@ -688,13 +804,18 @@ export class FlightTracker extends DurableObject<Env> {
   }
 
   /**
-   * A refresh outside the cadence: a user's pull-to-refresh (capped per user per day, its cost
-   * on the separate sub-budget that never debits the scheduled cadence), the reconcile cron
-   * re-arming an abandoned tracker, or an operator. Coalesced onto a fetch in flight.
+   * A refresh outside the cadence: a user's pull-to-refresh, the reconcile cron re-arming an
+   * abandoned tracker, or an operator. Coalesced twice over (ruling L15): onto a fetch in
+   * flight, and onto a snapshot younger than `USER_REFRESH_FRESHNESS_MS`; neither charges the
+   * user's daily cap, which is charged only when this call makes the provider call. A user
+   * refresh is denied when the flight's ledger is at its hard cap. A reconcile refresh abandons
+   * an in-flight handle older than `INFLIGHT_STALE_MS` (a hung promise, ruling L3). When the
+   * answer says the flight is done, the finish path runs here exactly as it does in the alarm.
    */
   async forceRefresh(input: unknown): Promise<Exact<ForceRefreshResponseV1>> {
     const request = parseRpcRequest(ForceRefreshRequestV1, input);
     this.#ensureSchema();
+    await this.#awaitFinishing();
     const now = this.#now();
     const row = this.#flight();
     if (row === null) {
@@ -705,13 +826,38 @@ export class FlightTracker extends DurableObject<Env> {
       return this.#refreshResponse('skipped', 'finished');
     }
     if (this.#inflight !== null) {
-      await this.#inflight.catch(() => undefined);
-      return this.#refreshResponse('coalesced');
+      const age = this.#inflightSince === null ? 0 : now - this.#inflightSince;
+      if (request.reason === 'reconcile' && age >= INFLIGHT_STALE_MS) {
+        this.#log.error('flight_tracker_inflight_abandoned', { age_ms: age });
+        this.#inflight = null;
+        this.#inflightSince = null;
+      } else {
+        await this.#awaitInflight();
+        return this.#refreshResponse('coalesced', 'inflight');
+      }
     }
     if (request.reason === 'user_refresh') {
       const userId = request.userId;
       if (userId === undefined) {
         throw new RpcRequestError('invalid_request', 'user_refresh needs a userId');
+      }
+      if (
+        row.last_refreshed_at_ms !== null &&
+        now - row.last_refreshed_at_ms < USER_REFRESH_FRESHNESS_MS
+      ) {
+        this.#scheduleKv(now, false);
+        return this.#refreshResponse('coalesced', 'fresh');
+      }
+      const budget = this.#budget();
+      const call = this.#expectedCall(row, now);
+      const decision = perFlightLedgerDecision({
+        spentPe: budget.scheduled_pe + budget.user_refresh_pe,
+        requestPe: call.expectedPe,
+        softCapPe: budget.soft_cap_pe,
+        hardCapPe: budget.hard_cap_pe,
+      });
+      if (budget.hard_cap_hit === 1 || decision === 'hard_cap') {
+        return this.#refreshResponse('denied', 'hard_cap');
       }
       const day = new Date(now).toISOString().slice(0, 10);
       const allowed = this.#tx((): boolean => {
@@ -742,7 +888,10 @@ export class FlightTracker extends DurableObject<Env> {
         : request.reason === 'reconcile'
           ? 'reconcile'
           : 'manual';
-    await this.#poll(trigger, now, null);
+    const outcome = await this.#poll(trigger, now, null);
+    if (outcome.finish !== null) {
+      await this.#finish(this.#now(), outcome.finish);
+    }
     return this.#refreshResponse('refreshed');
   }
 
@@ -750,6 +899,7 @@ export class FlightTracker extends DurableObject<Env> {
     this.#ensureSchema();
     const row = this.#flight();
     if (row === null) {
+      this.#armAbsentCleanup(this.#now());
       throw new RpcRequestError('invalid_request', 'tracker is not seeded');
     }
     const budget = this.#budget();
@@ -770,11 +920,13 @@ export class FlightTracker extends DurableObject<Env> {
   /**
    * A provider event pushed in: an AeroAPI alert delivery is MERGED onto the snapshot (its
    * payload lacks timezone and status, so it never replaces it); an AeroDataBox hint, or any
-   * event whose payload is not a patch, is a re-read through the coalesced refresh path.
+   * event whose payload is not a patch, is a re-read through the coalesced refresh path. Either
+   * way, an answer that says the flight is done runs the finish path (ruling L12).
    */
   async ingestProviderEvent(input: unknown): Promise<Exact<IngestProviderEventResponseV1>> {
     const event = parseRpcRequest(ProviderEventV1, input);
     this.#ensureSchema();
+    await this.#awaitFinishing();
     const now = this.#now();
     const row = this.#flight();
     if (row === null) {
@@ -791,9 +943,7 @@ export class FlightTracker extends DurableObject<Env> {
     }
     const patch = event.payload as Partial<AeroApiAlertPatch> | null | undefined;
     if (event.provider === 'aeroapi' && patch?.source === 'aeroapi_alert') {
-      if (this.#inflight !== null) {
-        await this.#inflight.catch(() => undefined);
-      }
+      await this.#awaitInflight();
       const applied = this.#tx((): ApplyOutcome => {
         const current = this.#requireFlight();
         const snapshot = this.#snapshotOf(current);
@@ -808,12 +958,16 @@ export class FlightTracker extends DurableObject<Env> {
           false,
         );
       });
-      await this.#flushOutbox(now);
-      this.#scheduleKv(now);
+      if (applied.finish !== null) {
+        await this.#finish(now, applied.finish);
+      } else {
+        await this.#flushOutbox(now);
+        this.#scheduleKv(now);
+      }
       return { rpcVersion: RPC_SCHEMA_VERSION, outcome: 'merged', version: applied.version };
     }
     if (this.#inflight !== null) {
-      await this.#inflight.catch(() => undefined);
+      await this.#awaitInflight();
       return {
         rpcVersion: RPC_SCHEMA_VERSION,
         outcome: 'refreshed',
@@ -822,6 +976,9 @@ export class FlightTracker extends DurableObject<Env> {
       };
     }
     const outcome = await this.#poll('provider_alert', now, null);
+    if (outcome.finish !== null) {
+      await this.#finish(this.#now(), outcome.finish);
+    }
     return { rpcVersion: RPC_SCHEMA_VERSION, outcome: 'refreshed', version: outcome.version };
   }
 
@@ -829,19 +986,26 @@ export class FlightTracker extends DurableObject<Env> {
   confirmPersisted(input: unknown): Exact<ConfirmPersistedResponseV1> {
     const request = parseRpcRequest(ConfirmPersistedRequestV1, input);
     this.#ensureSchema();
+    const now = this.#now();
     const row = this.#flight();
-    if (row === null || row.created_at_ms !== request.epochMs) {
+    if (row === null) {
+      // A confirmation that outlived its lifetime (a Queues duplicate after the +22 h delete):
+      // the object it recreated must not stay behind with an empty schema.
+      this.#armAbsentCleanup(now);
+      return { rpcVersion: RPC_SCHEMA_VERSION, deleted: 0, remaining: 0, matched: false };
+    }
+    if (row.created_at_ms !== request.epochMs) {
       return {
         rpcVersion: RPC_SCHEMA_VERSION,
         deleted: 0,
-        remaining: row === null ? 0 : this.#count('outbox'),
+        remaining: this.#count('outbox'),
         matched: false,
       };
     }
     const deleted = this.#tx((): number => {
       let removed = 0;
-      for (let i = 0; i < request.seqs.length; i += 100) {
-        const chunk = request.seqs.slice(i, i + 100);
+      for (let i = 0; i < request.seqs.length; i += SQL_BIND_CHUNK) {
+        const chunk = request.seqs.slice(i, i + SQL_BIND_CHUNK);
         const before = this.#count('outbox');
         this.#exec(
           `DELETE FROM outbox WHERE seq IN (${chunk.map(() => '?').join(', ')})`,
@@ -851,6 +1015,7 @@ export class FlightTracker extends DurableObject<Env> {
       }
       return removed;
     });
+    this.#scheduleKv(now, false);
     return {
       rpcVersion: RPC_SCHEMA_VERSION,
       deleted,
@@ -864,14 +1029,20 @@ export class FlightTracker extends DurableObject<Env> {
     this.#ensureSchema();
     const row = this.#flight();
     const alarm = await this.ctx.storage.getAlarm();
+    const now = this.#now();
+    const inflightSinceMs =
+      this.#inflight === null || this.#inflightSince === null
+        ? null
+        : Math.max(0, now - this.#inflightSince);
     if (row === null) {
-      this.#armAbsentCleanup(this.#now());
+      this.#armAbsentCleanup(now);
       return {
         rpcVersion: RPC_SCHEMA_VERSION,
         flightKey: null,
         phase: 'absent',
         alarmAt: iso(alarm),
         inflight: this.#inflight !== null,
+        inflightSinceMs,
         version: 0,
         doSchemaVersion: this.#schema.version,
         unconfirmedOutbox: 0,
@@ -884,6 +1055,7 @@ export class FlightTracker extends DurableObject<Env> {
       phase: row.phase as TrackerHealthPhase,
       alarmAt: iso(alarm),
       inflight: this.#inflight !== null,
+      inflightSinceMs,
       version: row.version,
       doSchemaVersion: this.#schema.version,
       unconfirmedOutbox: this.#count('outbox'),
@@ -901,6 +1073,11 @@ export class FlightTracker extends DurableObject<Env> {
     this.#ensureSchema();
     const retryCount = alarmInfo?.retryCount ?? 0;
     const isRetry = alarmInfo?.isRetry ?? retryCount > 0;
+
+    // Step 0: whatever is in flight settles first. Nothing is committed yet, so waiting is safe,
+    // and step 1 then reads the row a user refresh or a finish just wrote (ruling L14).
+    await this.#awaitFinishing();
+    await this.#awaitInflight();
     const now = this.#now();
 
     // Step 1 (and step 2's decision): one synchronous transaction before any I/O.
@@ -915,26 +1092,36 @@ export class FlightTracker extends DurableObject<Env> {
       case 'finish_alarm':
         await this.#finishAlarm(now);
         return;
+      case 'deferred':
+        this.#log.warn('flight_tracker_alarm_deferred', {
+          path: plan.path,
+          retry_count: retryCount,
+        });
+        return;
       case 'exhausted':
       case 'rearm':
         this.#log.info('flight_tracker_alarm_rearmed', {
           kind: plan.kind,
           retry_count: retryCount,
         });
+        this.#scheduleKv(now, false);
         return;
       case 'finish':
         await this.#finish(now, plan.reason);
         return;
       case 'stopped':
+      case 'satisfied':
         await this.#flushOutbox(now);
-        this.#scheduleKv(now);
+        this.#scheduleKv(now, plan.kind === 'stopped');
         this.#recordAttempt(plan.slot);
         return;
       case 'skip_io':
-        // The retry found its slot already attempted: resend what the failed attempt left
-        // behind and leave the provider alone.
+        // The retry found step 1 committed: resend what the failed attempt left behind, leave
+        // the provider alone, and resume the committed plan (ruling L13): the schedule must not
+        // depend on how the platform treats set-then-throw.
         await this.#flushOutbox(now);
-        this.#scheduleKv(now);
+        this.#scheduleKv(now, false);
+        await this.#resumeCommitted(now);
         this.#recordAttempt(plan.slot);
         return;
       case 'poll':
@@ -942,7 +1129,7 @@ export class FlightTracker extends DurableObject<Env> {
     }
 
     // Steps 3 to 5.
-    const outcome = await this.#poll(plan.trigger, now, plan.slot, plan.provider, plan.expectedPe);
+    const outcome = await this.#poll(plan.trigger, now, plan.slot, plan.call);
     if (outcome.finish !== null) {
       await this.#finish(this.#now(), outcome.finish);
     } else if (plan.finishAfter) {
@@ -962,14 +1149,28 @@ export class FlightTracker extends DurableObject<Env> {
   ): AlarmPlan {
     const row = this.#flight();
     if (row === null) {
+      if (retryCount >= RETRY_LADDER_MAX) {
+        this.#setAlarm(now + FINISH_RETRY_MS);
+        return { kind: 'deferred', path: 'cleanup' };
+      }
       return { kind: 'cleanup' };
     }
     if (row.phase === 'finished') {
+      if (retryCount >= RETRY_LADDER_MAX) {
+        // The ladder counts as one of the bounded finish attempts (ruling L16).
+        this.#exec(
+          'UPDATE flight SET finish_alarm_attempts = finish_alarm_attempts + 1, updated_at_ms = ? WHERE id = 1',
+          now,
+        );
+        this.#setAlarm(now + FINISH_RETRY_MS);
+        return { kind: 'deferred', path: 'finish_alarm' };
+      }
       return { kind: 'finish_alarm' };
     }
     if (retryCount >= RETRY_LADDER_MAX) {
-      // Step 2: re-arm 30 s out and return. Never set-then-throw.
-      const at = now + RETRY_BACKSTOP_MS;
+      // Step 2: re-arm 30 s out and return. Never set-then-throw, and never overwrite the
+      // committed schedule: when the backstop fires, `next_refresh_at_ms` decides whether it
+      // re-arms to the grid slot (step 1 had committed) or polls the still-due slot.
       if (row.attempt_slot_ms !== null) {
         this.#exec(
           `UPDATE attempts SET retry_count = ?, outcome = 'retry_ladder_exhausted', finished_at_ms = ?
@@ -979,40 +1180,43 @@ export class FlightTracker extends DurableObject<Env> {
           row.attempt_slot_ms,
         );
       }
-      this.#exec(
-        'UPDATE flight SET next_refresh_at_ms = ?, updated_at_ms = ? WHERE id = 1',
-        at,
-        now,
-      );
-      this.#setAlarm(at);
+      this.#setAlarm(now + RETRY_BACKSTOP_MS);
       return { kind: 'exhausted' };
     }
-    const slotTarget = row.next_refresh_at_ms ?? scheduledTime ?? now;
-    if (!isRetry && now + EARLY_ALARM_TOLERANCE_MS < slotTarget) {
-      // A duplicate delivery, or an alarm that fired before its time: keep the schedule.
-      this.#setAlarm(slotTarget);
-      return { kind: 'rearm', at: slotTarget };
-    }
-    if (isRetry && row.attempt_slot_ms !== null) {
-      const attempt = this.#exec<AttemptRow>(
-        'SELECT slot_ms, started_at_ms, retry_count, outcome FROM attempts WHERE slot_ms = ?',
-        row.attempt_slot_ms,
-      )[0];
-      if (
-        attempt !== undefined &&
-        now - attempt.started_at_ms < this.#tierIntervalMs(row, attempt.slot_ms)
-      ) {
+    const committedNext = row.next_refresh_at_ms;
+    if (isRetry) {
+      // Ruling L13: the committed schedule decides, never the age of the last attempt. The
+      // first delivery's step 1 moved `next_refresh_at_ms` past now, or to NULL when no slot
+      // follows; a step 1 that rolled back left the due slot where it was.
+      const committed = committedNext === null || committedNext > now + EARLY_ALARM_TOLERANCE_MS;
+      if (committed && row.attempt_slot_ms !== null) {
         this.#exec(
           `UPDATE attempts SET retry_count = ?,
                   outcome = CASE WHEN outcome = 'started' THEN 'skipped_retry' ELSE outcome END
             WHERE slot_ms = ?`,
           retryCount,
-          attempt.slot_ms,
+          row.attempt_slot_ms,
         );
-        return { kind: 'skip_io', slot: attempt.slot_ms };
+        return { kind: 'skip_io', slot: row.attempt_slot_ms };
+      }
+    } else {
+      const slotTarget = committedNext ?? scheduledTime ?? now;
+      if (now + EARLY_ALARM_TOLERANCE_MS < slotTarget) {
+        // A duplicate delivery, an alarm that fired before its time, or the 30 s backstop after
+        // a committed step 1: keep the schedule.
+        this.#setAlarm(slotTarget);
+        return { kind: 'rearm', at: slotTarget };
+      }
+      if (committedNext === null) {
+        // The committed plan had no next slot (the tail poll committed and its finish never
+        // ran, or a refresh emptied the schedule): finish now.
+        const reason = this.#schedule(row, now).finish;
+        if (reason !== null) {
+          return { kind: 'finish', reason };
+        }
       }
     }
-    const slot = slotTarget;
+    const slot = committedNext ?? scheduledTime ?? now;
     const context = this.#cadenceContext(row, now);
     if (context === null) {
       return { kind: 'finish', reason: 'unschedulable' };
@@ -1033,20 +1237,48 @@ export class FlightTracker extends DurableObject<Env> {
         };
       }
     }
-    const cadence = cadenceById(row.cadence);
-    const source: CadenceSource = windowAt(cadence, context)?.source ?? 'aerodatabox';
-    const scheduledOut = new Date(context.scheduledOut);
-    const provider = providerFor(source, this.env, this.providerDeps, {
-      scheduledOut,
-      now: new Date(now),
-    });
-    const expectedPe = pollEquivalents(provider.id, operationFor(provider));
+    if (
+      trigger === 'alarm' &&
+      row.last_refreshed_at_ms !== null &&
+      now - row.last_refreshed_at_ms < this.#tierIntervalMs(row, slot) &&
+      this.#refreshedSinceLastAttempt(row)
+    ) {
+      // Ruling L14: a refresh outside the cadence (a user's, a reconcile's, a merged alert's)
+      // inside this slot's tier interval already answered it. Reschedule without a call; the
+      // attempt row still records the slot and its row counters. The previous SCHEDULED poll
+      // never satisfies a slot, whatever the gap between two tiers' grids: the cadence module
+      // is normative for the poll count.
+      const next = this.#schedule(row, now);
+      if (next.finish !== null) {
+        return { kind: 'finish', reason: next.finish };
+      }
+      this.#exec(
+        `INSERT INTO attempts (slot_ms, flight_id, started_at_ms, finished_at_ms, retry_count, trigger, outcome)
+         VALUES (?, 1, ?, ?, ?, 'alarm', 'satisfied')
+         ON CONFLICT (slot_ms) DO UPDATE SET started_at_ms = excluded.started_at_ms,
+                                            retry_count = excluded.retry_count,
+                                            outcome = 'satisfied'`,
+        slot,
+        now,
+        now,
+        retryCount,
+      );
+      this.#exec(
+        'UPDATE flight SET attempt_slot_ms = ?, next_refresh_at_ms = ?, updated_at_ms = ? WHERE id = 1',
+        slot,
+        next.at,
+        now,
+      );
+      this.#setAlarm(next.at);
+      return { kind: 'satisfied', slot };
+    }
+    const call = this.#expectedCall(row, now, context);
     const budget = this.#budget();
     const decision =
       trigger === 'alarm'
         ? perFlightLedgerDecision({
             spentPe: budget.scheduled_pe,
-            requestPe: expectedPe,
+            requestPe: call.expectedPe,
             softCapPe: budget.soft_cap_pe,
             hardCapPe: budget.hard_cap_pe,
           })
@@ -1073,6 +1305,7 @@ export class FlightTracker extends DurableObject<Env> {
         retryCount,
       );
       const stopped = this.#requireFlight();
+      this.#appendInstance(stopped, now);
       this.#appendEvent(stopped, now, {
         type: 'budget_hard_cap',
         field: 'scheduledPe',
@@ -1086,11 +1319,11 @@ export class FlightTracker extends DurableObject<Env> {
         alerts_to_delete: this.#count('alert_registrations'),
         reconcile_poll_at: iso(at),
       });
-      this.#appendInstance(stopped, now);
       this.#setAlarm(at);
       return { kind: 'stopped', slot };
     }
     if (decision === 'soft_cap' && budget.stretched === 0) {
+      // The soft cap stretches the cadence one tier: one grid slot is skipped from here on.
       this.#exec('UPDATE budget SET stretched = 1 WHERE id = 1');
       this.#appendEvent(row, now, {
         type: 'budget_soft_cap',
@@ -1116,7 +1349,7 @@ export class FlightTracker extends DurableObject<Env> {
       retryCount,
       trigger,
     );
-    this.#debit(budget, trigger, expectedPe);
+    this.#debit(budget, trigger, call.expectedPe);
     this.#exec(
       `UPDATE flight SET attempt_slot_ms = ?, next_refresh_at_ms = ?, version = version + 1,
               provider_call_count = provider_call_count + 1, last_refreshed_at_ms = ?,
@@ -1130,7 +1363,34 @@ export class FlightTracker extends DurableObject<Env> {
     if (next.finish === null) {
       this.#setAlarm(next.at);
     }
-    return { kind: 'poll', slot, trigger, provider, expectedPe, finishAfter: next.finish !== null };
+    return { kind: 'poll', slot, trigger, call, finishAfter: next.finish !== null };
+  }
+
+  /**
+   * After a `skip_io` retry: the committed plan, resumed. A plan with no next slot, or stopped
+   * polling, runs the finish path; otherwise the committed alarm is re-asserted (one row).
+   */
+  async #resumeCommitted(now: number): Promise<void> {
+    const row = this.#flight();
+    if (row === null || row.phase === 'finished') {
+      return;
+    }
+    const schedule = this.#schedule(row, now);
+    if (schedule.finish !== null) {
+      await this.#finish(now, schedule.finish);
+      return;
+    }
+    const at = row.next_refresh_at_ms ?? schedule.at;
+    this.#tx(() => {
+      if (row.next_refresh_at_ms !== at) {
+        this.#exec(
+          'UPDATE flight SET next_refresh_at_ms = ?, updated_at_ms = ? WHERE id = 1',
+          at,
+          now,
+        );
+      }
+      this.#setAlarm(at);
+    });
   }
 
   // -------------------------------------------------------------------------------------------
@@ -1138,38 +1398,29 @@ export class FlightTracker extends DurableObject<Env> {
   // -------------------------------------------------------------------------------------------
 
   /**
-   * Fetch, apply, flush. `#inflight` is the promise `subscribe`, `forceRefresh` and
-   * `ingestProviderEvent` join while it is set. A refresh outside the cadence passes no slot,
-   * no provider (the router is asked for the current window) and no pre-debited cost.
+   * Fetch, apply, flush. `#inflight` is the promise `subscribe`, `forceRefresh`,
+   * `ingestProviderEvent` and the alarm join while it is set. A refresh outside the cadence
+   * passes no slot and no pre-debited call: the router is asked for the current window and the
+   * expected cost is debited here.
    */
   async #poll(
     trigger: ProviderCallTrigger,
     now: number,
     slot: number | null,
-    provider?: FlightDataProvider,
-    expectedPe?: number,
+    preDebited?: ExpectedCall,
   ): Promise<ApplyOutcome> {
     const run = async (): Promise<ApplyOutcome> => {
       const row = this.#requireFlight();
       const snapshot = this.#snapshotOf(row);
-      let adapter = provider;
-      let pe = expectedPe;
-      if (adapter === undefined || pe === undefined) {
-        const context = this.#cadenceContext(row, now);
-        const source: CadenceSource =
-          context === null
-            ? 'aerodatabox'
-            : (windowAt(cadenceById(row.cadence), context)?.source ?? 'aerodatabox');
-        adapter = providerFor(source, this.env, this.providerDeps, {
-          scheduledOut: new Date(row.scheduled_out_ms ?? now),
-          now: new Date(now),
-        });
-        pe = pollEquivalents(adapter.id, operationFor(adapter));
+      let call = preDebited;
+      if (call === undefined) {
+        const expected = this.#expectedCall(row, now);
+        call = expected;
         this.#tx(() => {
-          this.#debit(this.#budget(), trigger, pe ?? 0);
+          this.#debit(this.#budget(), trigger, expected.expectedPe);
         });
       }
-      const result = await this.#fetch(row, snapshot, adapter, trigger, pe);
+      const result = await this.#fetch(row, snapshot, call, trigger);
       const applied = this.#tx((): ApplyOutcome => {
         const current = this.#requireFlight();
         return this.#applyResult(current, result, this.#now(), slot);
@@ -1181,22 +1432,27 @@ export class FlightTracker extends DurableObject<Env> {
     };
     const inflight = run();
     this.#inflight = inflight;
+    this.#inflightSince = now;
     try {
       return await inflight;
     } finally {
       if (this.#inflight === inflight) {
         this.#inflight = null;
+        this.#inflightSince = null;
       }
     }
   }
 
-  /** Step 3. Never throws for a provider problem; the record says what happened. */
+  /**
+   * Step 3. Never throws for a provider problem; the record says what happened. The adapter is
+   * resolved inside the try (ruling L17): a `ProviderConfigError` is a zero-cost error record
+   * that keeps the schedule and raises the ops alert once per configuration error.
+   */
   async #fetch(
     row: FlightRow,
     snapshot: FlightStatus,
-    provider: FlightDataProvider,
+    call: ExpectedCall,
     trigger: ProviderCallTrigger,
-    expectedPe: number,
   ): Promise<FetchResult> {
     const key = row.key as FlightKey;
     const parts = parseFlightKey(key);
@@ -1219,6 +1475,10 @@ export class FlightTracker extends DurableObject<Env> {
       designator.code.length === 3 ? { icao: designator.code } : { iata: designator.code };
     const startedAt = new Date(this.#now());
     try {
+      const provider = providerFor(call.source, this.env, this.#routerDeps(), {
+        scheduledOut: new Date(row.scheduled_out_ms ?? this.#now()),
+        now: new Date(this.#now()),
+      });
       const result = await provider.getFlight(
         {
           carrier,
@@ -1231,23 +1491,52 @@ export class FlightTracker extends DurableObject<Env> {
       );
       const status =
         result.data.find((item) => item.origin.icao === parts.originIcao) ?? result.data[0] ?? null;
-      return { status, records: [...buffered, result.call], expectedPe, trigger };
+      return { status, records: [...buffered, result.call], expectedPe: call.expectedPe, trigger };
     } catch (error) {
-      // A throw out of the adapter (a mapping bug, a key it cannot form) is a provider error, not
-      // a storage one: recorded at zero cost and never retried through the alarm ladder.
-      this.#log.error('flight_tracker_provider_threw', errorFields(error));
+      // A throw out of the adapter (a mapping bug, a key it cannot form) or out of the router (a
+      // provider that is not configured) is a provider error, not a storage one: recorded at
+      // zero cost and never retried through the alarm ladder.
+      const configuration = error instanceof ProviderConfigError;
+      if (configuration) {
+        this.#alertConfigError(error.message);
+      } else {
+        this.#log.error('flight_tracker_provider_threw', errorFields(error));
+      }
       const record = callRecord({
         ctx,
-        provider: provider.id,
-        operation: operationFor(provider),
+        provider: call.provider,
+        operation: operationFor(call.provider),
         startedAt,
         finishedAt: new Date(this.#now()),
         result: 'error',
         billed: false,
-        error: `thrown:${error instanceof Error ? error.message : String(error)}`,
+        error: `${configuration ? 'config' : 'thrown'}:${error instanceof Error ? error.message : String(error)}`,
       });
-      return { status: null, records: [...buffered, record], expectedPe, trigger };
+      return { status: null, records: [...buffered, record], expectedPe: call.expectedPe, trigger };
     }
+  }
+
+  /** The router's dependencies: the timed fetch under whatever a test overrode. */
+  #routerDeps(): RouterDeps {
+    const timeoutMs = this.providerFetchTimeoutMs;
+    const timedFetch: ProviderFetch = (request) =>
+      fetch(request, { signal: AbortSignal.timeout(timeoutMs) });
+    return { ...this.providerDeps, fetch: this.providerDeps.fetch ?? timedFetch };
+  }
+
+  /** One ops alert per configuration error per in-memory instance, never a thrown alarm. */
+  #alertConfigError(message: string): void {
+    if (this.#configAlerted.has(message)) {
+      this.#log.error('provider_config_error_repeated', { message });
+      return;
+    }
+    this.#configAlerted.add(message);
+    raiseOpsAlert(
+      'provider_config_error',
+      { flight_key: this.ctx.id.name ?? 'unnamed', message },
+      this.#log,
+      this.capture,
+    );
   }
 
   /** Step 4, inside the caller's transaction. */
@@ -1380,6 +1669,7 @@ export class FlightTracker extends DurableObject<Env> {
     now: number,
   ): boolean {
     if (schedule.finish !== null) {
+      // Nothing left to schedule: the caller runs the finish path, which replaces the alarm.
       if (row.next_refresh_at_ms !== null) {
         this.#exec(
           'UPDATE flight SET next_refresh_at_ms = NULL, updated_at_ms = ? WHERE id = 1',
@@ -1447,32 +1737,54 @@ export class FlightTracker extends DurableObject<Env> {
   }
 
   #cadenceContext(row: FlightRow, now: number): CadenceContext | null {
-    if (row.scheduled_out_ms === null) {
-      return null;
-    }
-    const scheduledIn = row.scheduled_in_ms ?? row.scheduled_out_ms + DEFAULT_BLOCK_MS;
-    const context: CadenceContext = {
-      now: new Date(now),
-      scheduledOut: new Date(row.scheduled_out_ms),
-      scheduledIn: new Date(scheduledIn),
-      phase: row.phase as TrackerPhase,
-    };
-    if (row.estimated_in_ms !== null) {
-      context.estimatedIn = new Date(row.estimated_in_ms);
-    }
-    if (row.actual_off_ms !== null) {
-      context.actualOff = new Date(row.actual_off_ms);
-    }
-    if (row.actual_on_ms !== null) {
-      context.actualOn = new Date(row.actual_on_ms);
-    }
-    if (row.actual_in_ms !== null) {
-      context.actualIn = new Date(row.actual_in_ms);
-    }
-    return context;
+    return cadenceContextFor(
+      {
+        scheduledOutMs: row.scheduled_out_ms,
+        scheduledInMs: row.scheduled_in_ms,
+        estimatedInMs: row.estimated_in_ms,
+        actualOffMs: row.actual_off_ms,
+        actualOnMs: row.actual_on_ms,
+        actualInMs: row.actual_in_ms,
+        phase: row.phase as TrackerPhase,
+      },
+      now,
+    );
   }
 
-  /** The nominal interval of the window that owns `slot`, for the retry freshness rule. */
+  /** The call the current window asks for, priced before any adapter exists (ruling L17). */
+  #expectedCall(row: FlightRow, now: number, context?: CadenceContext | null): ExpectedCall {
+    const resolved = context === undefined ? this.#cadenceContext(row, now) : context;
+    const source: CadenceSource =
+      resolved === null
+        ? 'aerodatabox'
+        : (windowAt(cadenceById(row.cadence), resolved)?.source ?? 'aerodatabox');
+    const provider = expectedProviderFor(source, this.env, {
+      scheduledOut: new Date(row.scheduled_out_ms ?? now),
+      now: new Date(now),
+    });
+    return { source, provider, expectedPe: pollEquivalents(provider, operationFor(provider)) };
+  }
+
+  /**
+   * True when `last_refreshed_at_ms` was written after the last scheduled attempt ended: a
+   * refresh from outside the cadence. A scheduled poll's own apply lands before its attempt row
+   * is closed (`#recordAttempt`), so it never counts as one.
+   */
+  #refreshedSinceLastAttempt(row: FlightRow): boolean {
+    if (row.last_refreshed_at_ms === null) {
+      return false;
+    }
+    if (row.attempt_slot_ms === null) {
+      return true;
+    }
+    const closed = this.#exec<{ closed_ms: number | null }>(
+      'SELECT COALESCE(finished_at_ms, started_at_ms) AS closed_ms FROM attempts WHERE slot_ms = ?',
+      row.attempt_slot_ms,
+    )[0]?.closed_ms;
+    return closed === undefined || closed === null || row.last_refreshed_at_ms > closed;
+  }
+
+  /** The nominal interval of the window that owns `slot`, for the freshness rules. */
   #tierIntervalMs(row: FlightRow, slot: number): number {
     const context = this.#cadenceContext(row, slot);
     if (context === null) {
@@ -1495,10 +1807,31 @@ export class FlightTracker extends DurableObject<Env> {
   }
 
   // -------------------------------------------------------------------------------------------
-  // Finish path (ruling J12).
+  // Finish path (ruling J12, L2, L11, L12, L14).
   // -------------------------------------------------------------------------------------------
 
+  /**
+   * Runs under `#finishing`, which `forceRefresh`, `ingestProviderEvent`, `subscribe`, `seed`
+   * and the alarm await before they read the row: nothing fetches or writes events after the
+   * archive is taken. A second caller during a finish joins it.
+   */
   async #finish(now: number, reason: FinishReason): Promise<void> {
+    if (this.#finishing !== null) {
+      await this.#awaitFinishing();
+      return;
+    }
+    const run = this.#finishBody(now, reason);
+    this.#finishing = run;
+    try {
+      await run;
+    } finally {
+      if (this.#finishing === run) {
+        this.#finishing = null;
+      }
+    }
+  }
+
+  async #finishBody(now: number, reason: FinishReason): Promise<void> {
     const row = this.#flight();
     if (row === null || row.phase === 'finished') {
       return;
@@ -1513,7 +1846,7 @@ export class FlightTracker extends DurableObject<Env> {
         source: 'system',
       });
     });
-    const archiveKey = await this.#archiveEvents(row.key as FlightKey);
+    const archiveKey = await this.#archiveEvents(row);
     this.#tx(() => {
       const current = this.#flight();
       if (current === null || current.phase === 'finished') {
@@ -1533,10 +1866,15 @@ export class FlightTracker extends DurableObject<Env> {
     });
     this.#log.info('flight_tracker_finished', { reason, archived: archiveKey !== null });
     await this.#flushOutbox(now);
-    this.#scheduleKv(now);
+    await this.#writeFinalKv(now);
   }
 
-  /** The +22 h alarm: re-read phase and outbox in one synchronous block, then `deleteAll()`. */
+  /**
+   * The +22 h alarm (ruling L2): re-read phase and outbox in one synchronous block, flush, and
+   * `deleteAll()` ONLY when every outbox row has been confirmed. While rows remain, re-arm an
+   * hour out, bounded by nothing but the rows draining, and raise the ops alert once after the
+   * sixth deferral. Storage for one small object is cheaper than losing a flight's events.
+   */
   async #finishAlarm(now: number): Promise<void> {
     const state = this.#tx(() => {
       const row = this.#flight();
@@ -1548,6 +1886,7 @@ export class FlightTracker extends DurableObject<Env> {
             attempts: row.finish_alarm_attempts,
             archived: row.events_r2_key !== null,
             key: row.key as FlightKey,
+            row,
           };
     });
     if (state === null || state.phase !== 'finished') {
@@ -1557,7 +1896,7 @@ export class FlightTracker extends DurableObject<Env> {
       await this.#flushOutbox(now);
     }
     if (!state.archived) {
-      const archiveKey = await this.#archiveEvents(state.key);
+      const archiveKey = await this.#archiveEvents(state.row);
       if (archiveKey !== null) {
         this.#tx(() => {
           this.#exec('UPDATE flight SET events_r2_key = ? WHERE id = 1', archiveKey);
@@ -1565,27 +1904,48 @@ export class FlightTracker extends DurableObject<Env> {
       }
     }
     const remaining = this.#count('outbox');
-    if (remaining > 0 && state.attempts < FINISH_MAX_RETRIES) {
+    if (remaining > 0) {
+      const unsent = this.#countUnsent();
+      const attempts = state.attempts + 1;
       this.#tx(() => {
         this.#exec(
-          'UPDATE flight SET finish_alarm_attempts = finish_alarm_attempts + 1, updated_at_ms = ? WHERE id = 1',
+          'UPDATE flight SET finish_alarm_attempts = ?, updated_at_ms = ? WHERE id = 1',
+          attempts,
           now,
         );
         this.#setAlarm(now + FINISH_RETRY_MS);
       });
-      this.#log.warn('flight_tracker_finish_deferred', {
-        unconfirmed: remaining,
-        attempts: state.attempts + 1,
-      });
+      if (attempts === FINISH_ALERT_AFTER_ATTEMPTS) {
+        raiseOpsAlert(
+          'flight_tracker_outbox_stuck',
+          {
+            flight_key: state.key,
+            name: this.ctx.id.name ?? 'unnamed',
+            unconfirmed: remaining,
+            unsent,
+            attempts,
+          },
+          this.#log,
+          this.capture,
+        );
+      } else {
+        this.#log.warn('flight_tracker_finish_deferred', {
+          unconfirmed: remaining,
+          unsent,
+          attempts,
+        });
+      }
       return;
-    }
-    if (remaining > 0) {
-      this.#log.error('flight_tracker_outbox_abandoned', { unconfirmed: remaining });
     }
     await this.#deleteEverything();
   }
 
-  async #archiveEvents(key: FlightKey): Promise<string | null> {
+  /**
+   * The timeline to R2 under this lifetime's key, never overwriting: a key that exists was
+   * written by an earlier attempt of this same finish and is kept as it is.
+   */
+  async #archiveEvents(row: FlightRow): Promise<string | null> {
+    const key = row.key as FlightKey;
     const events = this.#exec<EventRow>(
       'SELECT seq, occurred_at_ms, type, field, old_value, new_value, source, provider_call_id FROM events ORDER BY seq',
     ).map((event) => ({
@@ -1598,9 +1958,16 @@ export class FlightTracker extends DurableObject<Env> {
       source: event.source,
       providerCallId: event.provider_call_id,
     }));
-    const archiveKey = eventsArchiveKey(key);
+    const archiveKey = eventsArchiveKey(key, row.created_at_ms);
     try {
-      await putJsonArchive(this.bucket, archiveKey, { flightKey: key, events });
+      const outcome = await putJsonArchiveIfAbsent(this.bucket, archiveKey, {
+        flightKey: key,
+        lifetimeEpochMs: row.created_at_ms,
+        events,
+      });
+      if (outcome === 'exists') {
+        this.#log.warn('flight_tracker_archive_exists', { archive_key: archiveKey });
+      }
       return archiveKey;
     } catch (error) {
       this.#log.error('flight_tracker_archive_failed', errorFields(error));
@@ -1673,8 +2040,8 @@ export class FlightTracker extends DurableObject<Env> {
     };
     if (outcome.sentSeqs.length > 0) {
       this.#tx(() => {
-        for (let i = 0; i < outcome.sentSeqs.length; i += 100) {
-          const chunk = outcome.sentSeqs.slice(i, i + 100);
+        for (let i = 0; i < outcome.sentSeqs.length; i += SQL_BIND_CHUNK) {
+          const chunk = outcome.sentSeqs.slice(i, i + SQL_BIND_CHUNK);
           this.#exec(
             `UPDATE outbox SET sent_at_ms = ? WHERE seq IN (${chunk.map(() => '?').join(', ')})`,
             now,
@@ -1686,44 +2053,74 @@ export class FlightTracker extends DurableObject<Env> {
   }
 
   /**
-   * The KV snapshot, debounced with stored state (never `setTimeout`) and written off the
-   * critical path. A suppressed write marks `pending`; the next flush writes it.
+   * The KV snapshot, debounced with stored state (never a timer) and written off the critical
+   * path. A writer passes `dirty`; a suppressed write marks `pending`, and any entry point that
+   * calls this with `dirty` false performs the pending write once the gap has passed (L11).
    */
-  #scheduleKv(now: number): void {
+  #scheduleKv(now: number, dirty = true): void {
     const row = this.#flight();
     if (row === null) {
       return;
     }
-    const debounce = this.#exec<{ last_write_at_ms: number; pending: number }>(
+    const debounce = this.#exec<DebounceRow>(
       'SELECT last_write_at_ms, pending FROM kv_debounce WHERE id = 1',
     )[0];
+    const pending = debounce?.pending === 1;
+    if (!dirty && !pending) {
+      return;
+    }
     const last = debounce?.last_write_at_ms ?? 0;
     if (now - last < SNAPSHOT_KV_DEBOUNCE_MS || this.#kvInFlight !== null) {
-      if (debounce?.pending !== 1) {
+      if (!pending) {
         this.#exec('UPDATE kv_debounce SET pending = 1 WHERE id = 1');
       }
       return;
     }
+    this.#writeKv(now, row);
+  }
+
+  #writeKv(now: number, row: FlightRow): void {
     this.#exec('UPDATE kv_debounce SET last_write_at_ms = ?, pending = 0 WHERE id = 1', now);
-    const write = writeSnapshotKv(
-      this.kv,
-      {
-        rpcVersion: 1,
-        flightKey: row.key as FlightKey,
-        phase: row.phase as TrackerHealthPhase,
-        version: row.version,
-        snapshot: this.#snapshotOf(row),
-        nextRefreshAt: iso(row.next_refresh_at_ms),
-        writtenAt: new Date(now).toISOString(),
-      },
-      this.#log,
-    )
+    const value: SnapshotKvValue = {
+      rpcVersion: 1,
+      flightKey: row.key as FlightKey,
+      phase: row.phase as TrackerHealthPhase,
+      version: row.version,
+      snapshot: this.#snapshotOf(row),
+      nextRefreshAt: iso(row.next_refresh_at_ms),
+      writtenAt: new Date(now).toISOString(),
+    };
+    const write = writeSnapshotKv(this.kv, value, this.#log)
       .then(() => undefined)
       .finally(() => {
         this.#kvInFlight = null;
       });
     this.#kvInFlight = write;
     this.ctx.waitUntil(write);
+  }
+
+  /**
+   * The finished snapshot, written by the finish path itself (ruling L11): after the in-flight
+   * write settles, and after the KV per-key gap when the poll of the same alarm just wrote,
+   * waiting the remainder with `scheduler.wait` inside the running alarm. This is the one
+   * in-request wait in the module, bounded by `SNAPSHOT_KV_MIN_GAP_MS`; nothing here is an idle
+   * timer (a pending timer would keep the object from hibernating).
+   */
+  async #writeFinalKv(now: number): Promise<void> {
+    await this.kvSettled();
+    const debounce = this.#exec<DebounceRow>(
+      'SELECT last_write_at_ms, pending FROM kv_debounce WHERE id = 1',
+    )[0];
+    const elapsed = now - (debounce?.last_write_at_ms ?? 0);
+    if (elapsed >= 0 && elapsed < SNAPSHOT_KV_MIN_GAP_MS) {
+      await scheduler.wait(SNAPSHOT_KV_MIN_GAP_MS - elapsed);
+    }
+    const row = this.#flight();
+    if (row === null) {
+      return;
+    }
+    this.#writeKv(this.#now(), row);
+    await this.kvSettled();
   }
 
   /** Test seam: resolves once no KV write is in flight. */
@@ -1812,6 +2209,7 @@ export class FlightTracker extends DurableObject<Env> {
   #ensureSchema(): void {
     if (this.#deleted) {
       this.#schema = runSqlMigrations(this.ctx, FlightTracker.MIGRATIONS);
+      this.rowsWrittenLifetime += this.#schema.rowsWritten;
       this.#deleted = false;
     }
   }
@@ -1823,6 +2221,20 @@ export class FlightTracker extends DurableObject<Env> {
     }
     this.#cleanupArmed = true;
     void this.ctx.storage.setAlarm(now + ABSENT_CLEANUP_MS);
+  }
+
+  /** The finish path in progress, if any; errors are the finisher's to report. */
+  async #awaitFinishing(): Promise<void> {
+    while (this.#finishing !== null) {
+      await this.#finishing.catch(() => undefined);
+    }
+  }
+
+  /** The fetch in flight, if any; errors are the poller's to report. */
+  async #awaitInflight(): Promise<void> {
+    while (this.#inflight !== null) {
+      await this.#inflight.catch(() => undefined);
+    }
   }
 
   #flight(): FlightRow | null {
@@ -1849,15 +2261,15 @@ export class FlightTracker extends DurableObject<Env> {
     return this.#exec<CountRow>(`SELECT COUNT(*) AS n FROM ${table}`)[0]?.n ?? 0;
   }
 
-  #snapshotOf(row: FlightRow): FlightStatus {
-    return FlightStatusSchema.parse(JSON.parse(row.snapshot));
+  /** Outbox rows that never reached the queue. */
+  #countUnsent(): number {
+    return (
+      this.#exec<CountRow>('SELECT COUNT(*) AS n FROM outbox WHERE sent_at_ms IS NULL')[0]?.n ?? 0
+    );
   }
 
-  #caps(): { softCapPe: number; hardCapPe: number } {
-    // The shared caps: 2x and 4x the expected A2 spend, the same defaults
-    // `perFlightLedgerDecision` applies. Stored on the budget row so the ledger response can
-    // show them and a test can lower them without changing the rule.
-    return { softCapPe: A2_SOFT_CAP_PE, hardCapPe: A2_HARD_CAP_PE };
+  #snapshotOf(row: FlightRow): FlightStatus {
+    return FlightStatusSchema.parse(JSON.parse(row.snapshot));
   }
 
   #debit(budget: BudgetRow, trigger: ProviderCallTrigger, pe: number): void {
@@ -1925,10 +2337,21 @@ export class FlightTracker extends DurableObject<Env> {
     );
   }
 
-  /** The `flight_instances` row as of `row`, into the outbox. */
+  /**
+   * The `flight_instances` row as of `row`, into the outbox. A phase that is not finished never
+   * persists a NULL `next_refresh_at` (ruling L12): when the plan has no next slot, the finish
+   * instant goes out instead, so a tracker that dies between its last step 1 and its finish is
+   * still found by the reconcile cron.
+   */
   #appendInstance(row: FlightRow, now: number): void {
     const key = row.key as FlightKey;
     const parts = parseFlightKey(key);
+    const nextRefreshAt =
+      row.next_refresh_at_ms !== null
+        ? iso(row.next_refresh_at_ms)
+        : row.phase === 'finished'
+          ? null
+          : iso(now);
     const payload: FlightInstanceOutboxPayloadV1 = {
       operatingCarrierIcao: parts.operatingCarrierIcao,
       flightNumber: parts.flightNumber,
@@ -1939,7 +2362,7 @@ export class FlightTracker extends DurableObject<Env> {
       phase: row.phase as TrackerPhase,
       trackingState: trackingStateFor(row.phase),
       refreshCadence: row.cadence as FlightInstanceOutboxPayloadV1['refreshCadence'],
-      nextRefreshAt: iso(row.next_refresh_at_ms),
+      nextRefreshAt,
       lastRefreshedAt: iso(row.last_refreshed_at_ms),
       doSchemaVersion: this.#schema.version,
       snapshot: this.#snapshotOf(row),

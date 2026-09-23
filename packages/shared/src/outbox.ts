@@ -31,7 +31,11 @@ import { TrackerPhaseSchema } from './rpc';
  * Every message names its sender's LIFETIME in `origin` (`flight_tracker:{key}@{epochMs}`,
  * `provider_budget:{name}@{epochMs}`, `designator_resolver:{name}@{epochMs}`), so `(origin, seq)`
  * is unique even when an object is recreated after `deleteAll()`, and the consumer confirms
- * persisted seqs back to the one tracker lifetime that sent them and to nothing else.
+ * persisted seqs back to the one tracker lifetime that sent them and to nothing else. The
+ * tracker's epoch is also stored on `flight_instances.do_lifetime_epoch_ms`: the consumer ignores
+ * instance and event rows from an OLDER lifetime than the stored one, and refuses a NEWER
+ * lifetime for an instance whose tracking state is terminal (a finished flight never gets a
+ * second lifetime, ruling L9).
  *
  * Every object schema is `looseObject` for the same reason as `flight-status.ts`: a consumer one
  * release behind a producer keeps the fields it does not know. Nothing here reads a clock.
@@ -186,6 +190,13 @@ export const ProviderBudgetKillSwitchPayloadV1 = z.looseObject({
 export const ProviderBudgetDailyPayloadV1 = z.looseObject({
   provider: ProviderIdSchema,
   utcDate: IsoDateSchema,
+  /**
+   * The shard (0 to 7) when the day is sharded, null for the unsharded object. The persist
+   * consumer keeps one `provider_call_daily` row PER SHARD (`budget_daily` for null,
+   * `budget_daily:{n}` per shard) with replace semantics, never a sum: at-least-once delivery
+   * makes a summing upsert count a redelivery twice (ruling L10).
+   */
+  shard: z.int().min(0).max(7).nullable().default(null),
   units: z.number().nonnegative(),
   pollEquivalents: z.number().nonnegative(),
   calls: z.int().nonnegative(),

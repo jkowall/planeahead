@@ -28,7 +28,7 @@
  *                               or 204 (the gateway's miss) when nothing is scripted. A scripted
  *                               `reset: true` destroys the socket so the adapter's fetch rejects.
  *   PUT  /control/aerodatabox/flights/{designator}/{dateLocal}
- *                               `{ responses: [{ status, body?, contentType?, reset? }] }`
+ *                               `{ responses: [{ status, body?, contentType?, reset?, delayMs? }] }`
  *   DELETE /control/aerodatabox/flights/{designator}/{dateLocal}
  *   GET  /control/aerodatabox/calls?designator=&date=
  *                               `{ calls }`: how many status requests that flight has received.
@@ -86,6 +86,8 @@ export interface ScriptedAdbResponse {
   readonly contentType?: string;
   /** Destroy the socket instead of answering, so the adapter's `fetch` rejects. */
   readonly reset?: boolean;
+  /** Hold the answer this long first (a slow gateway, for the fetch timeout and in-flight tests). */
+  readonly delayMs?: number;
 }
 
 /** The AeroDataBox flight-status path the adapter builds, with the designator upper-cased. */
@@ -141,6 +143,13 @@ export async function startFakeProviders(): Promise<FakeProviders> {
         if (scripted === undefined) {
           response.writeHead(204);
           return response.end();
+        }
+        if (scripted.delayMs !== undefined && scripted.delayMs > 0) {
+          await new Promise<void>((resolve) => {
+            const timer = setTimeout(resolve, scripted.delayMs);
+            // A pending delay must not hold the run open past teardown.
+            timer.unref();
+          });
         }
         if (scripted.reset === true) {
           request.socket.destroy();

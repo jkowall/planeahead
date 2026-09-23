@@ -45,7 +45,7 @@ describe('GET /health', () => {
     // wrangler `exports` map must fail this test, and a snapshot would simply be updated.
     expect(body.doSchemaVersions).toEqual({
       FlightTracker: 1,
-      DesignatorResolver: 1,
+      DesignatorResolver: 2,
       AirportState: 0,
       UserInbox: 0,
       // Increment 6: the ledger, bucket, kill switch and outbox tables.

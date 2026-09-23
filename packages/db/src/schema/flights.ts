@@ -19,6 +19,7 @@
 
 import { sql } from 'drizzle-orm';
 import {
+  bigint,
   check,
   date,
   foreignKey,
@@ -71,6 +72,10 @@ export const TRACKING_STATES = [
   'superseded',
 ] as const;
 export const ACTIVE_TRACKING_STATES = ['pending', 'tracking', 'airborne', 'landed'] as const;
+/** Every state that is not active: a row here never gets a new FlightTracker lifetime (L9). */
+export const TERMINAL_TRACKING_STATES = TRACKING_STATES.filter(
+  (state) => !(ACTIVE_TRACKING_STATES as readonly string[]).includes(state),
+);
 export const REFRESH_CADENCES = ['literal', 'A1', 'A2', 'B'] as const;
 export const SUPERSEDE_REASONS = ['key_drift', 'provider_merge', 'manual'] as const;
 /** Mirrors FlightStatus.operatorSource in @planeahead/shared (increment 6). */
@@ -142,6 +147,14 @@ export const flightInstances = pgTable(
      * and out of order, increment 7).
      */
     version: integer('version').notNull().default(0),
+    /**
+     * The FlightTracker LIFETIME this row was last written from (`created_at_ms` of the object,
+     * the `@{epochMs}` of its outbox origin; migration 0002, increment 7 ruling L9). The persist
+     * consumer ignores instance and event rows from an older lifetime and refuses a newer one
+     * for a row whose tracking state is terminal: a finished flight never gets a second
+     * lifetime. Null on rows written before the column existed.
+     */
+    doLifetimeEpochMs: bigint('do_lifetime_epoch_ms', { mode: 'number' }),
     /** How the operating carrier in the key was determined (increment 6, ADR 0010). */
     operatorSource: text('operator_source'),
     // merge and archive

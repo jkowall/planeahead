@@ -23,7 +23,12 @@
  * crowd the embedded cluster).
  */
 
-import { createMessageBatch, runInDurableObject } from 'cloudflare:test';
+import {
+  createExecutionContext,
+  createMessageBatch,
+  getQueueResult,
+  runInDurableObject,
+} from 'cloudflare:test';
 import { eq } from 'drizzle-orm';
 import { flightEvents, flightInstances, openDb } from '@planeahead/db';
 import { afterEach, describe, expect, it } from 'vitest';
@@ -112,6 +117,9 @@ describe('FlightTracker lifecycle (A2, created at T-48 h)', () => {
     const initial = await tracker.stub.getState();
     expect(initial.phase).toBe('scheduled');
     expect(initial.version).toBe(1);
+    const epochMs =
+      (await tracker.rows<{ created_at_ms: number }>('SELECT created_at_ms FROM flight'))[0]
+        ?.created_at_ms ?? 0;
 
     // Two subscribers: one flight, one object, one call per refresh.
     for (const user of ['user-a', 'user-b']) {
@@ -139,11 +147,11 @@ describe('FlightTracker lifecycle (A2, created at T-48 h)', () => {
             body,
           })),
         );
-        await handlePersistBatch(
-          batch,
-          { env: testEnv, ctx: {} as ExecutionContext, log: quietLog },
-          { db },
-        );
+        const ctx = createExecutionContext();
+        await handlePersistBatch(batch, { env: testEnv, ctx, log: quietLog }, { db });
+        // The instance row precedes the events of its transaction, so nothing is ever retried
+        // for want of an instance (review finding outbox-and-data-flow-7).
+        expect((await getQueueResult(batch, ctx)).retryMessages).toEqual([]);
       }
     };
     // The resolver's own call record goes the same way.
@@ -235,8 +243,9 @@ describe('FlightTracker lifecycle (A2, created at T-48 h)', () => {
     expect(await tracker.tables()).toEqual([]);
     expect(await tracker.alarmAt()).toBeNull();
 
-    // 3. The events archive landed in R2 with the whole timeline.
-    const archive = await testEnv.PRIVATE_BUCKET.get(eventsArchiveKey(flight.flightKey));
+    // 3. The events archive landed in R2, under this lifetime's key, with the whole timeline.
+    const archiveKey = eventsArchiveKey(flight.flightKey, epochMs);
+    const archive = await testEnv.PRIVATE_BUCKET.get(archiveKey);
     expect(archive).not.toBeNull();
     const archived = (await archive?.json()) as { flightKey: string; events: { type: string }[] };
     expect(archived.flightKey).toBe(flight.flightKey);
@@ -254,7 +263,8 @@ describe('FlightTracker lifecycle (A2, created at T-48 h)', () => {
     expect(row?.trackingState).toBe('finished');
     expect(row?.status).toBe('arrived');
     expect(row?.version).toBe(walk.versions.at(-1));
-    expect(row?.eventsR2Key).toBe(eventsArchiveKey(flight.flightKey));
+    expect(row?.eventsR2Key).toBe(archiveKey);
+    expect(row?.doLifetimeEpochMs).toBe(epochMs);
     expect(row?.actualIn).toBe(flight.scheduledIn.toISOString().replace('.000Z', 'Z'));
     const events = await db
       .select({ seq: flightEvents.seq, type: flightEvents.type })

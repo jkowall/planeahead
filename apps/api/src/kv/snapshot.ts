@@ -6,8 +6,10 @@
  * KV allows one write a second per key and answers 429 above it. The tracker writes at most
  * once every `SNAPSHOT_KV_DEBOUNCE_MS` (stored state in its `kv_debounce` table, never a
  * `setTimeout`, which would keep the object from hibernating), off the alarm's critical path
- * (`ctx.waitUntil`), and a failed write, a 429 included, is logged and never fails the alarm:
- * the next flush writes again.
+ * (`ctx.waitUntil`), and a failed write, a 429 included, is logged and never fails the alarm. A
+ * write the debounce suppressed is marked `pending` and performed by the next entry point once
+ * the gap has passed, so a change never stays behind the previous snapshot for longer than the
+ * object stays idle; the finish path writes its own final snapshot.
  */
 
 import type { FlightStatus, FlightKey, TrackerHealthPhase } from '@planeahead/shared';
@@ -15,6 +17,13 @@ import { errorFields, type Logger } from '../observability/log';
 
 export const SNAPSHOT_KV_TTL_SECONDS = 180;
 export const SNAPSHOT_KV_DEBOUNCE_MS = 2_000;
+/**
+ * KV's own per-key limit: one write a second. The debounce above suppresses a write inside this
+ * gap and marks it pending for the next entry point; the finish path is the one place that waits
+ * the remainder out (`scheduler.wait`, inside the running alarm) so the `finished` snapshot is
+ * what readers see (ruling L11).
+ */
+export const SNAPSHOT_KV_MIN_GAP_MS = 1_000;
 
 export function snapshotKvKey(flightKey: FlightKey): string {
   return `flight:snapshot:${flightKey}`;

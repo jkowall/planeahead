@@ -46,8 +46,9 @@ interface PingCase {
   readonly className: string;
   readonly ping: (name: string) => Promise<DurableObjectPing>;
   /**
-   * The class's migrations: one each for ProviderBudget (increment 6), FlightTracker and
-   * DesignatorResolver (increment 7); none for the two shells.
+   * The class's migrations: one each for ProviderBudget (increment 6) and FlightTracker
+   * (increment 7), two for DesignatorResolver (increment 7 and its review fix round); none for
+   * the two shells.
    */
   readonly version: number;
 }
@@ -61,7 +62,7 @@ const CLASSES: readonly PingCase[] = [
   {
     className: 'DesignatorResolver',
     ping: (name) => track(env.DESIGNATOR_RESOLVER.getByName(name)).ping(),
-    version: 1,
+    version: 2,
   },
   {
     className: 'AirportState',

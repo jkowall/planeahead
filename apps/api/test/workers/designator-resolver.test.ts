@@ -2,8 +2,9 @@
  * The DesignatorResolver: fifty concurrent searches cost one AeroDataBox call, the Worker-side
  * KV cache short-circuits the object, the tracker's `seed` is idempotent, a not-found is cached
  * like a hit, an existing tracker is adopted without a call when the origin is known, the object
- * deletes itself 24 hours after resolving, and the "generating too much load" error gets one
- * jittered retry before an `overloaded` answer.
+ * deletes itself 24 hours after resolving (never before every provider call record was sent),
+ * an unconfigured provider is a zero-cost error record, and the "generating too much load"
+ * error gets one jittered retry before an `overloaded` answer.
  */
 
 import { listDurableObjectIds, runInDurableObject } from 'cloudflare:test';
@@ -11,10 +12,13 @@ import { afterEach, describe, expect, it } from 'vitest';
 import { RPC_SCHEMA_VERSION, type ResolveResponseV1 } from '@planeahead/shared';
 import {
   RESOLUTION_TTL_MS,
-  resolveDesignator,
+  RESOLVER_FLUSH_ALERT_AFTER_ATTEMPTS,
+  RESOLVER_FLUSH_RETRY_MS,
   searchKvKey,
   type DesignatorResolver,
 } from '../../src/do/designator-resolver';
+import type { Env } from '../../src/env';
+import { resolveDesignator } from '../../src/search/resolve';
 import {
   HOUR_MS,
   adbCalls,
@@ -280,7 +284,7 @@ describe('DesignatorResolver', () => {
       { designator: flight.designator, dateLocal: flight.dateLocal },
       {
         stubFor: () => flaky,
-        sleep: (ms) => {
+        sleep: (ms: number) => {
           sleeps.push(ms);
           return Promise.resolve();
         },
@@ -291,6 +295,25 @@ describe('DesignatorResolver', () => {
     expect(sleeps).toHaveLength(1);
     expect(sleeps[0] ?? 0).toBeGreaterThanOrEqual(50);
     expect(sleeps[0] ?? 0).toBeLessThan(250);
+
+    // The default wait is `scheduler.wait` in the Worker (never a timer in an object): the
+    // retry still happens, after the jitter, with no sleep injected.
+    let defaultCalls = 0;
+    const flakyDefault = {
+      resolve: () => {
+        defaultCalls += 1;
+        return defaultCalls === 1 ? Promise.reject(loadError()) : Promise.resolve(answer);
+      },
+    };
+    const started = Date.now();
+    const recoveredByDefault = await resolveDesignator(
+      testEnv,
+      { designator: flight.designator, dateLocal: flight.dateLocal },
+      { stubFor: () => flakyDefault },
+    );
+    expect(recoveredByDefault).toMatchObject({ outcome: 'resolved' });
+    expect(defaultCalls).toBe(2);
+    expect(Date.now() - started).toBeGreaterThanOrEqual(45);
 
     const always = { resolve: () => Promise.reject(loadError()) };
     const overloaded = await resolveDesignator(
@@ -310,6 +333,112 @@ describe('DesignatorResolver', () => {
       ),
     ).rejects.toThrow('something else');
     void track;
+  });
+
+  it('never deletes an unsent provider call record at expiry: hourly retries, one alert (L2)', async () => {
+    const flight = uniqueFlight();
+    const clock = flight.scheduledOut.getTime() - 48 * HOUR_MS;
+    await scriptAdb(flight, [adbOk(flight, { phase: 'expected' })]);
+    await trackerHarness(flight.flightKey, clock);
+    await openBudgetFor(flight, clock);
+    const resolver = await resolverHarness(flight, clock);
+    const alerts: string[] = [];
+    await runInDurableObject(resolver.stub, (instance: DesignatorResolver) => {
+      instance.capture = (message) => void alerts.push(message);
+    });
+    resolver.outbox.failSends = true;
+    const resolved = await resolver.stub.resolve({
+      rpcVersion: RPC_SCHEMA_VERSION,
+      designator: flight.designator,
+      dateLocal: flight.dateLocal,
+    });
+    expect(resolved.outcome).toBe('resolved');
+    // The billed call's record could not be sent: the first retry is an hour out, not a day.
+    expect(await resolver.alarmAt()).toBe(clock + RESOLVER_FLUSH_RETRY_MS);
+    const alarm = () =>
+      runInDurableObject(resolver.stub, (instance: DesignatorResolver) => instance.alarm());
+    const unsent = () =>
+      runInDurableObject(
+        resolver.stub,
+        (_instance, state) =>
+          state.storage.sql
+            .exec<{ n: number }>('SELECT COUNT(*) AS n FROM outbox WHERE sent_at_ms IS NULL')
+            .one().n,
+      );
+    // Before expiry the alarm keeps retrying hourly and keeps the schedule.
+    await resolver.setClock(clock + RESOLVER_FLUSH_RETRY_MS);
+    await alarm();
+    expect(await unsent()).toBe(1);
+    expect(await resolver.alarmAt()).toBe(clock + 2 * RESOLVER_FLUSH_RETRY_MS);
+
+    // At expiry, six failed attempts: deferred hourly, one alert at the sixth, nothing deleted.
+    let at = clock + RESOLUTION_TTL_MS;
+    for (let attempt = 1; attempt <= RESOLVER_FLUSH_ALERT_AFTER_ATTEMPTS; attempt += 1) {
+      await resolver.setClock(at);
+      await alarm();
+      expect(await unsent()).toBe(1);
+      expect(await resolver.alarmAt()).toBe(at + RESOLVER_FLUSH_RETRY_MS);
+      expect(alerts).toEqual(
+        attempt < RESOLVER_FLUSH_ALERT_AFTER_ATTEMPTS ? [] : ['designator_resolver_outbox_stuck'],
+      );
+      at += RESOLVER_FLUSH_RETRY_MS;
+    }
+
+    // The queue is back: the next alarm sends the record and deletes everything.
+    resolver.outbox.failSends = false;
+    await resolver.setClock(at);
+    await alarm();
+    expect(ofKind(resolver.outbox.sent, 'provider_call')).toHaveLength(1);
+    expect(ofKind(resolver.outbox.sent, 'provider_call')[0]?.payload.trigger).toBe('user_search');
+    const tables = await runInDurableObject(resolver.stub, (_instance, state) =>
+      [
+        ...state.storage.sql.exec<{ name: string }>(
+          "SELECT name FROM sqlite_master WHERE type = 'table'",
+        ),
+      ]
+        .map((row) => row.name)
+        .filter((name) => !name.startsWith('_cf_')),
+    );
+    expect(tables).toEqual([]);
+    expect(await resolver.alarmAt()).toBeNull();
+    expect(alerts).toHaveLength(1);
+    expect(await adbCalls(flight)).toBe(1);
+  });
+
+  it('records a provider that is not configured as a zero-cost error and alerts once (L17)', async () => {
+    const flight = uniqueFlight();
+    const clock = flight.scheduledOut.getTime() - 48 * HOUR_MS;
+    await openBudgetFor(flight, clock);
+    const resolver = await resolverHarness(flight, clock);
+    const alerts: string[] = [];
+    await runInDurableObject(resolver.stub, (instance: DesignatorResolver) => {
+      const holder = instance as unknown as { env: Env };
+      holder.env = { ...holder.env, AERODATABOX_API_KEY: '' };
+      instance.capture = (message) => void alerts.push(message);
+    });
+    const request = {
+      rpcVersion: RPC_SCHEMA_VERSION,
+      designator: flight.designator,
+      dateLocal: flight.dateLocal,
+    };
+
+    const first = await resolver.stub.resolve(request);
+    const second = await resolver.stub.resolve(request);
+
+    expect(first).toMatchObject({ outcome: 'error', cached: false, reason: 'config' });
+    expect(second).toMatchObject({ outcome: 'error', cached: false, reason: 'config' });
+    expect(await adbCalls(flight)).toBe(0);
+    const records = ofKind(resolver.outbox.sent, 'provider_call');
+    expect(records).toHaveLength(2);
+    for (const record of records) {
+      expect(record.payload).toMatchObject({
+        result: 'error',
+        costUnits: 0,
+        trigger: 'user_search',
+      });
+      expect(record.payload.error).toMatch(/^config:AERODATABOX_API_KEY/);
+    }
+    expect(alerts).toEqual(['provider_config_error']);
   });
 
   it('refuses an unknown rpcVersion with a typed error', async () => {
