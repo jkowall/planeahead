@@ -19,6 +19,25 @@
  *   POST /resend/emails         Resend's send endpoint; records the message and answers { id }
  *   GET  /resend/sent?to=       the recorded messages for one recipient
  *
+ * Increment 7 adds AeroDataBox, so a FlightTracker alarm under test fetches through the real
+ * router and the real adapter (`AERODATABOX_BASE_URL` is this origin plus `/aerodatabox`):
+ *
+ *   GET  /aerodatabox/flights/Number/{designator}/{dateLocal}
+ *                               the flight status route. Answers from the responses a test
+ *                               scripted for that designator and date (the last one repeats),
+ *                               or 204 (the gateway's miss) when nothing is scripted. A scripted
+ *                               `reset: true` destroys the socket so the adapter's fetch rejects.
+ *   PUT  /control/aerodatabox/flights/{designator}/{dateLocal}
+ *                               `{ responses: [{ status, body?, contentType?, reset? }] }`
+ *   DELETE /control/aerodatabox/flights/{designator}/{dateLocal}
+ *   GET  /control/aerodatabox/calls?designator=&date=
+ *                               `{ calls }`: how many status requests that flight has received.
+ *                               The lifecycle test takes its provider call count from here,
+ *                               never from a counter inside the isolate.
+ *
+ * A test owns its own designator and date (unique per test), so files running in parallel never
+ * share a script or a counter.
+ *
  * The private half of the RSA key is handed to the Worker as `TEST_IDP_PRIVATE_KEY_PEM` so tests
  * can mint identity tokens that the JWKS above validates. Everything is generated per run and
  * nothing is persisted.
@@ -60,6 +79,23 @@ export interface RecordedEmail {
   readonly body: Record<string, unknown>;
 }
 
+/** One scripted AeroDataBox answer (increment 7). */
+export interface ScriptedAdbResponse {
+  readonly status: number;
+  readonly body?: unknown;
+  readonly contentType?: string;
+  /** Destroy the socket instead of answering, so the adapter's `fetch` rejects. */
+  readonly reset?: boolean;
+}
+
+/** The AeroDataBox flight-status path the adapter builds, with the designator upper-cased. */
+const ADB_FLIGHT_RE = /^\/aerodatabox\/flights\/Number\/([^/]+)\/([0-9]{4}-[0-9]{2}-[0-9]{2})$/;
+const ADB_CONTROL_RE = /^\/control\/aerodatabox\/flights\/([^/]+)\/([0-9]{4}-[0-9]{2}-[0-9]{2})$/;
+
+function adbKey(designator: string, date: string): string {
+  return `${decodeURIComponent(designator).toUpperCase().replace(/\s+/g, '')}/${date}`;
+}
+
 function readBody(request: IncomingMessage): Promise<string> {
   return new Promise((resolve, reject) => {
     const chunks: Buffer[] = [];
@@ -83,6 +119,8 @@ export async function startFakeProviders(): Promise<FakeProviders> {
 
   const tokenRequests: RecordedTokenRequest[] = [];
   const sent: RecordedEmail[] = [];
+  const adbScripts = new Map<string, ScriptedAdbResponse[]>();
+  const adbCalls = new Map<string, number>();
 
   const server: Server = createServer((request, response) => {
     void (async () => {
@@ -91,6 +129,54 @@ export async function startFakeProviders(): Promise<FakeProviders> {
 
       if (method === 'GET' && url.pathname === '/apple/keys') {
         return json(response, 200, appleJwks);
+      }
+
+      const adbFlight = ADB_FLIGHT_RE.exec(url.pathname);
+      if (method === 'GET' && adbFlight?.[1] !== undefined && adbFlight[2] !== undefined) {
+        const key = adbKey(adbFlight[1], adbFlight[2]);
+        adbCalls.set(key, (adbCalls.get(key) ?? 0) + 1);
+        const queue = adbScripts.get(key);
+        const scripted =
+          queue === undefined ? undefined : queue.length > 1 ? queue.shift() : queue[0];
+        if (scripted === undefined) {
+          response.writeHead(204);
+          return response.end();
+        }
+        if (scripted.reset === true) {
+          request.socket.destroy();
+          return undefined;
+        }
+        if (scripted.body === undefined) {
+          response.writeHead(scripted.status);
+          return response.end();
+        }
+        const text =
+          typeof scripted.body === 'string' ? scripted.body : JSON.stringify(scripted.body);
+        response.writeHead(scripted.status, {
+          'content-type': scripted.contentType ?? 'application/json',
+        });
+        return response.end(text);
+      }
+      const control = ADB_CONTROL_RE.exec(url.pathname);
+      if (control?.[1] !== undefined && control[2] !== undefined) {
+        const key = adbKey(control[1], control[2]);
+        if (method === 'PUT') {
+          const body = JSON.parse(await readBody(request)) as { responses?: ScriptedAdbResponse[] };
+          adbScripts.set(key, [...(body.responses ?? [])]);
+          return json(response, 200, { scripted: adbScripts.get(key)?.length ?? 0 });
+        }
+        if (method === 'DELETE') {
+          adbScripts.delete(key);
+          adbCalls.delete(key);
+          return json(response, 200, { cleared: true });
+        }
+      }
+      if (method === 'GET' && url.pathname === '/control/aerodatabox/calls') {
+        const key = adbKey(
+          url.searchParams.get('designator') ?? '',
+          url.searchParams.get('date') ?? '',
+        );
+        return json(response, 200, { calls: adbCalls.get(key) ?? 0 });
       }
       if (method === 'GET' && url.pathname === '/google/certs') {
         return json(response, 200, googleJwks);

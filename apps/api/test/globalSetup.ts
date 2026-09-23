@@ -7,7 +7,9 @@
  *      the db package uses (CI points both at its `postgres:18` service container through
  *      `TEST_DATABASE_URL`). One database for the whole run: test files run in parallel against
  *      it, so every test that writes uses unique emails and install ids.
- *   2. the fake Apple, Google and Resend endpoints (`test/fake-providers.ts`) and their URLs.
+ *   2. the fake Apple, Google, Resend and (increment 7) AeroDataBox endpoints
+ *      (`test/fake-providers.ts`) and their URLs, plus `TEST_CLOCK=true`, the only place that
+ *      binding is ever set.
  *   3. the secrets from `.dev.vars.test`, parsed here because the Workers plugin reads only
  *      `.dev.vars`, and that file is the developer's own and gitignored.
  *
@@ -34,6 +36,10 @@ export interface TestBindings extends Record<string, string> {
   /** Private half of the fake JWKS key, so a test can mint identity tokens. */
   readonly TEST_IDP_PRIVATE_KEY_PEM: string;
   readonly TEST_FAKE_PROVIDERS_ORIGIN: string;
+  /** The fake AeroDataBox gateway (increment 7): `TEST_FAKE_PROVIDERS_ORIGIN` + `/aerodatabox`. */
+  readonly AERODATABOX_BASE_URL: string;
+  /** `true`: the FlightTracker and DesignatorResolver accept `_setClock` (increment 7). */
+  readonly TEST_CLOCK: string;
   /** The uncommented key names in `.dev.vars.example`, comma separated (ruling F5). */
   readonly TEST_DEV_VARS_EXAMPLE_KEYS: string;
   /** Where the database came from: `shell` (TEST_DATABASE_URL), `.env.test` or `embedded`. */
@@ -131,6 +137,8 @@ export async function setup(project: TestProject): Promise<() => Promise<void>> 
     RESEND_API_URL: `${providers.origin}/resend/emails`,
     TEST_IDP_PRIVATE_KEY_PEM: providers.privateKeyPem,
     TEST_FAKE_PROVIDERS_ORIGIN: providers.origin,
+    AERODATABOX_BASE_URL: `${providers.origin}/aerodatabox/`,
+    TEST_CLOCK: 'true',
     TEST_DEV_VARS_EXAMPLE_KEYS: exampleKeys.join(','),
     TEST_DATABASE_SOURCE: cluster.source,
     SPIKE_UNHANDLED_REJECTION: process.env['SPIKE_UNHANDLED_REJECTION'] === 'true' ? 'true' : '',

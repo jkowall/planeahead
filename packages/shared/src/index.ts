@@ -17,6 +17,7 @@ export * from './flight-status';
 export * from './ids';
 export * from './live-activity';
 export * from './operator';
+export * from './outbox';
 export * from './preferences';
 export * from './provider-call-point';
 export * from './providers';

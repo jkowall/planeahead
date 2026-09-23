@@ -1,15 +1,30 @@
 import { describe, expect, it } from 'vitest';
 import { FLIGHT_STATUS_VALUES, ProviderEventSchema } from '../src/flight-status';
 import {
+  ConfirmPersistedRequestV1,
+  ConfirmPersistedResponseV1,
   ForceRefreshRequestV1,
+  ForceRefreshResponseV1,
+  GetCostLedgerResponseV1,
   GetStateResponseV1,
+  HealthResponseV1,
+  IngestProviderEventResponseV1,
   ProviderEventV1,
   RPC_SCHEMA_VERSION,
+  ResolveRequestV1,
+  ResolveResponseV1,
+  RpcRequestError,
+  SeedRequestV1,
+  SeedResponseV1,
   SubscribeRequestV1,
   SubscribeResponseV1,
+  TRACKER_HEALTH_PHASES,
   TRACKER_PHASES,
+  TrackerHealthPhaseSchema,
   TrackerPhaseSchema,
   UnsubscribeRequestV1,
+  UnsubscribeResponseV1,
+  parseRpcRequest,
 } from '../src/rpc';
 import { AA100_INPUT } from './fixtures';
 
@@ -169,5 +184,178 @@ describe('rpc schemas', () => {
       'rpcVersion',
     ]);
     expect(ProviderEventV1.safeParse({ ...event, kind: undefined }).success).toBe(false);
+  });
+});
+
+describe('parseRpcRequest (increment 7)', () => {
+  it('serves a V1 payload, with or without an explicit rpcVersion', () => {
+    expect(parseRpcRequest(ForceRefreshRequestV1, { reason: 'manual' })).toEqual({
+      rpcVersion: 1,
+      reason: 'manual',
+    });
+    expect(parseRpcRequest(ForceRefreshRequestV1, { rpcVersion: 1, reason: 'manual' }).reason).toBe(
+      'manual',
+    );
+  });
+
+  it('refuses an unknown rpcVersion with a typed error before the schema runs', () => {
+    let caught: unknown;
+    try {
+      parseRpcRequest(ForceRefreshRequestV1, { rpcVersion: 2, reason: 'manual' });
+    } catch (error) {
+      caught = error;
+    }
+    expect(caught).toBeInstanceOf(RpcRequestError);
+    expect((caught as RpcRequestError).code).toBe('unsupported_rpc_version');
+    // The code survives the RPC boundary as the first token of the message.
+    expect((caught as RpcRequestError).message).toMatch(/^unsupported_rpc_version: /);
+    // The schema alone would have accepted it: refusing is the receiver's job.
+    expect(ForceRefreshRequestV1.parse({ rpcVersion: 2, reason: 'manual' }).rpcVersion).toBe(2);
+  });
+
+  it('refuses an invalid payload with invalid_request and names the field', () => {
+    let caught: unknown;
+    try {
+      parseRpcRequest(SubscribeRequestV1, { subscriptionId: 'nope', userId: 'u' });
+    } catch (error) {
+      caught = error;
+    }
+    expect(caught).toBeInstanceOf(RpcRequestError);
+    expect((caught as RpcRequestError).code).toBe('invalid_request');
+    expect((caught as RpcRequestError).message).toContain('subscriptionId');
+  });
+});
+
+describe('increment 7 schemas', () => {
+  it('health phases are the tracker phases plus absent', () => {
+    expect(TRACKER_HEALTH_PHASES).toEqual([...TRACKER_PHASES, 'absent']);
+    expect(TrackerHealthPhaseSchema.parse('absent')).toBe('absent');
+    expect(TrackerHealthPhaseSchema.parse('merged')).toBe('unknown');
+  });
+
+  it('SeedRequestV1 defaults the cadence to A2 and the trigger to user_search', () => {
+    const parsed = SeedRequestV1.parse({ flightKey: KEY, status: AA100_INPUT });
+    expect(parsed.cadence).toBe('A2');
+    expect(parsed.trigger).toBe('user_search');
+    expect(SeedRequestV1.safeParse({ flightKey: 'AA100', status: AA100_INPUT }).success).toBe(
+      false,
+    );
+    expect(
+      SeedResponseV1.parse({
+        status: 'seeded',
+        flightKey: KEY,
+        version: 1,
+        phase: 'scheduled',
+        nextRefreshAt: null,
+      }).rpcVersion,
+    ).toBe(1);
+  });
+
+  it('ConfirmPersistedRequestV1 names a lifetime and at most 1000 seqs', () => {
+    expect(ConfirmPersistedRequestV1.parse({ epochMs: 5, seqs: [1, 2] }).seqs).toEqual([1, 2]);
+    expect(ConfirmPersistedRequestV1.safeParse({ epochMs: 5, seqs: [-1] }).success).toBe(false);
+    expect(
+      ConfirmPersistedRequestV1.safeParse({
+        epochMs: 5,
+        seqs: Array.from({ length: 1_001 }, (_v, i) => i),
+      }).success,
+    ).toBe(false);
+    expect(
+      ConfirmPersistedResponseV1.parse({ deleted: 2, remaining: 0, matched: true }).rpcVersion,
+    ).toBe(1);
+  });
+
+  it('HealthResponseV1 allows a null key and a null alarm', () => {
+    const parsed = HealthResponseV1.parse({
+      flightKey: null,
+      phase: 'absent',
+      alarmAt: null,
+      inflight: false,
+      version: 0,
+      doSchemaVersion: 1,
+      unconfirmedOutbox: 0,
+      subscriberCount: 0,
+    });
+    expect(parsed.phase).toBe('absent');
+    expect(
+      HealthResponseV1.safeParse({
+        flightKey: KEY,
+        phase: 'scheduled',
+        alarmAt: 'soon',
+        inflight: false,
+        version: 0,
+        doSchemaVersion: 1,
+        unconfirmedOutbox: 0,
+        subscriberCount: 0,
+      }).success,
+    ).toBe(false);
+  });
+
+  it('ResolveRequestV1 and ResolveResponseV1 carry the search and its outcome', () => {
+    expect(ResolveRequestV1.parse({ designator: 'AA100', dateLocal: '2026-09-19' })).toEqual({
+      rpcVersion: 1,
+      designator: 'AA100',
+      dateLocal: '2026-09-19',
+    });
+    expect(
+      ResolveRequestV1.safeParse({ designator: 'AA100', dateLocal: '2026-02-30' }).success,
+    ).toBe(false);
+    const found = ResolveResponseV1.parse({
+      outcome: 'resolved',
+      flightKey: KEY,
+      status: AA100_INPUT,
+      created: true,
+      cached: false,
+      resolvedAt: '2026-09-19T12:00:00Z',
+      expiresAt: '2026-09-20T12:00:00Z',
+    });
+    expect(found.status?.legSeq).toBe(1);
+    expect(
+      ResolveResponseV1.safeParse({
+        outcome: 'found',
+        cached: false,
+        resolvedAt: '2026-09-19T12:00:00Z',
+        expiresAt: null,
+      }).success,
+    ).toBe(false);
+  });
+
+  it('ForceRefreshResponseV1, GetCostLedgerResponseV1 and the smaller responses parse', () => {
+    expect(
+      ForceRefreshResponseV1.parse({
+        outcome: 'coalesced',
+        phase: 'boarding',
+        version: 4,
+        snapshot: null,
+      }).rpcVersion,
+    ).toBe(1);
+    expect(
+      ForceRefreshResponseV1.safeParse({
+        outcome: 'later',
+        phase: 'boarding',
+        version: 4,
+        snapshot: null,
+      }).success,
+    ).toBe(false);
+    expect(
+      GetCostLedgerResponseV1.parse({
+        flightKey: KEY,
+        scheduledPe: 3,
+        userRefreshPe: 0.2,
+        calls: 5,
+        softCapPe: 244,
+        hardCapPe: 488,
+        stretched: false,
+        hardCapHit: false,
+        byTrigger: { alarm: { pe: 3, calls: 3 }, user_refresh: { pe: 0.2, calls: 2 } },
+      }).byTrigger['alarm']?.calls,
+    ).toBe(3);
+    expect(IngestProviderEventResponseV1.parse({ outcome: 'merged', version: 2 }).outcome).toBe(
+      'merged',
+    );
+    expect(
+      UnsubscribeResponseV1.parse({ status: 'unsubscribed', subscriberCount: 0 }).rpcVersion,
+    ).toBe(1);
+    expect(ForceRefreshRequestV1.parse({ reason: 'user_refresh', userId: 'u1' }).userId).toBe('u1');
   });
 });

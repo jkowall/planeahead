@@ -67,6 +67,32 @@ import {
   type FlightTimeField,
   type FlightTimes,
   type ForceRefreshRequestV1,
+  type ForceRefreshResponseV1,
+  type GetCostLedgerResponseV1,
+  type HealthResponseV1,
+  type IngestProviderEventResponseV1,
+  type ConfirmPersistedRequestV1,
+  type ConfirmPersistedResponseV1,
+  type SeedRequestV1,
+  type SeedResponseV1,
+  type ResolveRequestV1,
+  type ResolveResponseV1,
+  type RpcRequestErrorCode,
+  type TrackerHealthPhase,
+  type UnsubscribeResponseV1,
+  type OutboxKind,
+  type FlightTrackingState,
+  type FlightTrackerOrigin,
+  type FlightInstanceOutboxPayloadV1,
+  type FlightEventOutboxPayloadV1,
+  type FlightInstanceMessageV1,
+  type FlightEventMessageV1,
+  type ProviderCallMessageV1,
+  type ProviderBudgetKillSwitchMessageV1,
+  type ProviderBudgetDailyMessageV1,
+  type PersistMessageV1,
+  type PersistMessageV1Input,
+  type ReconcileMessageV1,
   type Instant,
   type IntervalWindow,
   type KeyDrift,
@@ -213,6 +239,20 @@ interface TypeSurface {
   airlineCallsign: AirlineCallsign;
   resolveOperatorInput: ResolveOperatorInput;
   resolvedOperator: ResolvedOperator;
+  // outbox
+  outboxKind: OutboxKind;
+  flightTrackingState: FlightTrackingState;
+  flightTrackerOrigin: FlightTrackerOrigin;
+  flightInstanceOutboxPayloadV1: FlightInstanceOutboxPayloadV1;
+  flightEventOutboxPayloadV1: FlightEventOutboxPayloadV1;
+  flightInstanceMessageV1: FlightInstanceMessageV1;
+  flightEventMessageV1: FlightEventMessageV1;
+  providerCallMessageV1: ProviderCallMessageV1;
+  providerBudgetKillSwitchMessageV1: ProviderBudgetKillSwitchMessageV1;
+  providerBudgetDailyMessageV1: ProviderBudgetDailyMessageV1;
+  persistMessageV1: PersistMessageV1;
+  persistMessageV1Input: PersistMessageV1Input;
+  reconcileMessageV1: ReconcileMessageV1;
   // preferences
   preferenceSettings: PreferenceSettings;
   userPreferences: UserPreferences;
@@ -240,6 +280,19 @@ interface TypeSurface {
   unsubscribeRequestV1: UnsubscribeRequestV1;
   getStateResponseV1: GetStateResponseV1;
   forceRefreshRequestV1: ForceRefreshRequestV1;
+  forceRefreshResponseV1: ForceRefreshResponseV1;
+  getCostLedgerResponseV1: GetCostLedgerResponseV1;
+  healthResponseV1: HealthResponseV1;
+  ingestProviderEventResponseV1: IngestProviderEventResponseV1;
+  confirmPersistedRequestV1: ConfirmPersistedRequestV1;
+  confirmPersistedResponseV1: ConfirmPersistedResponseV1;
+  seedRequestV1: SeedRequestV1;
+  seedResponseV1: SeedResponseV1;
+  resolveRequestV1: ResolveRequestV1;
+  resolveResponseV1: ResolveResponseV1;
+  rpcRequestErrorCode: RpcRequestErrorCode;
+  trackerHealthPhase: TrackerHealthPhase;
+  unsubscribeResponseV1: UnsubscribeResponseV1;
   providerEventV1: ProviderEventV1;
   // status-derivation
   adbStatus: AdbStatus;

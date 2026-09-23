@@ -1,0 +1,363 @@
+/**
+ * The persist consumer against the real database: idempotent and monotonic under duplicate and
+ * reordered delivery, an event that arrives before its instance is retried (not lost, not
+ * acknowledged), a bad Analytics Engine point never fails a batch, the confirmation round trip
+ * to a real FlightTracker drains its outbox, and the ProviderBudget's daily row lands in
+ * `provider_call_daily`.
+ *
+ * Every flight key is unique (a 2100s date and a random number), so this file runs in parallel
+ * with every other file against the one test database.
+ */
+
+import { createMessageBatch, getQueueResult, createExecutionContext } from 'cloudflare:test';
+import { and, eq } from 'drizzle-orm';
+import {
+  flightEvents,
+  flightInstances,
+  openDb,
+  providerCallDaily,
+  providerCalls,
+} from '@planeahead/db';
+import { afterEach, describe, expect, it } from 'vitest';
+import {
+  RPC_SCHEMA_VERSION,
+  flightTrackerOrigin,
+  uuidv7,
+  type FlightInstanceOutboxPayloadV1,
+  type FlightKey,
+  type PersistMessageV1Input,
+  type ProviderCallRecord,
+} from '@planeahead/shared';
+import { createLogger } from '../../src/observability/log';
+import { handlePersistBatch } from '../../src/queues/persist';
+import { makeStatus } from '../../../../packages/shared/test/fixtures';
+import {
+  HOUR_MS,
+  adbOk,
+  drainTouched,
+  openBudgetFor,
+  resolverHarness,
+  scriptAdb,
+  testEnv,
+  trackerHarness,
+  uniqueFlight,
+  type TestFlight,
+} from './helpers/flights';
+
+afterEach(drainTouched);
+
+const quietLog = createLogger({}, () => undefined);
+const EPOCH = 4_102_444_800_000;
+
+function instancePayload(
+  flight: TestFlight,
+  version: number,
+  overrides: Partial<FlightInstanceOutboxPayloadV1> = {},
+): FlightInstanceOutboxPayloadV1 {
+  return {
+    operatingCarrierIcao: 'AAL',
+    flightNumber: flight.number,
+    scheduledDepartureDate: flight.dateLocal,
+    originIcao: 'KJFK',
+    legSeq: 1,
+    version,
+    phase: 'scheduled',
+    trackingState: 'tracking',
+    refreshCadence: 'A2',
+    nextRefreshAt: new Date(flight.scheduledOut.getTime() - HOUR_MS).toISOString(),
+    lastRefreshedAt: null,
+    doSchemaVersion: 1,
+    snapshot: makeStatus({
+      key: flight.flightKey,
+      flightNumber: flight.number,
+      times: {
+        scheduledOut: flight.scheduledOut.toISOString(),
+        scheduledIn: flight.scheduledIn.toISOString(),
+      },
+      fetchedAt: new Date(flight.scheduledOut.getTime() - 48 * HOUR_MS).toISOString(),
+    }),
+    providerCallCount: version,
+    providerCostUnits: 2 * version,
+    subscriberCount: 0,
+    operatorSource: 'provider',
+    finishedAt: null,
+    eventsR2Key: null,
+    ...overrides,
+  };
+}
+
+function message(
+  flight: TestFlight,
+  seq: number,
+  body: Omit<PersistMessageV1Input, 'seq' | 'origin'>,
+): PersistMessageV1Input {
+  return {
+    ...body,
+    seq,
+    origin: flightTrackerOrigin(flight.flightKey, EPOCH),
+  } as PersistMessageV1Input;
+}
+
+function callRecord(
+  flightKey: FlightKey,
+  overrides: Partial<ProviderCallRecord> = {},
+): ProviderCallRecord {
+  return {
+    id: uuidv7(),
+    provider: 'aerodatabox',
+    operation: 'flight_status',
+    trigger: 'alarm',
+    flightKey,
+    requestId: 'req-persist',
+    startedAt: '2100-01-01T12:00:00.000Z',
+    latencyMs: 120,
+    httpStatus: 200,
+    result: 'ok',
+    costUnits: 2,
+    pollEquivalents: 0.1,
+    estCostUsdMicros: 500,
+    ...overrides,
+  };
+}
+
+async function run(
+  bodies: readonly unknown[],
+  options: { env?: typeof testEnv; capture?: (text: string, context: unknown) => void } = {},
+) {
+  const batch = createMessageBatch(
+    'planeahead-persist-local',
+    bodies.map((body, index) => ({
+      id: `m-${String(index)}`,
+      timestamp: new Date(),
+      attempts: 1,
+      body,
+    })),
+  );
+  const ctx = createExecutionContext();
+  await handlePersistBatch(
+    batch,
+    { env: options.env ?? testEnv, ctx, log: quietLog },
+    { capture: options.capture },
+  );
+  return getQueueResult(batch, ctx);
+}
+
+describe('persist consumer', () => {
+  it('applies instance rows monotonically under duplicate and reordered delivery', async () => {
+    const flight = uniqueFlight();
+    const db = openDb(testEnv);
+    const v1 = message(flight, 1, {
+      kind: 'flight_instance',
+      flightKey: flight.flightKey,
+      payload: instancePayload(flight, 1),
+    });
+    const v2 = message(flight, 3, {
+      kind: 'flight_instance',
+      flightKey: flight.flightKey,
+      payload: instancePayload(flight, 2, { phase: 'boarding', trackingState: 'tracking' }),
+    });
+    const v3 = message(flight, 5, {
+      kind: 'flight_instance',
+      flightKey: flight.flightKey,
+      payload: instancePayload(flight, 3, { phase: 'en_route', trackingState: 'airborne' }),
+    });
+
+    // Out of order, with a duplicate: v2, v3, v1 (stale), v3 (dup).
+    const result = await run([v2, v3, v1, v3]);
+
+    expect(result.explicitAcks).toEqual(['m-0', 'm-1', 'm-2', 'm-3']);
+    expect(result.retryMessages).toEqual([]);
+    const [row] = await db
+      .select({
+        version: flightInstances.version,
+        trackingState: flightInstances.trackingState,
+        providerCallCount: flightInstances.providerCallCount,
+        flightKey: flightInstances.flightKey,
+      })
+      .from(flightInstances)
+      .where(eq(flightInstances.flightKey, flight.flightKey));
+    expect(row).toEqual({
+      version: 3,
+      trackingState: 'airborne',
+      providerCallCount: 3,
+      flightKey: flight.flightKey,
+    });
+  });
+
+  it('inserts events and provider calls once, and retries an event whose instance is not there yet', async () => {
+    const flight = uniqueFlight();
+    const db = openDb(testEnv);
+    const event = message(flight, 2, {
+      kind: 'flight_event',
+      flightKey: flight.flightKey,
+      payload: {
+        occurredAt: '2100-01-01T12:00:00.000Z',
+        type: 'status_changed',
+        field: 'status',
+        oldValue: 'scheduled',
+        newValue: 'boarding',
+        source: 'aerodatabox',
+        providerCallId: null,
+      },
+    });
+    const call = callRecord(flight.flightKey);
+    const callMessage = message(flight, 4, {
+      kind: 'provider_call',
+      flightKey: flight.flightKey,
+      payload: call,
+    });
+
+    // The event lands before its instance row: retried, not acknowledged, not lost.
+    const early = await run([event, callMessage]);
+    expect(early.retryMessages.map((m) => m.msgId)).toEqual(['m-0']);
+    expect(early.explicitAcks).toEqual(['m-1']);
+
+    const instance = message(flight, 1, {
+      kind: 'flight_instance',
+      flightKey: flight.flightKey,
+      payload: instancePayload(flight, 1),
+    });
+    const later = await run([instance, event, event, callMessage, callMessage]);
+    expect(later.explicitAcks).toEqual(['m-0', 'm-1', 'm-2', 'm-3', 'm-4']);
+
+    const [row] = await db
+      .select({ id: flightInstances.id })
+      .from(flightInstances)
+      .where(eq(flightInstances.flightKey, flight.flightKey));
+    const events = await db
+      .select({ seq: flightEvents.seq, type: flightEvents.type })
+      .from(flightEvents)
+      .where(eq(flightEvents.flightInstanceId, row?.id ?? ''));
+    expect(events).toEqual([{ seq: 2, type: 'status_changed' }]);
+    const calls = await db
+      .select({ id: providerCalls.id, flightInstanceId: providerCalls.flightInstanceId })
+      .from(providerCalls)
+      .where(eq(providerCalls.id, call.id));
+    // The first delivery came before the instance existed, so the row carries no instance id;
+    // the record is stored once and the later delivery is a no-op.
+    expect(calls).toEqual([{ id: call.id, flightInstanceId: null }]);
+  });
+
+  it('a bad Analytics Engine point never fails a batch', async () => {
+    const flight = uniqueFlight();
+    let attempted = 0;
+    const throwing = {
+      writeDataPoint: () => {
+        attempted += 1;
+        throw new Error('too many blobs');
+      },
+    } as unknown as AnalyticsEngineDataset;
+    const bodies = [1, 2, 3].map((seq) =>
+      message(flight, seq, {
+        kind: 'provider_call',
+        flightKey: flight.flightKey,
+        payload: callRecord(flight.flightKey, { operation: 'x'.repeat(20_000) }),
+      }),
+    );
+
+    const result = await run(bodies, { env: { ...testEnv, PROVIDER_CALLS: throwing } });
+
+    expect(attempted).toBe(3);
+    expect(result.explicitAcks).toEqual(['m-0', 'm-1', 'm-2']);
+    expect(result.retryMessages).toEqual([]);
+  });
+
+  it('acknowledges a message it cannot read rather than retrying it for ever', async () => {
+    const result = await run([{ kind: 'flight_upsert', seq: 1 }, 'not even an object']);
+    expect(result.explicitAcks).toEqual(['m-0', 'm-1']);
+  });
+
+  it('confirms the seqs it wrote back to the tracker, which deletes them from its outbox', async () => {
+    const flight = uniqueFlight();
+    const clock = flight.scheduledOut.getTime() - 48 * HOUR_MS;
+    await scriptAdb(flight, [adbOk(flight, { phase: 'expected' })]);
+    const tracker = await trackerHarness(flight.flightKey, clock);
+    await openBudgetFor(flight, clock);
+    const resolver = await resolverHarness(flight, clock);
+    await resolver.stub.resolve({
+      rpcVersion: RPC_SCHEMA_VERSION,
+      designator: flight.designator,
+      dateLocal: flight.dateLocal,
+    });
+    await tracker.setClock(clock + HOUR_MS);
+    expect(await tracker.runAlarm()).toBe(true);
+    const before = await tracker.stub.health();
+    expect(before.unconfirmedOutbox).toBeGreaterThan(0);
+    const sent = tracker.outbox.sent.splice(0);
+    // The alarm's flush re-sent the seed's rows too (unconfirmed, past the grace): distinct
+    // seqs are what is outstanding.
+    expect(new Set(sent.map((m) => m.seq)).size).toBe(before.unconfirmedOutbox);
+
+    // Delivered twice, out of order: idempotent writes, one confirmation per tracker lifetime.
+    const result = await run([...sent].reverse().concat(sent));
+
+    expect(result.retryMessages).toEqual([]);
+    expect(result.explicitAcks).toHaveLength(sent.length * 2);
+    expect((await tracker.stub.health()).unconfirmedOutbox).toBe(0);
+    // A confirmation for another lifetime of the same key is ignored.
+    const foreign = await tracker.stub.confirmPersisted({
+      rpcVersion: RPC_SCHEMA_VERSION,
+      epochMs: 1,
+      seqs: [1, 2, 3],
+    });
+    expect(foreign).toMatchObject({ matched: false, deleted: 0 });
+    const db = openDb(testEnv);
+    const [row] = await db
+      .select({ version: flightInstances.version, trackingState: flightInstances.trackingState })
+      .from(flightInstances)
+      .where(eq(flightInstances.flightKey, flight.flightKey));
+    expect(row?.trackingState).toBe('tracking');
+    expect(row?.version ?? 0).toBeGreaterThanOrEqual(1);
+  });
+
+  it('writes the ProviderBudget daily counters to provider_call_daily, replacing on redelivery', async () => {
+    const day = `21${String(Math.floor(Math.random() * 90)).padStart(2, '0')}-0${String(1 + Math.floor(Math.random() * 9))}-1${String(Math.floor(Math.random() * 9))}`;
+    const daily = (units: number, calls: number) => ({
+      kind: 'provider_budget_daily',
+      seq: 1,
+      origin: `provider_budget:aerodatabox:${day}@1`,
+      payload: {
+        provider: 'aerodatabox',
+        utcDate: day,
+        shard: null,
+        units,
+        pollEquivalents: units / 20,
+        calls,
+        releasedUnits: 0,
+        byTrigger: { alarm: { units, pe: units / 20, calls } },
+        denials: {},
+        dailyUnitCap: 13_333,
+        finalised: false,
+      },
+    });
+    const captured: string[] = [];
+    const result = await run(
+      [
+        daily(40, 20),
+        daily(44, 22),
+        {
+          kind: 'provider_budget_kill_switch',
+          seq: 2,
+          origin: `provider_budget:aerodatabox:${day}@1`,
+          payload: { provider: 'aerodatabox', utcDate: day, reason: 'daily_cap', atMs: 1 },
+        },
+      ],
+      { capture: (text) => void captured.push(text) },
+    );
+    expect(result.explicitAcks).toEqual(['m-0', 'm-1', 'm-2']);
+    expect(captured).toEqual(['provider_kill_switch_tripped']);
+    const db = openDb(testEnv);
+    const rows = await db
+      .select({
+        calls: providerCallDaily.calls,
+        costUnits: providerCallDaily.costUnits,
+        costUsdMicros: providerCallDaily.costUsdMicros,
+        operation: providerCallDaily.operation,
+      })
+      .from(providerCallDaily)
+      .where(and(eq(providerCallDaily.day, day), eq(providerCallDaily.provider, 'aerodatabox')));
+    expect(rows).toEqual([
+      { calls: 22, costUnits: 44, costUsdMicros: 44 * 250, operation: 'budget_daily' },
+    ]);
+  });
+});

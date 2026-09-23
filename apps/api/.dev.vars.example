@@ -92,3 +92,11 @@ AEROAPI_MODE=mock
 ADB_PLAN=growth
 # `true` opens the AeroDataBox webhook receiver. Phase 0 has no subscription, so it stays false.
 ADB_ALERTS_ENABLED=false
+
+# Test-only seams (increment 7). NEVER set in a deployed environment or in `.dev.vars`.
+# AERODATABOX_BASE_URL points the router's AeroDataBox adapter at another host; the Workers suite
+# sets it to the fake provider server (test/fake-providers.ts) so FlightTracker alarms fetch
+# scripted fixtures through the real adapter. TEST_CLOCK=true enables the `_setClock` RPC on the
+# FlightTracker and DesignatorResolver objects; test/globalSetup.ts is the only place that sets it.
+# AERODATABOX_BASE_URL=
+# TEST_CLOCK=
