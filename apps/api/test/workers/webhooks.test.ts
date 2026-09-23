@@ -15,7 +15,10 @@ import { afterEach, describe, expect, it } from 'vitest';
 import { ProviderEventV1, RPC_SCHEMA_VERSION } from '@planeahead/shared';
 import { createApp, type ChainOptions } from '../../src/app';
 import type { Env } from '../../src/env';
-import type { IdempotencyStore, StoredResponse } from '../../src/middleware/idempotency';
+import {
+  createMemoryIdempotencyStore,
+  type IdempotencyStore,
+} from '../../src/middleware/idempotency';
 import { scrubSentryEvent } from '../../src/middleware/sentry';
 import { v1Routes } from '../../src/routes/v1';
 import {
@@ -312,14 +315,18 @@ describe('the receivers in the chain', () => {
     expect(limited).toEqual(['ip:203.0.113.7']);
   });
 
-  it('accept a delivery that carries Idempotency-Key (the middleware read the body first)', async () => {
-    const stored = new Map<string, StoredResponse>();
+  it('accept a delivery that carries Idempotency-Key (no idempotency instance touches it)', async () => {
+    // Increment 8: the global instance leaves `/v1` to the `/v1` instance, and that one skips
+    // `/v1/webhooks/`. A provider retry is the provider's business, not the outbox's.
+    const reserved: string[] = [];
+    const memory = createMemoryIdempotencyStore();
     const store: IdempotencyStore = {
-      get: (scope, key) => Promise.resolve(stored.get(`${scope}|${key}`) ?? null),
-      put: (scope, key, response) => {
-        stored.set(`${scope}|${key}`, response);
-        return Promise.resolve();
+      reserve: (scope, key, hash) => {
+        reserved.push(key);
+        return memory.reserve(scope, key, hash);
       },
+      complete: (scope, key, response) => memory.complete(scope, key, response),
+      release: (scope, key) => memory.release(scope, key),
     };
     const { lines, result } = await captureLogs(() =>
       isolated(
@@ -334,6 +341,7 @@ describe('the receivers in the chain', () => {
     expect(result.response.status).toBe(200);
     expect(await result.response.json()).toEqual({ accepted: 1 });
     expect(result.sent).toHaveLength(1);
+    expect(reserved).toEqual([]);
     expect(lines.join('\n').includes(AEROAPI_TOKEN)).toBe(false);
   });
 

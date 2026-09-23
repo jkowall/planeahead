@@ -46,6 +46,7 @@ import {
   instant,
   literal,
   timestamps,
+  xid8,
 } from './columns';
 import { airports } from './reference';
 
@@ -421,6 +422,46 @@ export const flightTracks = pgTable(
     check(
       'flight_tracks_sample_count_check',
       sql`${t.sampleCount} >= 0 and ${t.sampleCount} <= 2000`,
+    ),
+  ],
+);
+
+/**
+ * The flight half of the sync feed (migration 0003, increment 8, ADR 0012): one row per applied
+ * `flight_instances` write, carrying the snapshot that write stored. Inserted by the persist
+ * consumer inside the SAME transaction as the monotonic upsert it records, and only when that
+ * upsert changed the row, so a replayed or stale delivery adds nothing. Never updated or upserted:
+ * `xid` is a column DEFAULT, and a default does not fire on the `DO UPDATE` branch of
+ * `ON CONFLICT`. Shares the watermark rule of `user_sync_changes`
+ * (`xid < pg_snapshot_xmin(pg_current_snapshot())`); `GET /v1/sync` reads the rows of the
+ * caller's subscribed instances. `seq` is drawn from `user_sync_changes`'s own identity sequence
+ * rather than one of its own (ruling O3, ADR 0012 item 3): the persist consumer writes rows to
+ * BOTH tables in one transaction (the upsert's snapshot, and the `live_tracked` changes of the
+ * flight's subscriptions), so one xid can carry rows in both, and only a shared sequence keeps an
+ * `(xid, seq)` pair naming at most one row across the two tables. Purged by the housekeeping cron
+ * (increment 12) together with `user_sync_changes`, below one horizon (`sync_horizon`).
+ */
+export const flightSyncChanges = pgTable(
+  'flight_sync_changes',
+  {
+    seq: bigint('seq', { mode: 'number' })
+      .primaryKey()
+      .default(sql`nextval('user_sync_changes_seq_seq'::regclass)`),
+    flightInstanceId: uuid('flight_instance_id')
+      .notNull()
+      .references(() => flightInstances.id, { onDelete: 'cascade' }),
+    xid: xid8('xid')
+      .notNull()
+      .default(sql`pg_current_xact_id()`),
+    /** The `FlightStatus` the upsert stored, with `key` set. */
+    snapshot: jsonb('snapshot').notNull(),
+    ...createdOnly(),
+  },
+  (t) => [
+    index('flight_sync_changes_flight_instance_id_xid_seq_idx').on(
+      t.flightInstanceId,
+      t.xid,
+      t.seq,
     ),
   ],
 );

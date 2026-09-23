@@ -47,39 +47,49 @@ function postInit(key?: string, installId: string | null = 'chain-install-0001')
 
 describe('the deployed chain answers the shape it documents', () => {
   it('answers 501, not 500, for a mutating request carrying an Idempotency-Key', async () => {
-    // The regression. `POST /v1/flights` with this header is the request shape the mobile
-    // outbox retries aggressively; increments 7 and 8 own the route, so the stub still answers.
+    // The regression: a keyed POST is the request shape the mobile outbox retries aggressively.
+    // Increment 8 took `/v1/flights`; `/v1/events` is the stub that still answers.
     const response = await exports.default.fetch(
-      'https://api.planeahead.test/v1/flights',
+      'https://api.planeahead.test/v1/events',
       postInit('chain-key-00000001'),
     );
     const body = await response.json<{ error: string; increment: string }>();
 
     expect(response.status).toBe(501);
     expect(body.error).toBe('not_implemented');
-    expect(body.increment).toContain('08');
+    expect(body.increment).toContain('/v1/events');
   });
 
   it('answers the same 501 without the header, so the header is not what routes', async () => {
     const response = await exports.default.fetch(
-      'https://api.planeahead.test/v1/flights',
+      'https://api.planeahead.test/v1/events',
       postInit(),
     );
 
     expect(response.status).toBe(501);
   });
 
-  it('answers 400, not 500, for a keyed request that carries no X-Install-Id', async () => {
-    // No user can be resolved ahead of auth and there is no install id, so the key has no scope.
-    // The Worker says so instead of running the handler as if the key had not been sent.
+  it('answers 401, not 500, for a keyed POST /v1/flights without a session', async () => {
+    const response = await exports.default.fetch(
+      'https://api.planeahead.test/v1/flights',
+      postInit('chain-key-00000006'),
+    );
+
+    expect(response.status).toBe(401);
+    expect((await response.json<{ error: string }>()).error).toBe('unauthenticated');
+  });
+
+  it('answers 401, not 500, for a keyed /v1 request that carries no session and no X-Install-Id', async () => {
+    // Nothing scopes the key, and under /v1 that is auth's to answer (ruling O10): the caller is
+    // told to sign in, never to add an install id to a request no session could run.
     const response = await exports.default.fetch(
       'https://api.planeahead.test/v1/flights',
       postInit('chain-key-00000005', null),
     );
     const body = await response.json<{ error: string; requestId: string }>();
 
-    expect(response.status).toBe(400);
-    expect(body.error).toBe('idempotency_scope_missing');
+    expect(response.status).toBe(401);
+    expect(body.error).toBe('unauthenticated');
     expect(body.requestId).toBe(response.headers.get(REQUEST_ID_HEADER));
   });
 

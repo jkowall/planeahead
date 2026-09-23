@@ -20,6 +20,7 @@ import { describe, expect, it } from 'vitest';
 import { createApp } from '../../src/app';
 import { normalisePem } from '../../src/auth/apple-client-secret';
 import { TEST_SEAM_NAMES, WORKER_SECRET_NAMES } from '../../src/env';
+import wranglerConfig from '../../wrangler.jsonc?raw';
 import {
   API_ORIGIN,
   appleNativeSignIn,
@@ -62,6 +63,35 @@ describe('.dev.vars.example and .dev.vars.test', () => {
         continue;
       }
       expect(testEnv[name]?.length ?? 0, name).toBeGreaterThan(8);
+    }
+  });
+});
+
+/**
+ * The `"secrets": { "required": [...] }` blocks of wrangler.jsonc, in order of appearance, read
+ * without a JSONC parser: the blocks hold nothing but quoted names.
+ */
+function requiredSecretBlocks(text: string): string[][] {
+  return [...text.matchAll(/"secrets"\s*:\s*\{\s*"required"\s*:\s*\[([^\]]*)\]/g)].map((match) =>
+    [...(match[1] ?? '').matchAll(/"([A-Z0-9_]+)"/g)].map((name) => name[1] ?? ''),
+  );
+}
+
+describe('wrangler.jsonc secrets.required (ruling O11)', () => {
+  it('declares every secret the Worker reads in staging and in production, and nothing else', () => {
+    const blocks = requiredSecretBlocks(wranglerConfig);
+    // Staging and production only: the top level is the local and test environment, which reads
+    // .dev.vars and .dev.vars.test and must not warn about a missing production secret.
+    expect(blocks).toHaveLength(2);
+    const staging = wranglerConfig.indexOf('"staging"');
+    const production = wranglerConfig.indexOf('"production"');
+    const positions = [...wranglerConfig.matchAll(/"secrets"\s*:/g)].map((match) => match.index);
+    expect(positions[0]).toBeGreaterThan(staging);
+    expect(positions[0]).toBeLessThan(production);
+    expect(positions[1]).toBeGreaterThan(production);
+    for (const block of blocks) {
+      // The block replaces .dev.vars inference, so it must be complete, in the same order.
+      expect(block).toEqual([...WORKER_SECRET_NAMES]);
     }
   });
 });

@@ -96,11 +96,24 @@ export type MiddlewareName = (typeof MIDDLEWARE_ORDER)[number];
  * return the response), but `hono/body-limit`, `hono/bearer-auth` and Better Auth's handler all
  * throw, and increment 5 mounts the first of them.
  *
+ * Under `/v1` an `HTTPException` is answered with the PlaneAhead envelope and its own status
+ * (increment 8, ruling O10), because the mobile client parses every non-2xx `/v1` answer as the
+ * envelope and branches on `error`: `@hono/zod-validator` throws `HTTPException(400, 'Malformed
+ * JSON in request body')` BEFORE the validator's hook runs, so a truncated body would otherwise
+ * reach the outbox as `text/plain`. A 400 becomes `validation_failed` with one `invalid_json`
+ * issue, a 413 `payload_too_large`, anything else the generic code for its status; each carries
+ * the request id. Outside `/v1` (Better Auth's mount throws its own) the exception's response is
+ * kept as Hono would answer it.
+ *
  * Everything else really is unhandled, so it is logged with the request id and answered with a
  * body that carries the same id back to the caller.
  */
 export function handleError(error: Error, c: Context<AppBindings>): Response {
   if (error instanceof HTTPException) {
+    const path = new URL(c.req.url).pathname;
+    if (path === '/v1' || path.startsWith('/v1/')) {
+      return httpExceptionEnvelope(error, c);
+    }
     return error.getResponse();
   }
   const requestIdValue = c.var.requestId ?? 'unknown';
@@ -110,6 +123,49 @@ export function handleError(error: Error, c: Context<AppBindings>): Response {
     ...errorFields(error),
   });
   return c.json({ error: 'internal_error', requestId: requestIdValue }, 500);
+}
+
+/** The envelope for an `HTTPException` thrown under `/v1`, keeping its status. */
+export function httpExceptionEnvelope(error: HTTPException, c: Context<AppBindings>): Response {
+  const requestIdValue = c.var.requestId ?? 'unknown';
+  const status = error.status;
+  if (status === 400) {
+    return c.json(
+      {
+        error: 'validation_failed',
+        message: 'the request body is not valid JSON',
+        issues: [{ path: [], message: 'malformed JSON', code: 'invalid_json' }],
+        requestId: requestIdValue,
+      },
+      400,
+    );
+  }
+  if (status === 413) {
+    return c.json(
+      {
+        error: 'payload_too_large',
+        message: 'the request body is too large',
+        requestId: requestIdValue,
+      },
+      413,
+    );
+  }
+  const code =
+    status === 401
+      ? 'unauthenticated'
+      : status === 403
+        ? 'insufficient_scope'
+        : status === 404
+          ? 'not_found'
+          : status === 429
+            ? 'rate_limited'
+            : status >= 500
+              ? 'internal_error'
+              : 'invalid_payload';
+  return c.json(
+    { error: code, message: error.message || 'request refused', requestId: requestIdValue },
+    status,
+  );
 }
 
 export function handleNotFound(c: Context<AppBindings>): Response {

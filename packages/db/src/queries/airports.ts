@@ -20,9 +20,12 @@ export interface AirportEndpoint {
   readonly tz: string;
 }
 
-/** Looks an airport up by its stored code. Null when the code is unknown. */
+/**
+ * Looks an airport up by its stored code. Null when the code is unknown. Takes anything that can
+ * select, so a writer can call it inside its own transaction (the persist consumer does).
+ */
 export async function resolveAirportEndpoint(
-  db: Db,
+  db: Pick<Db, 'select'>,
   icao: string,
 ): Promise<AirportEndpoint | null> {
   const [row] = await db

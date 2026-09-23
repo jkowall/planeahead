@@ -24,10 +24,12 @@ else belongs in a code comment.
 | [0009](0009-postgres-js-driver.md) | postgres.js as the single Postgres driver              | Accepted |
 | [0010](0010-provider-identity.md)  | Provider identity: operator resolution and merge path  | Accepted |
 | [0011](0011-alarm-idempotency.md)  | Alarm idempotency: attempt row, retry ladder, outbox   | Accepted |
+| [0012](0012-sync-cursor.md)        | The sync cursor: an xid8 watermark over two tables     | Accepted |
 
 0003 (flight key) and 0006 (uuidv7) were written in increment 2; 0002, 0007 and 0009 in
 increment 3; 0004 in increment 4; 0010 (provider identity) in increment 6, which also amended 0003;
-0011 (alarm idempotency) in increment 7, which also amended 0007 with its third reason. The Phase 0
+0011 (alarm idempotency) in increment 7, which also amended 0007 with its third reason; 0012 (sync
+cursor) in increment 8. The Phase 0
 plan lists the ADRs still due in later increments:
 0001 Expo, 0005 identifiers, 0008 expo-widgets. Their rationale is already written up in
 [docs/plans/phase0-plan.md](../plans/phase0-plan.md) section 3; each increment lifts the relevant

@@ -35,7 +35,8 @@
  * account access to Workers Logs; rotate it if that access widens.
  *
  * Rate limiting (orchestrator ruling I2): these routes are EXEMPT from the public per-IP limiter
- * (`ipLimiter` skips `/v1/webhooks/`) and have no per-route limiter in Phase 0. A provider posts
+ * (`ipLimiter` skips `/v1/webhooks/aerodatabox/` and `/v1/webhooks/aeroapi/`, and nothing else
+ * under `/v1/webhooks/`) and have no per-route limiter in Phase 0. A provider posts
  * from a handful of addresses, so an IP limit would throttle real deliveries first; the 256-bit
  * path token makes a wrong guess a cheap 404, and the `provider-events` queue's backpressure
  * bounds what a valid token can push. docs/security/threat-model.md records the trade-off.
@@ -132,7 +133,7 @@ async function parseDelivery(
  * The receiver, with every unexpected throw answered here: an error that reached the app's
  * `onError` would be logged with the request path, and the path is the credential.
  */
-async function receive(c: Context<AppBindings>, provider: WebhookProvider): Promise<Response> {
+async function receive(c: Context<AppBindings>, provider: WebhookProvider) {
   // Never the path: it carries the token.
   const log = createLogger({ request_id: c.var.requestId, webhook: provider });
   try {
@@ -143,20 +144,25 @@ async function receive(c: Context<AppBindings>, provider: WebhookProvider): Prom
   }
 }
 
-async function receiveUnguarded(
-  c: Context<AppBindings>,
-  provider: WebhookProvider,
-  log: Logger,
-): Promise<Response> {
+/**
+ * The app's ordinary 404 (`handleNotFound`'s exact body), answered typed so the receivers keep a
+ * typed surface in `AppType` (ruling O10): a disabled receiver and a wrong token read the same as
+ * an unknown path.
+ */
+function ordinaryNotFound(c: Context<AppBindings>) {
+  return c.json({ error: 'not_found' as const, requestId: c.var.requestId }, 404);
+}
+
+async function receiveUnguarded(c: Context<AppBindings>, provider: WebhookProvider, log: Logger) {
   if (provider === 'aerodatabox' && !providerSettings(c.env).adbAlertsEnabled) {
-    return c.notFound();
+    return ordinaryNotFound(c);
   }
   const expected = expectedToken(c, provider);
   if (!verifyPathToken(c.req.param('token') ?? '', expected)) {
     log.info('webhook_rejected', {
       reason: isWellFormedWebhookToken(expected) ? 'token' : 'token_not_configured',
     });
-    return c.notFound();
+    return ordinaryNotFound(c);
   }
   const text = await readLimited(c, WEBHOOK_BODY_LIMIT_BYTES);
   if (text === null) {
@@ -189,11 +195,40 @@ async function receiveUnguarded(
   return c.json({ accepted: messages.length }, 200);
 }
 
+/** The 501 of a receiver whose URL is reserved before its handler exists. */
+export interface ReservedWebhookBody {
+  readonly error: 'not_implemented';
+  readonly phase: string;
+  readonly message: string;
+  readonly requestId: string;
+}
+
+function reserved(c: Context<AppBindings>, phase: string, message: string) {
+  return c.json<ReservedWebhookBody, 501>(
+    { error: 'not_implemented', phase, message, requestId: c.var.requestId },
+    501,
+  );
+}
+
 /**
- * Mounted at `/v1/webhooks`. Anything under it that is not one of the two POST receivers is the
- * app's ordinary 404, so a wrong provider, method or token all read the same.
+ * Mounted at `/v1/webhooks`. Anything under it that is not one of the POST receivers or the two
+ * reserved stubs is the app's ordinary 404, so a wrong provider, method or token all read the
+ * same.
+ *
+ * The stubs (increment 8, ruling K12) reserve two URLs that must be registered with a third party
+ * before their handlers exist: Sign in with Apple server-to-server notifications (a per-App-ID
+ * setting in Certificates, Identifiers and Profiles: consent revoked, account deleted, email
+ * forwarding changes) and RevenueCat's webhook. Both answer 501 naming the phase that implements
+ * them. They sit outside the provider receivers' path-token scheme and inside the public per-IP
+ * limiter, and never read their body.
  */
 export const webhookRoutes = new Hono<AppBindings>()
   .post('/aerodatabox/:token', (c) => receive(c, 'aerodatabox'))
   .post('/aeroapi/:token', (c) => receive(c, 'aeroapi'))
+  .post('/apple', (c) =>
+    reserved(c, 'Phase 1', 'Sign in with Apple server-to-server notifications are not handled yet'),
+  )
+  .post('/revenuecat', (c) =>
+    reserved(c, 'Phase 1', 'RevenueCat webhooks are not handled until billing ships'),
+  )
   .all('/*', (c) => c.notFound());

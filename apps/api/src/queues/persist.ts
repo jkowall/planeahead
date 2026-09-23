@@ -1,5 +1,6 @@
 /**
- * `persist` queue consumer (increment 7).
+ * `persist` queue consumer (increment 7; increment 8 adds the `live_tracked` bookkeeping and the
+ * `merge` message).
  *
  * This is the only path from a Durable Object to Postgres (ADR 0007): a tracker appends outbox
  * rows, flushes them here, and this consumer writes `flight_instances`, `flight_events` and
@@ -17,7 +18,17 @@
  *     ignored, and a NEWER lifetime for an instance whose tracking state is terminal is refused
  *     with the `flight_lifetime_rejected` ops alert. A finished flight never gets a second
  *     lifetime; a reborn tracker is a bug, not data. (A newer lifetime for a row that is still
- *     active is applied and logged: that is a recovery, not a rebirth.)
+ *     active is applied and logged: that is a recovery, not a rebirth.) Increment 8: the upsert
+ *     runs in a transaction with the `flight_sync_changes` row it records (the sync feed's flight
+ *     half, ADR 0012), inserted only when the upsert changed the row. Ruling O3: the same
+ *     transaction charges `live_tracked` where a flight ENTERS its live window (the first row that
+ *     puts it there: scheduled departure within 48 h, or already departed) for every live
+ *     subscription not yet flagged, and releases it where the flight is OVER (arrived, cancelled,
+ *     or a terminal tracking state), idempotent through `flight_subscriptions.live_tracked`; every
+ *     flag it decides is appended to `user_sync_changes` so the client can show it. That is why
+ *     the two change tables share one sequence (ADR 0012 item 3).
+ *   - `merge` (increment 8, ruling O2): the FlightTracker half of an anonymous-to-account upgrade,
+ *     src/queues/merge.ts.
  *   - `flight_events`: insert on conflict `(flight_instance_id, seq)` do nothing, the instance
  *     id resolved by flight key in a preceding select. An event that arrives before its
  *     instance row throws and is retried with backoff: the row will exist by then.
@@ -50,12 +61,14 @@
  * doubling spacing. The helpers below are what both consumers share.
  */
 
-import { eq, sql } from 'drizzle-orm';
+import { and, eq, isNull, sql } from 'drizzle-orm';
 import {
   TERMINAL_TRACKING_STATES,
   destinationColumns,
   flightEvents,
   flightInstances,
+  flightSubscriptions,
+  flightSyncChanges,
   openDb,
   originColumns,
   providerCallDaily,
@@ -69,6 +82,7 @@ import {
   PersistMessageIdentityV1,
   PersistMessageV1,
   RPC_SCHEMA_VERSION,
+  isInLiveWindow,
   parseFlightTrackerOrigin,
   providerCallPoint,
   type ConfirmPersistedResponseV1,
@@ -79,6 +93,10 @@ import {
   type ProviderCallRecord,
 } from '@planeahead/shared';
 import { environmentName, type Env } from '../env';
+import { releaseCap, takeCap, userCap } from '../lib/caps';
+import { appendUserChange, subscriptionSyncRow } from '../lib/sync-rows';
+import { defaultTrackerFor as routeTrackerFor, type TrackerFor } from '../lib/trackers';
+import { handleMergeMessage, isMergeMessage } from './merge';
 import { raiseOpsAlert, type CaptureMessage } from '../observability/ops-alert';
 import { errorFields, type Logger } from '../observability/log';
 import { providerCallRow } from '../providers/cost-log';
@@ -101,6 +119,10 @@ export interface PersistDeps {
   readonly trackerFor?: ((flightKey: FlightKey) => ConfirmingTracker) | undefined;
   /** The database handle; the default opens one on the Hyperdrive binding per batch. */
   readonly db?: Db | undefined;
+  /** The trackers a `merge` message re-points; the default is `FLIGHT_TRACKER.getByName`. */
+  readonly mergeTrackerFor?: TrackerFor | undefined;
+  /** The clock the live-window decision reads (ruling O3); `Date.now` by default. */
+  readonly now?: (() => number) | undefined;
 }
 
 const AIRCRAFT_TYPE_RE = /^[A-Z0-9]{2,4}$/;
@@ -132,14 +154,26 @@ interface StoredInstance {
   readonly id: string;
   readonly epochMs: number | null;
   readonly trackingState: string;
+  readonly status: string;
+  readonly scheduledOut: string | null;
+  readonly version: number;
+  /** When the row was last written (`set_updated_at`), the time its own stage is judged at. */
+  readonly updatedAt: string;
 }
 
-async function storedInstanceFor(db: Db, flightKey: string): Promise<StoredInstance | null> {
+/** Anything that can select: the batch's handle or a transaction on it. */
+type Selector = Pick<Db, 'select'>;
+
+async function storedInstanceFor(db: Selector, flightKey: string): Promise<StoredInstance | null> {
   const [row] = await db
     .select({
       id: flightInstances.id,
       epochMs: flightInstances.doLifetimeEpochMs,
       trackingState: flightInstances.trackingState,
+      status: flightInstances.status,
+      scheduledOut: flightInstances.scheduledOut,
+      version: flightInstances.version,
+      updatedAt: flightInstances.updatedAt,
     })
     .from(flightInstances)
     .where(eq(flightInstances.flightKey, flightKey))
@@ -147,7 +181,7 @@ async function storedInstanceFor(db: Db, flightKey: string): Promise<StoredInsta
   return row ?? null;
 }
 
-async function instanceIdFor(db: Db, flightKey: string): Promise<string | null> {
+async function instanceIdFor(db: Selector, flightKey: string): Promise<string | null> {
   return (await storedInstanceFor(db, flightKey))?.id ?? null;
 }
 
@@ -172,11 +206,139 @@ function lifetimeVerdict(
   return null;
 }
 
-/** The monotonic, lifetime-aware upsert. `epochMs` is the origin's lifetime, null if unknown. */
+/**
+ * The monotonic, lifetime-aware upsert. `epochMs` is the origin's lifetime, null if unknown.
+ *
+ * Increment 8 (ruling K4): the upsert and its `flight_sync_changes` row are one transaction on
+ * one connection (`db.transaction`, postgres.js `sql.begin`; Hyperdrive may hand one invocation
+ * several connections, so two statements outside a transaction could land on two). The change row
+ * is written only when the upsert changed the row (`RETURNING` answered), so a duplicate or stale
+ * delivery adds nothing to the sync feed, and the row carries the snapshot this upsert stored.
+ */
 export async function upsertFlightInstance(
   db: Db,
   message: FlightInstanceMessageV1,
   epochMs: number | null = parseFlightTrackerOrigin(message.origin)?.epochMs ?? null,
+  nowMs: number = Date.now(),
+): Promise<LifetimeWrite> {
+  return db.transaction((tx) => upsertFlightInstanceIn(tx, message, epochMs, nowMs));
+}
+
+type Tx = Parameters<Parameters<Db['transaction']>[0]>[0];
+
+/** Where an instance row stands against its live window (ruling O3). */
+export type LiveWindowStage = 'before' | 'live' | 'over';
+
+const OVER_STATUSES: ReadonlySet<string> = new Set(['arrived', 'cancelled']);
+
+export function liveWindowStage(
+  row: {
+    readonly status: string;
+    readonly trackingState: string;
+    readonly scheduledOut: string | null;
+  },
+  nowMs: number,
+): LiveWindowStage {
+  if (isTerminal(row.trackingState) || OVER_STATUSES.has(row.status)) {
+    return 'over';
+  }
+  return isInLiveWindow({ phase: row.status, scheduledOut: row.scheduledOut }, nowMs)
+    ? 'live'
+    : 'before';
+}
+
+/**
+ * The `live_tracked` bookkeeping of one applied instance row, inside its upsert transaction.
+ *
+ * ENTERING the window (the stored row was not live WHEN IT WAS WRITTEN: absent, the routes'
+ * version-0 registry row, or before the window at its `updated_at`; the new one is live now).
+ * Judging the stored row at its own write time, not at now, is what catches a crossing that time
+ * alone makes: a row written 49 h out and one written 47 h out can carry the same departure, and
+ * only the second write happens inside the window. Every live subscription not yet flagged takes one
+ * `live_tracked` slot of its user; a take the cap refuses leaves the flag false (the shared
+ * tracker still tracks the flight; the flag records, and from Phase 1 gates notifications and
+ * the Live Activity). OVER: every flagged live subscription is cleared and its slot released,
+ * never below zero. Both are idempotent through the flag, and each decided row gets its upsert in
+ * `user_sync_changes`, so the client can show whether the flight is live-tracked.
+ */
+async function applyLiveWindow(
+  tx: Tx,
+  instanceId: string,
+  flightKey: FlightKey,
+  stored: StoredInstance | null,
+  next: { status: string; trackingState: string; scheduledOut: string | null },
+  nowMs: number,
+): Promise<void> {
+  const now = new Date(nowMs);
+  const stage = liveWindowStage(next, nowMs);
+  if (stage === 'over') {
+    const cleared = await tx
+      .update(flightSubscriptions)
+      .set({ liveTracked: false })
+      .where(
+        and(
+          eq(flightSubscriptions.flightInstanceId, instanceId),
+          eq(flightSubscriptions.liveTracked, true),
+          isNull(flightSubscriptions.deletedAt),
+        ),
+      )
+      .returning();
+    for (const row of cleared) {
+      await releaseCap(tx, userCap('live_tracked', row.userId, now));
+      await appendUserChange(tx, {
+        userId: row.userId,
+        entity: 'flight_subscriptions',
+        entityId: row.id,
+        op: 'upsert',
+        row: subscriptionSyncRow(row, flightKey),
+      });
+    }
+    return;
+  }
+  const wasLive =
+    stored !== null &&
+    stored.version > 0 &&
+    liveWindowStage(stored, Date.parse(stored.updatedAt)) === 'live';
+  if (stage !== 'live' || wasLive) {
+    return;
+  }
+  const waiting = await tx
+    .select()
+    .from(flightSubscriptions)
+    .where(
+      and(
+        eq(flightSubscriptions.flightInstanceId, instanceId),
+        eq(flightSubscriptions.liveTracked, false),
+        isNull(flightSubscriptions.deletedAt),
+      ),
+    )
+    .orderBy(flightSubscriptions.createdAt)
+    .for('update');
+  for (const row of waiting) {
+    let decided = row;
+    if (await takeCap(tx, userCap('live_tracked', row.userId, now))) {
+      const [flagged] = await tx
+        .update(flightSubscriptions)
+        .set({ liveTracked: true })
+        .where(eq(flightSubscriptions.id, row.id))
+        .returning();
+      decided = flagged ?? row;
+    }
+    await appendUserChange(tx, {
+      userId: row.userId,
+      entity: 'flight_subscriptions',
+      entityId: row.id,
+      op: 'upsert',
+      row: subscriptionSyncRow(decided, flightKey),
+    });
+  }
+}
+
+async function upsertFlightInstanceIn(
+  db: Tx,
+  message: FlightInstanceMessageV1,
+  epochMs: number | null,
+  nowMs: number,
 ): Promise<LifetimeWrite> {
   const p = message.payload;
   const stored = await storedInstanceFor(db, message.flightKey);
@@ -231,7 +393,7 @@ export async function upsertFlightInstance(
     finishedAt: p.finishedAt,
     eventsR2Key: p.eventsR2Key,
   };
-  await db
+  const written = await db
     .insert(flightInstances)
     .values({
       operatingCarrierIcao: p.operatingCarrierIcao,
@@ -251,7 +413,30 @@ export async function upsertFlightInstance(
         or (${flightInstances.doLifetimeEpochMs} is not null
             and excluded.do_lifetime_epoch_ms is not null
             and ${flightInstances.doLifetimeEpochMs} < excluded.do_lifetime_epoch_ms)`,
+    })
+    .returning({ id: flightInstances.id });
+  const row = written[0];
+  if (row !== undefined && snapshot !== null && snapshot !== undefined) {
+    // Insert only: the xid DEFAULT fires on insert, never on an upsert's DO UPDATE branch.
+    await db.insert(flightSyncChanges).values({
+      flightInstanceId: row.id,
+      snapshot: { ...snapshot, key: message.flightKey },
     });
+  }
+  if (row !== undefined) {
+    await applyLiveWindow(
+      db,
+      row.id,
+      message.flightKey,
+      stored,
+      {
+        status: mutable.status,
+        trackingState: mutable.trackingState,
+        scheduledOut: mutable.scheduledOut,
+      },
+      nowMs,
+    );
+  }
   return 'applied';
 }
 
@@ -481,9 +666,19 @@ export async function handlePersistBatch(
     raiseOpsAlert('flight_lifetime_rejected', fields, log, deps.capture);
   };
 
+  const nowMs = deps.now ?? Date.now;
   const outcome = await consumeBatch(
     batch,
     async (message) => {
+      if (isMergeMessage(message.body)) {
+        // Not a tracker's outbox row: nothing to confirm. A failure throws and is retried.
+        await handleMergeMessage(message.body, {
+          db: database(),
+          trackerFor: deps.mergeTrackerFor ?? routeTrackerFor(env),
+          log,
+        });
+        return;
+      }
       const parsed = PersistMessageV1.safeParse(message.body);
       if (!parsed.success) {
         // A message this build cannot read can never succeed on retry: acknowledge it, loudly,
@@ -507,7 +702,7 @@ export async function handlePersistBatch(
         case 'flight_instance':
           lifetimeOutcome(
             body,
-            await upsertFlightInstance(database(), body, origin?.epochMs ?? null),
+            await upsertFlightInstance(database(), body, origin?.epochMs ?? null, nowMs()),
           );
           break;
         case 'flight_event':

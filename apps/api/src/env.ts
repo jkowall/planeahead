@@ -11,8 +11,10 @@
  * missing one must fail with its own message, not with a type error that never runs.
  */
 
+import type { EnvironmentName } from '@planeahead/shared';
 import type { AuthRuntime } from './auth/runtime';
 import type { AuthenticatedUser } from './auth/user';
+import type { IdempotencyContext } from './middleware/idempotency';
 
 /**
  * Secrets set with `wrangler secret put` (staging and production) or `.dev.vars` (local), and
@@ -76,11 +78,31 @@ export interface WorkerSecrets {
   readonly WEBHOOK_TOKEN_AEROAPI?: string;
 
   /**
+   * HMAC-SHA-256 key for `deleted_subjects.provider_subject_hash` (increment 8, ruling K8): the
+   * Apple and Google subjects and the session tokens of a deleted account are stored only as a
+   * keyed hash under this secret, which never enters the database. At least 32 characters
+   * (`openssl rand -base64 32`). Missing means `POST /v1/me/delete` refuses (500) before it
+   * touches anything, and a dead session is answered `unauthenticated` rather than
+   * `account_deleted`.
+   */
+  readonly DELETED_SUBJECT_HMAC_KEY?: string;
+
+  /**
+   * Root of the daily salt for anonymous per-IP caps (increment 8, ruling K2): the salt for a UTC
+   * day is HMAC-SHA-256(secret, day), and the counter subject is base64url
+   * HMAC-SHA-256(salt, CF-Connecting-IP), so `usage_counters` never holds an address and
+   * yesterday's subjects cannot be recomputed from today's. At least 32 characters.
+   */
+  readonly IP_SALT_SECRET?: string;
+
+  /**
    * Test seams. Unset in every deployed environment, where the code falls back to the real
    * hosts; the Workers suite points them at `test/fake-providers.ts`.
    */
   readonly APPLE_JWKS_URL?: string;
   readonly APPLE_TOKEN_URL?: string;
+  /** Apple's `/auth/revoke` (increment 8); the suite points it at the fake provider server. */
+  readonly APPLE_REVOKE_URL?: string;
   readonly GOOGLE_JWKS_URL?: string;
   readonly RESEND_API_URL?: string;
 }
@@ -107,12 +129,15 @@ export const WORKER_SECRET_NAMES = [
   'AEROAPI_API_KEY',
   'WEBHOOK_TOKEN_AERODATABOX',
   'WEBHOOK_TOKEN_AEROAPI',
+  'DELETED_SUBJECT_HMAC_KEY',
+  'IP_SALT_SECRET',
 ] as const satisfies readonly (keyof WorkerSecrets)[];
 
 /** Bindings that redirect an external endpoint at a test double. Never set in a deployment. */
 export const TEST_SEAM_NAMES = [
   'APPLE_JWKS_URL',
   'APPLE_TOKEN_URL',
+  'APPLE_REVOKE_URL',
   'GOOGLE_JWKS_URL',
   'RESEND_API_URL',
 ] as const satisfies readonly (keyof WorkerSecrets)[];
@@ -145,12 +170,20 @@ export interface WorkerSettings {
    * wrangler.jsonc or `.dev.vars`; with it unset the RPC throws and the objects read `Date.now()`.
    */
   readonly TEST_CLOCK?: string;
+  /**
+   * `true` makes `POST /v1/me/delete` call RevenueCat's `DELETE /v1/subscribers/{id}` (increment
+   * 8). Off in Phase 0, where the call is a typed stub (src/billing/revenuecat.ts) that records
+   * what it would have done: RevenueCat deletion is optional and does not cancel a store
+   * subscription.
+   */
+  readonly REVENUECAT_DELETE_ENABLED?: string;
 }
 
 export const WORKER_SETTING_NAMES = [
   'AEROAPI_MODE',
   'ADB_PLAN',
   'ADB_ALERTS_ENABLED',
+  'REVENUECAT_DELETE_ENABLED',
 ] as const satisfies readonly (keyof WorkerSettings)[];
 
 export type Env = Cloudflare.Env & WorkerSecrets & WorkerSettings;
@@ -170,6 +203,18 @@ export interface Variables {
    * the routes so one request opens one client. Unset until something asks for it.
    */
   authRuntime: AuthRuntime | undefined;
+  /**
+   * Set by the auth middleware when the request presented a session cookie that no longer
+   * resolves AND whose token belongs to a deleted account (`deleted_subjects`), so `requireUser`
+   * answers 401 `account_deleted` (wipe the local store) instead of `unauthenticated` (sign in
+   * again). Unset otherwise.
+   */
+  accountDeleted: boolean | undefined;
+  /**
+   * Set by the `/v1` idempotency instance for a keyed mutating request: the key, its scope and its
+   * store, which `idempotencyGate()` reserves against once the route has validated the body.
+   */
+  idempotency: IdempotencyContext | undefined;
 }
 
 /**
@@ -182,8 +227,12 @@ export interface AppBindings {
   Variables: Variables;
 }
 
-/** Deployment environment name, from the `ENVIRONMENT` var in wrangler.jsonc. */
-export type EnvironmentName = 'local' | 'test' | 'staging' | 'production';
+/**
+ * Deployment environment name, from the `ENVIRONMENT` var in wrangler.jsonc. Defined in
+ * `@planeahead/shared` because `GET /health` answers it and the typed client may import only
+ * leaf types from there.
+ */
+export type { EnvironmentName };
 
 export function environmentName(env: Env): EnvironmentName {
   const value: string = env.ENVIRONMENT;

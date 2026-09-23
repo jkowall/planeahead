@@ -171,6 +171,31 @@
 
       "routes": [{ "pattern": "api-staging.planeahead.app", "custom_domain": true }],
 
+      // Every secret the Worker reads (WORKER_SECRET_NAMES in src/env.ts; secrets-in-logs.test.ts
+      // keeps the two lists equal). wrangler refuses a first deploy while one is unset. The block
+      // is not inherited and replaces .dev.vars inference, so it must be complete here.
+      "secrets": {
+        "required": [
+          "SENTRY_DSN",
+          "BETTER_AUTH_SECRET",
+          "TOKEN_KEK_V1",
+          "APPLE_SIWA_P8",
+          "APPLE_SIWA_KEY_ID",
+          "APPLE_SIWA_TEAM_ID",
+          "APPLE_BUNDLE_ID",
+          "GOOGLE_CLIENT_ID_WEB",
+          "GOOGLE_CLIENT_ID_IOS",
+          "GOOGLE_CLIENT_ID_ANDROID",
+          "RESEND_API_KEY",
+          "AERODATABOX_API_KEY",
+          "AEROAPI_API_KEY",
+          "WEBHOOK_TOKEN_AERODATABOX",
+          "WEBHOOK_TOKEN_AEROAPI",
+          "DELETED_SUBJECT_HMAC_KEY",
+          "IP_SALT_SECRET",
+        ],
+      },
+
       "vars": {
         "ENVIRONMENT": "staging",
         "API_PUBLIC_URL": "https://api-staging.planeahead.app",
@@ -272,6 +297,31 @@
       },
 
       "routes": [{ "pattern": "api.planeahead.app", "custom_domain": true }],
+
+      // Every secret the Worker reads (WORKER_SECRET_NAMES in src/env.ts; secrets-in-logs.test.ts
+      // keeps the two lists equal). wrangler refuses a first deploy while one is unset. The block
+      // is not inherited and replaces .dev.vars inference, so it must be complete here.
+      "secrets": {
+        "required": [
+          "SENTRY_DSN",
+          "BETTER_AUTH_SECRET",
+          "TOKEN_KEK_V1",
+          "APPLE_SIWA_P8",
+          "APPLE_SIWA_KEY_ID",
+          "APPLE_SIWA_TEAM_ID",
+          "APPLE_BUNDLE_ID",
+          "GOOGLE_CLIENT_ID_WEB",
+          "GOOGLE_CLIENT_ID_IOS",
+          "GOOGLE_CLIENT_ID_ANDROID",
+          "RESEND_API_KEY",
+          "AERODATABOX_API_KEY",
+          "AEROAPI_API_KEY",
+          "WEBHOOK_TOKEN_AERODATABOX",
+          "WEBHOOK_TOKEN_AEROAPI",
+          "DELETED_SUBJECT_HMAC_KEY",
+          "IP_SALT_SECRET",
+        ],
+      },
 
       "vars": {
         "ENVIRONMENT": "production",

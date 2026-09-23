@@ -12,3 +12,15 @@ declare module '*.ts?raw' {
   const text: string;
   export default text;
 }
+
+/** wrangler.jsonc as text, for the check that its `secrets.required` blocks are complete. */
+declare module '*.jsonc?raw' {
+  const text: string;
+  export default text;
+}
+
+/** package.json as text, for the check that the client export points at the emitted declaration. */
+declare module '*.json?raw' {
+  const text: string;
+  export default text;
+}

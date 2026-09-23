@@ -285,7 +285,7 @@ Present: Node 24.21, npm 11, git 2.54, gh 2.101 authenticated as `jkowall`, Xcod
 | Cadence | A2 (72 polls + ~12 alerts, $0.60 list) | Lifecycle test constant and cost docs as written |
 | Provider keys | None yet | Increment 6 uses synthetic fixtures; AeroDataBox Starter key needed before increment 10 for the runnable milestone; AeroAPI not needed in Phase 0 |
 | iOS surfaces | expo-widgets | apple-targets only for watch shells; coexistence test in increment 11 |
-| Free tier | 5 active subscriptions, 2 live, 20 new instances per day | Enforced in `usage_counters` from increment 8 |
+| Free tier | 5 active subscriptions, 2 live, 20 new instances per day | Enforced in `usage_counters` from increment 8; per-plan (paid) limits are Phase 1, recorded in ADR 0012 |
 | Local-only mode | Lazy server-side anonymous user | Created on first add-flight or push registration; merge on sign-in re-keys rows and re-subscribes DOs |
 | Telemetry | Cloudflare-native only | Workers Logs 10% sampling in production, 100% staging, Analytics Engine; OTLP export deferred |
 | Neon region | us-east-1 (default kept) | Change at approval if you want otherwise; region is fixed per Neon project |

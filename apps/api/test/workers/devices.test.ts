@@ -141,7 +141,7 @@ describe('POST /v1/devices', () => {
     expect(liveActivity.status).toBe(400);
   });
 
-  it('replays a keyed registration scoped by X-Install-Id (ruling F2) and refuses a keyed one without it', async () => {
+  it('replays a keyed registration, scoped by the signed-in user (ruling K1)', async () => {
     const session = await signInAnonymously();
     const installId = uniqueInstallId('idem');
     const key = `devices-${crypto.randomUUID()}`;
@@ -177,10 +177,11 @@ describe('POST /v1/devices', () => {
     expect(replay.status).toBe(200);
     expect(replay.headers.get(IDEMPOTENCY_REPLAYED_HEADER)).toBe('true');
     expect(replayBody).toEqual(firstBody);
-    // Idempotency runs ahead of auth in the chain, so even a signed-in caller must scope a
-    // keyed request by install id.
-    expect(unscoped.status).toBe(400);
-    expect((await unscoped.json<DeviceBody>()).error).toBe('idempotency_scope_missing');
+    // Increment 8 (ruling K1): `/v1` has its own idempotency instance behind auth, so a signed-in
+    // caller's key is scoped by the user id and the install id header is not needed to replay.
+    expect(unscoped.status).toBe(200);
+    expect(unscoped.headers.get(IDEMPOTENCY_REPLAYED_HEADER)).toBe('true');
+    expect(await unscoped.json<DeviceBody>()).toEqual(firstBody);
   });
 
   it('moves a push token to the account that signs in on the SAME installation (account switch)', async () => {

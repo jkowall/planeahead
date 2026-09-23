@@ -1,25 +1,25 @@
 /**
- * The idempotency middleware, in its real slot.
+ * The idempotency middleware (increment 4, reworked in increment 8 to the IETF draft's semantics,
+ * ruling K1): the global slot's behaviour through `createApp()`, the memory and Postgres stores
+ * directly, and the request hash. The `/v1` instance's behaviour on a real route (replay, 409,
+ * 422, a stored 403) is asserted by flights.subscribe.test.ts through `exports.default.fetch()`.
  *
- * Every app in this file comes from `createApp()` in `src/app.ts`, which is the same function
- * `src/index.ts` calls, so the middleware under test sits where the Worker puts it: after
- * request-id, sentry, cors and rate-limit, and BEFORE the auth placeholder. The previous version
- * of this file built its own Hono app with `authPlaceholder()` registered first and claimed in its
- * docstring that the order was "reproduced exactly". It was the inverse, and that inversion is
- * what let a chain that 500s on every keyed POST ship with a green suite: with auth first,
- * `c.var.user` is `null` and the `=== null` tests in `storeFor` and `scopeFor` hold; in the real
- * chain it is `undefined` and they read `user.id` off it.
+ * Every app in the first half comes from `createApp()` in `src/app.ts`, which is the same
+ * function `src/index.ts` calls, so the middleware under test sits where the Worker puts it:
+ * after request-id, sentry, cors and rate-limit, and BEFORE the auth middleware. The previous
+ * version of this file built its own Hono app with the auth placeholder registered first and
+ * claimed the order was "reproduced exactly"; it was the inverse, and that inversion let a chain
+ * that 500s on every keyed POST ship with a green suite.
  *
- * Because the slot is ahead of auth, no request in this file ever has a user. The scope is the
- * `X-Install-Id` header, and the tests below pin the two properties that header was chosen for
- * and that the client IP (the previous scope) did not have: two installs never share a bucket,
- * and one install keeps replaying after its IP changes.
- *
- * Routes are added to the app returned by `createApp()` rather than to a hand-built instance. The
- * store is injected through the chain's own seam, so no test needs Postgres.
+ * Because the slot is ahead of auth, no request in the global slot ever has a user. The scope is
+ * the `X-Install-Id` header, and the tests below pin the two properties that header was chosen
+ * for and that the client IP (the previous scope) did not have: two installs never share a
+ * bucket, and one install keeps replaying after its IP changes.
  */
 
-import { env } from 'cloudflare:workers';
+import { env, exports } from 'cloudflare:workers';
+import { sql } from 'drizzle-orm';
+import { openDb } from '@planeahead/db';
 import { beforeEach, describe, expect, it } from 'vitest';
 import type { Hono } from 'hono';
 import { createApp } from '../../src/app';
@@ -28,21 +28,29 @@ import {
   IDEMPOTENCY_KEY_HEADER,
   IDEMPOTENCY_REPLAYED_HEADER,
   INSTALL_ID_HEADER,
+  IN_FLIGHT_STATUS,
   type IdempotencyStore,
+  canonicalJson,
+  canonicalPath,
+  createDbIdempotencyStore,
   createMemoryIdempotencyStore,
+  hashValidatedRequest,
   idempotency,
+  idempotencyGate,
   isStorableResponse,
   isValidIdempotencyKey,
   isValidInstallId,
   scopeFor,
   storeFor,
 } from '../../src/middleware/idempotency';
+import { signInAnonymously } from './helpers/auth';
 
 const INSTALL_A = 'install-aaaa-0001';
 const INSTALL_B = 'install-bbbb-0002';
 
 let store: IdempotencyStore;
 let handlerCalls = 0;
+let releaseSlow: Promise<void> = Promise.resolve();
 
 function app(): Hono<AppBindings> {
   const instance = createApp({ idempotencyStore: () => store });
@@ -54,6 +62,15 @@ function app(): Hono<AppBindings> {
   instance.post('/boom', () => {
     handlerCalls += 1;
     throw new Error('handler exploded');
+  });
+  instance.post('/refuse', (c) => {
+    handlerCalls += 1;
+    return c.json({ error: 'cap_exceeded', created: handlerCalls }, 403);
+  });
+  instance.post('/slow', async (c) => {
+    handlerCalls += 1;
+    await releaseSlow;
+    return c.json({ created: handlerCalls }, 201);
   });
   instance.get('/things', (c) => {
     handlerCalls += 1;
@@ -128,7 +145,47 @@ describe('idempotency replay', () => {
     const body = await reused.json<{ error: string }>();
 
     expect(reused.status).toBe(422);
-    expect(body.error).toBe('idempotency_key_reuse');
+    expect(body.error).toBe('idempotency_payload_mismatch');
+    expect(handlerCalls).toBe(1);
+  });
+
+  it('answers 409 in_flight to a duplicate that arrives while the first is still running', async () => {
+    const instance = app();
+    const key = 'in-flight-key-0001';
+    let open: () => void = () => undefined;
+    releaseSlow = new Promise<void>((resolve) => {
+      open = resolve;
+    });
+
+    const first = instance.fetch(post(key, { name: 'AA100' }, { path: '/slow' }), env);
+    // Let the first request reach its handler before the duplicate arrives.
+    while (handlerCalls === 0) {
+      await new Promise((resolve) => setTimeout(resolve, 5));
+    }
+    const duplicate = await instance.fetch(post(key, { name: 'AA100' }, { path: '/slow' }), env);
+    open();
+    const settled = await first;
+
+    expect(duplicate.status).toBe(409);
+    expect((await duplicate.json<{ error: string }>()).error).toBe('in_flight');
+    expect(settled.status).toBe(201);
+    expect(handlerCalls).toBe(1);
+    // Completed now: the same request replays.
+    const replay = await instance.fetch(post(key, { name: 'AA100' }, { path: '/slow' }), env);
+    expect(replay.headers.get(IDEMPOTENCY_REPLAYED_HEADER)).toBe('true');
+  });
+
+  it('stores a terminal 4xx, so the outbox replay gets the same refusal', async () => {
+    const instance = app();
+    const key = 'refusal-key-00001';
+
+    const first = await instance.fetch(post(key, {}, { path: '/refuse' }), env);
+    const second = await instance.fetch(post(key, {}, { path: '/refuse' }), env);
+
+    expect(first.status).toBe(403);
+    expect(second.status).toBe(403);
+    expect(second.headers.get(IDEMPOTENCY_REPLAYED_HEADER)).toBe('true');
+    expect(await second.json()).toEqual(await first.json());
     expect(handlerCalls).toBe(1);
   });
 
@@ -297,24 +354,38 @@ describe('idempotency helpers', () => {
 
   it('bounds the in-memory store', async () => {
     const bounded = createMemoryIdempotencyStore(2);
-    const entry = { status: 200, body: { ok: true }, requestHash: 'aa' };
 
-    await bounded.put('scope', 'one', entry);
-    await bounded.put('scope', 'two', entry);
-    await bounded.put('scope', 'three', entry);
+    await bounded.reserve('scope', 'one', 'aa');
+    await bounded.reserve('scope', 'two', 'aa');
+    await bounded.reserve('scope', 'three', 'aa');
 
-    expect(await bounded.get('scope', 'one')).toBeNull();
-    expect(await bounded.get('scope', 'three')).not.toBeNull();
+    expect(await bounded.reserve('scope', 'one', 'bb')).toEqual({ kind: 'reserved' });
+    expect(await bounded.reserve('scope', 'three', 'bb')).toEqual({ kind: 'mismatch' });
   });
 
   it('keeps two scopes apart even when the key looks like a scope boundary', async () => {
-    const bounded = createMemoryIdempotencyStore();
-    const entry = { status: 200, body: { ok: true }, requestHash: 'aa' };
+    const memory = createMemoryIdempotencyStore();
 
-    await bounded.put('a', 'b:c', entry);
+    await memory.reserve('a', 'b:c', 'aa');
+    await memory.complete('a', 'b:c', { status: 200, body: { ok: true } });
 
-    expect(await bounded.get('a:b', 'c')).toBeNull();
-    expect(await bounded.get('a', 'b:c')).not.toBeNull();
+    expect(await memory.reserve('a:b', 'c', 'aa')).toEqual({ kind: 'reserved' });
+    expect(await memory.reserve('a', 'b:c', 'aa')).toEqual({
+      kind: 'replay',
+      response: { status: 200, body: { ok: true } },
+    });
+  });
+
+  it('frees a dead lease, and a released reservation, for the next caller', async () => {
+    let now = 0;
+    const memory = createMemoryIdempotencyStore(10, () => now);
+
+    expect(await memory.reserve('s', 'lease', 'aa')).toEqual({ kind: 'reserved' });
+    expect(await memory.reserve('s', 'lease', 'aa')).toEqual({ kind: 'in_flight' });
+    now = 61_000;
+    expect(await memory.reserve('s', 'lease', 'aa')).toEqual({ kind: 'reserved' });
+    await memory.release('s', 'lease');
+    expect(await memory.reserve('s', 'lease', 'bb')).toEqual({ kind: 'reserved' });
   });
 
   it('selects the memory store and an install scope in the global slot, never the database', async () => {
@@ -373,5 +444,159 @@ describe('the middleware is still usable on its own', () => {
     // that, but nothing in this file builds a CHAIN by hand: the order is src/app.ts's business.
     expect(typeof idempotency).toBe('function');
     expect(typeof idempotency({ store: () => store })).toBe('function');
+  });
+});
+
+describe('the request hash (ruling K1)', () => {
+  it('is key-order independent and covers method, canonical path and the validated body', async () => {
+    const url = 'https://api.planeahead.test/v1/flights';
+    const a = await hashValidatedRequest('POST', url, { number: 'AA100', date: '2026-10-01' });
+    const b = await hashValidatedRequest('post', `${url}/`, {
+      date: '2026-10-01',
+      number: 'AA100',
+    });
+    expect(a).toBe(b);
+    expect(a).toMatch(/^[0-9a-f]{64}$/);
+    expect(
+      await hashValidatedRequest('POST', url, { number: 'AA101', date: '2026-10-01' }),
+    ).not.toBe(a);
+    expect(
+      await hashValidatedRequest('DELETE', url, { number: 'AA100', date: '2026-10-01' }),
+    ).not.toBe(a);
+  });
+
+  it('canonicalises nested objects and drops undefined members', () => {
+    expect(canonicalJson({ b: 1, a: { d: [3, { f: 1, e: 2 }], c: undefined } })).toBe(
+      '{"a":{"d":[3,{"e":2,"f":1}]},"b":1}',
+    );
+    expect(canonicalJson(null)).toBe('null');
+    expect(canonicalPath('https://x.test//v1//flights/')).toBe('/v1/flights');
+    expect(canonicalPath('https://x.test/')).toBe('/');
+  });
+});
+
+let fileDb: ReturnType<typeof openDb> | null = null;
+
+/** One handle for the file: a client's sockets outlive the test that opened them. */
+function handle(): ReturnType<typeof openDb> {
+  fileDb ??= openDb(env);
+  return fileDb;
+}
+
+describe('the Postgres store (the /v1 instance, a resolved user)', () => {
+  it('reserves once, answers in_flight, mismatch and replay, and frees a released key', async () => {
+    const { userId } = await signInAnonymously();
+    const db = handle();
+    const pg = createDbIdempotencyStore(db, userId);
+    const scope = `user:${userId}`;
+    const hash = 'ab'.repeat(32);
+
+    expect(await pg.reserve(scope, 'pg-key-00000001', hash)).toEqual({ kind: 'reserved' });
+    expect(await pg.reserve(scope, 'pg-key-00000001', hash)).toEqual({ kind: 'in_flight' });
+    expect(await pg.reserve(scope, 'pg-key-00000001', 'cd'.repeat(32))).toEqual({
+      kind: 'mismatch',
+    });
+    await pg.complete(scope, 'pg-key-00000001', { status: 201, body: { created: true } });
+    expect(await pg.reserve(scope, 'pg-key-00000001', hash)).toEqual({
+      kind: 'replay',
+      response: { status: 201, body: { created: true } },
+    });
+
+    expect(await pg.reserve(scope, 'pg-key-00000002', hash)).toEqual({ kind: 'reserved' });
+    await pg.release(scope, 'pg-key-00000002');
+    expect(await pg.reserve(scope, 'pg-key-00000002', 'cd'.repeat(32))).toEqual({
+      kind: 'reserved',
+    });
+  });
+
+  it('lets exactly one of ten concurrent callers reserve a key (INSERT ... ON CONFLICT DO NOTHING)', async () => {
+    const { userId } = await signInAnonymously();
+    const pg = createDbIdempotencyStore(handle(), userId);
+    const hash = 'ef'.repeat(32);
+
+    const outcomes = await Promise.all(
+      Array.from({ length: 10 }, () => pg.reserve(`user:${userId}`, 'pg-race-0000001', hash)),
+    );
+
+    expect(outcomes.filter((outcome) => outcome.kind === 'reserved')).toHaveLength(1);
+    expect(outcomes.filter((outcome) => outcome.kind === 'in_flight')).toHaveLength(9);
+  });
+
+  it('takes over a reservation whose lease expired (a request that died mid-flight)', async () => {
+    const { userId } = await signInAnonymously();
+    const db = handle();
+    const pg = createDbIdempotencyStore(db, userId);
+    const hash = '01'.repeat(32);
+
+    expect(await pg.reserve(`user:${userId}`, 'pg-dead-0000001', hash)).toEqual({
+      kind: 'reserved',
+    });
+    await db.execute(sql`
+      update idempotency_keys set expires_at = now() - interval '1 second'
+      where user_id = ${userId}::uuid and key = 'pg-dead-0000001'
+    `);
+    expect(await pg.reserve(`user:${userId}`, 'pg-dead-0000001', '02'.repeat(32))).toEqual({
+      kind: 'reserved',
+    });
+    const [row] = await db.execute<{ status: number }>(sql`
+      select response_status as status from idempotency_keys
+      where user_id = ${userId}::uuid and key = 'pg-dead-0000001'
+    `);
+    expect(row?.status).toBe(IN_FLIGHT_STATUS);
+  });
+});
+
+describe('the /v1 instance in the deployed Worker', () => {
+  it('lets auth answer a keyed request with neither a session nor an install id: 401, not a scope error', async () => {
+    // Ruling O10: the /v1 instance sets nothing when it cannot scope a key, so the route's
+    // requireScope tells a signed-out caller to sign in (or that its account is gone) instead of
+    // blaming the missing X-Install-Id.
+    const response = await exports.default.fetch('https://api.planeahead.test/v1/flights', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', [IDEMPOTENCY_KEY_HEADER]: 'v1-unscoped-001' },
+      body: JSON.stringify({ flightKey: 'AAL-100-2026-10-01-KJFK' }),
+    });
+
+    expect(response.status).toBe(401);
+    expect((await response.json<{ error: string }>()).error).toBe('unauthenticated');
+  });
+
+  it('leaves the scope error to the gate: a keyed request that reaches it unscoped answers 400', async () => {
+    // A route with no requireScope ahead of its gate (none exists under /v1 today): the /v1
+    // instance set nothing, so only the gate can say the key has no scope, and it does.
+    const instance = createApp();
+    instance.use('/v1/*', idempotency({ mode: 'v1' }));
+    instance.post('/v1/probe-gate', idempotencyGate({ required: false }), (c) =>
+      c.json({ ran: true }, 201),
+    );
+
+    const response = await instance.fetch(
+      new Request('https://api.planeahead.test/v1/probe-gate', {
+        method: 'POST',
+        headers: { 'content-type': 'application/json', [IDEMPOTENCY_KEY_HEADER]: 'v1-gate-000001' },
+        body: '{}',
+      }),
+      env,
+    );
+
+    expect(response.status).toBe(400);
+    expect((await response.json<{ error: string }>()).error).toBe('idempotency_scope_missing');
+  });
+
+  it('lets the global slot leave /v1 alone: an install-scoped keyed POST reaches the route', async () => {
+    // Without a session the /v1 instance scopes by install id and the route answers its own 401;
+    // the global slot, which would have replayed from its memory store, never saw the request.
+    const response = await exports.default.fetch('https://api.planeahead.test/v1/flights', {
+      method: 'POST',
+      headers: {
+        'content-type': 'application/json',
+        [IDEMPOTENCY_KEY_HEADER]: 'v1-install-0001',
+        [INSTALL_ID_HEADER]: 'install-v1-00001',
+      },
+      body: JSON.stringify({ flightKey: 'AAL-100-2026-10-01-KJFK' }),
+    });
+
+    expect(response.status).toBe(401);
+    expect((await response.json<{ error: string }>()).error).toBe('unauthenticated');
   });
 });

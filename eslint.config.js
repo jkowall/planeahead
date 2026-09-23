@@ -16,6 +16,9 @@ export default tseslint.config(
       'apps/api/worker-configuration.d.ts',
       // apps/mobile is a placeholder until increment 9 creates the Expo app.
       'apps/mobile/**',
+      // The typed client's consumer check (increment 8): it imports the declaration `tsc -b`
+      // emits into dist/, which lint cannot assume exists; the api `typecheck` script checks it.
+      'apps/api/test/consumer/**',
     ],
   },
   js.configs.recommended,

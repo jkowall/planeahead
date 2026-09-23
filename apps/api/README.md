@@ -13,9 +13,14 @@ layer (`src/providers`: the AeroDataBox adapter, the fixture-backed AeroAPI adap
 the cost logger, the budget guards and token bucket), the ProviderBudget Durable Object and the
 two webhook receivers under `/v1/webhooks`; its design is in
 [docs/increments/06-provider-layer.md](../../docs/increments/06-provider-layer.md) and
-[ADR 0010](../../docs/adr/0010-provider-identity.md). The flight routes arrive in increments 7 and
-8, and every path they will own answers `501` with the increment that owns it. The auth design is in [docs/increments/05-auth.md](../../docs/increments/05-auth.md)
-and its threat model in [docs/security/threat-model.md](../../docs/security/threat-model.md).
+[ADR 0010](../../docs/adr/0010-provider-identity.md). Increment 7 adds the FlightTracker and the
+DesignatorResolver. Increment 8 adds the user-facing flight routes (`/v1/flights`: search,
+subscribe, list, detail, unsubscribe, refresh), the pull sync feed (`GET /v1/sync`, ADR 0012), the
+free-tier caps in `usage_counters`, the `/v1` idempotency instance, synchronous account deletion
+(`POST /v1/me/delete`) and the reserved Apple and RevenueCat webhook stubs; its design is in
+[docs/increments/08-flight-routes-and-sync.md](../../docs/increments/08-flight-routes-and-sync.md).
+The auth design is in [docs/increments/05-auth.md](../../docs/increments/05-auth.md) and its
+threat model in [docs/security/threat-model.md](../../docs/security/threat-model.md).
 
 ## Commands
 
@@ -75,7 +80,12 @@ src/mail/                 sender.ts (MailSender, the magic-link message), resend
                           cloudflare-email.ts (implementation only, never wired)
 src/routes/               health.ts, auth.ts (/api/auth: the gate, the verify wrapper, the browser
                           consume route), magic-link-landing.ts (/auth/magic-link, the emailed
-                          non-consuming page), v1.ts (/v1: devices.ts, me.ts, webhooks.ts, the stub)
+                          non-consuming page), v1.ts (/v1: devices.ts, flights.ts, me.ts, sync.ts,
+                          webhooks.ts, the stub)
+src/lib/                  increment 8: validate.ts (the one validator), caps.ts, deadline.ts,
+                          sync-cursor.ts, sync-rows.ts, trackers.ts, flight-search.ts,
+                          flight-registry.ts, flight-snapshots.ts, account-deletion.ts, hmac.ts
+src/client.ts             hcWithType, the typed RPC client the mobile app builds from AppType
 src/providers/            aerodatabox.adapter.ts, aeroapi.mock.ts, router.ts, cost-log.ts,
                           budget.ts, token-bucket.ts, config.ts (plans and settings), http.ts;
                           specs/ (the vendored OpenAPI snapshots), fixtures/ (test data only)
@@ -83,11 +93,14 @@ src/validation/           nul.ts (U+0000 is refused at every JSON boundary; Post
 src/do/                   migrate.ts (the SQLite schema runner), base.ts, the five classes,
                           migrations/<class>/NNN.ts (ProviderBudget has the first)
 src/queues/               index.ts dispatch, consume.ts (per-message ack), analytics.ts, consumers
+                          (persist.ts also routes the anonymous merge's `merge` message to merge.ts)
 src/cron/                 index.ts dispatch, reconcile.ts, housekeeping.ts
 src/observability/log.ts  structured JSON logging with the request id
 test/workers/             everything that drives the Worker, inside workerd
 test/unit/                pure WebCrypto and jose tests, ALSO inside workerd (that is the point:
                           they settle facts about the runtime, not about Node)
+test/consumer/            the typed client as the mobile app sees it (`types: []`), checked by
+                          the `typecheck` script against the declaration `tsc -b` emits
 test/globalSetup.ts       embedded Postgres, the fake Apple/Google/Resend server, .dev.vars.test
 ```
 
@@ -95,7 +108,9 @@ test/globalSetup.ts       embedded Postgres, the fake Apple/Google/Resend server
 
 **`AppType` is the type of the chained app.** Hono accumulates RPC types through the return value
 of `.route()`. Add a route to the chain in `src/index.ts`; a separate `app.route(...)` statement
-compiles, runs correctly and silently empties the type the mobile client is built from.
+compiles, runs correctly and silently leaves that route out of the type the mobile client is built
+from. The Better Auth mount is exactly such a statement, on purpose (increment 8): its catch-all
+has no business in `AppType`. `test/unit/app-type.test.ts` asserts both halves.
 
 **Middleware order is the contract, and it has exactly one definition.** request-id first so
 everything after it can correlate, Sentry second so events carry the id, CORS third so a preflight
@@ -117,8 +132,11 @@ mutating request that carries `Idempotency-Key` without it, or with a malformed 
 400 `idempotency_scope_missing` rather than run unprotected. The client IP was rejected as the
 scope: it changes when a phone moves from WiFi to LTE mid-retry, which is the retry the key exists
 to make safe, and behind a carrier NAT two phones share one. In the global slot the store is the
-in-memory map; the Postgres store and the per-user scope in `idempotency.ts` are for the `/v1`
-mount behind auth in increment 8 and are never taken before then. The one path the middleware
+in-memory map. Since increment 8 the global slot leaves `/v1` alone: `/v1` has its own instance
+behind auth and the burst limiter, which scopes a key by the user id (else the install id), keeps a
+user's keys in Postgres, and leaves the reservation to `idempotencyGate()`, which a route places
+after its validator so the hash covers the validated body (IETF semantics: replay with
+`Idempotent-Replayed: true`, 409 `in_flight`, 422 `idempotency_payload_mismatch`). The one path the middleware
 skips is the Better Auth mount (`/api/auth/*`): its endpoints carry their own replay semantics, a
 stored 200 replayed for `/sign-in/magic-link` would answer ahead of the per-address cap and never
 count, and reading the body there would consume it ahead of the handler that has to parse it.
@@ -229,3 +247,30 @@ real staging deploy is that check, and the queues plus their dead letter queues 
 with `wrangler queues create` beforehand, because deploy fails on a missing queue rather than
 creating one. Secrets are set out of band with `wrangler secret put --env staging`; the deploy
 workflow passes an empty `secrets` input on purpose.
+
+### Deploy checklist
+
+Every secret the Worker reads is declared in `wrangler.jsonc` under `env.staging.secrets.required`
+and `env.production.secrets.required` (the list `WORKER_SECRET_NAMES` in `src/env.ts`;
+`test/workers/secrets-in-logs.test.ts` keeps the two equal), and wrangler refuses a first deploy
+while one is unset. Before the first deploy of an environment, set each with
+`wrangler secret put <NAME> --env <environment>`. Two came with increment 8 and fail loudly when
+missing:
+
+- `DELETED_SUBJECT_HMAC_KEY` (`openssl rand -base64 32`): without it `POST /v1/me/delete`, the
+  path Apple requires, answers 500 before touching anything, and a deleted account's other device
+  is told `unauthenticated` instead of `account_deleted`.
+- `IP_SALT_SECRET` (`openssl rand -base64 32`): without it every anonymous search or subscribe by
+  number answers 500 (the per-IP tracker-creation cap cannot key its counter).
+
+## Owner tasks (increment 8)
+
+- Set `DELETED_SUBJECT_HMAC_KEY` and `IP_SALT_SECRET` with `wrangler secret put` in staging and in
+  production (the deploy checklist above).
+- Set `idle_in_transaction_session_timeout` on the app role in every environment, next to
+  `statement_timeout`: `ALTER ROLE <role> SET idle_in_transaction_session_timeout = '30s'`. The
+  sync watermark is cluster-global, so one session idle inside a writing transaction freezes
+  `GET /v1/sync` for every user (docs/schema-review.md section 12, ADR 0012 item 7).
+- Keep Hyperdrive query caching disabled on the `DB` binding (ADR 0012 item 7), and after any
+  point-in-time restore of an environment's database bump `sync_epoch` before traffic returns
+  (the restore runbook in docs/schema-review.md section 6).

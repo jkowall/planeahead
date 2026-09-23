@@ -40,7 +40,12 @@ interface GeneratorState {
 
 export type Uuidv7Generator = (now?: () => number) => string;
 
-function getRandomValues(bytes: Uint8Array): void {
+/**
+ * `Uint8Array<ArrayBuffer>`, not the default `ArrayBufferLike`: the DOM lib's `getRandomValues`
+ * (the mobile app's view, checked by apps/api/test/consumer) refuses a view that could sit on a
+ * SharedArrayBuffer.
+ */
+function getRandomValues(bytes: Uint8Array<ArrayBuffer>): void {
   const cryptoApi = globalThis.crypto as typeof globalThis.crypto | undefined;
   if (cryptoApi === undefined || typeof cryptoApi.getRandomValues !== 'function') {
     throw new MissingCryptoError();

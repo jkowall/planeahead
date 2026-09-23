@@ -97,6 +97,7 @@ import {
   ConfirmPersistedRequestV1,
   ForceRefreshRequestV1,
   FlightStatusSchema,
+  FREE_TIER_LIMITS,
   INFLIGHT_STALE_MS,
   ProviderEventV1,
   RPC_SCHEMA_VERSION,
@@ -214,8 +215,12 @@ const EARLY_ALARM_TOLERANCE_MS = 5_000;
  * (`deadLetterResendDue`).
  */
 export const OUTBOX_RESEND_GRACE_MS = 10_000;
-/** Per user, per flight, per UTC day (ruling J8). Charged only when a provider call is made. */
-export const USER_REFRESH_DAILY_CAP = 10;
+/**
+ * Per user, per flight, per UTC day (ruling J8). Charged only when a provider call is made. The
+ * number is the shared free-tier limit (increment 8, ruling K3), the same one the refresh route's
+ * `usage_counters` sub-budget enforces in front of the object.
+ */
+export const USER_REFRESH_DAILY_CAP = FREE_TIER_LIMITS.refreshesPerFlightPerDay;
 /**
  * Every provider request the tracker makes carries this timeout (ruling L3): a timer scoped to
  * one request inside a running alarm, not a pending object timer. A timed-out fetch is the

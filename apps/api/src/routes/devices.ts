@@ -3,7 +3,8 @@
  * one, its push token.
  *
  * `installId` is the per-installation id the app generates once and sends on every request as
- * `X-Install-Id` (the idempotency middleware scopes anonymous keys by it). When both are present
+ * `X-Install-Id` (the idempotency middleware scopes a caller WITHOUT a session by it; a keyed
+ * request from a signed-in caller is scoped by the user id, increment 8 ruling K1). When both are present
  * they have to agree: a body naming a different install than the header is a client bug worth
  * a 400, not a silent second device row.
  *
@@ -25,7 +26,6 @@
  * constraint's. A U+0000 anywhere in the body is a 400 (Postgres would answer 500).
  */
 
-import { zValidator } from '@hono/zod-validator';
 import { sql } from 'drizzle-orm';
 import { Hono } from 'hono';
 import {
@@ -40,7 +40,8 @@ import { z } from 'zod';
 import { authRuntime } from '../auth/runtime';
 import type { AppBindings } from '../env';
 import { currentUser, requireScope } from '../middleware/auth';
-import { INSTALL_ID_HEADER, isValidInstallId } from '../middleware/idempotency';
+import { validate } from '../lib/validate';
+import { INSTALL_ID_HEADER, idempotencyGate, isValidInstallId } from '../middleware/idempotency';
 import { withoutNul } from '../validation/nul';
 
 const shortText = (max: number) => z.string().trim().min(1).max(max);
@@ -76,7 +77,8 @@ export type PushTokenSkipReason = 'owned_by_another_user';
 export const devicesRoutes = new Hono<AppBindings>().post(
   '/',
   requireScope('user'),
-  zValidator('json', DeviceRegistrationSchema),
+  validate('json', DeviceRegistrationSchema),
+  idempotencyGate({ required: false }),
   async (c) => {
     const user = currentUser(c.var.user);
     const body = c.req.valid('json');
@@ -84,7 +86,7 @@ export const devicesRoutes = new Hono<AppBindings>().post(
     if (headerInstallId !== undefined && headerInstallId !== body.installId) {
       return c.json(
         {
-          error: 'install_id_mismatch',
+          error: 'install_id_mismatch' as const,
           message: `${INSTALL_ID_HEADER} and installId name different installations`,
           requestId: c.var.requestId,
         },
@@ -147,10 +149,13 @@ export const devicesRoutes = new Hono<AppBindings>().post(
       }
     }
 
-    return c.json({
-      device,
-      pushToken,
-      ...(pushTokenSkipped === null ? {} : { pushTokenSkipped }),
-    });
+    return c.json(
+      {
+        device,
+        pushToken,
+        ...(pushTokenSkipped === null ? {} : { pushTokenSkipped }),
+      },
+      200,
+    );
   },
 );

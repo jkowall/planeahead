@@ -15,6 +15,11 @@
  *                               that subject, or `unknown-subject` for a code without one, so
  *                               the exchange binding can be tested in both directions
  *   GET  /apple/token/requests  what the exchange received, so a test can assert on the form
+ *   POST /apple/revoke          token revocation (increment 8). Records the form and answers 200,
+ *                               like Apple, whatever the token; a refresh token whose authorization
+ *                               code names a subject containing `revoke-500` answers 500 instead,
+ *                               so a test picks the failure path by its own subject
+ *   GET  /apple/revoke/requests what the revocation endpoint received
  *   GET  /google/certs          Google's JWKS, the same key under a different kid
  *   POST /resend/emails         Resend's send endpoint; records the message and answers { id }
  *   GET  /resend/sent?to=       the recorded messages for one recipient
@@ -120,6 +125,7 @@ export async function startFakeProviders(): Promise<FakeProviders> {
   const googleJwks = { keys: [{ ...publicJwk, kid: GOOGLE_TEST_KID, use: 'sig', alg: 'RS256' }] };
 
   const tokenRequests: RecordedTokenRequest[] = [];
+  const revokeRequests: RecordedTokenRequest[] = [];
   const sent: RecordedEmail[] = [];
   const adbScripts = new Map<string, ScriptedAdbResponse[]>();
   const adbCalls = new Map<string, number>();
@@ -218,6 +224,22 @@ export async function startFakeProviders(): Promise<FakeProviders> {
       }
       if (method === 'GET' && url.pathname === '/apple/token/requests') {
         return json(response, 200, tokenRequests);
+      }
+      if (method === 'POST' && url.pathname === '/apple/revoke') {
+        const raw = await readBody(request);
+        const form = Object.fromEntries(new URLSearchParams(raw));
+        revokeRequests.push({ form, contentType: request.headers['content-type'] ?? null });
+        // The refresh token the fake exchange minted is `rt_<code>_<uuid>`; its code names the
+        // subject the test chose.
+        const code = /^rt_(code_[0-9a-f]+_[0-9a-f-]{36})_/.exec(form['token'] ?? '')?.[1] ?? '';
+        if (subjectFromAuthorizationCode(code).includes('revoke-500')) {
+          return json(response, 500, { error: 'server_error' });
+        }
+        response.writeHead(200);
+        return response.end();
+      }
+      if (method === 'GET' && url.pathname === '/apple/revoke/requests') {
+        return json(response, 200, revokeRequests);
       }
       if (method === 'POST' && url.pathname === '/resend/emails') {
         const body = JSON.parse(await readBody(request)) as Record<string, unknown>;

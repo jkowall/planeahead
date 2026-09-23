@@ -40,6 +40,10 @@ const SPEC_TABLES = [
   'user_sync_changes',
   'idempotency_keys',
   'deleted_subjects',
+  // sync feed (increment 8, migration 0003)
+  'flight_sync_changes',
+  'sync_epoch',
+  'sync_horizon',
   // reference
   'airports',
   'airport_profiles',
@@ -160,15 +164,20 @@ interface SnapshotTable {
   uniqueConstraints: Record<string, { columns: string[] }>;
   checkConstraints: Record<string, { name: string; value: string }>;
 }
+/**
+ * The LATEST snapshot, so every convention below applies to tables and columns later migrations
+ * add (increment 8 added `flight_sync_changes` and four columns in 0003).
+ */
+const LATEST_SNAPSHOT = `${String(readJournal().entries.length - 1).padStart(4, '0')}_snapshot.json`;
 const snapshot = JSON.parse(
-  readFileSync(join(PACKAGE_ROOT, 'migrations', 'meta', '0000_snapshot.json'), 'utf8'),
+  readFileSync(join(PACKAGE_ROOT, 'migrations', 'meta', LATEST_SNAPSHOT), 'utf8'),
 ) as { tables: Record<string, SnapshotTable> };
 const tables = Object.values(snapshot.tables);
 const byName = new Map(tables.map((t) => [t.name, t]));
 
 describe('table set', () => {
-  it('matches the normative list in the increment 3 spec (70 tables)', () => {
-    expect(new Set(SPEC_TABLES).size).toBe(70);
+  it('matches the normative list: the increment 3 spec (70 tables) plus increment 8 (3)', () => {
+    expect(new Set(SPEC_TABLES).size).toBe(73);
     expect(tables.map((t) => t.name).sort()).toEqual([...SPEC_TABLES].sort());
   });
 
@@ -186,10 +195,18 @@ describe('table set', () => {
 });
 
 describe('column conventions', () => {
-  it('uses a uuid primary key with a uuidv7() default everywhere except the two documented cases', () => {
+  it('uses a uuid primary key with a uuidv7() default everywhere except the documented cases', () => {
     for (const table of tables) {
-      if (table.name === 'user_sync_changes') {
-        expect(table.columns['seq']?.type).toBe('bigint');
+      if (table.name === 'user_sync_changes' || table.name === 'flight_sync_changes') {
+        expect(table.columns['seq']?.type, table.name).toBe('bigint');
+        expect(table.columns['seq']?.primaryKey, table.name).toBe(true);
+        continue;
+      }
+      if (table.name === 'sync_epoch' || table.name === 'sync_horizon') {
+        // One-row tables of the sync contract (ADR 0012): the key is the constant 1.
+        expect(table.columns['id']?.type, table.name).toBe('smallint');
+        expect(table.columns['id']?.primaryKey, table.name).toBe(true);
+        expect(String(table.columns['id']?.default), table.name).toBe('1');
         continue;
       }
       if (table.name === 'idempotency_keys') {
@@ -331,7 +348,8 @@ describe('column conventions', () => {
     // Drizzle's own mode: 'string' hands back Postgres text (`2026-09-19 22:30:00+00`), which
     // is not ISO-8601 and fails IsoInstantSchema; the instant() column type normalises it.
     expect([...rawString]).toEqual([]);
-    expect(isoString.size).toBe(65);
+    // 65 from increment 3, plus flight_sync_changes, sync_epoch and sync_horizon (increment 8).
+    expect(isoString.size).toBe(68);
     for (const auth of modeDate) {
       expect(isoString.has(auth)).toBe(false);
     }
