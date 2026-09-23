@@ -14,6 +14,8 @@ export interface SyncKv {
   getItemSync(key: string): string | null;
   setItemSync(key: string, value: string): void;
   removeItemSync(key: string): boolean;
+  /** Every key; the replacement records are found by their prefix (src/lib/flight-replacements.ts). */
+  getAllKeysSync(): string[];
 }
 
 export const kv: SyncKv = Storage;

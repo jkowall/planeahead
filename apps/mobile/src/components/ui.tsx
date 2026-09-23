@@ -1,21 +1,25 @@
 /**
- * The few primitives the increment 9 screens need. Increment 10 replaces the palette with theme
- * tokens (src/theme); nothing here is meant to outlive that.
+ * The app's primitives, on the theme tokens (src/theme). Increment 9 carried its own palette
+ * here; increment 10 moved every colour, space and type size into `src/theme/tokens.ts`, and
+ * `usePalette()` stays only as a narrow view of the tokens for the increment 9 sign-in screen.
  */
 
-import type { ReactNode } from 'react';
+import type { ReactElement, ReactNode } from 'react';
 import {
   ActivityIndicator,
   Pressable,
   ScrollView,
   StyleSheet,
   Text,
-  useColorScheme,
+  TextInput,
   View,
+  type RefreshControlProps,
   type StyleProp,
+  type TextInputProps,
   type ViewStyle,
 } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
+import { useTheme } from '../theme/useTheme';
 
 export interface Palette {
   readonly background: string;
@@ -28,37 +32,41 @@ export interface Palette {
   readonly border: string;
 }
 
-const LIGHT: Palette = {
-  background: '#FFFFFF',
-  surface: '#F2F4F8',
-  text: '#101418',
-  muted: '#5B6470',
-  accent: '#1C4FD6',
-  accentText: '#FFFFFF',
-  danger: '#B42318',
-  border: '#D6DAE1',
-};
-
-const DARK: Palette = {
-  background: '#0B0E13',
-  surface: '#171B22',
-  text: '#F2F4F8',
-  muted: '#9AA3AF',
-  accent: '#6E93FF',
-  accentText: '#0B0E13',
-  danger: '#FF8A80',
-  border: '#2A303A',
-};
-
+/** The increment 9 palette shape, read from the theme tokens. */
 export function usePalette(): Palette {
-  return useColorScheme() === 'dark' ? DARK : LIGHT;
+  const { color } = useTheme();
+  return {
+    background: color.background,
+    surface: color.surface,
+    text: color.text,
+    muted: color.textMuted,
+    accent: color.accent,
+    accentText: color.accentText,
+    danger: color.danger,
+    border: color.border,
+  };
 }
 
-export function Screen({ children, testID }: { children: ReactNode; testID?: string }) {
-  const palette = usePalette();
+export function Screen({
+  children,
+  testID,
+  refreshControl,
+}: {
+  children: ReactNode;
+  testID?: string;
+  refreshControl?: ReactElement<RefreshControlProps>;
+}) {
+  const theme = useTheme();
   return (
-    <SafeAreaView style={[styles.fill, { backgroundColor: palette.background }]}>
-      <ScrollView contentContainerStyle={styles.screen} testID={testID}>
+    <SafeAreaView style={[styles.fill, { backgroundColor: theme.color.background }]}>
+      <ScrollView
+        contentContainerStyle={[
+          styles.screen,
+          { padding: theme.space.xl - 4, gap: theme.space.lg },
+        ]}
+        testID={testID}
+        {...(refreshControl === undefined ? {} : { refreshControl })}
+      >
         {children}
       </ScrollView>
     </SafeAreaView>
@@ -66,9 +74,12 @@ export function Screen({ children, testID }: { children: ReactNode; testID?: str
 }
 
 export function Title({ children }: { children: ReactNode }) {
-  const palette = usePalette();
+  const theme = useTheme();
   return (
-    <Text accessibilityRole="header" style={[styles.title, { color: palette.text }]}>
+    <Text
+      accessibilityRole="header"
+      style={[styles.title, { color: theme.color.text, fontSize: theme.font.title }]}
+    >
       {children}
     </Text>
   );
@@ -83,21 +94,52 @@ export function Body({
   muted?: boolean;
   testID?: string;
 }) {
-  const palette = usePalette();
+  const theme = useTheme();
   return (
-    <Text testID={testID} style={[styles.body, { color: muted ? palette.muted : palette.text }]}>
+    <Text
+      testID={testID}
+      style={[
+        styles.body,
+        {
+          color: muted ? theme.color.textMuted : theme.color.text,
+          fontSize: theme.font.body,
+        },
+      ]}
+    >
       {children}
     </Text>
   );
 }
 
-export function Section({ title, children }: { title: string; children: ReactNode }) {
-  const palette = usePalette();
+export function Section({
+  title,
+  children,
+  testID,
+}: {
+  title: string;
+  children: ReactNode;
+  testID?: string;
+}) {
+  const theme = useTheme();
   return (
     <View
-      style={[styles.section, { backgroundColor: palette.surface, borderColor: palette.border }]}
+      testID={testID}
+      style={[
+        styles.section,
+        {
+          backgroundColor: theme.color.surface,
+          borderColor: theme.color.border,
+          borderRadius: theme.radius.lg - 2,
+          padding: theme.space.lg,
+          gap: theme.space.md,
+        },
+      ]}
     >
-      <Text style={[styles.sectionTitle, { color: palette.muted }]}>{title}</Text>
+      <Text
+        style={[styles.sectionTitle, { color: theme.color.textMuted, fontSize: theme.font.small }]}
+      >
+        {title}
+      </Text>
       {children}
     </View>
   );
@@ -112,6 +154,9 @@ export interface ButtonProps {
   readonly busy?: boolean;
   readonly selected?: boolean;
   readonly style?: StyleProp<ViewStyle>;
+  readonly accessibilityHint?: string;
+  /** What a screen reader calls the button when the title alone is too short (`Add a flight`). */
+  readonly accessibilityLabel?: string;
 }
 
 export function Button({
@@ -123,23 +168,25 @@ export function Button({
   busy = false,
   selected,
   style,
+  accessibilityHint,
+  accessibilityLabel,
 }: ButtonProps) {
-  const palette = usePalette();
+  const { color, radius, font } = useTheme();
   const background =
-    variant === 'primary' ? palette.accent : variant === 'danger' ? 'transparent' : palette.surface;
-  const color =
-    variant === 'primary'
-      ? palette.accentText
-      : variant === 'danger'
-        ? palette.danger
-        : palette.text;
+    variant === 'primary' ? color.accent : variant === 'danger' ? 'transparent' : color.surface;
+  const foreground =
+    variant === 'primary' ? color.accentText : variant === 'danger' ? color.danger : color.text;
   return (
     <Pressable
       accessibilityRole="button"
+      // An explicit name, so a busy button (its title swapped for a spinner) keeps it.
+      accessibilityLabel={accessibilityLabel ?? title}
       accessibilityState={{
         disabled: disabled || busy,
+        ...(busy ? { busy: true } : {}),
         ...(selected === undefined ? {} : { selected }),
       }}
+      {...(accessibilityHint === undefined ? {} : { accessibilityHint })}
       disabled={disabled || busy}
       onPress={onPress}
       testID={testID}
@@ -147,29 +194,123 @@ export function Button({
         styles.button,
         {
           backgroundColor: background,
-          borderColor: selected === true ? palette.accent : palette.border,
+          borderColor: selected === true ? color.accent : color.border,
+          borderWidth: selected === true ? 2 : StyleSheet.hairlineWidth,
+          borderRadius: radius.md,
           opacity: disabled ? 0.5 : pressed ? 0.8 : 1,
         },
         style,
       ]}
     >
       {busy ? (
-        <ActivityIndicator color={color} />
+        <ActivityIndicator color={foreground} />
       ) : (
-        <Text style={[styles.buttonText, { color }]}>{title}</Text>
+        <Text style={[styles.buttonText, { color: foreground, fontSize: font.body }]}>{title}</Text>
       )}
     </Pressable>
   );
 }
 
+/** A labelled text input with its validation message underneath. */
+export function TextField({
+  label,
+  error,
+  testID,
+  ...input
+}: Omit<TextInputProps, 'style' | 'placeholderTextColor'> & {
+  label: string;
+  error?: string | null | undefined;
+  testID?: string;
+}) {
+  const { color, radius, space, font } = useTheme();
+  return (
+    <View style={{ gap: space.xs }}>
+      <Text style={{ color: color.textMuted, fontSize: font.small, fontWeight: '600' }}>
+        {label}
+      </Text>
+      <TextInput
+        {...input}
+        testID={testID}
+        accessibilityLabel={label}
+        placeholderTextColor={color.textMuted}
+        style={[
+          styles.input,
+          {
+            color: color.text,
+            backgroundColor: color.surfaceRaised,
+            borderColor: error === null || error === undefined ? color.inputBorder : color.danger,
+            borderRadius: radius.md,
+            fontSize: font.body + 2,
+          },
+        ]}
+      />
+      {error === null || error === undefined ? null : (
+        <Text
+          testID={testID === undefined ? undefined : `${testID}-error`}
+          accessibilityLiveRegion="polite"
+          style={{ color: color.danger, fontSize: font.small }}
+        >
+          {error}
+        </Text>
+      )}
+    </View>
+  );
+}
+
+/** A dismissible message strip: a refused add, a refresh still running. */
+export function Notice({
+  children,
+  tone = 'info',
+  testID,
+  onDismiss,
+}: {
+  children: ReactNode;
+  tone?: 'info' | 'warning' | 'danger';
+  testID?: string;
+  onDismiss?: () => void;
+}) {
+  const { color, radius, space, font } = useTheme();
+  const accent =
+    tone === 'danger' ? color.danger : tone === 'warning' ? color.warning : color.accent;
+  return (
+    <View
+      testID={testID}
+      accessibilityRole="alert"
+      style={[
+        styles.notice,
+        {
+          backgroundColor: color.surface,
+          borderColor: accent,
+          borderRadius: radius.md,
+          padding: space.md,
+          gap: space.sm,
+        },
+      ]}
+    >
+      <Text style={{ color: color.text, fontSize: font.body - 1, flex: 1 }}>{children}</Text>
+      {onDismiss === undefined ? null : (
+        <Pressable
+          accessibilityRole="button"
+          accessibilityLabel="Dismiss"
+          testID={testID === undefined ? undefined : `${testID}-dismiss`}
+          onPress={onDismiss}
+          hitSlop={8}
+        >
+          <Text style={{ color: accent, fontSize: font.body - 1, fontWeight: '600' }}>OK</Text>
+        </Pressable>
+      )}
+    </View>
+  );
+}
+
 export function Loading({ label }: { label: string }) {
-  const palette = usePalette();
+  const { color } = useTheme();
   return (
     <View
       accessibilityLabel={label}
-      style={[styles.fill, styles.center, { backgroundColor: palette.background }]}
+      style={[styles.fill, styles.center, { backgroundColor: color.background }]}
     >
-      <ActivityIndicator color={palette.accent} />
+      <ActivityIndicator color={color.accent} />
     </View>
   );
 }
@@ -178,17 +319,25 @@ const styles = StyleSheet.create({
   fill: { flex: 1 },
   center: { alignItems: 'center', justifyContent: 'center' },
   screen: { padding: 20, gap: 16 },
-  title: { fontSize: 28, fontWeight: '700' },
-  body: { fontSize: 16, lineHeight: 22 },
-  section: { borderRadius: 12, borderWidth: StyleSheet.hairlineWidth, padding: 16, gap: 12 },
-  sectionTitle: { fontSize: 13, fontWeight: '600', textTransform: 'uppercase' },
+  title: { fontWeight: '700' },
+  body: { lineHeight: 22 },
+  section: { borderWidth: StyleSheet.hairlineWidth },
+  sectionTitle: { fontWeight: '600', textTransform: 'uppercase' },
   button: {
     minHeight: 48,
-    borderRadius: 10,
-    borderWidth: StyleSheet.hairlineWidth,
     alignItems: 'center',
     justifyContent: 'center',
     paddingHorizontal: 16,
   },
-  buttonText: { fontSize: 16, fontWeight: '600' },
+  buttonText: { fontWeight: '600' },
+  input: {
+    minHeight: 48,
+    borderWidth: 1,
+    paddingHorizontal: 12,
+  },
+  notice: {
+    borderLeftWidth: 4,
+    flexDirection: 'row',
+    alignItems: 'flex-start',
+  },
 });

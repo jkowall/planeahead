@@ -19,5 +19,10 @@ export default function AppLayout() {
   if (session === null) {
     return <Redirect href="/sign-in" />;
   }
-  return <Stack screenOptions={{ headerShown: false }} />;
+  return (
+    <Stack screenOptions={{ headerShown: false }}>
+      {/* The add-flight sheet (increment 10): a modal is a swipe-to-dismiss page sheet on iOS. */}
+      <Stack.Screen name="add" options={{ presentation: 'modal' }} />
+    </Stack>
+  );
 }

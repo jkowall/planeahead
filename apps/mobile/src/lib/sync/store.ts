@@ -24,8 +24,14 @@
  * would drop the flight from the list while its mutation still waits for the network, and bring
  * it back only after the POST drains and a later pull. Like the outbox, it is this installation's
  * own intent, so it also survives the owner wipe; the account wipe empties the outbox FIRST, so
- * nothing is named and nothing survives. Rows a queued PATCH or DELETE names are not kept: the
- * snapshot carries the server's version of those and overwrites them anyway.
+ * nothing is named and nothing survives.
+ *
+ * Increment 10 review (ruling X7): a row a queued `DELETE /v1/flights/:id` names is kept too, as
+ * the local tombstone it is. The server has not seen the unsubscribe yet, so a snapshot pulled
+ * while the DELETE waits in its backoff still carries the row as live; the page apply re-stamps
+ * the tombstone after it wrote the page (src/lib/sync/local-intent.ts), and the row goes for good
+ * when the DELETE settles (src/lib/flights.ts). Rows a queued PATCH names are not kept: the
+ * snapshot carries the server's version of those, and the PATCH overlay is the settings store's.
  */
 
 import { notifyTablesChanged, type StoreTable } from '../db/store-signal';
@@ -100,19 +106,43 @@ export function writeSyncState(db: SqliteLike, state: SyncStateWrite): void {
 /** The one mutation whose row the server cannot know until it drains (see the header). */
 export const SUBSCRIBE_MUTATION = { method: 'POST', path: '/v1/flights' } as const;
 
+/** An unsubscribe: `DELETE /v1/flights/:id`, naming the row it tombstones as `entity_id`. */
+export const UNSUBSCRIBE_METHOD = 'DELETE';
+export const UNSUBSCRIBE_PATH_PREFIX = '/v1/flights/';
+
+export function isUnsubscribe(item: { readonly method: string; readonly path: string }): boolean {
+  return item.method === UNSUBSCRIBE_METHOD && item.path.startsWith(UNSUBSCRIBE_PATH_PREFIX);
+}
+
 /**
- * Deletes every synced row except a subscription a queued subscribe names (see the header); the
- * caller holds the transaction.
+ * The ids of the subscriptions this installation's queued mutations still hold locally: a
+ * subscribe's optimistic row and an unsubscribe's tombstone (see the header). A SQL fragment with
+ * its four parameters, for `id IN (...)`.
+ */
+const QUEUED_FLIGHT_INTENT_SQL = `SELECT entity_id FROM outbox
+   WHERE entity_id IS NOT NULL
+     AND ((method = ? AND path = ?) OR (method = ? AND substr(path, 1, ?) = ?))`;
+
+function queuedFlightIntentParams(): [string, string, string, number, string] {
+  return [
+    SUBSCRIBE_MUTATION.method,
+    SUBSCRIBE_MUTATION.path,
+    UNSUBSCRIBE_METHOD,
+    UNSUBSCRIBE_PATH_PREFIX.length,
+    UNSUBSCRIBE_PATH_PREFIX,
+  ];
+}
+
+/**
+ * Deletes every synced row except a subscription a queued subscribe or unsubscribe names (see
+ * the header); the caller holds the transaction.
  */
 export function deleteSyncedRows(db: SqliteLike): void {
   for (const table of SYNCED_TABLES) {
     if (table === 'flight_subscriptions') {
       db.run(
-        `DELETE FROM flight_subscriptions WHERE id IS NOT NULL AND id NOT IN (
-           SELECT entity_id FROM outbox
-           WHERE entity_id IS NOT NULL AND method = ? AND path = ?
-         )`,
-        [SUBSCRIBE_MUTATION.method, SUBSCRIBE_MUTATION.path],
+        `DELETE FROM flight_subscriptions WHERE id IS NOT NULL AND id NOT IN (${QUEUED_FLIGHT_INTENT_SQL})`,
+        queuedFlightIntentParams(),
       );
       continue;
     }

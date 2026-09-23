@@ -120,12 +120,16 @@ describe('settings', () => {
     expect(first.useSettings.getState().appearance).toBe('system');
     await first.rntl.render(first.React.createElement(first.SettingsScreen));
     await first.rntl.fireEvent.press(first.rntl.screen.getByTestId('settings-appearance-dark'));
-    first.useSettings.getState().applyServerPreferences({
-      distanceUnit: 'km',
-      temperatureUnit: 'c',
-      timeFormat: '24h',
-      showLocalTimes: false,
-      settings: {},
+    // The screen shows the units and time format since increment 10, so the page's preferences
+    // re-render it: inside act, as React requires.
+    await first.rntl.act(() => {
+      first.useSettings.getState().applyServerPreferences({
+        distanceUnit: 'km',
+        temperatureUnit: 'c',
+        timeFormat: '24h',
+        showLocalTimes: false,
+        settings: {},
+      });
     });
     expect(
       first.rntl.screen.getByTestId('settings-appearance-dark').props.accessibilityState,

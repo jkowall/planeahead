@@ -15,7 +15,16 @@
  * the same transaction (increment 9 review, auth-and-store-4). The delete keeps every
  * subscription a QUEUED subscribe names (`outbox.entity_id`, src/lib/sync/store.ts): the server
  * has not seen that row, so the snapshot cannot carry it, and the store, not a later writer,
- * enforces that it stays (increment 9 re-review).
+ * enforces that it stays (increment 9 re-review). It keeps a row a queued unsubscribe names too.
+ *
+ * Local intent (increment 10 review, rulings X3 and X7; src/lib/sync/local-intent.ts): after the
+ * page's rows are written, and inside the same transaction, the apply re-stamps the tombstone of
+ * every row a queued `DELETE /v1/flights/:id` names (a pull that lands while the DELETE waits in
+ * its backoff never resurrects the flight), carries the local-only columns (`finished_at`,
+ * `added_as`, `superseded`) across a replace, and marks a pending add superseded when the store
+ * already holds its flight as a live row (same designator and date), for replace and delta pages
+ * alike. The superseded row is hidden from the list; its POST stays queued so the server's 200
+ * `created: false` settles it.
  *
  * Forward compatibility (auth-and-store-5): the page's shell (`rpcVersion`, `serverTime`,
  * `cursor`, `hasMore`) is parsed strictly by the caller, but `changes[]` and `flights[]` arrive
@@ -45,7 +54,13 @@ import {
 import { z } from 'zod';
 import { sqlBoolean, type SqliteLike } from '../db/sqlite-like';
 import { notifyTablesChanged, type StoreTable } from '../db/store-signal';
-import { deleteSyncedRows, SUBSCRIBE_MUTATION, SYNCED_TABLES, writeSyncState } from './store';
+import {
+  markSupersededPending,
+  readLocalOnly,
+  reapplyQueuedUnsubscribes,
+  restoreLocalOnly,
+} from './local-intent';
+import { deleteSyncedRows, SYNCED_TABLES, writeSyncState } from './store';
 
 /**
  * The page as the client parses it: the shell strictly, the elements as unknown. `SyncEnvelopeV1`
@@ -102,7 +117,12 @@ const OPAQUE_TABLES = {
   logbook_entries: 'logbook_entries',
 } as const;
 
-function upsertSubscription(db: SqliteLike, row: FlightSubscriptionRowV1): void {
+/**
+ * Writes a server subscription row; the snapshot columns and the local-only columns
+ * (`finished_at`, `added_as`, `superseded`) are left alone. Also the outbox's success hook for
+ * `POST /v1/flights` (src/lib/flights.ts), inside its transaction.
+ */
+export function upsertSubscription(db: SqliteLike, row: FlightSubscriptionRowV1): void {
   db.run(
     `INSERT INTO flight_subscriptions (
        id, flight_key, flight_instance_id, trip_id, label, seat, cabin, muted,
@@ -198,9 +218,23 @@ function tableFor(entity: SyncChangeV1['entity']): StoreTable {
   }
 }
 
-function applySnapshot(db: SqliteLike, flight: SyncFlightV1): void {
+/**
+ * Writes a flight snapshot onto every subscription naming its key. `onlyIfNewer` (a snapshot from
+ * a route answer rather than the ordered feed: refresh, subscribe) skips a row whose stored
+ * snapshot was fetched later, so an answer that lost a race with a sync page never rolls the row
+ * back; `julianday` compares instants whatever their fractional-second spelling.
+ */
+export function applySnapshot(
+  db: SqliteLike,
+  flight: SyncFlightV1,
+  options: { readonly onlyIfNewer?: boolean } = {},
+): number {
   const { times } = flight;
-  db.run(
+  const guard =
+    options.onlyIfNewer === true
+      ? ' AND (snapshot_fetched_at IS NULL OR julianday(snapshot_fetched_at) <= julianday(?))'
+      : '';
+  return db.run(
     `UPDATE flight_subscriptions SET
        flight_status = ?, scheduled_out = ?, estimated_out = ?, actual_out = ?,
        scheduled_in = ?, estimated_in = ?, actual_in = ?,
@@ -209,7 +243,7 @@ function applySnapshot(db: SqliteLike, flight: SyncFlightV1): void {
        origin_terminal = ?, origin_gate = ?, destination_terminal = ?, destination_gate = ?,
        baggage_claim = ?, aircraft_type_icao = ?, departure_delay_sec = ?, arrival_delay_sec = ?,
        snapshot_json = ?, snapshot_fetched_at = ?, snapshot_source = ?
-     WHERE flight_key = ?`,
+     WHERE flight_key = ?${guard}`,
     [
       flight.status,
       times.scheduledOut ?? null,
@@ -236,8 +270,9 @@ function applySnapshot(db: SqliteLike, flight: SyncFlightV1): void {
       flight.fetchedAt,
       flight.source,
       flight.key,
+      ...(options.onlyIfNewer === true ? [flight.fetchedAt] : []),
     ],
-  );
+  ).changes;
 }
 
 const UUID_SHAPE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
@@ -265,6 +300,7 @@ export function applySyncPage(
   options: ApplyOptions = {},
 ): ApplyOutcome {
   const replace = options.replace ?? false;
+  const now = (options.now ?? (() => new Date()))();
   const touched = new Set<StoreTable>(['sync_state']);
   if (replace) {
     for (const table of SYNCED_TABLES) {
@@ -278,6 +314,8 @@ export function applySyncPage(
       let changes = 0;
       let flights = 0;
 
+      // Read before the delete: a replace writes the page's rows without them.
+      const localOnly = replace ? readLocalOnly(db) : [];
       if (replace) {
         deleteSyncedRows(db);
       }
@@ -343,31 +381,21 @@ export function applySyncPage(
         flights += 1;
       });
 
-      if (replace) {
-        // A kept optimistic row (one a queued subscribe names) whose flight the snapshot already
-        // carries under the server's own id would show the flight twice: the server answers that
-        // queued POST with its existing row (200, created false), never with the client's id, so
-        // the duplicate goes now and the POST stays queued (final re-review of increment 9). A
-        // qualified delete, like every other statement here.
-        db.run(
-          `DELETE FROM flight_subscriptions
-             WHERE id IN (
-               SELECT entity_id FROM outbox
-               WHERE entity_id IS NOT NULL AND method = ? AND path = ?
-             )
-             AND EXISTS (
-               SELECT 1 FROM flight_subscriptions AS live
-               WHERE live.flight_key = flight_subscriptions.flight_key
-                 AND live.id <> flight_subscriptions.id
-                 AND live.deleted_at IS NULL
-             )`,
-          [SUBSCRIBE_MUTATION.method, SUBSCRIBE_MUTATION.path],
-        );
+      // Local intent, after the page (see the header). The optimistic row of a queued subscribe
+      // carries a placeholder key, so a server row for the same flight never equals it by key:
+      // a pending add whose designator and date a live row already has is marked superseded and
+      // hidden, and its POST stays queued for the 200 `created: false` to settle.
+      const intent =
+        restoreLocalOnly(db, localOnly) +
+        reapplyQueuedUnsubscribes(db, now) +
+        markSupersededPending(db);
+      if (intent > 0) {
+        touched.add('flight_subscriptions');
       }
 
       writeSyncState(db, {
         cursor: page.cursor,
-        pulledAt: (options.now ?? (() => new Date()))().toISOString(),
+        pulledAt: now.toISOString(),
         ownerUserId: options.ownerUserId ?? null,
         storeVersion: options.storeVersion ?? null,
       });

@@ -10,6 +10,7 @@ export interface SqliteKvStorage {
   getItemSync(key: string): string | null;
   setItemSync(key: string, value: string): void;
   removeItemSync(key: string): boolean;
+  getAllKeysSync(): string[];
 }
 
 export function sqliteKvStorage(db: SqliteLike): SqliteKvStorage {
@@ -29,6 +30,9 @@ export function sqliteKvStorage(db: SqliteLike): SqliteKvStorage {
     },
     removeItemSync(key) {
       return db.run('DELETE FROM storage WHERE key = ?;', [key]).changes > 0;
+    },
+    getAllKeysSync() {
+      return db.all<{ key: string }>('SELECT key FROM storage;').map((row) => row.key);
     },
   };
 }

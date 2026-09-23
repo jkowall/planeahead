@@ -5,13 +5,18 @@
  */
 
 import * as Sentry from '@sentry/react-native';
+import { onlineManager } from '@tanstack/react-query';
 import { createAnalytics, type Analytics } from './analytics';
 import { createApiClient, type ApiClient } from './api-client';
 import { authClient } from './auth-client';
 import { runtimeConfig } from './config';
 import { whenStoreReady, type Store } from './db/client';
 import { KV_KEYS, kv } from './db/kv';
+import { useFlightNotices } from './flight-notices';
+import { clearReplacements } from './flight-replacements';
+import { flightOutboxHooks } from './flights';
 import { analyticsId, installId } from './identity';
+import { withPendingPatches } from './preference-mutations';
 import { queryClient } from './query';
 import { useSettings } from './settings';
 import { createSyncClient, type SyncClient } from './sync/client';
@@ -26,14 +31,20 @@ export interface Services {
   readonly sync: SyncClient;
   readonly outbox: { drain(): Promise<DrainResult> };
   readonly analytics: Analytics;
+  /**
+   * What `401 account_deleted` ends in, wherever it is answered: the sync client, the outbox and
+   * the detail screen's direct refresh all run this one path (`forgetAccount` over this store).
+   */
+  readonly onAccountDeleted: () => Promise<void>;
 }
 
 /**
  * The local half of signing out, and what `401 account_deleted` ends in: the store and the
  * outbox are gone (the caller wiped them, or this does), the Better Auth client forgets its
  * cookies (its `/sign-out` hook clears SecureStore before the request is even sent, so it works
- * against a deleted account), and the settings fall back to the defaults. The root layout then
- * sees no session and routes to the sign-in group.
+ * against a deleted account), the settings fall back to the defaults, and the record of where an
+ * optimistic subscription went is dropped with the rows it named (src/lib/flight-replacements.ts).
+ * The root layout then sees no session and routes to the sign-in group.
  */
 export async function forgetAccount(store: Store | null): Promise<void> {
   if (store !== null) {
@@ -41,8 +52,10 @@ export async function forgetAccount(store: Store | null): Promise<void> {
   }
   await authClient.signOut().catch(() => undefined);
   useSettings.getState().reset();
+  useFlightNotices.getState().clear();
   kv.removeItemSync(KV_KEYS.appleUserId);
   kv.removeItemSync(KV_KEYS.pendingMagicLink);
+  clearReplacements();
   queryClient.clear();
 }
 
@@ -68,7 +81,8 @@ function build(store: Store): Services {
     },
     onAccountDeleted,
     onPreferences: (preferences) => {
-      useSettings.getState().applyServerPreferences(preferences);
+      // A toggle whose PATCH is still queued stays as the user set it (preference-mutations.ts).
+      useSettings.getState().applyServerPreferences(withPendingPatches(store.sqlite, preferences));
     },
     onSkipped: (skipped) => {
       // Entity, id (a uuid, or a flight's position in the page) and the failing field: never a
@@ -79,16 +93,30 @@ function build(store: Store): Services {
       });
     },
   });
+  const flightHooks = flightOutboxHooks(store.sqlite);
   const outbox = createOutbox({
     db: store.sqlite,
     gate,
     transport: { send: (request) => api.request(request) },
+    // Nothing is stamped or sent while the phone knows it is offline, so an add made offline can
+    // still be cancelled (ruling Y1; src/lib/query.ts feeds this from expo-network).
+    isOnline: () => onlineManager.isOnline(),
     onAccountDeleted,
-    onDropped: ({ item, status, code }) => {
+    onSent: flightHooks.onSent,
+    onRefused: flightHooks.onRefused,
+    onHookError: (item, error) => {
+      Sentry.captureException(error, {
+        extra: { hook: 'outbox_settle', method: item.method, path: item.path },
+      });
+    },
+    onDropped: (dropped) => {
+      // Method, path, status and code only: never the body (it names the flight).
+      const { item, status, code } = dropped;
       Sentry.captureMessage('outbox_mutation_dropped', {
         level: 'warning',
         extra: { method: item.method, path: item.path, status, code },
       });
+      flightHooks.notifyDropped(dropped);
     },
     onKeyRegenerated: (item) => {
       // A client bug by definition (the same key was sent with a different body); no body here.
@@ -99,7 +127,7 @@ function build(store: Store): Services {
     },
   });
   const analytics = createAnalytics({ baseUrl: config.apiUrl, analyticsId });
-  return { store, api, gate, sync, outbox, analytics };
+  return { store, api, gate, sync, outbox, analytics, onAccountDeleted };
 }
 
 export function services(): Promise<Services> {
