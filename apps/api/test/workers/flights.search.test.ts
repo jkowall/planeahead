@@ -13,7 +13,7 @@ import { runInDurableObject } from 'cloudflare:test';
 import { env } from 'cloudflare:workers';
 import { sql } from 'drizzle-orm';
 import { afterEach, describe, expect, it } from 'vitest';
-import { uuidv7 } from '@planeahead/shared';
+import { ApiErrorSchema, uuidv7 } from '@planeahead/shared';
 import {
   RESOLUTION_TTL_MS,
   searchKvKey,
@@ -38,6 +38,7 @@ import {
   db,
   nearUniqueFlight,
   openTodaysBudget,
+  subscribe,
   trackerStub,
   type ErrorBody,
 } from './helpers/routes';
@@ -49,6 +50,15 @@ interface SearchBody {
   readonly status: { status: string } | null;
   readonly tracker: string | null;
   readonly cached: boolean;
+}
+
+interface NotFoundBody extends ErrorBody {
+  readonly triedDates?: string[];
+  readonly suggestions?: unknown[];
+}
+
+function shift(dateLocal: string, days: number): string {
+  return new Date(Date.parse(`${dateLocal}T00:00:00Z`) + days * DAY_MS).toISOString().slice(0, 10);
 }
 
 function search(session: AnonymousSession, query: string): Promise<Response> {
@@ -127,16 +137,40 @@ describe('GET /v1/flights/search', () => {
     expect(await adbCalls(flight)).toBe(1);
   });
 
-  it('answers 404 not_found when the provider has no such flight', async () => {
+  it('answers 404 flight_not_found with the dates tried when the provider has no such flight', async () => {
     await openTodaysBudget();
     const flight = nearUniqueFlight();
+    const byNumber = nearUniqueFlight();
     resolverOf(flight);
+    resolverOf(byNumber);
     const session = await signInAnonymously();
 
     const response = await search(session, queryFor(flight));
+    const body = await response.json<NotFoundBody>();
+    const subscribed = await subscribe(session, {
+      number: byNumber.designator,
+      date: byNumber.dateLocal,
+    });
+    const subscribedBody = await subscribed.json<NotFoundBody>();
+    const unknownRoute = await authed(session, '/nowhere-at-all');
 
+    // Ruling O4: `flight_not_found`, never the unknown-route `not_found`, naming the origin-local
+    // dates the adapter asked for (the date and its neighbours) and the reserved suggestions.
     expect(response.status).toBe(404);
-    expect((await response.json<ErrorBody>()).error).toBe('not_found');
+    expect(body).toMatchObject({
+      error: 'flight_not_found',
+      triedDates: [flight.dateLocal, shift(flight.dateLocal, -1), shift(flight.dateLocal, 1)],
+      suggestions: [],
+    });
+    expect(ApiErrorSchema.safeParse(body).success).toBe(true);
+    expect(subscribed.status).toBe(404);
+    expect(subscribedBody).toMatchObject({
+      error: 'flight_not_found',
+      triedDates: [byNumber.dateLocal, shift(byNumber.dateLocal, -1), shift(byNumber.dateLocal, 1)],
+      suggestions: [],
+    });
+    expect(unknownRoute.status).toBe(404);
+    expect((await unknownRoute.json<ErrorBody>()).error).toBe('not_found');
     // A person-supplied date is tried with its neighbours (increment 6's user_search rule).
     expect(await adbCalls(flight)).toBeGreaterThanOrEqual(1);
     expect(await counterValue('user', session.userId, 'instances_created')).toBe(0);

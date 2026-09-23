@@ -12,9 +12,10 @@
  * The watermark is the entire safety argument: every transaction below `xmin` has committed or
  * aborted, so a transaction that took its xid early and committed after a newer one (the
  * late-commit hazard) is still above the watermark when the newer one is served, and is replayed
- * on a later pull instead of skipped. The two tables share the watermark and one order; no
- * transaction writes both (the persist consumer writes only flight rows, the routes only user
- * rows), so an `(xid, seq)` pair names at most one row across them.
+ * on a later pull instead of skipped. The two tables share the watermark and one order: they draw
+ * `seq` from ONE sequence (migration 0003), because the persist consumer writes both in one
+ * transaction (a snapshot row and its `live_tracked` decisions, ruling O3), so an `(xid, seq)` pair
+ * names at most one row across them.
  *
  * `SYNC_PAGE_SIZE` (200) is server-enforced: each table is read with LIMIT 201, the two are
  * merged, and the 201st row, when there is one, is what sets `hasMore`. A truncated page's cursor
@@ -24,11 +25,20 @@
  * upserts. No cursor means an empty client: the page is the current state of every entity the
  * caller owns, at the watermark.
  *
+ * The cursor is bound to its principal and its database timeline (ruling O12,
+ * src/lib/sync-cursor.ts): a cursor issued to another user or on another `sync_epoch` answers 410
+ * `resync_required`, and so does one whose xid is below the purge horizon H (`sync_horizon`,
+ * ruling O9), which is read AFTER the page so a purge that committed before the page's statement
+ * can never let a purged gap through as complete.
+ *
  * The route reads the PRIMARY. The Hyperdrive binding points at the Neon primary endpoint
  * (wrangler.jsonc, ADR 0002) and must stay there: whether a read replica's `xmin` can trail the
  * primary's is undocumented, and a watermark that moved backwards would re-serve or, worse, skip.
  * Every pull checks `transaction_read_only` on the connection in the same statement that reads
- * the watermark and refuses to serve from a read-only one.
+ * the watermark and refuses to serve from a read-only one. Hyperdrive query caching must stay
+ * disabled on that binding too (ADR 0012 item 7): the no-cursor snapshot is plain SELECTs answered
+ * with a cursor at a fresh watermark, and a cached result older than that watermark would be
+ * served with a cursor past its own changes.
  */
 
 import { and, eq, isNull, sql, type SQL } from 'drizzle-orm';
@@ -43,6 +53,7 @@ import {
 } from '@planeahead/db';
 import {
   FlightStatusSchema,
+  SYNC_CURSOR_MAX_LENGTH,
   SYNC_ENVELOPE_VERSION,
   SYNC_PAGE_SIZE,
   type FlightKey,
@@ -62,8 +73,12 @@ import {
   decodeSyncCursor,
   drainedCursor,
   encodeSyncCursor,
-  isCursorStale,
+  isBelowHorizon,
+  staleBeforePage,
+  syncCursorBinding,
+  type StaleCursorReason,
   type SyncCursor,
+  type SyncPosition,
 } from '../lib/sync-cursor';
 import {
   notificationPreferencesSyncRow,
@@ -84,14 +99,22 @@ export interface SyncBounds {
   readonly watermark: string;
   /** `pg_snapshot_xmax`: the next xid the cluster will assign. */
   readonly nextXid: string;
+  /** `sync_epoch.epoch`, the database timeline every cursor names (1 when the row is missing). */
+  readonly epoch: string;
 }
 
-/** The watermark, read together with the primary check in one statement. */
+/** The watermark and the epoch, read together with the primary check in one statement. */
 export async function readSyncBounds(db: DbOrTx): Promise<SyncBounds> {
-  const [row] = await db.execute<{ watermark: string; next_xid: string; read_only: string }>(sql`
+  const [row] = await db.execute<{
+    watermark: string;
+    next_xid: string;
+    read_only: string;
+    epoch: string;
+  }>(sql`
     select pg_snapshot_xmin(pg_current_snapshot())::text as watermark,
            pg_snapshot_xmax(pg_current_snapshot())::text as next_xid,
-           current_setting('transaction_read_only') as read_only
+           current_setting('transaction_read_only') as read_only,
+           coalesce((select epoch from sync_epoch where id = 1), 1)::text as epoch
   `);
   if (row === undefined) {
     throw new Error('the watermark query returned no row');
@@ -101,21 +124,19 @@ export async function readSyncBounds(db: DbOrTx): Promise<SyncBounds> {
       'GET /v1/sync must read the primary: the connection is read-only (a replica?)',
     );
   }
-  return { watermark: row.watermark, nextXid: row.next_xid };
+  return { watermark: row.watermark, nextXid: row.next_xid, epoch: row.epoch };
 }
 
 /**
- * The oldest xid either change table still holds (by `seq`, the primary key, so O(1)), or null.
- * Rows are purged oldest first, so a cursor below it may have lost rows after it.
+ * The purge horizon H (`sync_horizon`), or null before the first purge. The increment 12 purge
+ * deletes `xid < H` from both change tables and records H in one transaction, so a cursor at or
+ * above H has lost nothing, and one below it may have.
  */
-export async function oldestRetainedXid(db: DbOrTx): Promise<string | null> {
-  const [row] = await db.execute<{ oldest: string | null }>(sql`
-    select least(
-      (select xid from user_sync_changes order by seq limit 1),
-      (select xid from flight_sync_changes order by seq limit 1)
-    )::text as oldest
+export async function readSyncHorizon(db: DbOrTx): Promise<string | null> {
+  const [row] = await db.execute<{ horizon: string | null }>(sql`
+    select (select horizon_xid from sync_horizon where id = 1)::text as horizon
   `);
-  return row?.oldest ?? null;
+  return row?.horizon ?? null;
 }
 
 /**
@@ -126,7 +147,7 @@ export async function oldestRetainedXid(db: DbOrTx): Promise<string | null> {
 export function userChangesQuery(
   userId: string,
   watermark: string,
-  cursor: SyncCursor,
+  cursor: SyncPosition,
   limit: number = FETCH_LIMIT,
 ): SQL {
   return sql`
@@ -145,7 +166,7 @@ export function userChangesQuery(
 export function flightChangesQuery(
   userId: string,
   watermark: string,
-  cursor: SyncCursor,
+  cursor: SyncPosition,
   limit: number = FETCH_LIMIT,
 ): SQL {
   return sql`
@@ -179,8 +200,8 @@ interface FlightChangeRow extends Record<string, unknown> {
 }
 
 type PageEntry =
-  | { readonly kind: 'user'; readonly position: SyncCursor; readonly row: UserChangeRow }
-  | { readonly kind: 'flight'; readonly position: SyncCursor; readonly row: FlightChangeRow };
+  | { readonly kind: 'user'; readonly position: SyncPosition; readonly row: UserChangeRow }
+  | { readonly kind: 'flight'; readonly position: SyncPosition; readonly row: FlightChangeRow };
 
 /** The latest snapshot below the watermark of each instance, keyed by flight key. */
 export async function latestFlightSnapshots(
@@ -234,7 +255,7 @@ function changeFrom(row: UserChangeRow): SyncChangeV1 {
 }
 
 export interface SyncPage {
-  readonly cursor: SyncCursor;
+  readonly cursor: SyncPosition;
   readonly hasMore: boolean;
   readonly changes: SyncChangeV1[];
   readonly flights: SyncFlightV1[];
@@ -244,7 +265,7 @@ export interface SyncPage {
 export async function changePage(
   db: DbOrTx,
   userId: string,
-  cursor: SyncCursor,
+  cursor: SyncPosition,
   watermark: string,
 ): Promise<SyncPage> {
   const userRows = await db.execute<UserChangeRow>(userChangesQuery(userId, watermark, cursor));
@@ -355,69 +376,105 @@ export async function snapshotPage(db: Db, userId: string, watermark: string): P
 }
 
 const SyncQuerySchema = z.object({
-  cursor: queryValue(z.string().min(1).max(64)).optional(),
+  cursor: queryValue(z.string().min(1).max(SYNC_CURSOR_MAX_LENGTH)).optional(),
 });
 
-export const syncRoutes = new Hono<AppBindings>().get(
-  '/',
-  requireScope('user'),
-  validate('query', SyncQuerySchema),
-  async (c) => {
-    const user = currentUser(c.var.user);
-    const { cursor: wire } = c.req.valid('query');
-    const { db, log } = authRuntime(c);
+const RESYNC_MESSAGES: Readonly<Record<StaleCursorReason, string>> = {
+  epoch: 'the cursor was issued on another database timeline; reset the store and pull again',
+  binding: 'the cursor was issued to another account; reset the store and pull again',
+  unassigned:
+    'the cursor names a position this database never issued; reset the store and pull again',
+  horizon: 'the cursor is older than the change history; reset the store and pull again',
+};
 
-    let cursor: SyncCursor | null = null;
-    if (wire !== undefined) {
-      try {
-        cursor = decodeSyncCursor(wire);
-      } catch (error) {
-        if (!(error instanceof SyncCursorError)) {
-          throw error;
-        }
+export interface SyncRoutesOptions {
+  /**
+   * Test seam: replaces the read of `sync_horizon`, so a test can simulate a purge's horizon for
+   * its own user without moving the one horizon every parallel test file pulls against.
+   */
+  readonly readHorizon?: ((db: DbOrTx) => Promise<string | null>) | undefined;
+}
+
+export function createSyncRoutes(options: SyncRoutesOptions = {}) {
+  const horizonOf = options.readHorizon ?? readSyncHorizon;
+  return new Hono<AppBindings>().get(
+    '/',
+    requireScope('user'),
+    validate('query', SyncQuerySchema),
+    async (c) => {
+      const user = currentUser(c.var.user);
+      const { cursor: wire } = c.req.valid('query');
+      const { db, log } = authRuntime(c);
+      const resync = (reason: StaleCursorReason, cursor: SyncCursor) => {
+        log.info('sync_resync_required', {
+          reason,
+          cursor_xid: cursor.xid,
+          cursor_epoch: cursor.epoch,
+        });
         return c.json(
           {
-            error: 'invalid_cursor',
-            message: 'the cursor was not issued by this server; resync from scratch',
-            requestId: c.var.requestId,
-          },
-          400,
-        );
-      }
-    }
-
-    const bounds = await readSyncBounds(db);
-    let page: SyncPage;
-    if (cursor === null) {
-      page = await snapshotPage(db, user.id, bounds.watermark);
-    } else {
-      const oldest = await oldestRetainedXid(db);
-      if (isCursorStale(cursor, { nextXid: bounds.nextXid, oldestRetainedXid: oldest })) {
-        log.info('sync_resync_required', { cursor_xid: cursor.xid, oldest_xid: oldest });
-        return c.json(
-          {
-            error: 'resync_required',
-            message: 'the cursor is older than the change history; reset the store and pull again',
+            error: 'resync_required' as const,
+            message: RESYNC_MESSAGES[reason],
             requestId: c.var.requestId,
           },
           410,
         );
+      };
+
+      let cursor: SyncCursor | null = null;
+      if (wire !== undefined) {
+        try {
+          cursor = decodeSyncCursor(wire);
+        } catch (error) {
+          if (!(error instanceof SyncCursorError)) {
+            throw error;
+          }
+          return c.json(
+            {
+              error: 'invalid_cursor' as const,
+              message: 'the cursor was not issued by this server; resync from scratch',
+              requestId: c.var.requestId,
+            },
+            400,
+          );
+        }
       }
-      page = await changePage(db, user.id, cursor, bounds.watermark);
-    }
-    if (page.changes.length > SYNC_PAGE_SIZE) {
-      // Only the no-cursor snapshot can exceed a page; the Phase 0 caps (100 subscriptions at
-      // most, two preference rows) keep it under. Logged so a later entity set cannot outgrow it
-      // silently.
-      log.error('sync_snapshot_over_page_size', { changes: page.changes.length });
-    }
-    return c.json({
-      rpcVersion: SYNC_ENVELOPE_VERSION,
-      serverTime: new Date().toISOString(),
-      cursor: encodeSyncCursor(page.cursor),
-      hasMore: page.hasMore,
-      changes: page.changes,
-      flights: page.flights,
-    });
-  },
-);
+
+      const binding = await syncCursorBinding(user.id);
+      const bounds = await readSyncBounds(db);
+      let page: SyncPage;
+      if (cursor === null) {
+        page = await snapshotPage(db, user.id, bounds.watermark);
+      } else {
+        const stale = staleBeforePage(cursor, { ...bounds, binding });
+        if (stale !== null) {
+          return resync(stale, cursor);
+        }
+        page = await changePage(db, user.id, cursor, bounds.watermark);
+        // After the page, never before: see src/lib/sync-cursor.ts.
+        if (isBelowHorizon(cursor, await horizonOf(db))) {
+          return resync('horizon', cursor);
+        }
+      }
+      if (page.changes.length > SYNC_PAGE_SIZE) {
+        // Only the no-cursor snapshot can exceed a page; the Phase 0 caps (100 subscriptions at
+        // most, two preference rows) keep it under. Logged so a later entity set cannot outgrow it
+        // silently (ADR 0012 item 4: keyset paging arrives with the trips and logbook writers).
+        log.error('sync_snapshot_over_page_size', { changes: page.changes.length });
+      }
+      return c.json(
+        {
+          rpcVersion: SYNC_ENVELOPE_VERSION,
+          serverTime: new Date().toISOString(),
+          cursor: encodeSyncCursor({ ...page.cursor, epoch: bounds.epoch, binding }),
+          hasMore: page.hasMore,
+          changes: page.changes,
+          flights: page.flights,
+        },
+        200,
+      );
+    },
+  );
+}
+
+export const syncRoutes = createSyncRoutes();

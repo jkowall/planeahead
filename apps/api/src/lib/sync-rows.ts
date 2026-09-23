@@ -19,7 +19,10 @@ export type FlightSubscriptionRecord = typeof flightSubscriptions.$inferSelect;
 export type UserPreferencesRecord = typeof userPreferences.$inferSelect;
 export type NotificationPreferencesRecord = typeof notificationPreferences.$inferSelect;
 
-/** `flight_subscriptions` as the client sees it; `live_tracked` is server bookkeeping and stays. */
+/**
+ * `flight_subscriptions` as the client sees it, `liveTracked` included (ruling O3: the client shows
+ * whether the subscription holds a live-tracked slot or the cap left it tracked but not live).
+ */
 export function subscriptionSyncRow(
   row: FlightSubscriptionRecord,
   flightKey: FlightKey,
@@ -39,6 +42,7 @@ export function subscriptionSyncRow(
         ? (overrides as Record<string, unknown>)
         : {},
     source: row.source,
+    liveTracked: row.liveTracked,
     createdAt: row.createdAt,
     updatedAt: row.updatedAt,
     deletedAt: row.deletedAt,

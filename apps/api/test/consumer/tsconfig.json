@@ -1,0 +1,26 @@
+{
+  // The mobile app's view of the typed client (increment 8, ruling O10): a consumer with NO
+  // ambient types (`types: []`, so neither the Workers globals of worker-configuration.d.ts nor
+  // @cloudflare/vitest-plugin nor node) and a fetch-capable DOM lib, importing
+  // `@planeahead/api/client` through the package's `exports`, whose `types` is the declaration
+  // `tsc -b` emitted (dist/src/client.d.ts). `skipLibCheck` is off so the emitted declaration
+  // itself is checked. The api `typecheck` script runs this after `tsc -b`; it is not part of the
+  // api project (tsconfig.json excludes it) because it reads that project's output.
+  "compilerOptions": {
+    "target": "es2022",
+    "lib": ["es2023", "dom", "dom.iterable"],
+    "module": "esnext",
+    "moduleResolution": "bundler",
+    "moduleDetection": "force",
+    "isolatedModules": true,
+    "verbatimModuleSyntax": true,
+    "resolveJsonModule": true,
+    "strict": true,
+    "noUncheckedIndexedAccess": true,
+    "exactOptionalPropertyTypes": true,
+    "skipLibCheck": false,
+    "noEmit": true,
+    "types": []
+  },
+  "files": ["index.ts"]
+}

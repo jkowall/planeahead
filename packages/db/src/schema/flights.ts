@@ -434,14 +434,19 @@ export const flightTracks = pgTable(
  * `xid` is a column DEFAULT, and a default does not fire on the `DO UPDATE` branch of
  * `ON CONFLICT`. Shares the watermark rule of `user_sync_changes`
  * (`xid < pg_snapshot_xmin(pg_current_snapshot())`); `GET /v1/sync` reads the rows of the
- * caller's subscribed instances. Like `user_sync_changes`, `seq` is an identity rather than a
- * uuid because the cursor needs a total order inside one transaction. Purged after 30 days by the
- * housekeeping cron (increment 12).
+ * caller's subscribed instances. `seq` is drawn from `user_sync_changes`'s own identity sequence
+ * rather than one of its own (ruling O3, ADR 0012 item 3): the persist consumer writes rows to
+ * BOTH tables in one transaction (the upsert's snapshot, and the `live_tracked` changes of the
+ * flight's subscriptions), so one xid can carry rows in both, and only a shared sequence keeps an
+ * `(xid, seq)` pair naming at most one row across the two tables. Purged by the housekeeping cron
+ * (increment 12) together with `user_sync_changes`, below one horizon (`sync_horizon`).
  */
 export const flightSyncChanges = pgTable(
   'flight_sync_changes',
   {
-    seq: bigint('seq', { mode: 'number' }).primaryKey().generatedAlwaysAsIdentity(),
+    seq: bigint('seq', { mode: 'number' })
+      .primaryKey()
+      .default(sql`nextval('user_sync_changes_seq_seq'::regclass)`),
     flightInstanceId: uuid('flight_instance_id')
       .notNull()
       .references(() => flightInstances.id, { onDelete: 'cascade' }),

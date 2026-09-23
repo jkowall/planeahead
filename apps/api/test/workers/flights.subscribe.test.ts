@@ -12,15 +12,22 @@
  * one injected hook; everything else is the deployed Worker.
  */
 
-import { createExecutionContext, waitOnExecutionContext } from 'cloudflare:test';
+import {
+  createExecutionContext,
+  runInDurableObject,
+  waitOnExecutionContext,
+} from 'cloudflare:test';
 import { env } from 'cloudflare:workers';
 import { sql } from 'drizzle-orm';
 import { afterEach, describe, expect, it } from 'vitest';
+import { RPC_SCHEMA_VERSION, type FlightKey } from '@planeahead/shared';
 import { createApp } from '../../src/app';
+import type { Env } from '../../src/env';
 import { snapshotKvKey } from '../../src/kv/snapshot';
+import { defaultTrackerFor, type TrackerRpc } from '../../src/lib/trackers';
 import { IDEMPOTENCY_REPLAYED_HEADER } from '../../src/middleware/idempotency';
 import { createV1Routes } from '../../src/routes/v1';
-import { jsonRequest, signInAnonymously, uniqueIp, worker } from './helpers/auth';
+import { captureLogs, jsonRequest, signInAnonymously, uniqueIp, worker } from './helpers/auth';
 import { adbCalls, adbOk, drainTouched, scriptAdb, track, testEnv } from './helpers/flights';
 import {
   HOUR,
@@ -36,6 +43,7 @@ import {
   subscribe,
   subscribeRequest,
   subscriberCount,
+  trackerStub,
   type ErrorBody,
   type SubscribeBody,
 } from './helpers/routes';
@@ -351,6 +359,218 @@ describe('POST /v1/flights', () => {
     expect(body.success).toBeUndefined();
     expect(body.issues?.map((issue) => issue.path.join('.')).sort()).toEqual(['date', 'number']);
   });
+});
+
+describe('the tracker and Postgres agree (ruling O13)', () => {
+  /** The tracker's own subscriber rows, read from its SQLite storage. */
+  async function subscribers(flightKey: FlightKey): Promise<{ id: string; user: string }[]> {
+    return runInDurableObject(trackerStub(flightKey), (_instance, state) =>
+      state.storage.sql
+        .exec<{ id: string; user: string }>(
+          'SELECT subscription_id AS id, user_id AS user FROM subscribers ORDER BY subscription_id',
+        )
+        .toArray(),
+    );
+  }
+
+  /** A tracker seam whose FIRST subscribe waits `delayMs`, before or after the real call. */
+  function slowFirstSubscribe(delayMs: number, when: 'before' | 'after') {
+    let calls = 0;
+    return (workerEnv: Env) => {
+      const real = defaultTrackerFor(workerEnv);
+      return (key: FlightKey): TrackerRpc => {
+        const tracker = real(key);
+        return {
+          getState: () => tracker.getState(),
+          unsubscribe: (input) => tracker.unsubscribe(input),
+          forceRefresh: (input) => tracker.forceRefresh(input),
+          subscribe: async (input) => {
+            calls += 1;
+            if (calls !== 1) {
+              return tracker.subscribe(input);
+            }
+            const pause = () => new Promise((resolve) => setTimeout(resolve, delayMs));
+            if (when === 'before') {
+              await pause();
+              return tracker.subscribe(input);
+            }
+            const answer = await tracker.subscribe(input);
+            await pause();
+            return answer;
+          },
+        };
+      };
+    };
+  }
+
+  for (const when of ['before', 'after'] as const) {
+    for (const idSource of ['client', 'tombstone'] as const) {
+      it(`keeps the retry's subscriber when a subscribe lost its deadline (delay ${when} the call, ${idSource} id)`, async () => {
+        const flight = seededFlightFor();
+        await seedTracker(flight);
+        const session = await signInAnonymously();
+        let subscriptionId: string = crypto.randomUUID();
+        if (idSource === 'tombstone') {
+          const created = await (
+            await subscribe(session, { flightKey: flight.flightKey })
+          ).json<SubscribeBody>();
+          subscriptionId = created.subscription.id;
+          expect((await authed(session, `/v1/flights/${subscriptionId}`, 'DELETE')).status).toBe(
+            200,
+          );
+        }
+        const body =
+          idSource === 'client'
+            ? { flightKey: flight.flightKey, subscriptionId }
+            : { flightKey: flight.flightKey };
+        const key = idempotencyKey(`late-${when}-${idSource}`);
+        const app = createApp();
+        app.route(
+          '/v1',
+          createV1Routes({
+            flights: { deadlineMs: 300, trackerFor: slowFirstSubscribe(2_000, when) },
+          }),
+        );
+
+        const firstCtx = createExecutionContext();
+        const first = await app.fetch(subscribeRequest(session, body, { key }), env, firstCtx);
+        // A 5xx is not stored: the outbox's retry, same key, same body, really runs.
+        const retryCtx = createExecutionContext();
+        const retry = await app.fetch(subscribeRequest(session, body, { key }), env, retryCtx);
+        await waitOnExecutionContext(retryCtx);
+        // The first call lands now, and its late compensation runs.
+        await waitOnExecutionContext(firstCtx);
+
+        expect(first.status).toBe(504);
+        expect(retry.status).toBe(201);
+        expect((await retry.json<SubscribeBody>()).subscription.id).toBe(subscriptionId);
+        expect(await subscriptionRows(session.userId)).toEqual([
+          { id: subscriptionId, deleted: false },
+        ]);
+        expect(await subscribers(flight.flightKey)).toEqual([
+          { id: subscriptionId, user: session.userId },
+        ]);
+      });
+    }
+  }
+
+  it('repairs a tracker that lost the subscriber when the client subscribes again', async () => {
+    const flight = seededFlightFor();
+    await seedTracker(flight);
+    const session = await signInAnonymously();
+    const created = await (
+      await subscribe(session, { flightKey: flight.flightKey })
+    ).json<SubscribeBody>();
+    // Drift: the tracker forgot the subscriber Postgres still records.
+    await trackerStub(flight.flightKey).unsubscribe({
+      rpcVersion: RPC_SCHEMA_VERSION,
+      subscriptionId: created.subscription.id,
+    });
+    expect(await subscriberCount(flight.flightKey)).toBe(0);
+
+    const again = await subscribe(session, { flightKey: flight.flightKey });
+
+    expect(again.status).toBe(200);
+    expect((await again.json<SubscribeBody>()).created).toBe(false);
+    expect(await subscribers(flight.flightKey)).toEqual([
+      { id: created.subscription.id, user: session.userId },
+    ]);
+  });
+
+  for (const ids of ['different', 'same'] as const) {
+    it(`answers 200 already to the loser of two concurrent subscribes (${ids} ids): one row, one subscriber`, async () => {
+      const flight = seededFlightFor();
+      await seedTracker(flight);
+      // The instance row exists before either request (another user's subscribe registered it),
+      // so neither transaction's FOR UPDATE can see the other's uncommitted insert.
+      const other = await signInAnonymously();
+      expect((await subscribe(other, { flightKey: flight.flightKey })).status).toBe(201);
+      const session = await signInAnonymously();
+      const sharedId = crypto.randomUUID();
+      const bodyFor = () =>
+        ids === 'same'
+          ? { flightKey: flight.flightKey, subscriptionId: sharedId }
+          : { flightKey: flight.flightKey };
+      let calls = 0;
+      let entered = false;
+      let release: () => void = () => undefined;
+      const gate = new Promise<void>((resolve) => {
+        release = resolve;
+      });
+      const app = createApp();
+      app.route(
+        '/v1',
+        createV1Routes({
+          flights: {
+            beforeSubscribeCommit: async () => {
+              calls += 1;
+              if (calls === 1) {
+                entered = true;
+                await gate;
+              }
+            },
+          },
+        }),
+      );
+
+      const winnerCtx = createExecutionContext();
+      const loserCtx = createExecutionContext();
+      const { result, lines } = await captureLogs(async () => {
+        const winner = app.fetch(
+          subscribeRequest(session, bodyFor(), { key: idempotencyKey('race-a') }),
+          env,
+          winnerCtx,
+        );
+        await eventually(
+          () => Promise.resolve(entered),
+          (value) => value,
+        );
+        const loser = app.fetch(
+          subscribeRequest(session, bodyFor(), { key: idempotencyKey('race-b') }),
+          env,
+          loserCtx,
+        );
+        // Let the loser reach its INSERT, which waits on the winner's uncommitted row.
+        await eventually(
+          () =>
+            db().execute<{ n: number }>(sql`
+              select count(*)::int as n from pg_stat_activity
+              where wait_event_type = 'Lock' and query ilike '%insert into "flight_subscriptions"%'
+            `),
+          (rows) => (rows[0]?.n ?? 0) > 0,
+          10_000,
+        );
+        release();
+        const settled = [await winner, await loser] as const;
+        await waitOnExecutionContext(winnerCtx);
+        await waitOnExecutionContext(loserCtx);
+        return settled;
+      });
+      const [won, lost] = result;
+      // The loser really took the unique-violation branch, on the constraint this variant races.
+      const conflict = lines.find((line) => line.includes('flight_subscribe_conflict')) ?? '';
+      expect(conflict).toContain(
+        ids === 'same'
+          ? 'flight_subscriptions_pkey'
+          : 'flight_subscriptions_user_id_flight_instance_id_key',
+      );
+
+      expect(won.status).toBe(201);
+      expect(lost.status).toBe(200);
+      const wonBody = await won.json<SubscribeBody>();
+      const lostBody = await lost.json<SubscribeBody>();
+      expect(lostBody.created).toBe(false);
+      expect(lostBody.subscription.id).toBe(wonBody.subscription.id);
+      expect(await subscriptionRows(session.userId)).toEqual([
+        { id: wonBody.subscription.id, deleted: false },
+      ]);
+      const mine = (await subscribers(flight.flightKey)).filter(
+        (row) => row.user === session.userId,
+      );
+      expect(mine).toEqual([{ id: wonBody.subscription.id, user: session.userId }]);
+      expect(await counterValue('user', session.userId, 'active_subscriptions')).toBe(1);
+    });
+  }
 });
 
 describe('GET and DELETE /v1/flights', () => {

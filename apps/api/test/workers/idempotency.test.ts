@@ -36,6 +36,7 @@ import {
   createMemoryIdempotencyStore,
   hashValidatedRequest,
   idempotency,
+  idempotencyGate,
   isStorableResponse,
   isValidIdempotencyKey,
   isValidInstallId,
@@ -546,12 +547,37 @@ describe('the Postgres store (the /v1 instance, a resolved user)', () => {
 });
 
 describe('the /v1 instance in the deployed Worker', () => {
-  it('answers 400 idempotency_scope_missing to a keyed request with neither a session nor an install id', async () => {
+  it('lets auth answer a keyed request with neither a session nor an install id: 401, not a scope error', async () => {
+    // Ruling O10: the /v1 instance sets nothing when it cannot scope a key, so the route's
+    // requireScope tells a signed-out caller to sign in (or that its account is gone) instead of
+    // blaming the missing X-Install-Id.
     const response = await exports.default.fetch('https://api.planeahead.test/v1/flights', {
       method: 'POST',
       headers: { 'content-type': 'application/json', [IDEMPOTENCY_KEY_HEADER]: 'v1-unscoped-001' },
       body: JSON.stringify({ flightKey: 'AAL-100-2026-10-01-KJFK' }),
     });
+
+    expect(response.status).toBe(401);
+    expect((await response.json<{ error: string }>()).error).toBe('unauthenticated');
+  });
+
+  it('leaves the scope error to the gate: a keyed request that reaches it unscoped answers 400', async () => {
+    // A route with no requireScope ahead of its gate (none exists under /v1 today): the /v1
+    // instance set nothing, so only the gate can say the key has no scope, and it does.
+    const instance = createApp();
+    instance.use('/v1/*', idempotency({ mode: 'v1' }));
+    instance.post('/v1/probe-gate', idempotencyGate({ required: false }), (c) =>
+      c.json({ ran: true }, 201),
+    );
+
+    const response = await instance.fetch(
+      new Request('https://api.planeahead.test/v1/probe-gate', {
+        method: 'POST',
+        headers: { 'content-type': 'application/json', [IDEMPOTENCY_KEY_HEADER]: 'v1-gate-000001' },
+        body: '{}',
+      }),
+      env,
+    );
 
     expect(response.status).toBe(400);
     expect((await response.json<{ error: string }>()).error).toBe('idempotency_scope_missing');

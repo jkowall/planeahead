@@ -86,7 +86,7 @@ export const devicesRoutes = new Hono<AppBindings>().post(
     if (headerInstallId !== undefined && headerInstallId !== body.installId) {
       return c.json(
         {
-          error: 'install_id_mismatch',
+          error: 'install_id_mismatch' as const,
           message: `${INSTALL_ID_HEADER} and installId name different installations`,
           requestId: c.var.requestId,
         },
@@ -149,10 +149,13 @@ export const devicesRoutes = new Hono<AppBindings>().post(
       }
     }
 
-    return c.json({
-      device,
-      pushToken,
-      ...(pushTokenSkipped === null ? {} : { pushTokenSkipped }),
-    });
+    return c.json(
+      {
+        device,
+        pushToken,
+        ...(pushTokenSkipped === null ? {} : { pushTokenSkipped }),
+      },
+      200,
+    );
   },
 );

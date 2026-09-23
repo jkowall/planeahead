@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import {
+  SYNC_CURSOR_MAX_LENGTH,
   SYNC_ENTITIES,
   SyncCursorError,
   SyncCursorWireSchema,
@@ -9,52 +10,66 @@ import {
 } from '../src/sync';
 import { AA100_INPUT } from './fixtures';
 
+const BINDING = '0123456789abcdef';
+
+function cursor(xid: string, seq: string, epoch = '1', binding = BINDING) {
+  return { xid, seq, epoch, binding };
+}
+
 describe('sync cursor', () => {
-  it('encodes "<xid>:<seq>" as unpadded base64url and decodes it back', () => {
-    const wire = encodeSyncCursor({ xid: '12345', seq: '7' });
+  it('encodes "<xid>:<seq>:<epoch>:<hash8>" as unpadded base64url and decodes it back', () => {
+    const wire = encodeSyncCursor(cursor('12345', '7'));
     expect(wire).toMatch(/^[A-Za-z0-9_-]+$/);
-    expect(wire).toBe(btoa('12345:7').replaceAll('=', ''));
-    expect(decodeSyncCursor(wire)).toEqual({ xid: '12345', seq: '7' });
+    expect(wire).toBe(btoa(`12345:7:1:${BINDING}`).replaceAll('=', ''));
+    expect(decodeSyncCursor(wire)).toEqual(cursor('12345', '7'));
   });
 
-  it('keeps a 64-bit xid8 and a 63-bit seq as strings without losing a digit', () => {
-    const xid = '18446744073709551615';
-    const seq = '9223372036854775807';
-    expect(decodeSyncCursor(encodeSyncCursor({ xid, seq }))).toEqual({ xid, seq });
+  it('keeps a 64-bit xid8, a 63-bit seq and epoch as strings without losing a digit', () => {
+    const max = cursor('18446744073709551615', '9223372036854775807', '9223372036854775807');
+    const wire = encodeSyncCursor(max);
+    expect(wire.length).toBeLessThanOrEqual(SYNC_CURSOR_MAX_LENGTH);
+    expect(decodeSyncCursor(wire)).toEqual(max);
   });
 
-  it('refuses values past the xid8 and bigint ranges', () => {
-    expect(() => encodeSyncCursor({ xid: '18446744073709551616', seq: '1' })).toThrow(
-      SyncCursorError,
-    );
-    expect(() => encodeSyncCursor({ xid: '1', seq: '9223372036854775808' })).toThrow(
-      SyncCursorError,
-    );
+  it('refuses values past the xid8 and bigint ranges, epoch 0 and a malformed binding', () => {
+    for (const bad of [
+      cursor('18446744073709551616', '1'),
+      cursor('1', '9223372036854775808'),
+      cursor('1', '1', '0'),
+      cursor('1', '1', '9223372036854775808'),
+      cursor('1', '1', '1', '0123456789ABCDEF'),
+      cursor('1', '1', '1', '0123456789abcde'),
+    ]) {
+      expect(() => encodeSyncCursor(bad), JSON.stringify(bad)).toThrow(SyncCursorError);
+    }
   });
 
-  it('refuses anything this server did not mint', () => {
+  it('refuses anything this server did not mint, the pre-binding two-part form included', () => {
     const plain = (text: string) => btoa(text).replaceAll('=', '').replaceAll('+', '-');
     for (const bad of [
       '',
       'not base64!',
       plain('abc'),
       plain('1'),
-      plain('1:'),
-      plain(':1'),
-      plain('1:2:3'),
-      plain('-1:0'),
-      plain('01:0'),
-      plain('1:1.5'),
+      plain('1:2'),
+      plain(`1:2:3`),
+      plain(`1:2:1:${BINDING}:x`),
+      plain(`-1:0:1:${BINDING}`),
+      plain(`01:0:1:${BINDING}`),
+      plain(`1:1.5:1:${BINDING}`),
+      plain(`1:1::${BINDING}`),
       'MTIzNDU6Nw==',
-      'x'.repeat(100),
+      'x'.repeat(200),
     ]) {
       expect(() => decodeSyncCursor(bad), bad).toThrow(SyncCursorError);
     }
   });
 
   it('refuses a non-canonical encoding of a valid cursor', () => {
-    // "12:3" is four bytes, so its last base64url character carries four unused low bits.
-    const wire = encodeSyncCursor({ xid: '12', seq: '3' });
+    const wire = encodeSyncCursor(cursor('12', '3'));
+    const text = `12:3:1:${BINDING}`;
+    // Only a length that is not a multiple of three leaves unused low bits in the last character.
+    expect(text.length % 3).not.toBe(0);
     // Flip one of those bits: the same bytes, a different string.
     const last = wire.at(-1) ?? '';
     const alphabet = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_';
@@ -63,9 +78,7 @@ describe('sync cursor', () => {
   });
 
   it('SyncCursorWireSchema accepts exactly what decodes', () => {
-    expect(SyncCursorWireSchema.safeParse(encodeSyncCursor({ xid: '42', seq: '3' })).success).toBe(
-      true,
-    );
+    expect(SyncCursorWireSchema.safeParse(encodeSyncCursor(cursor('42', '3'))).success).toBe(true);
     expect(SyncCursorWireSchema.safeParse('42:3').success).toBe(false);
   });
 });
@@ -74,7 +87,7 @@ describe('SyncEnvelopeV1', () => {
   const envelope = {
     rpcVersion: 1,
     serverTime: '2026-09-23T12:00:00Z',
-    cursor: encodeSyncCursor({ xid: '42', seq: '3' }),
+    cursor: encodeSyncCursor(cursor('42', '3')),
     hasMore: false,
     changes: [
       {

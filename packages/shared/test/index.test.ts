@@ -242,6 +242,7 @@ const EXPECTED_EXPORTS = [
   'isActualAt',
   // sync (increment 8)
   'FlightSubscriptionRowV1',
+  'SYNC_CURSOR_MAX_LENGTH',
   'SYNC_ENTITIES',
   'SYNC_ENVELOPE_VERSION',
   'SYNC_OPS',
@@ -255,7 +256,9 @@ const EXPECTED_EXPORTS = [
   'decodeSyncCursor',
   'encodeSyncCursor',
   // api (increment 8)
+  'DEPLOYMENT_ENVIRONMENTS',
   'DesignatorInputSchema',
+  'FlightSearchSuggestionSchema',
   'OriginAirportInputSchema',
   'SUBSCRIPTION_CABINS',
   'SubscribeFlightBodySchema',

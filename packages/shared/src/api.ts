@@ -1,7 +1,8 @@
 import { z } from 'zod';
 import { IATA_AIRPORT_RE, ICAO_AIRPORT_RE } from './airports';
-import { FlightKeySchema, parseDesignator } from './flight-key';
-import { IsoDateSchema } from './flight-status';
+import type { ValidationIssue } from './errors';
+import { FlightKeySchema, parseDesignator, type FlightKey } from './flight-key';
+import { IsoDateSchema, type FlightStatus } from './flight-status';
 import { NotificationOverridesSchema } from './rpc';
 
 /**
@@ -85,3 +86,72 @@ export const SubscribeFlightBodySchema = SubscriptionPrefsSchema.extend({
     }
   });
 export type SubscribeFlightBody = z.infer<typeof SubscribeFlightBodySchema>;
+
+// ---------------------------------------------------------------------------------------------
+// Response shapes the typed client reads (increment 8, ruling O10). They live here, not in the
+// API Worker, because the declaration `hcWithType` is emitted with (apps/api/dist/src/client.d.ts)
+// may import only leaf types from this package: a type it had to import from the Worker would
+// drag the server's type graph, and the Workers globals, into the mobile app's type check.
+// ---------------------------------------------------------------------------------------------
+
+/** The deployment an API answer came from (`GET /health`); the `ENVIRONMENT` var's values. */
+export const DEPLOYMENT_ENVIRONMENTS = ['local', 'test', 'staging', 'production'] as const;
+export type EnvironmentName = (typeof DEPLOYMENT_ENVIRONMENTS)[number];
+
+/** The 400 every `/v1` validator (and a malformed JSON body) answers. */
+export interface ValidationFailedBody {
+  readonly error: 'validation_failed';
+  readonly message: string;
+  readonly issues: ValidationIssue[];
+  readonly requestId: string;
+}
+
+/** Where a route found the flight state it reports: the KV publication, the tracker, Postgres. */
+export type SnapshotSource = 'kv' | 'tracker' | 'postgres';
+
+/**
+ * A flight as the flight routes report it next to a subscription: the detail route, the list,
+ * subscribe, refresh (success, 504 `refresh_timeout` and 410 `flight_archived`) all use this one
+ * shape, so the detail screen applies every answer the same way.
+ */
+export interface FlightView {
+  readonly key: FlightKey;
+  readonly phase: string;
+  readonly version: number;
+  readonly snapshot: FlightStatus | null;
+  readonly source: SnapshotSource;
+}
+
+/**
+ * A neighbouring date the client could offer after a 404 `flight_not_found`. Reserved (ruling O4):
+ * the adapter already asked for the day before and the day after a user-supplied date, so Phase 0
+ * always answers an empty list and the client names the dates in `triedDates` instead.
+ */
+export const FlightSearchSuggestionSchema = z.looseObject({
+  date: IsoDateSchema,
+  flightKey: FlightKeySchema.optional(),
+});
+export type FlightSearchSuggestion = z.infer<typeof FlightSearchSuggestionSchema>;
+
+/**
+ * `GET /v1/flights/search` and `POST /v1/flights { number, date }` when the provider knows no such
+ * flight: 404 `flight_not_found` (distinct from the unknown-route `not_found`), with the
+ * origin-local dates the adapter asked for (D, D-1, D+1 for a user search, the ones inside the
+ * provider's lookahead) and the reserved `suggestions`.
+ */
+export interface FlightNotFoundBody {
+  readonly error: 'flight_not_found';
+  readonly message: string;
+  readonly requestId: string;
+  readonly triedDates: string[];
+  readonly suggestions: FlightSearchSuggestion[];
+}
+
+/** `GET /v1/flights/search` 200. */
+export interface FlightSearchResponse {
+  readonly flightKey: FlightKey;
+  readonly status: FlightStatus | null;
+  /** `seeded` or `adopted`: a tracker holds the flight; `none`: it is over; null when unknown. */
+  readonly tracker: 'seeded' | 'adopted' | 'none' | null;
+  readonly cached: boolean;
+}

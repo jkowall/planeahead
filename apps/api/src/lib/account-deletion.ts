@@ -23,13 +23,23 @@
  *      each session token for 31 days so another device is told `account_deleted`), the
  *      `audit_log` row, and finally `delete from users`. The sessions are among the rows deleted,
  *      which revokes them.
+ *   5. AFTER the commit, unsubscribe every subscription step 4 deleted that step 2 did not
+ *      (ruling O14): a mutating request of another device still authenticates until step 4
+ *      commits, so a subscribe can commit between the read and the delete; step 4's
+ *      `delete ... returning` names it, and it is undone here, best effort like step 2.
+ *
+ * Step 4 also removes the magic-link counters keyed by the account's address (`usage_counters`,
+ * scope `email`, subjects that start with the SHA-256 of the canonical mailbox, known from step
+ * 1): an unkeyed hash of an email is reversible by dictionary. Once trips get writers, step 4 must
+ * also append change rows for OTHER users' `trip_members` and `flight_subscriptions.trip_id` rows
+ * it touches (docs/schema-review.md section 7); in Phase 0 no trip exists.
  *
  * `DELETION_ORDER` is the enumeration docs/schema-review.md section 7 records as a table;
  * test/workers/me.delete.test.ts compares it with every foreign key the database catalog says
  * references `users`, so a table added later without a line here fails the suite.
  */
 
-import { and, eq, isNull, sql, type SQL } from 'drizzle-orm';
+import { and, eq, inArray, isNull, sql, type SQL } from 'drizzle-orm';
 import {
   accounts,
   auditLog,
@@ -48,7 +58,8 @@ import {
 } from '@planeahead/shared';
 import { revokeAppleRefreshToken, type AppleRevokeOutcome } from '../auth/apple-revoke';
 import { deleteRevenueCatCustomer, type RevenueCatDeletion } from '../billing/revenuecat';
-import { sha256 } from '../crypto/hash';
+import { sha256, sha256Hex } from '../crypto/hash';
+import { MAGIC_LINK_SCOPE, canonicalMailbox } from '../middleware/magic-link-ceiling';
 import type { Envelope } from '../crypto/envelope';
 import type { Env } from '../env';
 import { errorFields, type Logger } from '../observability/log';
@@ -56,16 +67,24 @@ import { callWithDeadline } from './deadline';
 import { deletedSubjectHash, requireSecret, type DeletedSubjectKind } from './hmac';
 import { unsubscribeTracker, type TrackerFor } from './trackers';
 
+/** What a step's statement may use: the user id, the email, and its mailbox hash. */
+export interface DeletionSubject {
+  readonly userId: string;
+  readonly email: string | null;
+  /** SHA-256 hex of the canonical mailbox, the prefix of the magic-link counter subjects. */
+  readonly mailboxHash: string | null;
+}
+
 export interface DeletionStep {
   readonly table: string;
   /** The statement, or null for a table whose rows die by cascade from an explicit parent. */
-  readonly statement: ((userId: string, email: string | null) => SQL | null) | null;
+  readonly statement: ((subject: DeletionSubject) => SQL | null) | null;
   readonly note: string;
 }
 
 const byUserId =
   (table: string) =>
-  (userId: string): SQL =>
+  ({ userId }: DeletionSubject): SQL =>
     sql`delete from ${sql.identifier(table)} where user_id = ${userId}::uuid`;
 
 /**
@@ -111,12 +130,17 @@ export const DELETION_ORDER: readonly DeletionStep[] = [
   { table: 'user_stats_yearly', statement: byUserId('user_stats_yearly'), note: '' },
   {
     table: 'flight_subscriptions',
-    statement: byUserId('flight_subscriptions'),
-    note: 'tombstones included',
+    // RETURNING: every row deleted here is unsubscribed after the commit unless step 2 already
+    // did (ruling O14), which covers a subscribe that committed after step 1 read the list.
+    statement: ({ userId }) =>
+      sql`delete from flight_subscriptions where user_id = ${userId}::uuid
+            returning id::text as id, flight_instance_id::text as flight_instance_id,
+                      deleted_at is null as live`,
+    note: 'tombstones included; RETURNING feeds step 5',
   },
   {
     table: 'trip_members',
-    statement: (userId) =>
+    statement: ({ userId }) =>
       sql`delete from trip_members where user_id = ${userId}::uuid
             or trip_id in (select id from trips where user_id = ${userId}::uuid)`,
     note: 'the user as a member, and every member of the user own trips',
@@ -139,13 +163,24 @@ export const DELETION_ORDER: readonly DeletionStep[] = [
   { table: 'sessions', statement: byUserId('sessions'), note: 'revokes every session' },
   {
     table: 'usage_counters',
-    statement: (userId) =>
+    statement: ({ userId }) =>
       sql`delete from usage_counters where scope = 'user' and subject = ${userId}`,
     note: 'no FK: subject is the user id',
   },
   {
+    table: 'usage_counters',
+    // The magic-link counters (src/middleware/magic-link-cap.ts): the address ceiling
+    // `{mailboxHash}:hour|day` and the owner budget `{mailboxHash}:{requesterHash}:hour|day`.
+    statement: ({ mailboxHash }) =>
+      mailboxHash === null
+        ? null
+        : sql`delete from usage_counters
+              where scope = ${MAGIC_LINK_SCOPE} and left(subject, 65) = ${`${mailboxHash}:`}`,
+    note: 'no FK: magic-link counters keyed by the SHA-256 of the canonical mailbox',
+  },
+  {
     table: 'verifications',
-    statement: (_userId, email) =>
+    statement: ({ email }) =>
       email === null
         ? null
         : sql`delete from verifications
@@ -155,7 +190,7 @@ export const DELETION_ORDER: readonly DeletionStep[] = [
   },
   {
     table: 'rate_limits',
-    statement: (_userId, email) =>
+    statement: ({ email }) =>
       email === null
         ? null
         : sql`delete from rate_limits where position(lower(${email}) in lower(key)) > 0`,
@@ -190,6 +225,8 @@ export interface DeletionReport {
   readonly subscriptions: number;
   readonly trackersUnsubscribed: number;
   readonly trackersFailed: number;
+  /** Subscriptions that committed after step 1 and were unsubscribed after the commit. */
+  readonly lateSubscriptions: number;
   readonly apple: AppleRevokeOutcome;
   readonly revenueCat: RevenueCatDeletion;
   readonly deletedSubjects: number;
@@ -273,7 +310,7 @@ async function readAccount(deps: DeletionDeps, userId: string): Promise<AccountR
   };
 }
 
-/** Step 2. Every tracker, in parallel, each under the deadline; never throws. */
+/** Steps 2 and 5. Every tracker, in parallel, each under the deadline; never throws. */
 async function unsubscribeAll(
   deps: DeletionDeps,
   subscriptions: AccountRead['subscriptions'],
@@ -303,6 +340,22 @@ async function unsubscribeAll(
   return { ok, failed: results.length - ok };
 }
 
+/** The flight keys of subscriptions step 4 deleted (their instances outlive them: RESTRICT). */
+async function flightKeysOf(
+  db: Db,
+  rows: readonly { id: string; flight_instance_id: string }[],
+): Promise<{ id: string; flightKey: FlightKey }[]> {
+  const keys = await db
+    .select({ id: flightInstances.id, flightKey: flightInstances.flightKey })
+    .from(flightInstances)
+    .where(inArray(flightInstances.id, [...new Set(rows.map((row) => row.flight_instance_id))]));
+  const byInstance = new Map(keys.map((row) => [row.id, row.flightKey as FlightKey]));
+  return rows.flatMap((row) => {
+    const flightKey = byInstance.get(row.flight_instance_id);
+    return flightKey === undefined ? [] : [{ id: row.id, flightKey }];
+  });
+}
+
 function daysFromNow(days: number): SQL {
   return sql`now() + make_interval(days => ${days})`;
 }
@@ -324,6 +377,7 @@ export async function deleteAccount(
   }
 
   const trackers = await unsubscribeAll(deps, read.subscriptions);
+  const unsubscribed = new Set(read.subscriptions.map((subscription) => subscription.id));
   const apple = await revokeAppleRefreshToken(deps.env, read.appleRefreshToken, {
     ...(deps.fetch === undefined ? {} : { fetch: deps.fetch }),
   });
@@ -352,11 +406,23 @@ export async function deleteAccount(
     expiresAt: daysFromNow(DELETED_SUBJECT_RETENTION_DAYS),
   }));
 
-  await deps.db.transaction(async (tx) => {
+  const subject: DeletionSubject = {
+    userId,
+    email: read.email,
+    mailboxHash: read.email === null ? null : await sha256Hex(canonicalMailbox(read.email)),
+  };
+  const deletedSubscriptions = await deps.db.transaction(async (tx) => {
+    let deleted: { id: string; flight_instance_id: string; live: boolean }[] = [];
     for (const step of DELETION_ORDER) {
-      const statement = step.statement?.(userId, read.email) ?? null;
-      if (statement !== null) {
-        await tx.execute(statement);
+      const statement = step.statement?.(subject) ?? null;
+      if (statement === null) {
+        continue;
+      }
+      const rows = await tx.execute<{ id: string; flight_instance_id: string; live: boolean }>(
+        statement,
+      );
+      if (step.table === 'flight_subscriptions') {
+        deleted = [...rows];
       }
     }
     if (subjectRows.length + rcRows.length > 0) {
@@ -374,18 +440,35 @@ export async function deleteAccount(
         subscriptions: read.subscriptions.length,
         trackers_unsubscribed: trackers.ok,
         trackers_failed: trackers.failed,
+        late_subscriptions: deleted.filter((row) => row.live && !unsubscribed.has(row.id)).length,
         apple_revoke: apple,
         revenuecat: revenueCat,
         deleted_subjects: subjectRows.length + rcRows.length,
       },
     });
     await tx.delete(users).where(eq(users.id, userId));
+    return deleted;
   });
+
+  // Step 5: a live subscription that committed after step 1 (another device's subscribe while
+  // this deletion ran) still sits in its tracker; step 4 named it.
+  const late = deletedSubscriptions.filter((row) => row.live && !unsubscribed.has(row.id));
+  const lateTrackers =
+    late.length === 0
+      ? { ok: 0, failed: 0 }
+      : await unsubscribeAll(deps, await flightKeysOf(deps.db, late));
+  if (late.length > 0) {
+    deps.log.warn('account_deletion_late_subscriptions', {
+      count: late.length,
+      failed: lateTrackers.failed,
+    });
+  }
 
   return {
     subscriptions: read.subscriptions.length,
-    trackersUnsubscribed: trackers.ok,
-    trackersFailed: trackers.failed,
+    trackersUnsubscribed: trackers.ok + lateTrackers.ok,
+    trackersFailed: trackers.failed + lateTrackers.failed,
+    lateSubscriptions: late.length,
     apple,
     revenueCat,
     deletedSubjects: subjectRows.length + rcRows.length,

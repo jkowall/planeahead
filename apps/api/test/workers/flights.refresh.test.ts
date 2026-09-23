@@ -11,6 +11,7 @@
 
 import { createExecutionContext, waitOnExecutionContext } from 'cloudflare:test';
 import { env } from 'cloudflare:workers';
+import { sql } from 'drizzle-orm';
 import { afterEach, describe, expect, it } from 'vitest';
 import { FREE_TIER_LIMITS, DO_CALL_DEADLINE_MS } from '@planeahead/shared';
 import { createApp } from '../../src/app';
@@ -22,6 +23,8 @@ import {
   DAY_MS,
   authed,
   counterValue,
+  db,
+  eventually,
   seedTracker,
   seededFlightFor,
   subscribe,
@@ -40,11 +43,11 @@ function refreshableFlight() {
   return seededFlightFor(30 * DAY_MS);
 }
 
+/** The refresh answer (ruling O10): the outcome, and the same `flight` shape as detail and 504. */
 interface RefreshBody {
-  readonly flightKey: string;
   readonly outcome: string;
   readonly reason: string | null;
-  readonly snapshot: unknown;
+  readonly flight: { key: string; phase: string; snapshot: unknown; source: string } | null;
 }
 
 async function subscribed(
@@ -79,6 +82,7 @@ describe('refresh coalescing', () => {
     const started = Date.now();
     const statuses: number[] = [];
     const outcomes: string[] = [];
+    const keys = new Set<string | undefined>();
     // Twenty at a time: the pool shares one Postgres (and its connection limit) with every other
     // test file running in parallel.
     for (let index = 0; index < calls.length; index += 20) {
@@ -87,7 +91,9 @@ describe('refresh coalescing', () => {
       );
       for (const response of batch) {
         statuses.push(response.status);
-        outcomes.push((await response.json<RefreshBody>()).outcome);
+        const body = await response.json<RefreshBody>();
+        outcomes.push(body.outcome);
+        keys.add(body.flight?.key);
       }
     }
     const elapsed = Date.now() - started;
@@ -96,6 +102,7 @@ describe('refresh coalescing', () => {
     expect(statuses.every((status) => status === 200)).toBe(true);
     expect(outcomes.filter((outcome) => outcome === 'refreshed')).toHaveLength(1);
     expect(outcomes.filter((outcome) => outcome === 'coalesced')).toHaveLength(499);
+    expect([...keys]).toEqual([flight.flightKey]);
     expect(await adbCalls(flight)).toBe(1);
   }, 180_000);
 
@@ -133,6 +140,36 @@ describe('refresh coalescing', () => {
     expect(second.status).toBe(200);
     expect(second.headers.get('Idempotent-Replayed')).toBeNull();
     expect(await counterValue('user', session.userId, `refresh:${flight.flightKey}`)).toBe(2);
+  });
+
+  it('answers 410 flight_archived with the last known flight when the flight is over, before any budget', async () => {
+    const flight = refreshableFlight();
+    await seedTracker(flight);
+    const { session, subscriptionId } = await subscribed(flight.flightKey);
+    // Postgres records the flight as over (the persist consumer's terminal write, simulated once
+    // the seed's own row has landed, at a version no later delivery of the seed can overwrite).
+    await eventually(
+      () =>
+        db().execute<{ version: number }>(sql`
+          select version from flight_instances where flight_key = ${flight.flightKey}
+        `),
+      (rows) => (rows[0]?.version ?? 0) >= 1,
+    );
+    await db().execute(sql`
+      update flight_instances
+      set tracking_state = 'finished', finished_at = now(), version = version + 1000
+      where flight_key = ${flight.flightKey}
+    `);
+
+    const response = await refresh(session, subscriptionId);
+    const body = await response.json<ErrorBody & Pick<RefreshBody, 'flight'>>();
+
+    expect(response.status).toBe(410);
+    expect(body.error).toBe('flight_archived');
+    expect(body.flight?.key).toBe(flight.flightKey);
+    // No budget taken and no provider call: nothing was asked of the tracker.
+    expect(await counterValue('user', session.userId, `refresh:${flight.flightKey}`)).toBe(0);
+    expect(await adbCalls(flight)).toBe(0);
   });
 
   it('answers 404 for a subscription that is not the caller live one', async () => {

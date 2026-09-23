@@ -11,6 +11,7 @@
  * missing one must fail with its own message, not with a type error that never runs.
  */
 
+import type { EnvironmentName } from '@planeahead/shared';
 import type { AuthRuntime } from './auth/runtime';
 import type { AuthenticatedUser } from './auth/user';
 import type { IdempotencyContext } from './middleware/idempotency';
@@ -226,8 +227,12 @@ export interface AppBindings {
   Variables: Variables;
 }
 
-/** Deployment environment name, from the `ENVIRONMENT` var in wrangler.jsonc. */
-export type EnvironmentName = 'local' | 'test' | 'staging' | 'production';
+/**
+ * Deployment environment name, from the `ENVIRONMENT` var in wrangler.jsonc. Defined in
+ * `@planeahead/shared` because `GET /health` answers it and the typed client may import only
+ * leaf types from there.
+ */
+export type { EnvironmentName };
 
 export function environmentName(env: Env): EnvironmentName {
   const value: string = env.ENVIRONMENT;

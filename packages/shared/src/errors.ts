@@ -1,15 +1,26 @@
 import { z } from 'zod';
+import { FlightSearchSuggestionSchema } from './api';
+import { IsoDateSchema } from './flight-status';
 import { CAP_NAMES } from './limits';
 
 /**
- * The PlaneAhead error envelope and its codes (increment 8, ruling K14).
+ * The PlaneAhead error envelope and its codes (increment 8, rulings K14 and O10).
  *
- * Every non-2xx JSON answer from the API Worker has this shape: `error` is a stable machine code
+ * Every non-2xx JSON answer from the API Worker has this shape, including the ones a framework
+ * layer raises under `/v1` (a malformed JSON body is 400 `validation_failed` with an
+ * `invalid_json` issue, an oversized one 413 `payload_too_large`): `error` is a stable machine code
  * from `API_ERROR_CODES`, `message` is for a human and may change, `requestId` is the correlation
  * id also sent as `X-Request-Id`. Some codes carry extra fields (`issues` on
- * `validation_failed`, `cap` and `limit` on `cap_exceeded`, `flight` on `refresh_timeout`), so
- * the schema is loose. The mobile client branches on `error`, never on `message` or the status
- * alone: 401 `account_deleted` wipes the local store, 401 `unauthenticated` signs in again.
+ * `validation_failed`, `cap` and `limit` on `cap_exceeded`, `flight` on `refresh_timeout` and on
+ * the refresh route's `flight_archived`, `triedDates` and `suggestions` on `flight_not_found` from
+ * the search and subscribe-by-number routes), so the schema is loose. The mobile client branches
+ * on `error`, never on `message` or the status alone: 401 `account_deleted` wipes the local store,
+ * 401 `unauthenticated` signs in again.
+ *
+ * A REPLAYED answer (`Idempotent-Replayed: true`, a stored response to an `Idempotency-Key` sent
+ * again) carries the ORIGINAL request's `requestId` in its body, since the body is stored and
+ * replayed byte for byte, while its `X-Request-Id` header names the replay. Correlate a replayed
+ * error by the body's id.
  */
 
 export const API_ERROR_CODES = [
@@ -68,6 +79,10 @@ export const ApiErrorSchema = z.looseObject({
   /** `cap_exceeded`: which cap and its limit. */
   cap: z.enum(CAP_NAMES).optional(),
   limit: z.int().nonnegative().optional(),
+  /** `flight_not_found` from a search: the origin-local dates the provider was asked for. */
+  triedDates: z.array(IsoDateSchema).optional(),
+  /** `flight_not_found` from a search: reserved, always empty in Phase 0 (ruling O4). */
+  suggestions: z.array(FlightSearchSuggestionSchema).optional(),
 });
 export type ApiError = z.infer<typeof ApiErrorSchema>;
 

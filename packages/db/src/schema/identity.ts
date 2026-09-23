@@ -323,6 +323,50 @@ export const userSyncChanges = pgTable(
   ],
 );
 
+/**
+ * The sync feed's database timeline (migration 0003, increment 8, ADR 0012, ruling O12): one row,
+ * seeded `1` by the migration. Every sync cursor carries the epoch it was issued under, and a
+ * cursor from another epoch answers 410 `resync_required`. The restore runbook
+ * (docs/schema-review.md section 6) bumps it after any point-in-time restore or branch reset,
+ * because a restored cluster REUSES the xids the lost timeline had issued: a cursor from that
+ * timeline would otherwise pass every xid check once the new timeline catches up and skip rows.
+ * `id` is a smallint pinned to 1 (a documented exception to the uuid key convention); there is no
+ * `updated_at` because nothing but the runbook writes it.
+ */
+export const syncEpoch = pgTable(
+  'sync_epoch',
+  {
+    id: smallint('id').primaryKey().default(1),
+    epoch: bigint('epoch', { mode: 'number' }).notNull().default(1),
+    bumpedAt: instant('bumped_at'),
+    ...createdOnly(),
+  },
+  (t) => [
+    check('sync_epoch_singleton_check', sql`${t.id} = 1`),
+    check('sync_epoch_epoch_check', sql`${t.epoch} >= 1`),
+  ],
+);
+
+/**
+ * The sync feed's retention horizon (migration 0003, increment 8, ADR 0012, ruling O9): one row,
+ * `horizon_xid` null until the first purge. The increment 12 purge picks one H below the watermark,
+ * deletes `where xid < H` from BOTH change tables and writes H here, all in one transaction;
+ * `GET /v1/sync` answers 410 `resync_required` exactly when a cursor's xid is below H. Exact by
+ * construction, unlike "the oldest retained row": a row's xid is fixed at its transaction's first
+ * write and its seq at the change-row insert, so neither a seq-ordered purge nor the lowest-seq
+ * row's xid bounds what was removed. Same singleton convention as `sync_epoch`.
+ */
+export const syncHorizon = pgTable(
+  'sync_horizon',
+  {
+    id: smallint('id').primaryKey().default(1),
+    horizonXid: xid8('horizon_xid'),
+    purgedAt: instant('purged_at'),
+    ...createdOnly(),
+  },
+  (t) => [check('sync_horizon_singleton_check', sql`${t.id} = 1`)],
+);
+
 /** Idempotency-Key replay store for mutating routes; purged after 24 h by housekeeping. */
 export const idempotencyKeys = pgTable(
   'idempotency_keys',

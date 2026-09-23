@@ -7,7 +7,10 @@
  * pseudonymous survivors (`audit_log`, `notification_deliveries`, `revenuecat_events`,
  * `subscriptions`, `provider_calls`, `deleted_subjects`), unsubscribes every FlightTracker,
  * completes when Apple's revoke answers 500, accepts an anonymous session, and tells another
- * device of the same user 401 `account_deleted` on its next call.
+ * device of the same user 401 `account_deleted` on its next call, GETs included, with the whole
+ * cookie jar the real client sends (the `session_data` cache cookie too: ruling O5). A subscribe
+ * another device commits while the deletion runs is undone after the commit (ruling O14), and the
+ * magic-link counters keyed by the account's mailbox go with the account.
  */
 
 import { createExecutionContext, waitOnExecutionContext } from 'cloudflare:test';
@@ -16,7 +19,16 @@ import { sql } from 'drizzle-orm';
 import { afterEach, describe, expect, it } from 'vitest';
 import { uuidv7 } from '@planeahead/shared';
 import { createApp } from '../../src/app';
-import { DELETION_ORDER, DELETION_SURVIVORS } from '../../src/lib/account-deletion';
+import { createAuthRuntime } from '../../src/auth/runtime';
+import { sha256Hex } from '../../src/crypto/hash';
+import {
+  DELETION_ORDER,
+  DELETION_SURVIVORS,
+  deleteAccount as runDeletion,
+} from '../../src/lib/account-deletion';
+import { defaultTrackerFor, type TrackerRpc } from '../../src/lib/trackers';
+import { canonicalMailbox } from '../../src/middleware/magic-link-ceiling';
+import { createLogger } from '../../src/observability/log';
 import { createV1Routes } from '../../src/routes/v1';
 import {
   appleNativeSignIn,
@@ -110,7 +122,10 @@ async function auditDetails(userId: string): Promise<Record<string, unknown> | n
   return row?.details ?? null;
 }
 
-/** An Apple user with two devices (two sessions), subscriptions, a device, preferences. */
+/**
+ * An Apple user with two devices (two sessions). The other device keeps the WHOLE cookie jar, the
+ * `session_data` cache cookie included, exactly as the Expo client sends it (increment 9).
+ */
 async function appleUser(sub: string) {
   const ip = uniqueIp();
   const first = await appleNativeSignIn({ sub, ip });
@@ -119,7 +134,8 @@ async function appleUser(sub: string) {
   const cookie = sessionTokenOnly(cookiesFrom(first.response) ?? '');
   const second = await appleNativeSignIn({ sub, email: null, ip: uniqueIp() });
   expect(second.response.status).toBe(200);
-  const otherDevice = sessionTokenOnly(cookiesFrom(second.response) ?? '');
+  const otherDevice = cookiesFrom(second.response) ?? '';
+  expect(otherDevice).toContain('session_data=');
   return { userId, session: { cookie, ip }, otherDevice: { cookie: otherDevice, ip: uniqueIp() } };
 }
 
@@ -140,6 +156,20 @@ describe('POST /v1/me/delete', () => {
     // Rows that must survive, keyed pseudonymously, and a user-owned entitlement that must not.
     const rcAppUserId = `rc_${crypto.randomUUID()}`;
     const handle = db();
+    // The magic-link counters keyed by the account's mailbox (ruling O14), and a stranger's.
+    const [account] = await handle.execute<{ email: string }>(
+      sql`select email from users where id = ${userId}::uuid`,
+    );
+    const mailbox = await sha256Hex(canonicalMailbox(account?.email ?? ''));
+    const strangerMailbox = await sha256Hex(
+      canonicalMailbox(`stranger-${crypto.randomUUID()}@x.test`),
+    );
+    await handle.execute(sql`
+      insert into usage_counters (id, scope, subject, counter, window_start, count) values
+        (uuidv7(), 'email', ${`${mailbox}:day`}, 'magic_links', date_trunc('day', now()), 2),
+        (uuidv7(), 'email', ${`${mailbox}:${'0'.repeat(64)}:hour`}, 'magic_links', date_trunc('hour', now()), 1),
+        (uuidv7(), 'email', ${`${strangerMailbox}:day`}, 'magic_links', date_trunc('day', now()), 1)
+    `);
     await handle.execute(sql`
       insert into entitlements (user_id, rc_app_user_id, entitlement_id, status)
       values (${userId}::uuid, ${rcAppUserId}, 'pro', 'active')
@@ -214,12 +244,29 @@ describe('POST /v1/me/delete', () => {
       revenuecat: { attempted: false, reason: 'disabled' },
     });
 
-    // The other device: 401 account_deleted (wipe the store), not unauthenticated.
-    for (const path of ['/v1/me', '/v1/flights', '/v1/sync']) {
-      const other = await authed(otherDevice, path);
-      expect(other.status, path).toBe(401);
-      expect((await other.json<ErrorBody>()).error, path).toBe('account_deleted');
+    const counters = await handle.execute<{ subject: string }>(sql`
+      select subject from usage_counters
+      where scope = 'email' and (left(subject, 64) = ${mailbox} or left(subject, 64) = ${strangerMailbox})
+    `);
+    expect(counters.map((row) => row.subject)).toEqual([`${strangerMailbox}:day`]);
+
+    // The other device, still holding the 300 s cookie cache: 401 account_deleted (wipe the store)
+    // on every /v1 call, GETs included, and a search that would write writes nothing.
+    const other = flights[0];
+    for (const path of [
+      '/v1/me',
+      '/v1/flights',
+      '/v1/sync',
+      `/v1/flights/search?number=${other?.designator ?? 'AA1'}&date=${other?.dateLocal ?? '2100-01-01'}`,
+    ]) {
+      const response = await authed(otherDevice, path);
+      expect(response.status, path).toBe(401);
+      expect((await response.json<ErrorBody>()).error, path).toBe('account_deleted');
     }
+    const [afterwards] = await handle.execute<{ n: number }>(sql`
+      select count(*)::int as n from usage_counters where subject = ${userId}
+    `);
+    expect(afterwards?.n).toBe(0);
     const retried = await deleteAccount(session);
     expect(retried.status).toBe(401);
     expect((await retried.json<ErrorBody>()).error).toBe('account_deleted');
@@ -275,6 +322,60 @@ describe('POST /v1/me/delete', () => {
     const response = await deleteAccount({ cookie: '', ip: uniqueIp() });
 
     expect(response.status).toBe(401);
+  });
+
+  it('undoes a subscribe another device commits while the deletion runs (ruling O14)', async () => {
+    const session = await signInAnonymously();
+    const first = seededFlightFor();
+    const raced = seededFlightFor();
+    await seedTracker(first);
+    await seedTracker(raced);
+    expect((await subscribe(session, { flightKey: first.flightKey })).status).toBe(201);
+    const otherDevice = { cookie: session.cookie, ip: uniqueIp() };
+    let racedStatus = 0;
+    const real = defaultTrackerFor(env);
+    const log = createLogger({}, () => undefined);
+    const ctx = createExecutionContext();
+
+    // Step 2 unsubscribes the flight step 1 read; while it runs, the other device (whose session
+    // lives until step 4 commits) subscribes to a second flight, and that commits.
+    const report = await runDeletion(
+      {
+        env,
+        db: db(),
+        envelope: createAuthRuntime(env, log).envelope,
+        log,
+        trackerFor: (key): TrackerRpc => {
+          const tracker = real(key);
+          return {
+            getState: () => tracker.getState(),
+            subscribe: (input) => tracker.subscribe(input),
+            forceRefresh: (input) => tracker.forceRefresh(input),
+            unsubscribe: async (input) => {
+              if (key === first.flightKey && racedStatus === 0) {
+                racedStatus = (await subscribe(otherDevice, { flightKey: raced.flightKey })).status;
+              }
+              return tracker.unsubscribe(input);
+            },
+          };
+        },
+        deadlineMs: 8_000,
+        waitUntil: (promise) => {
+          ctx.waitUntil(promise);
+        },
+        requestId: 'delete-race',
+      },
+      session.userId,
+    );
+    await waitOnExecutionContext(ctx);
+
+    expect(racedStatus).toBe(201);
+    expect(report?.subscriptions).toBe(1);
+    expect(report?.lateSubscriptions).toBe(1);
+    expect(await remainingRows(session.userId)).toEqual({});
+    expect(await subscriberCount(first.flightKey)).toBe(0);
+    expect(await subscriberCount(raced.flightKey)).toBe(0);
+    expect(await auditDetails(session.userId)).toMatchObject({ late_subscriptions: 1 });
   });
 });
 

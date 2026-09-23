@@ -19,15 +19,25 @@
  *     mount are skipped: the first has its own instance, the second its own replay semantics.
  *   - The `/v1` instance (`src/routes/v1.ts`, mounted behind auth and behind the per-principal
  *     burst limiter, so a 429 never consumes a key) scopes a key by the resolved user id, else by
- *     `X-Install-Id`, else answers 400 `idempotency_scope_missing`, and stores a user's keys in
- *     Postgres (`idempotency_keys`). It does NOT reserve on its own: the request hash covers the
- *     VALIDATED body (method, canonical path, key-sorted canonical JSON), so the reservation is
- *     made by `idempotencyGate()`, which a route places after its validator. The instance then
- *     finalises what the gate reserved: stores the response, or releases the key.
+ *     `X-Install-Id`, and stores a user's keys in Postgres (`idempotency_keys`). It does NOT
+ *     reserve on its own: the request hash covers the VALIDATED body (method, canonical path,
+ *     key-sorted canonical JSON), so the reservation is made by `idempotencyGate()`, which a route
+ *     places after its validator. The instance then finalises what the gate reserved: stores the
+ *     response, or releases the key. A request it cannot scope passes through with nothing set
+ *     (ruling O10): the route's `requireScope` answers 401 (or 401 `account_deleted`) to a caller
+ *     with no session, and only a request that got past auth without a scope reaches the gate,
+ *     which answers 400 `idempotency_scope_missing`.
+ *
+ * Both instances answer a replay with `Idempotent-Replayed: true` and a mismatch with 422
+ * `idempotency_payload_mismatch` (the global slot adopted the `/v1` semantics in increment 8). A
+ * `/v1` route opts in by placing the gate: required on `POST /v1/flights`, optional (a key is
+ * honoured when sent) on `POST /v1/devices`, `PATCH /v1/me/preferences` and
+ * `DELETE /v1/flights/:id`; `POST /v1/flights/:id/refresh` has no gate and takes no key.
  *
  * The Postgres store reserves with `INSERT ... ON CONFLICT DO NOTHING RETURNING`: a returned row
  * means this caller executes; no row means read the existing one and answer replay, 409 or 422.
- * A reservation is written with a short lease (`IN_FLIGHT_LEASE_SECONDS`) as its expiry, so a
+ * A reservation is a row whose `response_status` is `IN_FLIGHT_STATUS` (0, no HTTP status) written
+ * with a short lease (`IN_FLIGHT_LEASE_SECONDS`, 60 s) as its expiry, so a
  * request that died mid-flight does not block its key for a day; completing it moves the expiry
  * to the 24 h TTL. An expired row (a dead lease, or a response older than the TTL that the
  * housekeeping purge has not reached yet) is taken over by one atomic UPDATE.
@@ -506,7 +516,9 @@ export function idempotency(options: IdempotencyOptions = {}): MiddlewareHandler
     const store = selectStore(c);
     const scope = scopeFor(c);
     if (scope === null) {
-      return scopeMissing(c);
+      // Under `/v1` the route decides: `requireScope` answers a caller without a session 401
+      // before anything could be reserved, and `idempotencyGate` answers the rest.
+      return mode === 'v1' ? next() : scopeMissing(c);
     }
 
     if (mode === 'v1') {
@@ -546,6 +558,10 @@ export function idempotencyGate(options: IdempotencyGateOptions): MiddlewareHand
   return createMiddleware<AppBindings>(async (c, next) => {
     const context = c.var.idempotency;
     if (context === undefined) {
+      if (c.req.header(IDEMPOTENCY_KEY_HEADER) !== undefined) {
+        // A key the `/v1` instance could not scope (no session, no valid install id).
+        return scopeMissing(c);
+      }
       if (options.required) {
         return c.json(
           {

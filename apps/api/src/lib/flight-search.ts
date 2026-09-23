@@ -14,9 +14,10 @@
  *      DesignatorResolver object, which probes or makes the one AeroDataBox call and seeds the
  *      tracker), awaited under the route's deadline.
  *
- * Creating a tracker is what costs money, so it is what is capped: `instances_created` per user
- * per UTC day, and for an anonymous account also `tracker_creations` per salted client IP per UTC
- * day. When steps 2 and 3 found nothing the flight is presumed new: the slots are TAKEN before
+ * Creating a tracker is what costs money, so it is what is capped, wherever a request creates
+ * one (this search included, not only a subscribe): `instances_created` per user per UTC day, and
+ * for an anonymous account (a Better Auth anonymous user, `isAnonymous`) also `tracker_creations`
+ * per salted client IP per UTC day. When steps 2 and 3 found nothing the flight is presumed new: the slots are TAKEN before
  * the resolver runs (so a capped caller is refused without a provider call) and RELEASED when the
  * answer says no tracker was created (adopted, cached, not found, failed). When step 3 found the
  * flight, the resolver is expected to adopt it, so nothing is reserved; a creation that happens
@@ -106,7 +107,11 @@ export type FlightResolution =
       readonly created: boolean;
       readonly cached: boolean;
     }
-  | { readonly kind: 'not_found' }
+  | {
+      readonly kind: 'not_found';
+      /** The origin-local dates the adapter asked for (ruling O4): D, D-1, D+1 in the lookahead. */
+      readonly triedDates: readonly string[];
+    }
   | { readonly kind: 'cap_exceeded'; readonly slot: CapSlot }
   | { readonly kind: 'date_out_of_range'; readonly maxDaysAhead: number }
   | { readonly kind: 'unknown_origin' }
@@ -122,12 +127,29 @@ export function beyondLookahead(dateLocal: string, now: Date, maxDaysAhead: numb
   return (target - today) / DAY_MS > maxDaysAhead;
 }
 
+function shiftDate(dateLocal: string, days: number): string {
+  return new Date(Date.parse(`${dateLocal}T00:00:00Z`) + days * DAY_MS).toISOString().slice(0, 10);
+}
+
+/**
+ * The dates a user search asks the provider for, in the adapter's order: the date as given, the
+ * day before and the day after (the plus or minus one day retry of a person-supplied date), each
+ * only while inside the lookahead, exactly as the adapter skips one beyond it.
+ */
+export function userSearchDates(dateLocal: string, now: Date, maxDaysAhead: number): string[] {
+  return [dateLocal, shiftDate(dateLocal, -1), shiftDate(dateLocal, 1)].filter(
+    (date) => !beyondLookahead(date, now, maxDaysAhead),
+  );
+}
+
+type ResolvedOrMiss = Exclude<FlightResolution, { kind: 'not_found' }> | { readonly kind: 'miss' };
+
 function fromResolveResponse(
   response: ResolveResponseV1,
   cachedAnswer: boolean,
-): FlightResolution | null {
+): ResolvedOrMiss | null {
   if (response.outcome === 'not_found') {
-    return { kind: 'not_found' };
+    return { kind: 'miss' };
   }
   if (response.outcome !== 'resolved' || response.flightKey === undefined) {
     return null;
@@ -168,6 +190,10 @@ export async function resolveFlight(
   if (beyondLookahead(query.dateLocal, ctx.now, maxDaysAhead)) {
     return { kind: 'date_out_of_range', maxDaysAhead };
   }
+  const notFound: FlightResolution = {
+    kind: 'not_found',
+    triedDates: userSearchDates(query.dateLocal, ctx.now, maxDaysAhead),
+  };
   let originIcao: string | undefined;
   if (query.origin !== undefined) {
     const resolved = await resolveOriginIcao(ctx.db, query.origin);
@@ -190,7 +216,7 @@ export async function resolveFlight(
       const keyOrigin =
         answer?.kind === 'resolved' ? parseFlightKey(answer.flightKey).originIcao : undefined;
       if (answer !== null && (originIcao === undefined || keyOrigin === originIcao)) {
-        return answer;
+        return answer.kind === 'miss' ? notFound : answer;
       }
     }
   } catch (error) {
@@ -257,7 +283,7 @@ export async function resolveFlight(
   const answer = fromResolveResponse(result, false);
   if (answer === null || answer.kind !== 'resolved') {
     await releaseCreation();
-    return answer ?? { kind: 'not_found' };
+    return answer === null || answer.kind === 'miss' ? notFound : answer;
   }
   if (!answer.created) {
     await releaseCreation();

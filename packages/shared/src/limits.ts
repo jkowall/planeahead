@@ -11,7 +11,13 @@
 export const FREE_TIER_LIMITS = Object.freeze({
   /** Live (not tombstoned) `flight_subscriptions` rows per user. */
   activeSubscriptions: 5,
-  /** Of those, how many may be inside their live window at once (`isInLiveWindow`). */
+  /**
+   * Of those, how many may be live-tracked at once (ruling O3): a slot is taken where the flight
+   * enters its live window (`isInLiveWindow`), at subscribe for a flight already inside it or by
+   * the persist consumer on the first row that puts it there, and released where it is over
+   * (arrived, cancelled, finished) or unsubscribed. A subscription the cap refuses stays tracked,
+   * flagged not live-tracked.
+   */
   liveTracked: 2,
   /** Trackers a user's requests may create per UTC day (the provider spend). */
   instancesCreatedPerDay: 20,

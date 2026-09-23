@@ -20,5 +20,9 @@
     "vitest.exit-guard.config.ts",
     "worker-configuration.d.ts"
   ],
+  // test/consumer is the mobile app's view of the emitted client declaration, checked by its own
+  // tsconfig after `tsc -b` (the `typecheck` script); inside this project it would read its own
+  // output.
+  "exclude": ["test/consumer/**"],
   "references": [{ "path": "../../packages/shared" }, { "path": "../../packages/db" }]
 }

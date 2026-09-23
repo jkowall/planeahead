@@ -20,6 +20,7 @@ import {
   type FlightKey,
   type FlightStatus,
   type GetStateResponseV1,
+  type SnapshotSource,
 } from '@planeahead/shared';
 import type { Env } from '../env';
 import { snapshotKvKey, writeSnapshotKv, type SnapshotKvValue } from '../kv/snapshot';
@@ -28,7 +29,7 @@ import { withDeadline } from './deadline';
 import type { DbOrTx } from './flight-registry';
 import { getTrackerState, isAbsentTrackerError, type TrackerFor } from './trackers';
 
-export type SnapshotSource = 'kv' | 'tracker' | 'postgres';
+export type { SnapshotSource };
 
 export interface KnownFlight {
   readonly flightKey: FlightKey;

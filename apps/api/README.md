@@ -93,11 +93,14 @@ src/validation/           nul.ts (U+0000 is refused at every JSON boundary; Post
 src/do/                   migrate.ts (the SQLite schema runner), base.ts, the five classes,
                           migrations/<class>/NNN.ts (ProviderBudget has the first)
 src/queues/               index.ts dispatch, consume.ts (per-message ack), analytics.ts, consumers
+                          (persist.ts also routes the anonymous merge's `merge` message to merge.ts)
 src/cron/                 index.ts dispatch, reconcile.ts, housekeeping.ts
 src/observability/log.ts  structured JSON logging with the request id
 test/workers/             everything that drives the Worker, inside workerd
 test/unit/                pure WebCrypto and jose tests, ALSO inside workerd (that is the point:
                           they settle facts about the runtime, not about Node)
+test/consumer/            the typed client as the mobile app sees it (`types: []`), checked by
+                          the `typecheck` script against the declaration `tsc -b` emits
 test/globalSetup.ts       embedded Postgres, the fake Apple/Google/Resend server, .dev.vars.test
 ```
 
@@ -244,3 +247,30 @@ real staging deploy is that check, and the queues plus their dead letter queues 
 with `wrangler queues create` beforehand, because deploy fails on a missing queue rather than
 creating one. Secrets are set out of band with `wrangler secret put --env staging`; the deploy
 workflow passes an empty `secrets` input on purpose.
+
+### Deploy checklist
+
+Every secret the Worker reads is declared in `wrangler.jsonc` under `env.staging.secrets.required`
+and `env.production.secrets.required` (the list `WORKER_SECRET_NAMES` in `src/env.ts`;
+`test/workers/secrets-in-logs.test.ts` keeps the two equal), and wrangler refuses a first deploy
+while one is unset. Before the first deploy of an environment, set each with
+`wrangler secret put <NAME> --env <environment>`. Two came with increment 8 and fail loudly when
+missing:
+
+- `DELETED_SUBJECT_HMAC_KEY` (`openssl rand -base64 32`): without it `POST /v1/me/delete`, the
+  path Apple requires, answers 500 before touching anything, and a deleted account's other device
+  is told `unauthenticated` instead of `account_deleted`.
+- `IP_SALT_SECRET` (`openssl rand -base64 32`): without it every anonymous search or subscribe by
+  number answers 500 (the per-IP tracker-creation cap cannot key its counter).
+
+## Owner tasks (increment 8)
+
+- Set `DELETED_SUBJECT_HMAC_KEY` and `IP_SALT_SECRET` with `wrangler secret put` in staging and in
+  production (the deploy checklist above).
+- Set `idle_in_transaction_session_timeout` on the app role in every environment, next to
+  `statement_timeout`: `ALTER ROLE <role> SET idle_in_transaction_session_timeout = '30s'`. The
+  sync watermark is cluster-global, so one session idle inside a writing transaction freezes
+  `GET /v1/sync` for every user (docs/schema-review.md section 12, ADR 0012 item 7).
+- Keep Hyperdrive query caching disabled on the `DB` binding (ADR 0012 item 7), and after any
+  point-in-time restore of an environment's database bump `sync_epoch` before traffic returns
+  (the restore runbook in docs/schema-review.md section 6).

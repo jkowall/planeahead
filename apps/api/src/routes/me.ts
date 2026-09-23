@@ -84,7 +84,7 @@ export const meRoutes = new Hono<AppBindings>()
       // is simply not a user any more.
       return c.json(
         {
-          error: 'account_deleted',
+          error: 'account_deleted' as const,
           message: 'this account was deleted; clear the data stored on this device',
           requestId: c.var.requestId,
         },
@@ -92,30 +92,33 @@ export const meRoutes = new Hono<AppBindings>()
       );
     }
     const isAnonymous = row.isAnonymous === true;
-    return c.json({
-      user: {
-        id: row.id,
-        email: isAnonymous ? null : row.email,
-        name: row.name,
-        emailVerified: row.emailVerified,
-        isAnonymous,
-        status: row.status,
-        plan: row.plan,
-        locale: row.locale,
-        homeAirportId: row.homeAirportId,
-        createdAt: row.createdAt.toISOString(),
+    return c.json(
+      {
+        user: {
+          id: row.id,
+          email: isAnonymous ? null : row.email,
+          name: row.name,
+          emailVerified: row.emailVerified,
+          isAnonymous,
+          status: row.status,
+          plan: row.plan,
+          locale: row.locale,
+          homeAirportId: row.homeAirportId,
+          createdAt: row.createdAt.toISOString(),
+        },
+        preferences:
+          row.distanceUnit === null
+            ? { ...DEFAULT_USER_PREFERENCES }
+            : toPreferences({
+                distanceUnit: row.distanceUnit,
+                temperatureUnit: row.temperatureUnit ?? '',
+                timeFormat: row.timeFormat ?? '',
+                showLocalTimes: row.showLocalTimes ?? true,
+                settings: row.settings,
+              }),
       },
-      preferences:
-        row.distanceUnit === null
-          ? { ...DEFAULT_USER_PREFERENCES }
-          : toPreferences({
-              distanceUnit: row.distanceUnit,
-              temperatureUnit: row.temperatureUnit ?? '',
-              timeFormat: row.timeFormat ?? '',
-              showLocalTimes: row.showLocalTimes ?? true,
-              settings: row.settings,
-            }),
-    });
+      200,
+    );
   })
   .patch(
     '/preferences',
@@ -153,7 +156,7 @@ export const meRoutes = new Hono<AppBindings>()
         });
         return written;
       });
-      return c.json({ preferences: toPreferences(row) });
+      return c.json({ preferences: toPreferences(row) }, 200);
     },
   )
   .post('/delete', requireScope('user'), async (c) => {
@@ -177,7 +180,7 @@ export const meRoutes = new Hono<AppBindings>()
     if (report === null) {
       return c.json(
         {
-          error: 'account_deleted',
+          error: 'account_deleted' as const,
           message: 'this account was deleted; clear the data stored on this device',
           requestId: c.var.requestId,
         },
@@ -189,5 +192,5 @@ export const meRoutes = new Hono<AppBindings>()
       trackers_failed: report.trackersFailed,
       apple_revoke: report.apple.outcome,
     });
-    return c.json({ deleted: true as const, wipeLocalStore: true as const });
+    return c.json({ deleted: true as const, wipeLocalStore: true as const }, 200);
   });

@@ -13,19 +13,30 @@
  *   3. pull: nothing, the newer row is above the watermark and the older one is not visible;
  *   4. commit A;
  *   5. pull from the cursor step 3 answered: both rows, older first, nothing skipped.
+ *
+ * The second test is the retention horizon (ruling O9) on the same inversion: the older
+ * transaction's row holds the LOWER xid and the HIGHER seq, so a purge in seq order (or a horizon
+ * read off the lowest-seq row) removes a row a legitimate cursor has not seen and says nothing. A
+ * purge below one H recorded with it is exact: a cursor below H answers 410, one at H loses
+ * nothing. The purge is simulated for the test's own user and H reaches the route through the
+ * `readHorizon` seam, because the one `sync_horizon` row is what every parallel file pulls against.
  */
 
+import { createExecutionContext, waitOnExecutionContext } from 'cloudflare:test';
 import { env } from 'cloudflare:workers';
 import { sql } from 'drizzle-orm';
 import { createNodeDb } from '@planeahead/db';
 import {
   SyncEnvelopeV1,
   decodeSyncCursor,
+  encodeSyncCursor,
   type SyncEnvelopeV1 as SyncEnvelope,
 } from '@planeahead/shared';
 import { describe, expect, it } from 'vitest';
-import { signInAnonymously, type AnonymousSession } from './helpers/auth';
-import { authed, db, eventually } from './helpers/routes';
+import { createApp } from '../../src/app';
+import { createV1Routes } from '../../src/routes/v1';
+import { jsonRequest, signInAnonymously, type AnonymousSession } from './helpers/auth';
+import { authed, db, eventually, type ErrorBody } from './helpers/routes';
 
 async function pull(session: AnonymousSession, cursor?: string): Promise<SyncEnvelope> {
   const response = await authed(
@@ -127,5 +138,102 @@ describe('the late-commit hazard', () => {
       // fact (an unhandled rejection); the isolate reclaims it, as it does every request client.
       commit();
     }
+  });
+
+  it('keeps the 410 horizon exact when the seq order and the xid order disagree (ruling O9)', async () => {
+    const session = await signInAnonymously();
+    const handle = db();
+    await handle.execute(sql`
+      insert into user_sync_changes (user_id, entity, entity_id, op, row)
+      values (${session.userId}::uuid, 'trips', uuidv7(), 'upsert', '{"n":"before"}'::jsonb)
+    `);
+    const start = await eventually(
+      () => pull(session),
+      (page) => page.changes.length === 0,
+    );
+
+    // The inversion: T1 takes its xid first and inserts its change row last.
+    const older = createNodeDb(env.DB.connectionString, { max: 1 });
+    let hasXid = false;
+    let insertOlder: () => void = () => undefined;
+    const go = new Promise<void>((resolve) => {
+      insertOlder = resolve;
+    });
+    try {
+      const t1 = older.sql.begin(async (tx) => {
+        await tx`select pg_current_xact_id()`;
+        hasXid = true;
+        await go;
+        await tx`
+          insert into user_sync_changes (user_id, entity, entity_id, op, row)
+          values (${session.userId}::uuid, 'trips', uuidv7(), 'upsert', '{"n":"older"}'::jsonb)
+        `;
+      });
+      await eventually(
+        () => Promise.resolve(hasXid),
+        (value) => value,
+      );
+      await handle.execute(sql`
+        insert into user_sync_changes (user_id, entity, entity_id, op, row)
+        values (${session.userId}::uuid, 'trips', uuidv7(), 'upsert', '{"n":"newer"}'::jsonb)
+      `);
+      insertOlder();
+      await t1;
+    } finally {
+      insertOlder();
+    }
+    const rows = await handle.execute<{ n: string; xid: string; seq: string }>(sql`
+      select row->>'n' as n, xid::text as xid, seq::text as seq from user_sync_changes
+      where user_id = ${session.userId}::uuid and row->>'n' in ('older', 'newer')
+    `);
+    const olderRow = rows.find((row) => row.n === 'older');
+    const newerRow = rows.find((row) => row.n === 'newer');
+    if (olderRow === undefined || newerRow === undefined) {
+      throw new Error('both change rows expected');
+    }
+    expect(BigInt(olderRow.xid)).toBeLessThan(BigInt(newerRow.xid));
+    expect(BigInt(olderRow.seq)).toBeGreaterThan(BigInt(newerRow.seq));
+
+    // The purge: one H below the watermark, `xid < H` deleted, H recorded with it.
+    const horizon = newerRow.xid;
+    await handle.execute(sql`
+      delete from user_sync_changes
+      where user_id = ${session.userId}::uuid and xid < ${horizon}::xid8
+    `);
+    const app = createApp();
+    app.route('/v1', createV1Routes({ sync: { readHorizon: () => Promise.resolve(horizon) } }));
+    const pullAt = async (cursor: string) => {
+      const ctx = createExecutionContext();
+      const response = await app.fetch(
+        jsonRequest(`/v1/sync?cursor=${encodeURIComponent(cursor)}`, 'GET', undefined, {
+          ip: session.ip,
+          cookie: session.cookie,
+        }),
+        env,
+        ctx,
+      );
+      await waitOnExecutionContext(ctx);
+      return response;
+    };
+
+    // Below H: the older row is gone and the cursor had not seen it.
+    const below = await pullAt(start.cursor);
+    expect(below.status).toBe(410);
+    expect((await below.json<ErrorBody>()).error).toBe('resync_required');
+    // At H: everything from H on is still there, and served.
+    const atHorizon = encodeSyncCursor({
+      ...decodeSyncCursor(start.cursor),
+      xid: horizon,
+      seq: '0',
+    });
+    const served = await eventually(
+      async () => {
+        const response = await pullAt(atHorizon);
+        expect(response.status).toBe(200);
+        return SyncEnvelopeV1.parse(await response.json());
+      },
+      (page) => page.changes.length > 0,
+    );
+    expect(served.changes.map((change) => change.row?.['n'])).toEqual(['newer']);
   });
 });

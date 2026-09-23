@@ -7,6 +7,8 @@
 
 import type { InferRequestType, InferResponseType } from 'hono/client';
 import { describe, expect, expectTypeOf, it } from 'vitest';
+import type { FlightView } from '@planeahead/shared';
+import packageJsonText from '../../package.json?raw';
 import { hcWithType, type Client } from '../../src/client';
 
 const client = hcWithType('https://api.planeahead.test');
@@ -50,10 +52,69 @@ describe('AppType', () => {
     type Deleted = InferResponseType<typeof client.v1.me.delete.$post, 200>;
     expectTypeOf<Deleted>().toEqualTypeOf<{ deleted: true; wipeLocalStore: true }>();
     type Sync = InferResponseType<typeof client.v1.sync.$get, 200>;
-    expectTypeOf<Sync>().toHaveProperty('cursor');
-    expectTypeOf<Sync>().toHaveProperty('hasMore');
+    expectTypeOf<Sync['cursor']>().toEqualTypeOf<string>();
+    expectTypeOf<Sync['hasMore']>().toEqualTypeOf<boolean>();
     expectTypeOf<Sync>().toHaveProperty('changes');
     expectTypeOf<Sync>().toHaveProperty('flights');
+  });
+
+  it('types every status the add-flight sheet and the store branch on (ruling O10)', () => {
+    // POST /v1/flights: 201 created, 200 already, 403 capped. A plain `Response` anywhere in a
+    // handler would collapse all of these to `{}`.
+    type Created = InferResponseType<typeof client.v1.flights.$post, 201>;
+    expectTypeOf<Created['subscription']['id']>().toEqualTypeOf<string>();
+    expectTypeOf<Created['subscription']['liveTracked']>().toEqualTypeOf<boolean>();
+    expectTypeOf<Created['created']>().toEqualTypeOf<true>();
+    type Already = InferResponseType<typeof client.v1.flights.$post, 200>;
+    expectTypeOf<Already['subscription']['flightKey']>().toBeString();
+    expectTypeOf<Already['created']>().toEqualTypeOf<false>();
+    type Capped = InferResponseType<typeof client.v1.flights.$post, 403>;
+    expectTypeOf<Capped['error']>().toEqualTypeOf<'cap_exceeded'>();
+    expectTypeOf<Capped['limit']>().toEqualTypeOf<number>();
+    expectTypeOf<Capped>().toHaveProperty('cap');
+    type NotFound = InferResponseType<typeof client.v1.flights.$post, 404>;
+    expectTypeOf<
+      Extract<NotFound, { triedDates: string[] }>['error']
+    >().toEqualTypeOf<'flight_not_found'>();
+
+    // GET /v1/flights/search: 200 the key, 404 the dates tried.
+    type Found = InferResponseType<typeof client.v1.flights.search.$get, 200>;
+    expectTypeOf<Found['flightKey']>().toBeString();
+    expectTypeOf<Found['cached']>().toEqualTypeOf<boolean>();
+    type Missing = InferResponseType<typeof client.v1.flights.search.$get, 404>;
+    expectTypeOf<Missing['triedDates']>().toEqualTypeOf<string[]>();
+    expectTypeOf<Missing['suggestions']>().toBeArray();
+
+    // A status's type is that status's body alone: the sync envelope is never a 401.
+    type SyncUnauthorized = InferResponseType<typeof client.v1.sync.$get, 401>;
+    expectTypeOf<Extract<SyncUnauthorized, { cursor: string }>>().toBeNever();
+    type SyncGone = InferResponseType<typeof client.v1.sync.$get, 410>;
+    expectTypeOf<SyncGone['error']>().toEqualTypeOf<'resync_required'>();
+
+    // POST /v1/me/delete: 401 is `account_deleted`, never the success body.
+    type DeleteUnauthorized = InferResponseType<typeof client.v1.me.delete.$post, 401>;
+    expectTypeOf<DeleteUnauthorized['error']>().toEqualTypeOf<'account_deleted'>();
+    expectTypeOf<Extract<DeleteUnauthorized, { deleted: true }>>().toBeNever();
+
+    // Refresh: success, 504 and 410 share one `flight` shape.
+    type Refreshed = InferResponseType<(typeof client.v1.flights)[':id']['refresh']['$post'], 200>;
+    type TimedOut = InferResponseType<(typeof client.v1.flights)[':id']['refresh']['$post'], 504>;
+    type Archived = InferResponseType<(typeof client.v1.flights)[':id']['refresh']['$post'], 410>;
+    expectTypeOf<Refreshed['flight']['key']>().toEqualTypeOf<FlightView['key']>();
+    expectTypeOf<Refreshed['flight']['source']>().toEqualTypeOf<FlightView['source']>();
+    expectTypeOf<TimedOut['flight']>().toEqualTypeOf<Refreshed['flight'] | null>();
+    expectTypeOf<Archived['flight']>().toEqualTypeOf<Refreshed['flight'] | null>();
+  });
+
+  it('publishes the client as the emitted declaration, which a consumer without Workers types reads', () => {
+    // `pnpm --filter @planeahead/api typecheck` compiles test/consumer against exactly this
+    // path with `types: []` after `tsc -b` has emitted it (ruling O10).
+    const packageJson = JSON.parse(packageJsonText) as {
+      exports: Record<string, { types: string }>;
+      scripts: Record<string, string>;
+    };
+    expect(packageJson.exports['./client']?.types).toBe('./dist/src/client.d.ts');
+    expect(packageJson.scripts['typecheck']).toContain('tsc -p test/consumer/tsconfig.json');
   });
 
   it('keeps the Better Auth catch-all out of the typed surface', () => {

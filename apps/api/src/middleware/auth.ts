@@ -38,9 +38,17 @@
  * not resolve the middleware looks its token up there and marks the request `accountDeleted`;
  * `requireUser` and `requireScope` then answer 401 `account_deleted` (wipe the local store)
  * instead of `unauthenticated` (sign in again). One indexed read, only on the rare request that
- * presents a dead cookie. A MUTATING request also skips the 300 s cookie cache, so a deleted
- * account can never write through a cached session (which would recreate rows under a user id
- * that no longer exists); a read inside that window sees an empty account, which is harmless.
+ * presents a dead cookie.
+ *
+ * Every `/v1` request (and any other mutating one) skips Better Auth's 300 s cookie cache (ruling
+ * O5): the signed `session_data` cookie would otherwise keep a deleted account's other device
+ * acting for up to five minutes, and "acting" includes GETs that write (`GET /v1/flights/search`
+ * takes the creation caps and may seed a tracker under the deleted user id) and GETs that must
+ * say `account_deleted` (`GET /v1/sync` would answer an empty page and a fresh cursor, and the
+ * device would never wipe). The cost is one indexed `sessions` read per `/v1` request, accepted in
+ * Phase 0; the increment 12 alternative (a KV tombstone per deleted session hash, checked only
+ * when the cache cookie is present) is recorded in the threat model. `/api/auth/*` is untouched:
+ * Better Auth's own `get-session` keeps its cache.
  */
 
 import { and, eq, gt, sql } from 'drizzle-orm';
@@ -59,6 +67,13 @@ export { AUTH_PATH_PREFIX };
 const SESSION_COOKIE_MARKER = 'session_token';
 
 const MUTATING_METHODS: ReadonlySet<string> = new Set(['POST', 'PUT', 'PATCH', 'DELETE']);
+
+const V1_PATH = '/v1';
+
+/** Whether this request must read the session row itself rather than the cookie cache. */
+export function bypassesCookieCache(method: string, path: string): boolean {
+  return MUTATING_METHODS.has(method) || path === V1_PATH || path.startsWith(`${V1_PATH}/`);
+}
 
 /** Whether the request presents anything that could resolve to a session. */
 export function presentsSession(headers: Headers): boolean {
@@ -134,7 +149,7 @@ export function authMiddleware(): MiddlewareHandler<AppBindings> {
     const runtime = authRuntime(c);
     const session = await runtime.auth.api.getSession({
       headers: c.req.raw.headers,
-      query: MUTATING_METHODS.has(c.req.method)
+      query: bypassesCookieCache(c.req.method, path)
         ? { disableRefresh: true, disableCookieCache: true }
         : { disableRefresh: true },
     });

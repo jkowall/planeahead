@@ -2216,6 +2216,99 @@
       },
       "isRLSEnabled": false
     },
+    "public.sync_epoch": {
+      "name": "sync_epoch",
+      "schema": "",
+      "columns": {
+        "id": {
+          "name": "id",
+          "type": "smallint",
+          "primaryKey": true,
+          "notNull": true,
+          "default": 1
+        },
+        "epoch": {
+          "name": "epoch",
+          "type": "bigint",
+          "primaryKey": false,
+          "notNull": true,
+          "default": 1
+        },
+        "bumped_at": {
+          "name": "bumped_at",
+          "type": "timestamp with time zone",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "created_at": {
+          "name": "created_at",
+          "type": "timestamp with time zone",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "now()"
+        }
+      },
+      "indexes": {},
+      "foreignKeys": {},
+      "compositePrimaryKeys": {},
+      "uniqueConstraints": {},
+      "policies": {},
+      "checkConstraints": {
+        "sync_epoch_singleton_check": {
+          "name": "sync_epoch_singleton_check",
+          "value": "\"sync_epoch\".\"id\" = 1"
+        },
+        "sync_epoch_epoch_check": {
+          "name": "sync_epoch_epoch_check",
+          "value": "\"sync_epoch\".\"epoch\" >= 1"
+        }
+      },
+      "isRLSEnabled": false
+    },
+    "public.sync_horizon": {
+      "name": "sync_horizon",
+      "schema": "",
+      "columns": {
+        "id": {
+          "name": "id",
+          "type": "smallint",
+          "primaryKey": true,
+          "notNull": true,
+          "default": 1
+        },
+        "horizon_xid": {
+          "name": "horizon_xid",
+          "type": "xid8",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "purged_at": {
+          "name": "purged_at",
+          "type": "timestamp with time zone",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "created_at": {
+          "name": "created_at",
+          "type": "timestamp with time zone",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "now()"
+        }
+      },
+      "indexes": {},
+      "foreignKeys": {},
+      "compositePrimaryKeys": {},
+      "uniqueConstraints": {},
+      "policies": {},
+      "checkConstraints": {
+        "sync_horizon_singleton_check": {
+          "name": "sync_horizon_singleton_check",
+          "value": "\"sync_horizon\".\"id\" = 1"
+        }
+      },
+      "isRLSEnabled": false
+    },
     "public.users": {
       "name": "users",
       "schema": "",
@@ -3473,17 +3566,7 @@
           "type": "bigint",
           "primaryKey": true,
           "notNull": true,
-          "identity": {
-            "type": "always",
-            "name": "flight_sync_changes_seq_seq",
-            "schema": "public",
-            "increment": "1",
-            "startWith": "1",
-            "minValue": "1",
-            "maxValue": "9223372036854775807",
-            "cache": "1",
-            "cycle": false
-          }
+          "default": "nextval('user_sync_changes_seq_seq'::regclass)"
         },
         "flight_instance_id": {
           "name": "flight_instance_id",

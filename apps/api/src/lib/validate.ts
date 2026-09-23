@@ -15,15 +15,11 @@
 import { zValidator } from '@hono/zod-validator';
 import type { Context, TypedResponse, ValidationTargets } from 'hono';
 import * as z from 'zod';
-import type { ValidationIssue } from '@planeahead/shared';
+import type { ValidationFailedBody, ValidationIssue } from '@planeahead/shared';
 import type { AppBindings } from '../env';
 
-export interface ValidationFailedBody {
-  readonly error: 'validation_failed';
-  readonly message: string;
-  readonly issues: ValidationIssue[];
-  readonly requestId: string;
-}
+/** The envelope's type lives in `@planeahead/shared`, so the emitted client needs no Worker type. */
+export type { ValidationFailedBody };
 
 /** Zod issues as the envelope carries them: no input echo, no Zod internals. */
 export function toValidationIssues(error: z.core.$ZodError): ValidationIssue[] {

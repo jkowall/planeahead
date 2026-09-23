@@ -123,8 +123,10 @@ export const flightSubscriptions = pgTable(
     /**
      * Whether this subscription holds one of the user's `live_tracked` counter slots (migration
      * 0003, increment 8): set when the subscribe took the slot because the flight was inside its
-     * live window, read by the unsubscribe so it releases exactly what was taken. Server-side
-     * bookkeeping, never sent to the client.
+     * live window, or by the persist consumer when the flight enters it (ruling O3; false when the
+     * cap refused the slot), cleared by the consumer when the flight is over and by the
+     * unsubscribe, each releasing exactly the slot the flag records. Sent to the client in the
+     * sync row (`liveTracked`).
      */
     liveTracked: boolean('live_tracked').notNull().default(false),
     ...timestamps(),

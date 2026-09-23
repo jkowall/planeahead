@@ -28,9 +28,14 @@ import {
   type FlightInstanceMessageV1,
   type SyncEnvelopeV1 as SyncEnvelope,
 } from '@planeahead/shared';
-import { isCursorStale } from '../../src/lib/sync-cursor';
+import { isBelowHorizon, staleBeforePage, syncCursorBinding } from '../../src/lib/sync-cursor';
 import { upsertFlightInstance } from '../../src/queues/persist';
-import { ReadOnlyConnectionError, readSyncBounds, userChangesQuery } from '../../src/routes/sync';
+import {
+  ReadOnlyConnectionError,
+  readSyncBounds,
+  readSyncHorizon,
+  userChangesQuery,
+} from '../../src/routes/sync';
 import { jsonRequest, signInAnonymously, worker, type AnonymousSession } from './helpers/auth';
 import { drainTouched, type TestFlight } from './helpers/flights';
 import {
@@ -95,6 +100,27 @@ async function drain(
   }
 }
 
+/**
+ * A pull whose cursor is past every change row the user has: the cursor a drained client holds.
+ * A no-cursor pull answers `(watermark, 0)`, and while another file holds a writing transaction
+ * open the watermark can sit below rows the snapshot already carried, which the next pull then
+ * serves again (the documented, idempotent re-delivery); a test that counts rows after a cursor
+ * waits for a cursor past them.
+ */
+async function settledPull(
+  session: AnonymousSession,
+  also: (page: SyncEnvelope) => boolean = () => true,
+): Promise<SyncEnvelope> {
+  const [latest] = await db().execute<{ xid: string | null }>(sql`
+    select max(xid)::text as xid from user_sync_changes where user_id = ${session.userId}::uuid
+  `);
+  const floor = BigInt(latest?.xid ?? '0');
+  return eventually(
+    () => pull(session),
+    (page) => BigInt(decodeSyncCursor(page.cursor).xid) > floor && also(page),
+  );
+}
+
 async function subscribed(session: AnonymousSession, flight: TestFlight): Promise<string> {
   const response = await subscribe(session, { flightKey: flight.flightKey });
   if (response.status !== 201) {
@@ -128,10 +154,8 @@ describe('GET /v1/sync', () => {
     const firstId = await subscribed(session, first);
     expect((await patchPreferences(session, { distanceUnit: 'km' })).status).toBe(200);
 
-    const snapshot = await eventually(
-      () => pull(session),
-      (page) => page.changes.length === 2,
-    );
+    const snapshot = await settledPull(session);
+    expect(snapshot.changes).toHaveLength(2);
     expect(snapshot.hasMore).toBe(false);
     expect(snapshot.rpcVersion).toBe(1);
     expect(snapshot.changes.map((c) => [c.entity, c.op]).sort()).toEqual([
@@ -164,7 +188,7 @@ describe('GET /v1/sync', () => {
   it('serves a page of exactly 200 with hasMore, then the rest, in (xid, seq) order', async () => {
     const session = await signInAnonymously();
     await insertChanges(session.userId, 1);
-    const start = await pull(session);
+    const start = await settledPull(session);
     await insertChanges(session.userId, 201);
 
     // One transaction wrote all 201 rows (one xid), so they become visible together.
@@ -189,7 +213,7 @@ describe('GET /v1/sync', () => {
   it('neither skips nor repeats a row while other transactions keep inserting', async () => {
     const session = await signInAnonymously();
     await insertChanges(session.userId, 1);
-    let cursor = (await pull(session)).cursor;
+    let cursor = (await settledPull(session)).cursor;
     const delivered: number[] = [];
     let writing = true;
     const writer = (async () => {
@@ -242,12 +266,9 @@ describe('GET /v1/sync', () => {
       (rows) => (rows[0]?.n ?? 0) > 0,
     );
 
-    const snapshot = await eventually(
-      () => pull(session),
-      (page) => page.flights.length === 1,
-    );
+    const snapshot = await settledPull(session, (page) => page.flights.length === 1);
     expect(snapshot.flights.map((f) => f.key)).toEqual([flight.flightKey]);
-    const strangerStart = await pull(stranger);
+    const strangerStart = await settledPull(stranger);
 
     // A flight change after the cursor (as the persist consumer writes one).
     await db().execute(sql`
@@ -268,15 +289,58 @@ describe('GET /v1/sync', () => {
 
   it('answers 410 resync_required to a cursor this cluster never issued, and 400 to garbage', async () => {
     const session = await signInAnonymously();
-    const future = encodeSyncCursor({ xid: '18000000000000000000', seq: '1' });
+    const { epoch } = await readSyncBounds(db());
+    const future = encodeSyncCursor({
+      xid: '18000000000000000000',
+      seq: '1',
+      epoch,
+      binding: await syncCursorBinding(session.userId),
+    });
+    // The two-part form every cursor had before the principal binding (ruling O12).
+    const unbound = btoa('1:0').replaceAll('=', '');
 
     const stale = await authed(session, `/v1/sync?cursor=${future}`);
     const garbage = await authed(session, '/v1/sync?cursor=not-a-cursor');
+    const legacy = await authed(session, `/v1/sync?cursor=${unbound}`);
 
     expect(stale.status).toBe(410);
     expect((await stale.json<ErrorBody>()).error).toBe('resync_required');
     expect(garbage.status).toBe(400);
     expect((await garbage.json<ErrorBody>()).error).toBe('invalid_cursor');
+    expect(legacy.status).toBe(400);
+  });
+
+  it('binds the cursor to its principal and its timeline: another user or epoch answers 410', async () => {
+    // Ruling O12. A device that upgraded from an anonymous user to an existing account still holds
+    // the anonymous user's cursor; served as-is it would hide every older row of the account. And
+    // after a point-in-time restore the xids repeat, so a cursor from the lost timeline would look
+    // current once the new one caught up.
+    const anonymous = await signInAnonymously();
+    const account = await signInAnonymously();
+    await insertChanges(account.userId, 1);
+    const held = await pull(anonymous);
+    const decoded = decodeSyncCursor(held.cursor);
+    expect(decoded.binding).toBe(await syncCursorBinding(anonymous.userId));
+    const otherTimeline = encodeSyncCursor({
+      ...decoded,
+      epoch: String(BigInt(decoded.epoch) + 1n),
+    });
+
+    const asAccount = await authed(account, `/v1/sync?cursor=${encodeURIComponent(held.cursor)}`);
+    const afterRestore = await authed(
+      anonymous,
+      `/v1/sync?cursor=${encodeURIComponent(otherTimeline)}`,
+    );
+    const own = await authed(anonymous, `/v1/sync?cursor=${encodeURIComponent(held.cursor)}`);
+
+    expect(asAccount.status).toBe(410);
+    expect(await asAccount.json<ErrorBody>()).toMatchObject({ error: 'resync_required' });
+    expect(afterRestore.status).toBe(410);
+    expect(await afterRestore.json<ErrorBody>()).toMatchObject({ error: 'resync_required' });
+    expect(own.status).toBe(200);
+    // The resync: without a cursor the account gets its own rows, older ones included.
+    const snapshot = await pull(account);
+    expect(decodeSyncCursor(snapshot.cursor).binding).toBe(await syncCursorBinding(account.userId));
   });
 
   it('answers 401 without a session', async () => {
@@ -287,22 +351,46 @@ describe('GET /v1/sync', () => {
 });
 
 describe('the watermark and the cursor', () => {
-  it('judges a cursor stale below the oldest retained row or beyond the next xid', () => {
-    const bounds = { nextXid: '1000', oldestRetainedXid: '500' };
-    expect(isCursorStale({ xid: '499', seq: '9' }, bounds)).toBe(true);
-    expect(isCursorStale({ xid: '500', seq: '0' }, bounds)).toBe(false);
-    expect(isCursorStale({ xid: '999', seq: '0' }, bounds)).toBe(false);
-    expect(isCursorStale({ xid: '1001', seq: '0' }, bounds)).toBe(true);
-    expect(
-      isCursorStale({ xid: '1', seq: '0' }, { nextXid: '1000', oldestRetainedXid: null }),
-    ).toBe(false);
+  it('judges a cursor stale on another epoch or principal, beyond the next xid, or below H', () => {
+    const binding = '0123456789abcdef';
+    const context = { nextXid: '1000', epoch: '1', binding };
+    const at = (xid: string, seq = '0', epoch = '1', owner = binding) => ({
+      xid,
+      seq,
+      epoch,
+      binding: owner,
+    });
+    expect(staleBeforePage(at('999'), context)).toBeNull();
+    expect(staleBeforePage(at('1000'), context)).toBeNull();
+    expect(staleBeforePage(at('1001'), context)).toBe('unassigned');
+    expect(staleBeforePage(at('5', '0', '2'), context)).toBe('epoch');
+    expect(staleBeforePage(at('5', '0', '1', 'fedcba9876543210'), context)).toBe('binding');
+    // The horizon is exact: strictly below H is stale, H itself is not (ruling O9).
+    expect(isBelowHorizon(at('499', '9'), '500')).toBe(true);
+    expect(isBelowHorizon(at('500'), '500')).toBe(false);
+    expect(isBelowHorizon(at('1'), null)).toBe(false);
     // Strings all the way: 2^63 and beyond compare exactly.
     expect(
-      isCursorStale(
-        { xid: '9223372036854775809', seq: '0' },
-        { nextXid: '9223372036854775808', oldestRetainedXid: null },
-      ),
-    ).toBe(true);
+      staleBeforePage(at('9223372036854775809'), { ...context, nextXid: '9223372036854775808' }),
+    ).toBe('unassigned');
+    expect(isBelowHorizon(at('9223372036854775808'), '9223372036854775809')).toBe(true);
+  });
+
+  it('reads the horizon a purge records, and null before the first purge', async () => {
+    class RolledBack extends Error {}
+    let inside: string | null = 'unread';
+    await expect(
+      db().transaction(async (tx) => {
+        await tx.execute(sql`update sync_horizon set horizon_xid = '123'::xid8 where id = 1`);
+        inside = await readSyncHorizon(tx);
+        throw new RolledBack();
+      }),
+    ).rejects.toBeInstanceOf(RolledBack);
+
+    expect(inside).toBe('123');
+    // Nothing in the suite purges; the rollback left the seeded row as the migration wrote it.
+    expect(await readSyncHorizon(db())).toBeNull();
+    expect((await readSyncBounds(db())).epoch).toBe('1');
   });
 
   it('refuses to read the watermark from a read-only connection (the primary check)', async () => {
@@ -377,6 +465,35 @@ describe('the persist consumer writes flight_sync_changes in its upsert transact
     }
     return parsed;
   }
+
+  it('draws seq for both change tables from one sequence, so one transaction orders across them', async () => {
+    // Ruling O3 has the persist consumer write both tables in one transaction; ADR 0012 item 3.
+    const [column] = await db().execute<{ column_default: string; is_identity: string }>(sql`
+      select column_default, is_identity from information_schema.columns
+      where table_name = 'flight_sync_changes' and column_name = 'seq'
+    `);
+    expect(column?.column_default).toContain('user_sync_changes_seq_seq');
+    expect(column?.is_identity).toBe('NO');
+
+    const session = await signInAnonymously();
+    const flight = seededFlightFor();
+    await upsertFlightInstance(db(), instanceMessage(flight, 1));
+    const seqs = await db().transaction(async (tx) => {
+      const [user] = await tx.execute<{ xid: string; seq: string }>(sql`
+        insert into user_sync_changes (user_id, entity, entity_id, op, row)
+        values (${session.userId}::uuid, 'trips', uuidv7(), 'upsert', '{}'::jsonb)
+        returning xid::text as xid, seq::text as seq
+      `);
+      const [flightRow] = await tx.execute<{ xid: string; seq: string }>(sql`
+        insert into flight_sync_changes (flight_instance_id, snapshot)
+        select id, '{}'::jsonb from flight_instances where flight_key = ${flight.flightKey}
+        returning xid::text as xid, seq::text as seq
+      `);
+      return { user, flightRow };
+    });
+    expect(seqs.user?.xid).toBe(seqs.flightRow?.xid);
+    expect(BigInt(seqs.flightRow?.seq ?? '0')).toBeGreaterThan(BigInt(seqs.user?.seq ?? '0'));
+  });
 
   it('adds one change row per applied upsert, none for a replay or a stale version', async () => {
     const flight = seededFlightFor();

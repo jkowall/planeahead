@@ -42,6 +42,8 @@ const SPEC_TABLES = [
   'deleted_subjects',
   // sync feed (increment 8, migration 0003)
   'flight_sync_changes',
+  'sync_epoch',
+  'sync_horizon',
   // reference
   'airports',
   'airport_profiles',
@@ -174,8 +176,8 @@ const tables = Object.values(snapshot.tables);
 const byName = new Map(tables.map((t) => [t.name, t]));
 
 describe('table set', () => {
-  it('matches the normative list: the increment 3 spec (70 tables) plus increment 8 (1)', () => {
-    expect(new Set(SPEC_TABLES).size).toBe(71);
+  it('matches the normative list: the increment 3 spec (70 tables) plus increment 8 (3)', () => {
+    expect(new Set(SPEC_TABLES).size).toBe(73);
     expect(tables.map((t) => t.name).sort()).toEqual([...SPEC_TABLES].sort());
   });
 
@@ -198,6 +200,13 @@ describe('column conventions', () => {
       if (table.name === 'user_sync_changes' || table.name === 'flight_sync_changes') {
         expect(table.columns['seq']?.type, table.name).toBe('bigint');
         expect(table.columns['seq']?.primaryKey, table.name).toBe(true);
+        continue;
+      }
+      if (table.name === 'sync_epoch' || table.name === 'sync_horizon') {
+        // One-row tables of the sync contract (ADR 0012): the key is the constant 1.
+        expect(table.columns['id']?.type, table.name).toBe('smallint');
+        expect(table.columns['id']?.primaryKey, table.name).toBe(true);
+        expect(String(table.columns['id']?.default), table.name).toBe('1');
         continue;
       }
       if (table.name === 'idempotency_keys') {
@@ -339,8 +348,8 @@ describe('column conventions', () => {
     // Drizzle's own mode: 'string' hands back Postgres text (`2026-09-19 22:30:00+00`), which
     // is not ISO-8601 and fails IsoInstantSchema; the instant() column type normalises it.
     expect([...rawString]).toEqual([]);
-    // 65 from increment 3, plus flight_sync_changes.created_at (increment 8).
-    expect(isoString.size).toBe(66);
+    // 65 from increment 3, plus flight_sync_changes, sync_epoch and sync_horizon (increment 8).
+    expect(isoString.size).toBe(68);
     for (const auth of modeDate) {
       expect(isoString.has(auth)).toBe(false);
     }

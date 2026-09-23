@@ -133,7 +133,7 @@ async function parseDelivery(
  * The receiver, with every unexpected throw answered here: an error that reached the app's
  * `onError` would be logged with the request path, and the path is the credential.
  */
-async function receive(c: Context<AppBindings>, provider: WebhookProvider): Promise<Response> {
+async function receive(c: Context<AppBindings>, provider: WebhookProvider) {
   // Never the path: it carries the token.
   const log = createLogger({ request_id: c.var.requestId, webhook: provider });
   try {
@@ -144,20 +144,25 @@ async function receive(c: Context<AppBindings>, provider: WebhookProvider): Prom
   }
 }
 
-async function receiveUnguarded(
-  c: Context<AppBindings>,
-  provider: WebhookProvider,
-  log: Logger,
-): Promise<Response> {
+/**
+ * The app's ordinary 404 (`handleNotFound`'s exact body), answered typed so the receivers keep a
+ * typed surface in `AppType` (ruling O10): a disabled receiver and a wrong token read the same as
+ * an unknown path.
+ */
+function ordinaryNotFound(c: Context<AppBindings>) {
+  return c.json({ error: 'not_found' as const, requestId: c.var.requestId }, 404);
+}
+
+async function receiveUnguarded(c: Context<AppBindings>, provider: WebhookProvider, log: Logger) {
   if (provider === 'aerodatabox' && !providerSettings(c.env).adbAlertsEnabled) {
-    return c.notFound();
+    return ordinaryNotFound(c);
   }
   const expected = expectedToken(c, provider);
   if (!verifyPathToken(c.req.param('token') ?? '', expected)) {
     log.info('webhook_rejected', {
       reason: isWellFormedWebhookToken(expected) ? 'token' : 'token_not_configured',
     });
-    return c.notFound();
+    return ordinaryNotFound(c);
   }
   const text = await readLimited(c, WEBHOOK_BODY_LIMIT_BYTES);
   if (text === null) {

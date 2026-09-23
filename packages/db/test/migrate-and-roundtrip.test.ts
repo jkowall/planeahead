@@ -61,8 +61,9 @@ describe('migrations', () => {
       .map((table) => getTableName(table))
       .sort();
     expect(tables.map((row) => row.table_name)).toEqual(expected);
-    // 70 from increment 3, plus flight_sync_changes (increment 8, migration 0003).
-    expect(expected).toHaveLength(71);
+    // 70 from increment 3, plus flight_sync_changes, sync_epoch and sync_horizon (increment 8,
+    // migration 0003).
+    expect(expected).toHaveLength(73);
   });
 
   it('is idempotent: a second migrate run applies nothing', async () => {

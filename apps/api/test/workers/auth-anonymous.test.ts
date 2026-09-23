@@ -75,12 +75,13 @@ describe('POST /api/auth/sign-in/anonymous', () => {
     expect(response.status).toBe(400);
   });
 
-  it('answers a revoked session from the cookie cache for up to 300 s, and from the database at once without it', async () => {
+  it('never answers a /v1 request from the cookie cache: a revoked session is refused at once', async () => {
     // `session.cookieCache.enabled` (spec) trades a database read per request for a revocation
-    // lag of up to `maxAge` (300 s, the default). The merge revokes the anonymous session in
-    // the database; a client that keeps replaying the signed `session_data` cookie is still
-    // answered from it until it expires. The real client replaces both cookies on upgrade; the
-    // window matters only for a stolen cookie and is recorded in the threat model.
+    // lag of up to `maxAge` (300 s, the default). Under /v1 that trade is refused (ruling O5): the
+    // auth middleware reads the session row on every /v1 request, so a client that keeps
+    // replaying the signed `session_data` cookie after a revocation (the merge's, or a deleted
+    // account's other device) is refused on its next call, a GET included. The threat model
+    // records the cost and the increment 12 alternative.
     const anonymous = await signInAnonymously();
     expect(anonymous.cookie).toContain('session_data=');
     await withDb(testEnv, (db) => db.delete(sessions).where(eq(sessions.userId, anonymous.userId)));
@@ -95,7 +96,7 @@ describe('POST /api/auth/sign-in/anonymous', () => {
       }),
     );
 
-    expect(cached.status).toBe(200);
+    expect(cached.status).toBe(401);
     expect(direct.status).toBe(401);
   });
 

@@ -189,7 +189,10 @@ describe('mergeUsers', () => {
         idempotency_keys: 1,
       },
     });
-    expect(queue.sent).toEqual([{ kind: 'merge', from: planted.from, to: planted.to }]);
+    // No subscription was planted, so there is no tracker to re-point (ruling O2).
+    expect(queue.sent).toEqual([
+      { kind: 'merge', from: planted.from, to: planted.to, moved: [], tombstoned: [] },
+    ]);
 
     // Devices: both installs on `to`, exactly one row per install, the newer shared row kept.
     const deviceRows = await db

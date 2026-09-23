@@ -195,10 +195,17 @@ Threats considered:
 - **Cookie theft during the upgrade.** The anonymous session is revoked in the merge
   transaction, so a stolen session token stops working the moment its owner upgrades (tested:
   the old token answers 401 afterwards). The signed `session_data` cookie cache
-  (`session.cookieCache`, 300 s) is the exception: a request that still carries it is answered
-  from it without a database read until it expires, so a stolen pair keeps working for at most
-  300 s after revocation. That is the trade the spec makes for one fewer read per request; the
-  real client replaces both cookies on upgrade, and `auth-anonymous.test.ts` pins the window.
+  (`session.cookieCache`, 300 s) is no longer an exception under `/v1` (increment 8, ruling O5):
+  the auth middleware resolves every `/v1` request with the cache disabled, so a revoked or
+  deleted session is refused on its next `/v1` call, GETs included, and a deleted account's other
+  device is told `account_deleted` at once instead of reading an empty account (and, through
+  `GET /v1/flights/search`, writing counters and seeding trackers under a user id that no longer
+  exists) for five minutes. The cost is one indexed `sessions` read per `/v1` request, accepted
+  at Phase 0 scale. The increment 12 alternative, if that read shows up in the latency budget: a
+  KV tombstone per deleted or revoked session-token hash, checked only when the cache cookie is
+  present, which restores the cache for everyone else. Better Auth's own `/api/auth/get-session`
+  still answers from the cache, which exposes nothing a `/v1` route would act on.
+  `auth-anonymous.test.ts` and `me.delete.test.ts` pin the behaviour.
 - **The `?cookie=` redirect.** The Expo server plugin's after-hook appends the raw `Set-Cookie`
   value as a `cookie` query parameter to any non-http redirect it trusts, which would put the
   session cookie into a URL (logs, referrers, the OS's URL history). PlaneAhead makes the branch

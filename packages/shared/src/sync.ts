@@ -13,14 +13,25 @@ import { FlightStatusSchema, IsoInstantSchema } from './flight-status';
  * committed or aborted, so a transaction that took its xid early and committed late is replayed
  * on the next pull instead of being skipped (the late-commit hazard).
  *
- * The cursor is opaque on the wire: base64url of `"<xid8>:<seq>"`. Both halves stay decimal
- * STRINGS everywhere: an xid8 is 64 bits and does not fit a JavaScript number, and postgres.js
- * has no parser for it. A client stores the cursor it was given and sends it back unchanged; it
+ * The cursor is opaque on the wire: base64url of `"<xid8>:<seq>:<epoch>:<hash8>"` (ruling O12).
+ * `xid8` and `seq` are the position; they stay decimal STRINGS everywhere: an xid8 is 64 bits
+ * and does not fit a JavaScript number, and postgres.js has no parser for it. `epoch` names the
+ * database timeline (`sync_epoch`, bumped after a point-in-time restore, which reuses xids) and
+ * `hash8` binds the cursor to its principal (the first 8 bytes of SHA-256 over the user id, 16
+ * lower-case hex digits). A cursor from another epoch or issued to another user answers 410
+ * `resync_required`, which the client handles by resetting its store and pulling without a
+ * cursor: a device that signs in from anonymous to an existing account therefore receives that
+ * account's older rows. A client stores the cursor it was given and sends it back unchanged; it
  * never builds one. No cursor means "I have nothing": the server answers with the current state
  * of every entity and a cursor at the watermark.
  */
 
-/** The envelope's own version; a breaking change gets a V2 envelope, never an edit of V1. */
+/**
+ * The envelope's own version; a breaking change gets a V2 envelope, never an edit of V1. V1 itself
+ * was redefined in place once, by increment 8 (before any client shipped): the cursor gained its
+ * epoch and principal binding, the subscription row `liveTracked`, and the entity enum keeps
+ * `trip_members`.
+ */
 export const SYNC_ENVELOPE_VERSION = 1;
 
 /**
@@ -48,11 +59,20 @@ export type SyncOp = z.infer<typeof SyncOpSchema>;
 // Cursor.
 // ---------------------------------------------------------------------------------------------
 
-export interface SyncCursor {
+/** A position in the feed: `(xid, seq)`, both decimal strings. */
+export interface SyncPosition {
   /** `xid8` as a decimal string (0 to 2^64 - 1). */
   readonly xid: string;
   /** The change table's identity `seq` as a decimal string (0 to 2^63 - 1). */
   readonly seq: string;
+}
+
+/** What the opaque cursor carries: the position, the timeline it is valid on, its principal. */
+export interface SyncCursor extends SyncPosition {
+  /** `sync_epoch.epoch` when the cursor was issued, a decimal string (1 to 2^63 - 1). */
+  readonly epoch: string;
+  /** The first 8 bytes of SHA-256 over the user id, as 16 lower-case hex digits. */
+  readonly binding: string;
 }
 
 export class SyncCursorError extends Error {
@@ -62,18 +82,34 @@ export class SyncCursorError extends Error {
 const XID8_MAX = 18_446_744_073_709_551_615n;
 const BIGINT_MAX = 9_223_372_036_854_775_807n;
 const DECIMAL_RE = /^(0|[1-9][0-9]{0,19})$/;
+const BINDING_RE = /^[0-9a-f]{16}$/;
 const BASE64URL_RE = /^[A-Za-z0-9_-]+$/;
 const ALPHABET = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_';
+
+/**
+ * The longest wire form: 20 + 19 + 19 + 16 digits and three colons (77 characters), 103 in
+ * base64url. Anything longer was not minted here.
+ */
+export const SYNC_CURSOR_MAX_LENGTH = 128;
 
 /**
  * Range check without ever turning the value into a Number: BigInt holds any xid8 exactly.
  * The value itself travels as the original string.
  */
-function isDecimalWithin(value: string, max: bigint): boolean {
-  return DECIMAL_RE.test(value) && BigInt(value) <= max;
+function isDecimalWithin(value: string, max: bigint, min = 0n): boolean {
+  return DECIMAL_RE.test(value) && BigInt(value) <= max && BigInt(value) >= min;
 }
 
-/** base64url without padding, for the ASCII the cursor consists of (digits and `:`). */
+function isValidCursor(cursor: SyncCursor): boolean {
+  return (
+    isDecimalWithin(cursor.xid, XID8_MAX) &&
+    isDecimalWithin(cursor.seq, BIGINT_MAX) &&
+    isDecimalWithin(cursor.epoch, BIGINT_MAX, 1n) &&
+    BINDING_RE.test(cursor.binding)
+  );
+}
+
+/** base64url without padding, for the ASCII the cursor consists of (digits, hex and `:`). */
 function base64UrlEncodeAscii(text: string): string {
   let out = '';
   for (let index = 0; index < text.length; index += 3) {
@@ -118,34 +154,36 @@ function base64UrlDecodeAscii(encoded: string): string | null {
   return base64UrlEncodeAscii(out) === encoded ? out : null;
 }
 
-/** The opaque wire form of a cursor. Throws `SyncCursorError` on an out-of-range half. */
+/** The opaque wire form of a cursor. Throws `SyncCursorError` on an out-of-range part. */
 export function encodeSyncCursor(cursor: SyncCursor): string {
-  if (!isDecimalWithin(cursor.xid, XID8_MAX) || !isDecimalWithin(cursor.seq, BIGINT_MAX)) {
+  if (!isValidCursor(cursor)) {
     throw new SyncCursorError(`invalid sync cursor ${JSON.stringify(cursor)}`);
   }
-  return base64UrlEncodeAscii(`${cursor.xid}:${cursor.seq}`);
+  return base64UrlEncodeAscii(`${cursor.xid}:${cursor.seq}:${cursor.epoch}:${cursor.binding}`);
 }
 
 /** Parses the opaque wire form. Throws `SyncCursorError` on anything this server did not mint. */
 export function decodeSyncCursor(encoded: string): SyncCursor {
-  const text = encoded.length > 64 ? null : base64UrlDecodeAscii(encoded);
+  const text = encoded.length > SYNC_CURSOR_MAX_LENGTH ? null : base64UrlDecodeAscii(encoded);
   if (text === null) {
     throw new SyncCursorError('the sync cursor is not base64url');
   }
-  const colon = text.indexOf(':');
-  const xid = colon < 0 ? '' : text.slice(0, colon);
-  const seq = colon < 0 ? '' : text.slice(colon + 1);
-  if (!isDecimalWithin(xid, XID8_MAX) || !isDecimalWithin(seq, BIGINT_MAX)) {
-    throw new SyncCursorError('the sync cursor does not name an xid8 and a sequence');
+  const parts = text.split(':');
+  const [xid = '', seq = '', epoch = '', binding = ''] = parts;
+  const cursor: SyncCursor = { xid, seq, epoch, binding };
+  if (parts.length !== 4 || !isValidCursor(cursor)) {
+    throw new SyncCursorError(
+      'the sync cursor does not name an xid8, a sequence, an epoch and a binding',
+    );
   }
-  return { xid, seq };
+  return cursor;
 }
 
 /** The wire form, validated: a base64url string that decodes to a cursor. */
 export const SyncCursorWireSchema = z
   .string()
   .min(1)
-  .max(64)
+  .max(SYNC_CURSOR_MAX_LENGTH)
   .refine(
     (value) => {
       try {
@@ -178,6 +216,13 @@ export const FlightSubscriptionRowV1 = z.looseObject({
   muted: z.boolean(),
   notificationOverrides: z.record(z.string(), z.unknown()),
   source: z.string(),
+  /**
+   * Whether the subscription holds one of the user's live-tracked slots (ruling O3): taken at
+   * subscribe for a flight already inside its live window, or by the persist consumer when the
+   * flight enters it; false when the cap refused it (the flight is still tracked; from Phase 1
+   * the flag gates notifications and the Live Activity) and after the flight is over.
+   */
+  liveTracked: z.boolean(),
   createdAt: IsoInstantSchema,
   updatedAt: IsoInstantSchema,
   deletedAt: IsoInstantSchema.nullable(),

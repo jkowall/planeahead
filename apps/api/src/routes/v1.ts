@@ -14,7 +14,8 @@
  * validator, because the request hash covers the validated body.
  *
  * `createV1Routes` exists for tests that inject a slow tracker or a failing transaction into the
- * flight routes; the Worker mounts `v1Routes`, built with no options.
+ * flight routes, or a purge horizon into the sync route; the Worker mounts `v1Routes`, built with
+ * no options.
  */
 
 import { Hono } from 'hono';
@@ -25,11 +26,12 @@ import { devicesRoutes } from './devices';
 import { createFlightRoutes, type FlightRoutesOptions } from './flights';
 import { meRoutes } from './me';
 import { v1Stub } from './not-implemented';
-import { syncRoutes } from './sync';
+import { createSyncRoutes, type SyncRoutesOptions } from './sync';
 import { webhookRoutes } from './webhooks';
 
 export interface V1RoutesOptions {
   readonly flights?: FlightRoutesOptions;
+  readonly sync?: SyncRoutesOptions;
 }
 
 export function createV1Routes(options: V1RoutesOptions = {}) {
@@ -39,7 +41,7 @@ export function createV1Routes(options: V1RoutesOptions = {}) {
     .route('/devices', devicesRoutes)
     .route('/flights', createFlightRoutes(options.flights))
     .route('/me', meRoutes)
-    .route('/sync', syncRoutes)
+    .route('/sync', createSyncRoutes(options.sync))
     .route('/webhooks', webhookRoutes)
     .route('/', v1Stub);
 }

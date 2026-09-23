@@ -11,14 +11,14 @@
       "default": "./src/index.ts"
     },
     "./client": {
-      "types": "./src/client.ts",
+      "types": "./dist/src/client.d.ts",
       "default": "./src/client.ts"
     },
     "./package.json": "./package.json"
   },
   "scripts": {
     "gen:migration-hash": "node ../../scripts/gen-migration-hash.mjs",
-    "typecheck": "pnpm run gen:migration-hash && tsc -b",
+    "typecheck": "pnpm run gen:migration-hash && tsc -b && tsc -p test/consumer/tsconfig.json",
     "lint": "eslint .",
     "test": "pnpm run gen:migration-hash && vitest run",
     "dev": "pnpm run gen:migration-hash && wrangler dev",
