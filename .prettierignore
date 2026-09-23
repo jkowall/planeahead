@@ -15,6 +15,11 @@ apps/api/worker-configuration.d.ts
 .expo/
 apps/mobile/ios/
 apps/mobile/android/
+apps/mobile/dist/
+
+# drizzle-kit's generated mobile migrations: written byte for byte by `pnpm db:generate`, held
+# unchanged once committed by scripts/mobile-migrations-guard.mjs, never reformatted
+apps/mobile/src/lib/db/migrations/
 
 # Secrets and local environment
 .env

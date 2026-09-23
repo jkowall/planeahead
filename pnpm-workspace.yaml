@@ -9,6 +9,9 @@ catalog:
   '@types/node': ^24.13.6
   eslint: ^9.39.5
   eslint-config-prettier: ^10.1.8
+  # apps/mobile only (increment 9): the rules of hooks and exhaustive deps. Its React Compiler
+  # rules are not enabled (experiments.reactCompiler is off).
+  eslint-plugin-react-hooks: ^7.1.1
   globals: ^17.12.0
   prettier: ^3.9.8
   turbo: ^2.11.2
@@ -72,10 +75,92 @@ catalog:
   '@better-auth/expo': 1.7.5
   jose: ^6.2.12
 
-  # Not installed yet. Versions verified 2026-09-19 and recorded here so the
-  # increment that adds them does not have to rediscover the pin.
-  #
-  # expo: ~57.0.24                         increment 9
+  # Mobile (increment 9). Versions from docs/increments/09-11-mobile.facts.md "Pins" and Expo's
+  # own SDK 57 manifest (bundledNativeModules.json); scripts/toolchain-guard.mjs asserts the ones
+  # a drift would break. Tildes follow Expo's `expo install` convention for SDK packages; the
+  # React Native triple and the libraries outside Expo's manifest are exact.
+  expo: ~57.0.24
+  react-native: 0.86.3
+  react: 19.2.3
+  # Nothing renders on the web; react-dom is here because expo-router's dependency tree (vaul,
+  # the radix slot, @expo/metro-runtime) peers on it, and an unpinned auto-installed peer
+  # resolved to 19.3.0, whose own peer asks for React 19.3.
+  react-dom: 19.2.3
+  # Same story: react-native-drawer-layout (an expo-router dependency) peers on reanimated and
+  # gesture-handler, @expo/ui on worklets, and the auto-installed latest (4.7.0, 3.3.0, 0.13.0)
+  # is outside SDK 57's manifest; all three carry native code the autolinker compiles. Pinned to
+  # Expo's versions.
+  react-native-reanimated: 4.5.1
+  react-native-worklets: 0.10.1
+  react-native-gesture-handler: ~2.32.0
+  # Peer of @react-native/community-cli-plugin 0.86.3 at the exact React Native version; the
+  # auto-installed latest was 0.87.1.
+  '@react-native/metro-config': 0.86.3
+  expo-router: ~57.0.22
+  # Non-optional peers of expo-router 57.0.22 the template does not install. Under the isolated
+  # linker every peer has to be a direct dependency of apps/mobile.
+  '@expo/metro-runtime': ~57.0.16
+  '@expo/log-box': ~57.0.4
+  react-native-safe-area-context: ~5.7.0
+  react-native-screens: ~4.26.0
+  expo-build-properties: ~57.0.21
+  expo-sqlite: ~57.0.3
+  expo-secure-store: ~57.0.4
+  expo-linking: ~57.0.10
+  expo-network: ~57.0.2
+  expo-constants: ~57.0.19
+  expo-web-browser: ~57.0.3
+  expo-apple-authentication: ~57.0.2
+  expo-crypto: ~57.0.3
+  expo-standard-web-crypto: ~57.0.3
+  expo-notifications: ~57.0.20
+  # Applies `userInterfaceStyle: automatic` on Android (the root view background in dark mode).
+  expo-system-ui: ~57.0.4
+  # `isDevice`: the Apple credential-state call is skipped on the Simulator, where it always
+  # throws; also the model name POST /v1/devices records.
+  expo-device: ~57.0.2
+  # Development builds only (no Expo Go), and EAS Update with the fingerprint runtime version.
+  expo-dev-client: ~57.0.19
+  expo-updates: ~57.0.23
+  # The native Google sign-in module increment 5 committed to; exact because it shipped 25
+  # releases and two breaking majors in four months. nitro-modules is its required peer.
+  react-native-nitro-google-signin: 2.3.0
+  react-native-nitro-modules: 0.37.1
+  # Expo SDK 57's own pin, not npm latest 8.x (facts section 4, decision 1).
+  '@sentry/react-native': ~7.11.0
+  # Exactly the version @sentry/react-native 7.11.0 depends on. Its Xcode "Upload Debug Symbols"
+  # phase runs `require.resolve('@sentry/cli/package.json')` from apps/mobile under `set -e`, which
+  # the isolated linker cannot answer unless apps/mobile declares the package itself (spike 1).
+  '@sentry/cli': 2.58.4
+  '@tanstack/react-query': ~5.103.1
+  zustand: ~5.0.15
+  # Dependency only in Phase 0 (New Architecture only, outside Expo's manifest).
+  '@maplibre/maplibre-react-native': 11.4.0
+  '@types/react': ~19.2.2
+  babel-preset-expo: ~57.0.12
+  # Inlines the drizzle-kit `.sql` migration files into migrations.js at Babel time, so Metro
+  # never resolves a `.sql` import and metro.config.js stays exactly getSentryExpoConfig().
+  babel-plugin-inline-import: ^3.0.0
+  # jest-expo 57.0.5 is Jest 29 throughout; Jest 30 is unverified with it, so jest is exact.
+  jest: 29.7.0
+  jest-expo: ~57.0.5
+  '@react-native/jest-preset': 0.86.3
+  '@types/jest': ~29.5.14
+  '@testing-library/react-native': ~14.0.1
+  # 1.2.x, not the facts sheet's ~1.3.0: test-renderer 1.3.0 depends on react-reconciler ~0.34.0,
+  # which peers on React ^19.3.0; 1.2.0's react-reconciler ~0.33.0 is the React 19.2 line.
+  test-renderer: ~1.2.0
+
+# pnpm's default hidden hoisting ('*' into node_modules/.pnpm/node_modules), minus one package.
+# jest-expo brings jest-environment-jsdom and with it jsdom and @types/jsdom, and pnpm then links
+# jsdom as vitest's optional peer in EVERY project. TypeScript reaches @types/jsdom from vitest's
+# declarations through the hidden hoist directory, and its `/// <reference lib="dom" />` put the
+# DOM lib into apps/api's program, where lib.dom's BufferSource broke src/crypto/envelope.ts.
+# Keeping @types/jsdom out of the hidden hoist leaves vitest's jsdom import untyped (skipLibCheck)
+# and the Worker's type graph as it was before apps/mobile existed.
+hoistPattern:
+  - '*'
+  - '!@types/jsdom'
 
 minimumReleaseAgeExclude:
   - '@turbo/darwin-64@2.11.2'
@@ -98,3 +183,6 @@ allowBuilds:
   # workerd's postinstall checks that the platform binary for this OS and architecture unpacked
   # correctly. Without it wrangler and the Vitest Workers pool cannot start a runtime.
   workerd: true
+  # @sentry/cli's postinstall checks that the platform binary (@sentry/cli-darwin, -linux-x64)
+  # unpacked; the Sentry Xcode and Gradle build phases and the source-map upload step run it.
+  '@sentry/cli': true

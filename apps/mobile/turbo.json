@@ -1,0 +1,35 @@
+{
+  "$schema": "https://turborepo.com/schema.json",
+  "extends": ["//"],
+  "tasks": {
+    "typecheck": {
+      // `^typecheck` (inherited) builds @planeahead/api first: its `tsc -b` emits the client
+      // declaration (apps/api/dist/src/client.d.ts) this package type-checks against.
+      "inputs": ["src/**", "__tests__/**", "plugins/**", "*.ts", "tsconfig.json", "package.json"],
+      "outputs": []
+    },
+    "lint": {
+      "inputs": [
+        "src/**",
+        "__tests__/**",
+        "plugins/**",
+        "*.ts",
+        "*.js",
+        "tsconfig.json",
+        "../../eslint.config.js"
+      ]
+    },
+    "test": {
+      "inputs": [
+        "src/**",
+        "__tests__/**",
+        "plugins/**",
+        "*.ts",
+        "jest.config.js",
+        "babel.config.js",
+        "package.json"
+      ],
+      "outputs": []
+    }
+  }
+}
