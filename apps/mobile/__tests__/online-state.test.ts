@@ -3,12 +3,14 @@
  * ruling Y1): expo-network feeds it on every change, and a phone that starts offline is known
  * offline before any change arrives (Android sends none then), unless a change was heard first.
  * An unknown or failed launch read changes nothing, so it can never hold the outbox back.
+ * Offline means neither `isConnected` nor `isInternetReachable` is true (increment 10 re-review 2).
  */
 
 import { watchNetwork } from '../src/lib/query';
 
 interface State {
   readonly isConnected?: boolean;
+  readonly isInternetReachable?: boolean;
 }
 
 const mockNetwork: {
@@ -76,8 +78,23 @@ describe('watchNetwork', () => {
     expect(setOnline.mock.calls).toEqual([[true]]);
   });
 
+  it('keeps a validated network on an unclassified transport online', async () => {
+    // Android: expo-network derives the two fields separately, and session.ts drains on
+    // isInternetReachable, so this phone must be able to send.
+    mockNetwork.read = () => Promise.resolve({ isConnected: false, isInternetReachable: true });
+    const setOnline = jest.fn();
+    watchNetwork(setOnline);
+    await settle();
+    expect(setOnline).not.toHaveBeenCalled();
+    hear({ isConnected: false, isInternetReachable: true });
+    expect(setOnline.mock.calls).toEqual([[true]]);
+    hear({ isConnected: false, isInternetReachable: false });
+    expect(setOnline.mock.calls).toEqual([[true], [false]]);
+  });
+
   it.each([
     ['online', () => Promise.resolve({ isConnected: true })],
+    ['reachable only', () => Promise.resolve({ isConnected: false, isInternetReachable: true })],
     ['unknown', () => Promise.resolve({})],
     ['failed', () => Promise.reject(new Error('no network module'))],
   ] as const)('changes nothing when the launch read is %s', async (_name, read) => {
