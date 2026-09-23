@@ -723,7 +723,7 @@ CREATE TABLE "provider_alert_registrations" (
 	"created_at" timestamp with time zone DEFAULT now() NOT NULL,
 	"updated_at" timestamp with time zone DEFAULT now() NOT NULL,
 	CONSTRAINT "provider_alert_registrations_provider_check" CHECK ("provider_alert_registrations"."provider" in ('aeroapi', 'aerodatabox', 'adsb_lol', 'adsb_fi', 'airplanes_live', 'aviationweather', 'nws', 'open_meteo', 'faa_nas', 'llm', 'mock')),
-	CONSTRAINT "provider_alert_registrations_events_check" CHECK ("provider_alert_registrations"."events" is null or (jsonb_typeof("provider_alert_registrations"."events") = 'array' and "provider_alert_registrations"."events" <@ '["filed","departure","arrival","cancelled","diverted","out","off","on","in","hold_start","hold_end"]'::jsonb))
+	CONSTRAINT "provider_alert_registrations_events_check" CHECK ("provider_alert_registrations"."events" is null or (jsonb_typeof("provider_alert_registrations"."events") = 'array' and "provider_alert_registrations"."events" <@ '["filed","departure","arrival","cancelled","diverted","out","off","on","in"]'::jsonb))
 );
 --> statement-breakpoint
 CREATE TABLE "provider_budget_config" (

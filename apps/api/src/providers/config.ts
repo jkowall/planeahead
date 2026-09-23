@@ -60,6 +60,18 @@ export const AEROAPI_STANDARD = {
   maxDaysBehind: 10,
   /** Board windows are bounded by the same 2 days ahead. */
   fidsWindowHours: 48,
+  /**
+   * How far BEFORE the 2-day horizon a flight's `scheduled_out` must sit for AeroAPI to be asked
+   * about it: the `end` bound is exclusive and clamped to the horizon, so a flight exactly at the
+   * horizon lies outside every window AeroAPI accepts (the T-48 h slot). The router's T-48 h
+   * guard and the bracket both use it, so the two can never disagree.
+   */
+  horizonMarginMs: 5 * 60_000,
+  /**
+   * How far INSIDE the 10-day limit a `start` is kept. The request reaches FlightAware later than
+   * `now` (latency), and a start past the limit is a billed 400.
+   */
+  pastLimitMarginMs: 60_000,
 } as const;
 
 /**

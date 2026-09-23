@@ -1,9 +1,10 @@
 /**
  * The AeroAPI adapter (mocked: no key in Phase 0) against the vendored OpenAPI 4.17.1 and
- * fixtures shaped strictly from it. Two request rules are pinned (the bracketed first fetch, then
- * `fa_flight_id` with `max_pages=1`), the diverted two-item response, alert registration with the
- * nine booleans and a mandatory per-alert `target_url`, the `Location` header, the 18 event codes
- * and the merge of a delivery onto a snapshot.
+ * fixtures shaped strictly from it. Two request rules are pinned (the bracketed first fetch, which
+ * must contain the flight and answers only the flight asked about, then `fa_flight_id` with
+ * `max_pages=1`), the diverted two-item response, alert registration (the account endpoint set
+ * first, then the nine booleans and a mandatory per-alert `target_url`), the `Location` header,
+ * the 18 event codes and the merge of a delivery onto a snapshot.
  */
 
 import { describe, expect, it } from 'vitest';
@@ -19,23 +20,30 @@ import {
 import specText from '../../src/providers/specs/aeroapi-v4.17.1.yaml?raw';
 import {
   AEROAPI_BASE_URL,
+  AEROAPI_INSTANCE_MATCH_MS,
   AeroApiAdapter,
   AeroApiAlertError,
   alertEventFlags,
   bracketLocalDate,
   bracketWindow,
+  localMinuteToUtcMs,
   mergeAeroApiAlert,
   parseAeroApiAlert,
   parseAlertLocation,
   type AeroApiAlertPatch,
 } from '../../src/providers/aeroapi.mock';
+import { AeroDataBoxAdapter } from '../../src/providers/aerodatabox.adapter';
+import { ADB_PLANS, AEROAPI_STANDARD } from '../../src/providers/config';
 import { ProviderCallError } from '../../src/providers/http';
+import { aeroApiAllowedAt } from '../../src/providers/router';
 import airportDepartures from '../../src/providers/fixtures/aeroapi/airport-departures.json';
 import alertCreated from '../../src/providers/fixtures/aeroapi/alert-created.json';
 import alertChange from '../../src/providers/fixtures/aeroapi/alert-delivery-change.json';
 import alertOut from '../../src/providers/fixtures/aeroapi/alert-delivery-out.json';
 import alertUnknown from '../../src/providers/fixtures/aeroapi/alert-delivery-unknown-code.json';
+import alertEndpointSet from '../../src/providers/fixtures/aeroapi/alert-endpoint-set.json';
 import error400 from '../../src/providers/fixtures/aeroapi/error-400.json';
+import error400Endpoint from '../../src/providers/fixtures/aeroapi/error-400-alert-endpoint.json';
 import flightById from '../../src/providers/fixtures/aeroapi/flight-by-id-en-route.json';
 import flightByIdent from '../../src/providers/fixtures/aeroapi/flight-by-ident.json';
 import flightDiverted from '../../src/providers/fixtures/aeroapi/flight-diverted.json';
@@ -137,7 +145,9 @@ const FIXTURES: Record<string, Fixture> = {
   'alert-delivery-change': alertChange,
   'alert-delivery-out': alertOut,
   'alert-delivery-unknown-code': alertUnknown,
+  'alert-endpoint-set': alertEndpointSet,
   'error-400': error400,
+  'error-400-alert-endpoint': error400Endpoint,
   'flight-by-id-en-route': flightById,
   'flight-by-ident': flightByIdent,
   'flight-diverted': flightDiverted,
@@ -146,18 +156,55 @@ const FIXTURES: Record<string, Fixture> = {
 };
 
 const FA_FLIGHT_ID = 'AAL100-1758341600-schedule-0391';
+const DAY = 86_400_000;
 const KEY = 'AAL-100-2026-09-22-KJFK' as FlightKey;
 const TARGET = 'https://api-staging.planeahead.app/v1/webhooks/aeroapi/token-for-this-environment';
 
 function adapter(
   fetch: ReturnType<typeof fixtureFetch>['fetch'],
   target: { readonly alertTargetUrl: string | undefined } = { alertTargetUrl: TARGET },
+  alertEndpointsSet: Set<string> = new Set(),
 ) {
   return new AeroApiAdapter({
     apiKey: 'aeroapi-test-key',
     fetch,
     alertTargetUrl: target.alertTargetUrl,
+    alertEndpointsSet,
     now: () => new Date('2026-09-22T22:05:00Z'),
+  });
+}
+
+/** The fixture flight, re-dated by `shiftMs` and renamed, as another instance of AA 100. */
+function instanceOf(shiftMs: number, faFlightId: string): Record<string, unknown> {
+  const flight = (
+    (FIXTURES['flight-by-ident'] as Fixture).response.body as { flights: Record<string, unknown>[] }
+  ).flights[0] as Record<string, unknown>;
+  const shifted: Record<string, unknown> = { ...flight, fa_flight_id: faFlightId };
+  for (const [key, value] of Object.entries(flight)) {
+    if (/^(scheduled|estimated|actual)_(out|off|on|in)$/.test(key) && typeof value === 'string') {
+      shifted[key] = new Date(Date.parse(value) + shiftMs).toISOString().replace('.000Z', 'Z');
+    }
+  }
+  return shifted;
+}
+
+/**
+ * A fetch that answers `/flights/{ident}` the way the spec says AeroAPI does: every instance whose
+ * `scheduled_out` is at or after `start` and before `end`.
+ */
+function specFaithfulFlights(instances: readonly Record<string, unknown>[]) {
+  return fetchStub((request) => {
+    const url = new URL(request.url);
+    const start = Date.parse(url.searchParams.get('start') ?? '');
+    const end = Date.parse(url.searchParams.get('end') ?? '');
+    const flights = instances.filter((flight) => {
+      const out = Date.parse(flight['scheduled_out'] as string);
+      return out >= start && out < end;
+    });
+    return new Response(JSON.stringify({ links: null, num_pages: 1, flights }), {
+      status: 200,
+      headers: { 'content-type': 'application/json; charset=UTF-8' },
+    });
   });
 }
 
@@ -299,24 +346,152 @@ describe('getFlight: the two request rules', () => {
 
   it('brackets the start inclusively and the end exclusively inside 10 days back and 2 ahead', () => {
     const now = new Date('2026-09-22T12:00:00Z');
-    // Clamped on the far side: a flight 2.5 days out only gets the window up to now + 2 days.
-    expect(bracketWindow('2026-09-25T00:00:00Z', now)).toEqual({
-      start: '2026-09-24T00:00:00Z',
+    // A flight 2.5 days out is beyond the 2-day horizon: no window AeroAPI accepts contains it.
+    // (The clamped [09-24T00Z, 09-24T12Z) would have excluded the flight and answered with the
+    // previous day's instance at its inclusive start.)
+    expect(bracketWindow('2026-09-25T00:00:00Z', now)).toBeNull();
+    // More than 3 days out, nothing is reachable at all.
+    expect(bracketWindow('2026-09-26T00:00:00Z', now)).toBeNull();
+    // Inside the horizon with the margin to spare: clamped at now + 2 days, flight inside.
+    expect(bracketWindow('2026-09-24T11:00:00Z', now)).toEqual({
+      start: '2026-09-23T11:00:00Z',
       end: '2026-09-24T12:00:00Z',
     });
-    // More than 3 days out, nothing is reachable: AeroAPI cannot see it.
-    expect(bracketWindow('2026-09-26T00:00:00Z', now)).toBeNull();
-    // Clamped at 10 days back.
-    expect(bracketWindow('2026-09-12T06:00:00Z', now)).toEqual({
-      start: '2026-09-12T12:00:00Z',
-      end: '2026-09-13T06:00:00Z',
+    // Clamped at 10 days back, a minute inside the limit: the flight is still after the start.
+    expect(bracketWindow('2026-09-13T00:00:00Z', now)).toEqual({
+      start: '2026-09-12T12:01:00Z',
+      end: '2026-09-14T00:00:00Z',
     });
+    // A flight before the clamped start is outside the window, so nothing is asked.
+    expect(bracketWindow('2026-09-12T06:00:00Z', now)).toBeNull();
     expect(bracketWindow('garbage', now)).toBeNull();
     // Only the local date known: every zone's local day is inside the bracket.
     expect(bracketLocalDate('2026-09-22', now)).toEqual({
       start: '2026-09-21T10:00:00Z',
       end: '2026-09-23T12:00:00Z',
     });
+  });
+
+  it('never sends a start past the 10-day limit, whatever the milliseconds of now', () => {
+    // isoSeconds truncates: at .700 the old clamp sent 09-12T12:00:00Z, 700 ms past the limit.
+    const now = new Date('2026-09-22T12:00:00.700Z');
+    const limit = now.getTime() - AEROAPI_STANDARD.maxDaysBehind * DAY;
+    for (const window of [
+      bracketWindow('2026-09-13T00:00:00Z', now),
+      bracketLocalDate('2026-09-12', now),
+    ]) {
+      expect(window).not.toBeNull();
+      const start = Date.parse(window?.start ?? '');
+      expect(start - limit).toBeGreaterThanOrEqual(AEROAPI_STANDARD.pastLimitMarginMs);
+      expect(start % 1_000).toBe(0);
+    }
+    expect(bracketWindow('2026-09-13T00:00:00Z', now)?.start).toBe('2026-09-12T12:01:01Z');
+  });
+
+  it.each([
+    ['exactly T-48 h', 0],
+    ['T-48 h plus 400 ms (truncated to the second)', 400],
+    ['T-48 h plus 4 minutes 59 seconds', 299_000],
+  ])('sends nothing at %s: the flight is on the exclusive horizon', async (_label, lateMs) => {
+    const out = Date.parse('2026-09-24T22:00:00Z');
+    const now = new Date(out - 2 * DAY + lateMs);
+    expect(bracketWindow(new Date(out), now)).toBeNull();
+    // The router agrees: the T-48 h slot is AeroDataBox's, even in live mode.
+    expect(aeroApiAllowedAt({ scheduledOut: new Date(out), now })).toBe(false);
+    const stub = specFaithfulFlights([
+      instanceOf(DAY, 'AAL100-prev'),
+      instanceOf(2 * DAY, 'AAL100-target'),
+    ]);
+    const recorder = providerContext({ now });
+    const { data, call } = await adapter(stub.fetch).getFlight(
+      {
+        carrier: { icao: 'AAL' },
+        flightNumber: '100',
+        dateLocal: '2026-09-24',
+        scheduledOut: new Date(out).toISOString(),
+      },
+      recorder.ctx,
+    );
+    expect(stub.requests).toHaveLength(0);
+    expect(recorder.reservations).toHaveLength(0);
+    expect(data).toEqual([]);
+    expect(call).toMatchObject({ result: 'error', costUnits: 0, error: 'outside_aeroapi_window' });
+    // An explicit bracket around the same flight is refused the same way.
+    const explicit = await adapter(stub.fetch).getFlight(
+      {
+        carrier: { icao: 'AAL' },
+        flightNumber: '100',
+        dateLocal: '2026-09-24',
+        window: { start: '2026-09-23T22:00:00Z', end: '2026-09-25T22:00:00Z' },
+      },
+      recorder.ctx,
+    );
+    expect(explicit.call.error).toBe('outside_aeroapi_window');
+    expect(stub.requests).toHaveLength(0);
+  });
+
+  it('once inside the horizon, answers the flight asked about and never the previous day', async () => {
+    const out = Date.parse('2026-09-24T22:00:00Z');
+    const now = new Date(out - 2 * DAY + AEROAPI_STANDARD.horizonMarginMs + 1_000);
+    expect(aeroApiAllowedAt({ scheduledOut: new Date(out), now })).toBe(true);
+    // The fixture flight departs 09-22T22:00Z; shifted two days it is the target, one day the
+    // previous day's AA 100, which the bracket's inclusive start still holds.
+    const stub = specFaithfulFlights([
+      instanceOf(DAY, 'AAL100-prev'),
+      instanceOf(2 * DAY, 'AAL100-target'),
+    ]);
+    const { data, call } = await adapter(stub.fetch).getFlight(
+      {
+        carrier: { icao: 'AAL' },
+        flightNumber: '100',
+        dateLocal: '2026-09-24',
+        scheduledOut: new Date(out).toISOString(),
+      },
+      providerContext({ now }).ctx,
+    );
+    expect(Object.fromEntries(stub.urls()[0]?.searchParams ?? [])).toEqual({
+      ident_type: 'designator',
+      start: '2026-09-23T22:00:00Z',
+      end: '2026-09-24T22:05:01Z',
+      max_pages: '1',
+    });
+    expect(call).toMatchObject({ result: 'ok', costUnits: 1 });
+    expect(data.map((flight) => flight.providerRefs['aeroapi'])).toEqual(['AAL100-target']);
+    expect(data[0]?.scheduledDepartureDateLocal).toBe('2026-09-24');
+  });
+
+  it("a bracket holding only another day's instance is a billed miss, not that instance", async () => {
+    const out = Date.parse('2026-09-23T22:00:00Z');
+    const now = new Date('2026-09-22T20:00:00Z');
+    // Only the previous day's departure is in the window (the flight itself was dropped).
+    const stub = specFaithfulFlights([instanceOf(0, 'AAL100-prev')]);
+    const { data, call } = await adapter(stub.fetch).getFlight(
+      {
+        carrier: { icao: 'AAL' },
+        flightNumber: '100',
+        dateLocal: '2026-09-23',
+        scheduledOut: new Date(out).toISOString(),
+      },
+      providerContext({ now }).ctx,
+    );
+    expect(stub.requests).toHaveLength(1);
+    expect(data).toEqual([]);
+    expect(call).toMatchObject({ result: 'not_found', costUnits: 1, error: 'other_instances:1' });
+    expect(AEROAPI_INSTANCE_MATCH_MS).toBe(12 * 3_600_000);
+  });
+
+  it('a lookup by local date alone keeps only the instances departing that local day', async () => {
+    const stub = specFaithfulFlights([
+      instanceOf(-DAY, 'AAL100-prev'),
+      instanceOf(0, 'AAL100-target'),
+      instanceOf(DAY, 'AAL100-next'),
+    ]);
+    const { data } = await adapter(stub.fetch).getFlight(
+      { carrier: { icao: 'AAL' }, flightNumber: '100', dateLocal: '2026-09-22' },
+      providerContext({ now: '2026-09-22T12:00:00Z' }).ctx,
+    );
+    // The local-day span reaches into the neighbouring days; only 09-22 at KJFK is returned.
+    expect(data.map((flight) => flight.providerRefs['aeroapi'])).toEqual(['AAL100-target']);
   });
 
   it('refuses a lookup AeroAPI cannot answer without spending a result set', async () => {
@@ -414,6 +589,31 @@ describe('getFlight: mapping', () => {
     expect(call).toMatchObject({ result: 'not_found', costUnits: 1, estCostUsdMicros: 5_000 });
   });
 
+  it('a rejected fetch keeps its reservation and is billed: AeroAPI may have served it', async () => {
+    const stub = fetchStub(() => {
+      throw new TypeError('connection reset');
+    });
+    const recorder = providerContext({ now: '2026-09-22T23:00:00Z' });
+    const { data, call } = await adapter(stub.fetch).getFlight(
+      {
+        carrier: { icao: 'AAL' },
+        flightNumber: '100',
+        dateLocal: '2026-09-22',
+        providerRef: { provider: 'aeroapi', id: FA_FLIGHT_ID },
+      },
+      recorder.ctx,
+    );
+    expect(data).toEqual([]);
+    expect(call).toMatchObject({
+      result: 'error',
+      costUnits: 1,
+      estCostUsdMicros: 5_000,
+      error: 'transport_unknown_billing:connection reset',
+    });
+    expect(recorder.reservations).toHaveLength(1);
+    expect(recorder.releases).toEqual([]);
+  });
+
   it.each([
     ['400', 'error-400', 'error'],
     ['429', 'rate-limited-429', 'rate_limited'],
@@ -445,7 +645,7 @@ describe('getBoard', () => {
     const { data, call } = await adapter(stub.fetch).getBoard(
       'KJFK',
       'dep',
-      { from: '2026-09-22T20:00:00Z', to: '2026-09-23T02:00:00Z' },
+      { from: '2026-09-22T16:00', to: '2026-09-22T22:00', tz: 'America/New_York' },
       providerContext({ now: '2026-09-22T23:00:00Z' }).ctx,
     );
     expect(stub.urls()[0]?.pathname).toBe('/aeroapi/airports/KJFK/flights/departures');
@@ -468,18 +668,74 @@ describe('getBoard', () => {
       }),
     ]);
   });
+
+  it('reads the shared BoardWindow as airport-local time, exactly as AeroDataBox does', async () => {
+    // One window, both providers: 17:00 to 23:00 at JFK is 21:00Z to 03:00Z in September.
+    const window = { from: '2026-09-22T17:00', to: '2026-09-22T23:00', tz: 'America/New_York' };
+    const ctx = providerContext({ now: '2026-09-22T23:30:00Z' }).ctx;
+    const aeroapi = fixtureFetch(FIXTURES['airport-departures'] as Fixture);
+    await adapter(aeroapi.fetch).getBoard('KJFK', 'dep', window, ctx);
+    expect(Object.fromEntries(aeroapi.urls()[0]?.searchParams ?? [])).toEqual({
+      start: '2026-09-22T21:00:00Z',
+      end: '2026-09-23T03:00:00Z',
+      max_pages: '1',
+    });
+    const adb = fetchStub(
+      () =>
+        new Response(JSON.stringify({ departures: [] }), {
+          status: 200,
+          headers: { 'content-type': 'application/json' },
+        }),
+    );
+    await new AeroDataBoxAdapter({
+      apiKey: 'adb',
+      fetch: adb.fetch,
+      plan: ADB_PLANS.growth,
+      now: () => new Date(),
+    }).getBoard('KJFK', 'dep', window, ctx);
+    expect(adb.urls()[0]?.pathname).toBe(
+      '/flights/airports/Icao/KJFK/2026-09-22T17:00/2026-09-22T23:00',
+    );
+    // The same wall clock in winter is five hours from UTC, not four.
+    expect(localMinuteToUtcMs('2026-12-22T17:00', 'America/New_York')).toBe(
+      Date.parse('2026-12-22T22:00:00Z'),
+    );
+    // Across the November fall-back and the March spring-forward.
+    expect(localMinuteToUtcMs('2026-11-01T00:30', 'America/New_York')).toBe(
+      Date.parse('2026-11-01T04:30:00Z'),
+    );
+    expect(localMinuteToUtcMs('2026-11-01T03:00', 'America/New_York')).toBe(
+      Date.parse('2026-11-01T08:00:00Z'),
+    );
+    expect(localMinuteToUtcMs('2026-03-08T04:00', 'America/New_York')).toBe(
+      Date.parse('2026-03-08T08:00:00Z'),
+    );
+    expect(localMinuteToUtcMs('2026-09-22T17:00', 'Not/AZone')).toBeNull();
+    expect(localMinuteToUtcMs('2026-13-22T17:00', 'America/New_York')).toBeNull();
+    expect(localMinuteToUtcMs('2026-09-22T17:00:00Z', 'America/New_York')).toBeNull();
+    await expect(
+      adapter(aeroapi.fetch).getBoard('KJFK', 'dep', { ...window, tz: 'nowhere' }, ctx),
+    ).rejects.toThrow(RangeError);
+  });
 });
 
 describe('alerts', () => {
   it('registers the nine booleans, the instance, max_weekly and a per-alert target_url; the id comes from Location', async () => {
-    const stub = fixtureFetch(FIXTURES['alert-created'] as Fixture);
+    const stub = fixtureFetch(
+      FIXTURES['alert-endpoint-set'] as Fixture,
+      FIXTURES['alert-created'] as Fixture,
+    );
+    const recorder = providerContext();
     const { data, call } = await adapter(stub.fetch).registerAlert(
       KEY,
       { events: ['out', 'off', 'on', 'in', 'cancelled', 'diverted'], maxWeekly: 20 },
-      providerContext().ctx,
+      recorder.ctx,
     );
-    const request = stub.requests[0];
-    expect(request?.method).toBe('POST');
+    expect(stub.requests.map((r) => `${r.method} ${new URL(r.url).pathname}`)).toEqual([
+      'PUT /aeroapi/alerts/endpoint',
+      'POST /aeroapi/alerts',
+    ]);
+    const request = stub.requests[1];
     expect(request?.url).toBe('https://aeroapi.flightaware.com/aeroapi/alerts');
     expect(request?.headers.get('content-type')).toBe(JSON_TYPE);
     const body = (await request?.json()) as Record<string, unknown>;
@@ -525,7 +781,57 @@ describe('alerts', () => {
     });
   });
 
-  it('never registers without a per-alert https target_url (no account-wide endpoint)', async () => {
+  it("sets the account-wide endpoint first, to this environment's URL, at most once per isolate", async () => {
+    // The spec's alerts tag: PUT /alerts/endpoint "must first be used ... before any alerts can
+    // be configured", or POST /alerts answers 400.
+    expect(specText).toMatch(/This step must\s+be done before any alerts can be configured/);
+    const put = spec.resolve(
+      required(
+        at(
+          spec.root,
+          'paths',
+          '/alerts/endpoint',
+          'put',
+          'requestBody',
+          'content',
+          JSON_TYPE,
+          'schema',
+        ),
+        'put',
+      ),
+    );
+    expect([...put.properties.keys()]).toEqual(['url']);
+    expect(at(spec.root, 'paths', '/alerts/endpoint', 'put', 'responses', '204')).toBeDefined();
+
+    const isolate = new Set<string>();
+    const stub = fixtureFetch(
+      FIXTURES['alert-endpoint-set'] as Fixture,
+      FIXTURES['alert-created'] as Fixture,
+    );
+    const recorder = providerContext();
+    await adapter(stub.fetch, { alertTargetUrl: TARGET }, isolate).registerAlert(
+      KEY,
+      { events: ['out'], maxWeekly: 5 },
+      recorder.ctx,
+    );
+    expect(await stub.requests[0]?.json()).toEqual({ url: TARGET });
+    expect(stub.requests[0]?.headers.get('x-apikey')).toBe('aeroapi-test-key');
+    // The PUT is not the call registerAlert returns, so the adapter records it: zero cost.
+    expect(recorder.logged).toEqual([
+      containing({ operation: 'alert_manage', result: 'ok', httpStatus: 204, costUnits: 0 }),
+    ]);
+    // A second registration in the same isolate (another adapter instance, same key and URL)
+    // posts straight away.
+    const again = fixtureFetch(FIXTURES['alert-created'] as Fixture);
+    await adapter(again.fetch, { alertTargetUrl: TARGET }, isolate).registerAlert(
+      KEY,
+      { events: ['out'], maxWeekly: 5 },
+      providerContext().ctx,
+    );
+    expect(again.requests.map((r) => r.method)).toEqual(['POST']);
+  });
+
+  it('never registers without an https target_url, and never posts when the endpoint PUT is refused', async () => {
     const stub = fixtureFetch(FIXTURES['alert-created'] as Fixture);
     for (const target of [undefined, 'http://insecure.example/hook']) {
       await expect(
@@ -537,14 +843,60 @@ describe('alerts', () => {
       ).rejects.toThrow(AeroApiAlertError);
     }
     expect(stub.requests).toHaveLength(0);
-    // The adapter has no method that touches PUT /alerts/endpoint at all.
-    expect(
-      Object.getOwnPropertyNames(AeroApiAdapter.prototype).some((m) => /endpoint/i.test(m)),
-    ).toBe(false);
+
+    const refused = fixtureFetch(FIXTURES['error-400'] as Fixture);
+    const failure = adapter(refused.fetch).registerAlert(
+      KEY,
+      { events: ['out'], maxWeekly: 1 },
+      providerContext().ctx,
+    );
+    await expect(failure).rejects.toBeInstanceOf(ProviderCallError);
+    await failure.catch((error: unknown) => {
+      expect((error as ProviderCallError).call).toMatchObject({
+        operation: 'alert_manage',
+        result: 'error',
+        httpStatus: 400,
+      });
+      expect((error as ProviderCallError).call.error).toMatch(/^alert_endpoint_not_set:http_400/);
+    });
+    expect(refused.requests.map((r) => r.method)).toEqual(['PUT']);
+  });
+
+  it('a 400 for a missing account endpoint is distinct and makes the next registration set it again', async () => {
+    const isolate = new Set<string>();
+    const first = fixtureFetch(
+      FIXTURES['alert-endpoint-set'] as Fixture,
+      FIXTURES['error-400-alert-endpoint'] as Fixture,
+    );
+    const failure = adapter(first.fetch, { alertTargetUrl: TARGET }, isolate).registerAlert(
+      KEY,
+      { events: ['out'], maxWeekly: 1 },
+      providerContext().ctx,
+    );
+    await expect(failure).rejects.toMatchObject({
+      call: { result: 'error', httpStatus: 400, costUnits: 0 },
+    });
+    await failure.catch((error: unknown) => {
+      expect((error as ProviderCallError).call.error).toMatch(/^alert_endpoint_missing:/);
+    });
+    // Someone deleted the endpoint behind this isolate's back: the next registration PUTs again.
+    const second = fixtureFetch(
+      FIXTURES['alert-endpoint-set'] as Fixture,
+      FIXTURES['alert-created'] as Fixture,
+    );
+    await adapter(second.fetch, { alertTargetUrl: TARGET }, isolate).registerAlert(
+      KEY,
+      { events: ['out'], maxWeekly: 1 },
+      providerContext().ctx,
+    );
+    expect(second.requests.map((r) => r.method)).toEqual(['PUT', 'POST']);
   });
 
   it('a refused registration throws with the record attached, so it is still logged', async () => {
-    const stub = fixtureFetch(FIXTURES['error-400'] as Fixture);
+    const stub = fixtureFetch(
+      FIXTURES['alert-endpoint-set'] as Fixture,
+      FIXTURES['error-400'] as Fixture,
+    );
     const failure = adapter(stub.fetch).registerAlert(
       KEY,
       { events: ['out'], maxWeekly: 1 },
@@ -553,8 +905,13 @@ describe('alerts', () => {
     await expect(failure).rejects.toBeInstanceOf(ProviderCallError);
     await failure.catch((error: unknown) => {
       expect((error as ProviderCallError).call).toMatchObject({ result: 'error', httpStatus: 400 });
+      expect((error as ProviderCallError).call.error).toMatch(/^http_400:/);
     });
-    const noLocation = fetchStub(() => new Response(null, { status: 201 }));
+    const noLocation = fetchStub((request) =>
+      request.method === 'PUT'
+        ? new Response(null, { status: 204 })
+        : new Response(null, { status: 201 }),
+    );
     await expect(
       adapter(noLocation.fetch).registerAlert(
         KEY,
@@ -562,6 +919,21 @@ describe('alerts', () => {
         providerContext().ctx,
       ),
     ).rejects.toMatchObject({ call: { result: 'error', error: 'no_location' } });
+  });
+
+  it('registers on the operating designator the key carries (a callsign-resolved codeshare too)', async () => {
+    // BA 1512 flown as AAL100 keys as AAL-100-...: the alert is on AAL100, the aircraft AeroAPI
+    // tracks, never on AAL1512, which is American's own unrelated flight.
+    const stub = fixtureFetch(
+      FIXTURES['alert-endpoint-set'] as Fixture,
+      FIXTURES['alert-created'] as Fixture,
+    );
+    await adapter(stub.fetch).registerAlert(
+      'AAL-100-2026-09-22-KJFK' as FlightKey,
+      { events: ['out'], maxWeekly: 1 },
+      providerContext().ctx,
+    );
+    expect(((await stub.requests[1]?.json()) as { ident: string }).ident).toBe('AAL100');
   });
 
   it.each([
@@ -724,6 +1096,46 @@ describe('alert deliveries', () => {
 
     const other = mergeAeroApiAlert(snapshot, { ...out, faFlightId: 'SOMEONE-ELSE' }, new Date());
     expect(other).toBe(snapshot);
+  });
+
+  it('a merge keeps the scheduled_off fallback the poll used, so a known status stays known', () => {
+    const polled = mergeAeroApiAlert(
+      {
+        operatingCarrierIcao: 'AAL',
+        flightNumber: '100',
+        legSeq: 1,
+        codeshares: [],
+        origin: { icao: 'KJFK', tz: 'America/New_York' },
+        destination: { icao: 'EGLL' },
+        // A flight AeroAPI knows only by its runway schedule: no scheduled_out.
+        status: 'scheduled',
+        times: { scheduledOff: '2026-09-22T22:15:00.000Z' },
+        providerRefs: { aeroapi: FA_FLIGHT_ID },
+        fetchedAt: '2026-09-22T20:00:00.000Z',
+        source: 'aeroapi',
+        fieldQuality: {},
+      },
+      {
+        source: 'aeroapi_alert',
+        faFlightId: FA_FLIGHT_ID,
+        eventCode: 'change',
+        times: { estimatedOff: '2026-09-22T22:40:00.000Z' },
+      },
+      new Date('2026-09-22T21:00:00Z'),
+    );
+    expect(polled.status).toBe('scheduled');
+    expect(
+      mergeAeroApiAlert(
+        polled,
+        {
+          source: 'aeroapi_alert',
+          faFlightId: FA_FLIGHT_ID,
+          eventCode: 'change',
+          times: {},
+        },
+        new Date('2026-09-22T22:10:00Z'),
+      ).status,
+    ).toBe('boarding');
   });
 
   it('parseWebhook on the adapter reads the request and stamps it with its clock', async () => {

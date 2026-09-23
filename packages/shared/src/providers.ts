@@ -44,8 +44,33 @@ export interface FlightLookup {
   originIcao?: string | undefined;
   /** Provider-side id after the first fetch (AeroAPI `fa_flight_id`). */
   providerRef?: { provider: ProviderId; id: string } | undefined;
-  /** Bracketed first fetch: `scheduled_out` plus or minus one day, ISO instants. */
+  /**
+   * The instance's `scheduled_out` once known (an ISO instant, from the tracker's snapshot).
+   * AeroAPI brackets its first fetch around it and answers with the instance nearest to it;
+   * AeroDataBox, which asks by the origin-local date, ignores it.
+   */
+  scheduledOut?: string | undefined;
+  /**
+   * An explicit bracket, `scheduled_out` plus or minus one day as ISO instants, UNCLAMPED: its
+   * midpoint is read as `scheduled_out`. Prefer `scheduledOut`; `window` is for a caller that
+   * holds only the bracket.
+   */
   window?: { start: string; end: string } | undefined;
+}
+
+/**
+ * A board (FIDS) window: airport-LOCAL wall-clock times `YYYY-MM-DDTHH:mm` at the airport the
+ * board is for, plus that airport's IANA zone. One contract for every provider: AeroDataBox asks
+ * in local time and uses `from` and `to` as they are; AeroAPI asks in UTC and converts them with
+ * `tz`. Providers differ in WHICH flights a window selects, and the adapters document it:
+ * AeroDataBox FIDS selects by scheduled time, AeroAPI `departures` and `arrivals` by the actual
+ * off or on time (flights that already left or landed), so an AeroAPI board of a future window is
+ * empty.
+ */
+export interface BoardWindow {
+  from: string;
+  to: string;
+  tz: string;
 }
 
 export interface ProviderCapabilities {
@@ -98,6 +123,12 @@ export interface BudgetRequest {
   pollEquivalents: number;
   trigger: ProviderCallTrigger;
   flightKey?: FlightKey | undefined;
+  /**
+   * The UTC day (`YYYY-MM-DD`) whose provider-wide budget this reservation debits, decided once
+   * when the request is built. `release` refunds that same day even after midnight, where a
+   * clock read at release time would refund the next day for a debit it never saw.
+   */
+  utcDate?: string | undefined;
 }
 
 /**
@@ -161,6 +192,11 @@ export interface FlightDataProvider {
    * Every flight the provider returns for the lookup, as an array: AeroDataBox answers a
    * designator and date with every matching operation, and AeroAPI answers a diverted flight
    * with the original leg plus each diversion under one `fa_flight_id`. Empty on a miss.
+   *
+   * One HTTP call per lookup, except for a person-supplied date (`ctx.trigger` `user_search` or
+   * `import`), where AeroDataBox retries the day before and the day after on a miss. A tracker's
+   * own triggers (`alarm`, `reconcile`, `user_refresh`, `provider_alert`) never pay for a retry:
+   * the key's date is canonical.
    */
   getFlight(
     lookup: FlightLookup,
@@ -169,7 +205,7 @@ export interface FlightDataProvider {
   getBoard?(
     airportIcao: string,
     direction: 'dep' | 'arr',
-    window: { from: string; to: string },
+    window: BoardWindow,
     ctx: ProviderCallContext,
   ): Promise<ProviderResult<Exact<BoardRow>[]>>;
   registerAlert?(

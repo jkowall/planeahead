@@ -18,6 +18,7 @@ import {
   type ProviderCallRecord,
 } from '@planeahead/shared';
 import type { Env } from '../../src/env';
+import { createLogger } from '../../src/observability/log';
 import {
   DurableObjectCostLogger,
   PROVIDER_CALL_OUTBOX_KIND,
@@ -25,6 +26,7 @@ import {
   createCostLogger,
   providerCallRow,
 } from '../../src/providers/cost-log';
+import { AnalyticsBudget } from '../../src/queues/analytics';
 
 function record(overrides: Partial<ProviderCallRecord> = {}): ProviderCallRecord {
   return {
@@ -152,5 +154,30 @@ describe('in a Worker', () => {
       flightKey: 'AAL-100-2026-09-22-KJFK',
       requestId: 'req-cost-log',
     });
+  });
+
+  it("counts against the invocation's Analytics Engine budget when given one", async () => {
+    const points: AnalyticsEngineDataPoint[] = [];
+    const dataset = {
+      writeDataPoint: (point?: AnalyticsEngineDataPoint) => points.push(point ?? {}),
+    } as unknown as AnalyticsEngineDataset;
+    // One invocation, one budget (a queue batch that also logs provider calls): a budget of 1
+    // shared by two loggers lets exactly one point through, where two private budgets let two.
+    const invocation = new AnalyticsBudget(
+      dataset,
+      createLogger({}, () => undefined),
+      1,
+    );
+    const workerEnv = { DB: (env as Env).DB, PROVIDER_CALLS: dataset };
+    const first = createCostLogger({ env: workerEnv, environment: 'test', analytics: invocation });
+    const second = new WorkerCostLogger(workerEnv, { environment: 'test', analytics: invocation });
+    expect((first as WorkerCostLogger).analytics).toBe(invocation);
+    expect(second.analytics).toBe(invocation);
+    await first.record(record());
+    await second.record(record());
+    expect(points).toHaveLength(1);
+    expect(invocation.stats).toMatchObject({ written: 1, overflowed: 1 });
+    // Without one, a logger in a route builds its own.
+    expect(new WorkerCostLogger(workerEnv, { environment: 'test' }).analytics).not.toBe(invocation);
   });
 });

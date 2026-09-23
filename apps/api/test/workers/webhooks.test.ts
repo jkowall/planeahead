@@ -3,15 +3,19 @@
  * ordinary 404, the token comparison is constant time after a length check, bodies are
  * validated strictly, and a valid delivery is ENQUEUED on provider-events and nothing else (no
  * fetch, no database, no Durable Object). The AeroDataBox receiver stays shut while
- * ADB_ALERTS_ENABLED is false. None of this needs the database, so no test touches env.DB.
+ * ADB_ALERTS_ENABLED is false. The receivers are exempt from the public IP limiter (ruling I2),
+ * survive a delivery that carries `Idempotency-Key`, and never let the token reach a log line or
+ * a Sentry envelope, not even through an unexpected error. None of this needs the database, so
+ * no test touches env.DB.
  */
 
 import { createExecutionContext, waitOnExecutionContext } from 'cloudflare:test';
 import { env, exports } from 'cloudflare:workers';
 import { afterEach, describe, expect, it } from 'vitest';
 import { ProviderEventV1, RPC_SCHEMA_VERSION } from '@planeahead/shared';
-import { createApp } from '../../src/app';
+import { createApp, type ChainOptions } from '../../src/app';
 import type { Env } from '../../src/env';
+import type { IdempotencyStore, StoredResponse } from '../../src/middleware/idempotency';
 import { scrubSentryEvent } from '../../src/middleware/sentry';
 import { v1Routes } from '../../src/routes/v1';
 import {
@@ -22,7 +26,7 @@ import {
 import alertOut from '../../src/providers/fixtures/aeroapi/alert-delivery-out.json';
 import alertUnknown from '../../src/providers/fixtures/aeroapi/alert-delivery-unknown-code.json';
 import notification from '../../src/providers/fixtures/aerodatabox/notification.json';
-import { captureLogs } from './helpers/auth';
+import { captureLogs, logEvents } from './helpers/auth';
 
 /** `expect.objectContaining`, typed: the matcher is `any`, which the lint rules forbid assigning. */
 function containing(value: object): unknown {
@@ -67,7 +71,11 @@ afterEach(() => {
  * provider-events queue works: the database, the other queues, the Durable Object namespaces and
  * `fetch` record any use, and the tests assert there was none.
  */
-async function isolated(request: Request, overrides: Partial<Env> = {}): Promise<Recorded> {
+async function isolated(
+  request: Request,
+  overrides: Partial<Env> = {},
+  chain: ChainOptions = {},
+): Promise<Recorded> {
   const sent: unknown[] = [];
   const touched: string[] = [];
   const queue = (name: string) => ({
@@ -122,7 +130,7 @@ async function isolated(request: Request, overrides: Partial<Env> = {}): Promise
     return Promise.reject(new Error('the webhook route called fetch'));
   };
   try {
-    const app = createApp().route('/v1', v1Routes);
+    const app = createApp(chain).route('/v1', v1Routes);
     const ctx = createExecutionContext();
     const response = await app.fetch(request, isolatedEnv, ctx);
     await waitOnExecutionContext(ctx);
@@ -272,6 +280,78 @@ describe('POST /v1/webhooks/aeroapi/{token}', () => {
   });
 });
 
+describe('the receivers in the chain', () => {
+  it('are exempt from the public IP limiter (ruling I2); every other route is not', async () => {
+    const limited: string[] = [];
+    const refuseAll = {
+      limiter: () => ({
+        limit: ({ key }: { key: string }) => {
+          limited.push(key);
+          return Promise.resolve({ success: false });
+        },
+      }),
+    };
+    const fromProvider = { 'CF-Connecting-IP': '203.0.113.7' };
+    const delivery = await isolated(
+      post(`/v1/webhooks/aeroapi/${AEROAPI_TOKEN}`, OUT_BODY, fromProvider),
+      {},
+      refuseAll,
+    );
+    expect(delivery.response.status).toBe(200);
+    expect(delivery.sent).toHaveLength(1);
+    // A wrong token is still the plain 404, not a 429 that would confirm anything.
+    const wrong = await isolated(
+      post(`/v1/webhooks/aeroapi/${tamper(AEROAPI_TOKEN)}`, OUT_BODY, fromProvider),
+      {},
+      refuseAll,
+    );
+    expect(wrong.response.status).toBe(404);
+    expect(limited).toEqual([]);
+    const other = await isolated(post('/v1/me', '{}', fromProvider), {}, refuseAll);
+    expect(other.response.status).toBe(429);
+    expect(limited).toEqual(['ip:203.0.113.7']);
+  });
+
+  it('accept a delivery that carries Idempotency-Key (the middleware read the body first)', async () => {
+    const stored = new Map<string, StoredResponse>();
+    const store: IdempotencyStore = {
+      get: (scope, key) => Promise.resolve(stored.get(`${scope}|${key}`) ?? null),
+      put: (scope, key, response) => {
+        stored.set(`${scope}|${key}`, response);
+        return Promise.resolve();
+      },
+    };
+    const { lines, result } = await captureLogs(() =>
+      isolated(
+        post(`/v1/webhooks/aeroapi/${AEROAPI_TOKEN}`, OUT_BODY, {
+          'Idempotency-Key': 'delivery-key-00001',
+          'X-Install-Id': 'install-id-00001',
+        }),
+        {},
+        { idempotencyStore: () => store },
+      ),
+    );
+    expect(result.response.status).toBe(200);
+    expect(await result.response.json()).toEqual({ accepted: 1 });
+    expect(result.sent).toHaveLength(1);
+    expect(lines.join('\n').includes(AEROAPI_TOKEN)).toBe(false);
+  });
+
+  it('answer an unexpected failure themselves: a path-free log line, never the app error handler', async () => {
+    // A mistyped binding makes the receiver's first step throw (a TypeError from the settings
+    // parser), the kind of failure that used to reach app.onError and log the token-bearing path.
+    const hostile = { AEROAPI_MODE: 42 } as unknown as Partial<Env>;
+    const { lines, result } = await captureLogs(() =>
+      isolated(post(`/v1/webhooks/aerodatabox/${ADB_TOKEN}`, NOTIFICATION_BODY), hostile),
+    );
+    expect(result.response.status).toBe(500);
+    expect(await result.response.json()).toMatchObject({ error: 'internal_error' });
+    expect(logEvents(lines, 'webhook_failed')).toHaveLength(1);
+    expect(logEvents(lines, 'unhandled_error')).toEqual([]);
+    expect(lines.join('\n').includes(ADB_TOKEN)).toBe(false);
+  });
+});
+
 describe('POST /v1/webhooks/aerodatabox/{token}', () => {
   it('is shut while ADB_ALERTS_ENABLED is false, even with the right token', async () => {
     expect(testEnv.ADB_ALERTS_ENABLED).toBe('false');
@@ -332,6 +412,71 @@ describe('the token stays out of logs and Sentry', () => {
     for (const token of [AEROAPI_TOKEN, tamper(AEROAPI_TOKEN), ADB_TOKEN]) {
       expect(joined.includes(token)).toBe(false);
     }
+  });
+
+  it('a real delivery through the real chain sends Sentry no token, in any attribute', async () => {
+    // @sentry/core writes the raw pathname to the span attribute `url.path`; a scrubber that knew
+    // only `url.full` shipped the token on every sampled delivery. Assert on the serialised bytes.
+    const envelopes: unknown[] = [];
+    const { response } = await isolated(
+      post(`/v1/webhooks/aeroapi/${AEROAPI_TOKEN}`, OUT_BODY),
+      {},
+      {
+        sentry: {
+          dsn: 'https://publickey@o0.ingest.sentry.example/0',
+          transport: () => ({
+            send: (envelope: unknown) => {
+              envelopes.push(envelope);
+              return Promise.resolve({});
+            },
+            flush: () => Promise.resolve(true),
+          }),
+        },
+      },
+    );
+    expect(response.status).toBe(200);
+    const serialised = JSON.stringify(envelopes);
+    // Not vacuous: a transaction for this very request was sent, and it names the route.
+    expect(envelopes.length).toBeGreaterThan(0);
+    expect(serialised).toContain('/v1/webhooks/aeroapi/[redacted]');
+    expect(serialised).toContain('url.path');
+    expect(serialised.includes(AEROAPI_TOKEN)).toBe(false);
+  });
+
+  it('the Sentry scrubber redacts the path token from every string an event can carry', () => {
+    const event = scrubSentryEvent({
+      type: 'transaction',
+      transaction: `POST /v1/webhooks/aeroapi/${AEROAPI_TOKEN}`,
+      tags: { route: `/v1/webhooks/aeroapi/${AEROAPI_TOKEN}` },
+      contexts: {
+        trace: {
+          span_id: 'a',
+          trace_id: 'b',
+          data: {
+            'url.path': `/v1/webhooks/aeroapi/${AEROAPI_TOKEN}`,
+            'http.target': `/v1/webhooks/aerodatabox/${ADB_TOKEN}?x=1`,
+          },
+        },
+      },
+      spans: [
+        {
+          span_id: 'c',
+          trace_id: 'b',
+          start_timestamp: 0,
+          timestamp: 1,
+          description: `POST /v1/webhooks/aeroapi/${AEROAPI_TOKEN}`,
+          data: { 'url.path': `/v1/webhooks/aeroapi/${AEROAPI_TOKEN}` },
+        },
+      ],
+    } as never);
+    const serialised = JSON.stringify(event);
+    expect(serialised.includes(AEROAPI_TOKEN)).toBe(false);
+    expect(serialised.includes(ADB_TOKEN)).toBe(false);
+    expect(
+      (event as { contexts: { trace: { data: Record<string, string> } } }).contexts.trace.data[
+        'url.path'
+      ],
+    ).toBe('/v1/webhooks/aeroapi/[redacted]');
   });
 
   it('the Sentry scrubber redacts the path token from URLs and the transaction name', () => {

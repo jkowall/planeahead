@@ -39,7 +39,11 @@ export interface Reservation {
   readonly decision: BudgetDecision;
 }
 
-/** Asks the context's budget for one attempt at `operation`. */
+/**
+ * Asks the context's budget for one attempt at `operation`. The request names its budget day
+ * (`utcDate`, from `ctx.now()`) once, here, so a release after midnight refunds the day that was
+ * debited.
+ */
 export async function reserve(
   ctx: ProviderCallContext,
   provider: ProviderId,
@@ -51,6 +55,7 @@ export async function reserve(
     pollEquivalents: pollEquivalents(provider, operation),
     trigger: ctx.trigger,
     flightKey: ctx.flightKey,
+    utcDate: ctx.now().toISOString().slice(0, 10),
   };
   return { request, decision: await ctx.budget.reserve(request) };
 }
@@ -126,14 +131,25 @@ export function deniedRecord(
   });
 }
 
-/** The record for an attempt that never got an answer (a network error, a timeout). */
+/**
+ * The record for an attempt whose `fetch` rejected (a network error, a reset, a timeout).
+ *
+ * BILLED, and the reservation is KEPT: a rejection can arrive after the request reached the
+ * provider (a connection reset while the response head was on its way), and the provider may have
+ * served and billed it. The same conservative rule as a 451 or an unexplained error status:
+ * over-counting in our own ledger is the safe direction for a budget, and the daily cap only
+ * bounds the real bill if every possibly billed call is in it. The `transport_unknown_billing`
+ * prefix marks these rows so the daily reconciliation against the provider's own usage report
+ * can tell them apart. Only a failure that provably happened before the request left the Worker
+ * is unbilled, and the adapters build the `Request` before reserving so that such a failure
+ * never holds a reservation at all.
+ */
 export function transportErrorRecord(
   ctx: ProviderCallContext,
   provider: ProviderId,
   operation: string,
   startedAt: Date,
   error: unknown,
-  billed: boolean,
 ): ProviderCallRecord {
   return callRecord({
     ctx,
@@ -142,8 +158,8 @@ export function transportErrorRecord(
     startedAt,
     finishedAt: ctx.now(),
     result: 'error',
-    billed,
-    error: `transport:${error instanceof Error ? error.message : String(error)}`,
+    billed: true,
+    error: `transport_unknown_billing:${error instanceof Error ? error.message : String(error)}`,
   });
 }
 

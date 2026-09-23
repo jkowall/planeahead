@@ -6028,7 +6028,7 @@
         },
         "provider_alert_registrations_events_check": {
           "name": "provider_alert_registrations_events_check",
-          "value": "\"provider_alert_registrations\".\"events\" is null or (jsonb_typeof(\"provider_alert_registrations\".\"events\") = 'array' and \"provider_alert_registrations\".\"events\" <@ '[\"filed\",\"departure\",\"arrival\",\"cancelled\",\"diverted\",\"out\",\"off\",\"on\",\"in\",\"hold_start\",\"hold_end\"]'::jsonb)"
+          "value": "\"provider_alert_registrations\".\"events\" is null or (jsonb_typeof(\"provider_alert_registrations\".\"events\") = 'array' and \"provider_alert_registrations\".\"events\" <@ '[\"filed\",\"departure\",\"arrival\",\"cancelled\",\"diverted\",\"out\",\"off\",\"on\",\"in\"]'::jsonb)"
         }
       },
       "isRLSEnabled": false

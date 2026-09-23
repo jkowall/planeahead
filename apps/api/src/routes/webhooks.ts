@@ -25,10 +25,20 @@
  * several. The body is a hint, not data: the consumer (increment 7) routes it to the tracker,
  * which merges an AeroAPI patch onto its snapshot or re-reads the flight for an AeroDataBox hint.
  *
- * The token is part of the URL, so this module never logs a path, and the Sentry scrubber
- * redacts `/v1/webhooks/{provider}/{token}` (src/middleware/sentry.ts). Residual risk, recorded
- * in ADR 0010: Cloudflare's own invocation logs keep request URLs, so the token is readable by
- * anyone with account access to Workers Logs; rotate it if that access widens.
+ * The token is part of the URL, so this module never logs a path, and nothing it throws reaches
+ * the app's error handler (which logs the path): `receive` answers every unexpected failure
+ * itself with a path-free log line. The body is read through Hono's cached accessor, because the
+ * idempotency middleware ahead of this route reads it too when a delivery carries an
+ * `Idempotency-Key`. The Sentry scrubber redacts `/v1/webhooks/{provider}/{token}` wherever a
+ * string can hold it (src/middleware/sentry.ts). Residual risk, recorded in ADR 0010:
+ * Cloudflare's own invocation logs keep request URLs, so the token is readable by anyone with
+ * account access to Workers Logs; rotate it if that access widens.
+ *
+ * Rate limiting (orchestrator ruling I2): these routes are EXEMPT from the public per-IP limiter
+ * (`ipLimiter` skips `/v1/webhooks/`) and have no per-route limiter in Phase 0. A provider posts
+ * from a handful of addresses, so an IP limit would throttle real deliveries first; the 256-bit
+ * path token makes a wrong guess a cheap 404, and the `provider-events` queue's backpressure
+ * bounds what a valid token can push. docs/security/threat-model.md records the trade-off.
  */
 
 import { Hono, type Context } from 'hono';
@@ -40,10 +50,13 @@ import {
 } from '@planeahead/shared';
 import { utf8, timingSafeEqualBytes } from '../crypto/hash';
 import type { AppBindings } from '../env';
-import { createLogger, errorFields } from '../observability/log';
+import { createLogger, errorFields, type Logger } from '../observability/log';
 import { AeroApiAlertError, parseAeroApiAlert } from '../providers/aeroapi.mock';
 import { WebhookPayloadError, parseAdbNotification } from '../providers/aerodatabox.adapter';
 import { providerSettings } from '../providers/config';
+import { isWellFormedWebhookToken } from '../providers/webhook-token';
+
+export { WEBHOOK_PATH_PREFIX, isWellFormedWebhookToken } from '../providers/webhook-token';
 
 export type WebhookProvider = 'aerodatabox' | 'aeroapi';
 
@@ -52,14 +65,6 @@ export const WEBHOOK_BODY_LIMIT_BYTES = 256 * 1024;
 
 /** Queue `sendBatch` accepts at most 100 messages. */
 const SEND_BATCH_MAX = 100;
-
-/** 256 bits: 43 base64url characters, or 64 hex characters. */
-const TOKEN_RE = /^(?:[A-Za-z0-9_-]{43}|[0-9a-fA-F]{64})$/;
-
-/** Whether a configured token has the 256-bit shape; a shorter secret disables the route. */
-export function isWellFormedWebhookToken(token: string | undefined): token is string {
-  return token !== undefined && TOKEN_RE.test(token);
-}
 
 export type ByteComparator = (a: Uint8Array, b: Uint8Array) => boolean;
 
@@ -85,13 +90,17 @@ export function verifyPathToken(
   return equal(a, b);
 }
 
-/** Reads the body, refusing more than `limit` bytes; null when it is too large. */
-async function readLimited(request: Request, limit: number): Promise<string | null> {
-  const declared = Number(request.headers.get('content-length'));
+/**
+ * Reads the body, refusing more than `limit` bytes; null when it is too large. Through Hono's
+ * cached `c.req.arrayBuffer()`, never `c.req.raw`: the idempotency middleware reads the body
+ * first when a delivery carries `Idempotency-Key`, and the raw stream is then already consumed.
+ */
+async function readLimited(c: Context<AppBindings>, limit: number): Promise<string | null> {
+  const declared = Number(c.req.header('content-length'));
   if (Number.isFinite(declared) && declared > limit) {
     return null;
   }
-  const buffer = await request.arrayBuffer();
+  const buffer = await c.req.arrayBuffer();
   if (buffer.byteLength > limit) {
     return null;
   }
@@ -119,9 +128,26 @@ async function parseDelivery(
   return parseAdbNotification(body, receivedAt);
 }
 
+/**
+ * The receiver, with every unexpected throw answered here: an error that reached the app's
+ * `onError` would be logged with the request path, and the path is the credential.
+ */
 async function receive(c: Context<AppBindings>, provider: WebhookProvider): Promise<Response> {
   // Never the path: it carries the token.
   const log = createLogger({ request_id: c.var.requestId, webhook: provider });
+  try {
+    return await receiveUnguarded(c, provider, log);
+  } catch (error) {
+    log.error('webhook_failed', errorFields(error));
+    return c.json({ error: 'internal_error', requestId: c.var.requestId }, 500);
+  }
+}
+
+async function receiveUnguarded(
+  c: Context<AppBindings>,
+  provider: WebhookProvider,
+  log: Logger,
+): Promise<Response> {
   if (provider === 'aerodatabox' && !providerSettings(c.env).adbAlertsEnabled) {
     return c.notFound();
   }
@@ -132,7 +158,7 @@ async function receive(c: Context<AppBindings>, provider: WebhookProvider): Prom
     });
     return c.notFound();
   }
-  const text = await readLimited(c.req.raw, WEBHOOK_BODY_LIMIT_BYTES);
+  const text = await readLimited(c, WEBHOOK_BODY_LIMIT_BYTES);
   if (text === null) {
     return c.json({ error: 'payload_too_large', requestId: c.var.requestId }, 413);
   }

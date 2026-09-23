@@ -6,7 +6,11 @@
  */
 
 import { describe, expect, it } from 'vitest';
-import type { FlightKey, ProviderCallRecord } from '@planeahead/shared';
+import {
+  canonicalizeFromProvider,
+  type FlightKey,
+  type ProviderCallRecord,
+} from '@planeahead/shared';
 import specText from '../../src/providers/specs/aerodatabox-direct-v1.15.3.yaml?raw';
 import {
   AERODATABOX_BASE_URL,
@@ -17,6 +21,7 @@ import {
 import { ADB_PLANS } from '../../src/providers/config';
 import airportKjfk from '../../src/providers/fixtures/aerodatabox/airport-kjfk.json';
 import cloudflare403 from '../../src/providers/fixtures/aerodatabox/cloudflare-403.json';
+import fidsKjfkArrivals from '../../src/providers/fixtures/aerodatabox/fids-kjfk-arrivals.json';
 import fidsKjfk from '../../src/providers/fixtures/aerodatabox/fids-kjfk-departures.json';
 import flightArrived from '../../src/providers/fixtures/aerodatabox/flight-arrived.json';
 import flightCancelled from '../../src/providers/fixtures/aerodatabox/flight-cancelled.json';
@@ -25,6 +30,7 @@ import flightCodesharedRegional from '../../src/providers/fixtures/aerodatabox/f
 import flightDelayedGate from '../../src/providers/fixtures/aerodatabox/flight-delayed-gate.json';
 import flightDiverted from '../../src/providers/fixtures/aerodatabox/flight-diverted.json';
 import flightLanded from '../../src/providers/fixtures/aerodatabox/flight-landed.json';
+import flightOvernightBoth from '../../src/providers/fixtures/aerodatabox/flight-overnight-both.json';
 import flightScheduled from '../../src/providers/fixtures/aerodatabox/flight-scheduled.json';
 import healthKjfk from '../../src/providers/fixtures/aerodatabox/health-kjfk.json';
 import legal451 from '../../src/providers/fixtures/aerodatabox/legal-451.json';
@@ -52,6 +58,7 @@ const spec = new OpenApiDoc(specText);
 const FIXTURES: Record<string, Fixture> = {
   'airport-kjfk': airportKjfk,
   'cloudflare-403': cloudflare403,
+  'fids-kjfk-arrivals': fidsKjfkArrivals,
   'fids-kjfk-departures': fidsKjfk,
   'flight-arrived': flightArrived,
   'flight-cancelled': flightCancelled,
@@ -60,6 +67,7 @@ const FIXTURES: Record<string, Fixture> = {
   'flight-delayed-gate': flightDelayedGate,
   'flight-diverted': flightDiverted,
   'flight-landed': flightLanded,
+  'flight-overnight-both': flightOvernightBoth,
   'flight-scheduled': flightScheduled,
   'health-kjfk': healthKjfk,
   'legal-451': legal451,
@@ -81,6 +89,40 @@ function adapter(fetch: ReturnType<typeof fixtureFetch>['fetch'], alertsEnabled 
 }
 
 const AA100 = { carrier: { iata: 'AA' }, flightNumber: '100', dateLocal: '2026-09-22' } as const;
+const KJFK_EVENING = {
+  from: '2026-09-22T17:00',
+  to: '2026-09-23T17:00',
+  tz: 'America/New_York',
+} as const;
+
+/**
+ * A fetch that answers `/flights/Number/{designator}/{date}` from `items` the way the spec says
+ * the gateway does: with `dateLocalRole=Departure` only the flights departing on the date
+ * (origin-local), with `Both` (the default) also those that only ARRIVE on it.
+ */
+function byLocalRole(items: readonly Record<string, unknown>[]) {
+  return fetchStub((request) => {
+    const url = new URL(request.url);
+    const date = url.pathname.split('/').at(-1) ?? '';
+    const role = url.searchParams.get('dateLocalRole') ?? 'Both';
+    const localDate = (movement: unknown): string =>
+      ((movement as { scheduledTime?: { local?: string } }).scheduledTime?.local ?? '').slice(
+        0,
+        10,
+      );
+    const matching = items.filter(
+      (item) =>
+        localDate(item['departure']) === date ||
+        (role === 'Both' && localDate(item['arrival']) === date),
+    );
+    return matching.length === 0
+      ? new Response(null, { status: 204 })
+      : new Response(JSON.stringify(matching), {
+          status: 200,
+          headers: { 'content-type': 'application/json' },
+        });
+  });
+}
 
 describe('the vendored direct-gateway spec', () => {
   it('is the pinned 1.15.3.0 snapshot', async () => {
@@ -174,7 +216,7 @@ describe('fixtures', () => {
 });
 
 describe('getFlight: the request', () => {
-  it('asks /flights/Number/{designator}/{dateLocal} with X-Api-Key and never withFlightPlan', async () => {
+  it('asks /flights/Number/{designator}/{dateLocal} by DEPARTURE date, with X-Api-Key and never withFlightPlan', async () => {
     const stub = fixtureFetch(FIXTURES['flight-delayed-gate'] as Fixture);
     const { ctx } = providerContext({ flightKey: KEY });
     await adapter(stub.fetch).getFlight(AA100, ctx);
@@ -182,11 +224,50 @@ describe('getFlight: the request', () => {
     expect(stub.requests).toHaveLength(1);
     const request = stub.requests[0];
     expect(request?.method).toBe('GET');
-    expect(request?.url).toBe('https://api.aerodatabox.com/flights/Number/AA100/2026-09-22');
+    expect(request?.url).toBe(
+      'https://api.aerodatabox.com/flights/Number/AA100/2026-09-22?dateLocalRole=Departure',
+    );
     expect(request?.headers.get('X-Api-Key')).toBe(API_KEY);
     expect(new URL(request?.url ?? '').searchParams.has('withFlightPlan')).toBe(false);
-    expect([...new URL(request?.url ?? '').searchParams.keys()]).toEqual([]);
+    expect(Object.fromEntries(new URL(request?.url ?? '').searchParams)).toEqual({
+      dateLocalRole: 'Departure',
+    });
+    // The parameter and the value exist on this path in the vendored spec.
+    const parameters =
+      at(spec.root, 'paths', '/flights/{searchBy}/{searchParam}/{dateLocal}', 'get', 'parameters')
+        ?.children ?? [];
+    const role = parameters.find((p) => at(p, 'name')?.value === 'dateLocalRole');
+    expect(at(role, 'in')?.value).toBe('query');
+    expect(listOf(at(spec.schema('FlightDirection'), 'enum'))).toContain('Departure');
   });
+
+  it.each(['alarm', 'reconcile', 'user_refresh', 'provider_alert', 'user_search'] as const)(
+    'an overnight flight: %s gets the departure on the date asked, never the previous night',
+    async (trigger) => {
+      const items = (FIXTURES['flight-overnight-both'] as Fixture).response.body as Record<
+        string,
+        unknown
+      >[];
+      // Without the role the gateway would answer both, the 22nd's departure first.
+      const both = byLocalRole(items);
+      const defaultRole = await both
+        .fetch(new Request('https://api.aerodatabox.com/flights/Number/AA100/2026-09-23'))
+        .then((r) => r.json());
+      expect(defaultRole).toHaveLength(2);
+
+      const stub = byLocalRole(items);
+      const { ctx } = providerContext({ trigger, now: '2026-09-23T02:00:00Z' });
+      const { data, call } = await adapter(stub.fetch).getFlight(
+        { ...AA100, dateLocal: '2026-09-23' },
+        ctx,
+      );
+      expect(stub.requests).toHaveLength(1);
+      expect(call).toMatchObject({ result: 'ok', costUnits: 2 });
+      expect(data.map((flight) => [flight.scheduledDepartureDateLocal, flight.status])).toEqual([
+        ['2026-09-23', 'scheduled'],
+      ]);
+    },
+  );
 
   it('uses the ICAO code when the lookup has no IATA code and normalises the number', async () => {
     const stub = fixtureFetch(FIXTURES['flight-delayed-gate'] as Fixture);
@@ -329,16 +410,65 @@ describe('getFlight: mapping', () => {
     });
   });
 
-  it('a codeshare resolves its operator from the callsign and keeps the marketing identity', async () => {
+  it('a codeshare resolves its operating designator from the callsign and keeps the marketing identity', async () => {
     const { data } = await mapped('flight-codeshared');
     expect(data[0]).toMatchObject({
       operatingCarrierIcao: 'AAL',
       operatorSource: 'callsign',
       marketingCarrierIcao: 'BAW',
       marketingFlightNumber: '1512',
-      flightNumber: '1512',
+      // The callsign AAL100 is the operating designator: carrier AND number.
+      flightNumber: '100',
       codeshares: [],
       providerRefs: { aerodatabox: 'BA1512/2026-09-22' },
+    });
+    expect(canonicalizeFromProvider(data[0] as never)).toBe('AAL-100-2026-09-22-KJFK');
+  });
+
+  it('a callsign codeshare never takes the key of an unrelated flight with the marketing number', async () => {
+    // BA 1512 flown as AAL100, and American's own AA 1512 from the same airport the same day.
+    const codeshare = (await mapped('flight-codeshared')).data[0];
+    const body = (flightCodeshared as Fixture).response.body as Record<string, unknown>[];
+    const realAa1512 = {
+      ...body[0],
+      number: 'AA 1512',
+      callSign: 'AAL1512',
+      codeshareStatus: 'IsOperator',
+      airline: { name: 'American', iata: 'AA', icao: 'AAL' },
+    };
+    const stub = fetchStub(() =>
+      fixtureResponse({
+        ...(flightCodeshared as Fixture),
+        response: { status: 200, body: [realAa1512] },
+      }),
+    );
+    const real = (
+      await adapter(stub.fetch).getFlight(
+        { carrier: { iata: 'AA' }, flightNumber: '1512', dateLocal: '2026-09-22' },
+        providerContext({ flightKey: KEY }).ctx,
+      )
+    ).data[0];
+    const keys = [codeshare, real].map((status) => canonicalizeFromProvider(status as never));
+    expect(keys).toEqual(['AAL-100-2026-09-22-KJFK', 'AAL-1512-2026-09-22-KJFK']);
+    expect(new Set(keys).size).toBe(2);
+  });
+
+  it('an alphanumeric ATC callsign is not a designator: the marketing identity stands', async () => {
+    const body = (flightCodeshared as Fixture).response.body as Record<string, unknown>[];
+    const stub = fetchStub(() =>
+      fixtureResponse({
+        ...(flightCodeshared as Fixture),
+        response: { status: 200, body: [{ ...body[0], callSign: 'AAL12AB' }] },
+      }),
+    );
+    const { data } = await adapter(stub.fetch).getFlight(
+      { carrier: { iata: 'BA' }, flightNumber: '1512', dateLocal: '2026-09-22' },
+      providerContext().ctx,
+    );
+    expect(data[0]).toMatchObject({
+      operatingCarrierIcao: 'BAW',
+      flightNumber: '1512',
+      operatorSource: 'marketing',
     });
   });
 
@@ -414,6 +544,7 @@ describe('getFlight: mapping', () => {
         pollEquivalents: 0.1,
         trigger: 'alarm',
         flightKey: KEY,
+        utcDate: '2026-09-22',
       },
     ]);
   });
@@ -487,14 +618,22 @@ describe('getFlight: misses, suppression and push-back', () => {
     expect(recorder.logged.map((r) => r.result)).toEqual(['not_found']);
   });
 
-  it('an empty array is a miss like a 204', async () => {
+  it("an empty array is a billed not_found, like a 204 (and like AeroAPI's empty result set)", async () => {
     const stub = fetchStub(() =>
       fixtureResponse({ ...(miss204 as Fixture), response: { status: 200, body: [] } }),
     );
     const { ctx } = providerContext();
     const { data, call } = await adapter(stub.fetch).getFlight(AA100, ctx);
     expect(data).toEqual([]);
-    expect(call).toMatchObject({ result: 'ok', costUnits: 2 });
+    expect(call).toMatchObject({ result: 'not_found', httpStatus: 200, costUnits: 2 });
+    // Retried on a search: every empty 200 the adapter records itself says not_found too.
+    const recorder = providerContext({ trigger: 'user_search' });
+    const retried = await adapter(stub.fetch).getFlight(AA100, recorder.ctx);
+    expect([...recorder.logged, retried.call].map((r) => r.result)).toEqual([
+      'not_found',
+      'not_found',
+      'not_found',
+    ]);
   });
 
   it('451 is terminal: billed, an error, never retried even for a search', async () => {
@@ -588,7 +727,7 @@ describe('getFlight: misses, suppression and push-back', () => {
     });
   });
 
-  it('a transport failure is an unbilled error and releases the reservation', async () => {
+  it('a rejected fetch keeps its reservation and is billed: the gateway may have served it', async () => {
     const stub = fetchStub(() => {
       throw new TypeError('network connection lost');
     });
@@ -596,10 +735,21 @@ describe('getFlight: misses, suppression and push-back', () => {
     const { call } = await adapter(stub.fetch).getFlight(AA100, recorder.ctx);
     expect(call).toMatchObject({
       result: 'error',
-      costUnits: 0,
-      error: 'transport:network connection lost',
+      costUnits: 2,
+      estCostUsdMicros: 500,
+      error: 'transport_unknown_billing:network connection lost',
     });
-    expect(recorder.releases).toHaveLength(1);
+    expect(recorder.reservations).toHaveLength(1);
+    expect(recorder.releases).toEqual([]);
+  });
+
+  it('names the budget day on every reservation, so a refund after midnight finds it', async () => {
+    const recorder = providerContext({ now: '2026-09-22T23:59:59.900Z' });
+    await adapter(fixtureFetch(FIXTURES['flight-scheduled'] as Fixture).fetch).getFlight(
+      AA100,
+      recorder.ctx,
+    );
+    expect(recorder.reservations[0]).toMatchObject({ utcDate: '2026-09-22' });
   });
 });
 
@@ -607,12 +757,7 @@ describe('boards, airports and coverage', () => {
   it('getBoard asks FIDS by ICAO, caps the window at the plan, maps rows and skips the unkeyable', async () => {
     const stub = fixtureFetch(FIXTURES['fids-kjfk-departures'] as Fixture);
     const { ctx } = providerContext({ now: '2026-09-22T22:40:00Z' });
-    const { data, call } = await adapter(stub.fetch).getBoard(
-      'kjfk',
-      'dep',
-      { from: '2026-09-22T17:00', to: '2026-09-23T17:00' },
-      ctx,
-    );
+    const { data, call } = await adapter(stub.fetch).getBoard('kjfk', 'dep', KJFK_EVENING, ctx);
     const url = stub.urls()[0];
     // Growth allows 24 hours; the 24-hour ask stays, anything longer is cut.
     expect(url?.pathname).toBe('/flights/airports/Icao/KJFK/2026-09-22T17:00/2026-09-23T17:00');
@@ -629,13 +774,15 @@ describe('boards, airports and coverage', () => {
       data.map((row) => [
         row.designator,
         row.operatingCarrierIcao,
+        row.flightNumber,
         row.counterpart.icao,
         row.status,
       ]),
     ).toEqual([
-      ['AA100', 'AAL', 'EGLL', 'boarding'],
-      ['BA1512', 'AAL', 'EGLL', 'boarding'],
-      ['AF11', 'AFR', 'LFPG', 'departed'],
+      ['AA100', 'AAL', '100', 'EGLL', 'boarding'],
+      // The codeshare row names the operating designator its tracker is keyed by (AAL-100-...).
+      ['BA1512', 'AAL', '100', 'EGLL', 'boarding'],
+      ['AF11', 'AFR', '11', 'LFPG', 'departed'],
     ]);
     expect(data[0]).toMatchObject({
       estimated: '2026-09-22T23:10:00.000Z',
@@ -648,13 +795,48 @@ describe('boards, airports and coverage', () => {
     await adapter(wide.fetch).getBoard(
       'KJFK',
       'arr',
-      { from: '2026-09-22T00:00', to: '2026-09-24T00:00' },
+      { from: '2026-09-22T00:00', to: '2026-09-24T00:00', tz: 'America/New_York' },
       ctx,
     );
     expect(wide.urls()[0]?.pathname).toBe(
       '/flights/airports/Icao/KJFK/2026-09-22T00:00/2026-09-23T00:00',
     );
     expect(wide.urls()[0]?.searchParams.get('direction')).toBe('Arrival');
+  });
+
+  it('arrival rows derive their status from what an arrival row has, and resolve operators like flights', async () => {
+    const stub = fixtureFetch(FIXTURES['fids-kjfk-arrivals'] as Fixture);
+    const { data } = await adapter(stub.fetch).getBoard(
+      'KJFK',
+      'arr',
+      KJFK_EVENING,
+      providerContext({ now: '2026-09-22T21:30:00Z' }).ctx,
+    );
+    expect(
+      data.map((row) => [row.designator, row.operatingCarrierIcao, row.flightNumber, row.status]),
+    ).toEqual([
+      // In the air (the enum says it left the origin), with an estimated arrival: en route.
+      ['AA101', 'AAL', '101', 'en_route'],
+      // At the gate: the revised time is the actual in.
+      ['BA117', 'BAW', '117', 'arrived'],
+      // A regional codeshare with no callsign takes the hint, exactly as getFlight does.
+      ['AA3456', 'ENY', '3456', 'scheduled'],
+      ['DL404', 'DAL', '404', 'cancelled'],
+    ]);
+    expect(data[0]).toMatchObject({ estimated: '2026-09-22T22:05:00.000Z' });
+    expect(data[0]?.actual).toBeUndefined();
+    expect(data[1]).toMatchObject({ actual: '2026-09-22T20:52:00.000Z', baggageClaim: '4' });
+    // The row and the flight for the same operation resolve to the same operator.
+    const flight = await adapter(
+      fixtureFetch(FIXTURES['flight-codeshared-regional'] as Fixture).fetch,
+    ).getFlight(
+      { carrier: { iata: 'AA' }, flightNumber: '3456', dateLocal: '2026-09-22' },
+      providerContext().ctx,
+    );
+    expect([flight.data[0]?.operatingCarrierIcao, flight.data[0]?.flightNumber]).toEqual([
+      data[2]?.operatingCarrierIcao,
+      data[2]?.flightNumber,
+    ]);
   });
 
   it('getAirport is one unit and yields the time zone', async () => {
@@ -689,6 +871,11 @@ describe('boards, airports and coverage', () => {
 
 describe('webhook parsing (behind ADB_ALERTS_ENABLED)', () => {
   const body = JSON.stringify((notification as Fixture).response.body);
+  const NOTIFICATION_ATTEMPT = (
+    (notification as Fixture).response.body as {
+      deliveryAttempt: { seqNo: number; costCredits: number };
+    }
+  ).deliveryAttempt;
 
   it('refuses every body while alerts are disabled', async () => {
     const disabled = adapter(fixtureFetch(miss204).fetch, false);
@@ -714,9 +901,32 @@ describe('webhook parsing (behind ADB_ALERTS_ENABLED)', () => {
           notificationId: '4d1f6c52-2d0b-4c9b-9a55-0c1f5b8e2a71',
           subscriptionId: 'a3c8e1b2-7f44-4f0e-9c1d-2b6f8a9e0d13',
           lastUpdatedUtc: '2026-09-22 20:45Z',
+          deliverySeqNo: NOTIFICATION_ATTEMPT.seqNo,
+          deliveryItemCount: 1,
+          deliveryCostCredits: NOTIFICATION_ATTEMPT.costCredits,
         },
       },
     ]);
+  });
+
+  it("carries the delivery's billed credits once per notification, however many items it holds", () => {
+    const payload = (notification as Fixture).response.body as {
+      flights: Record<string, unknown>[];
+    };
+    const second = { ...payload.flights[0], number: 'AA 102' };
+    const events = parseAdbNotification(
+      { ...payload, flights: [payload.flights[0], second] },
+      new Date('2026-09-22T20:45:30Z'),
+    );
+    expect(events.map((event) => event.payload)).toEqual([
+      containing({
+        deliverySeqNo: NOTIFICATION_ATTEMPT.seqNo,
+        deliveryItemCount: 2,
+        deliveryCostCredits: NOTIFICATION_ATTEMPT.costCredits,
+      }),
+      containing({ deliverySeqNo: NOTIFICATION_ATTEMPT.seqNo, deliveryItemCount: 2 }),
+    ]);
+    expect(events[1]?.payload).not.toHaveProperty('deliveryCostCredits');
   });
 
   it.each([

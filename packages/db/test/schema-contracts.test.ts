@@ -408,18 +408,10 @@ describe('agreement with @planeahead/shared', () => {
     }
   });
 
-  it('alert events: the check constraint accepts every shared event, plus the two increment 6 retired', () => {
-    // Increment 6 removed hold_start and hold_end from the shared vocabulary (AeroAPI 4.17.1 has
-    // no such events). A closed vocabulary shrinks producer-first: nothing writes them any more,
-    // and the constraint in migration 0000 keeps accepting them until a later schema migration
-    // drops them. Only those two may differ.
-    for (const event of ALERT_EVENTS) {
-      expect(schema.ALERT_EVENTS).toContain(event);
-    }
-    expect(schema.ALERT_EVENTS.filter((event) => !ALERT_EVENTS.includes(event as never))).toEqual([
-      'hold_start',
-      'hold_end',
-    ]);
+  it('alert events: the check constraint accepts exactly the nine shared events', () => {
+    // Increment 6 removed hold_start and hold_end (AeroAPI 4.17.1 has no hold events) from the
+    // shared vocabulary and from this mirror, and regenerated migration 0000 to match.
+    expect([...schema.ALERT_EVENTS]).toEqual([...ALERT_EVENTS]);
   });
 
   it('user preference enumerations match the shared UserPreferencesSchema', () => {

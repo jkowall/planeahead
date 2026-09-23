@@ -21,6 +21,7 @@ import type { Context, MiddlewareHandler } from 'hono';
 import { createMiddleware } from 'hono/factory';
 import type { AppBindings, Env } from '../env';
 import { createLogger } from '../observability/log';
+import { WEBHOOK_PATH_PREFIX } from '../providers/webhook-token';
 
 export interface RateLimitOutcome {
   readonly success: boolean;
@@ -100,6 +101,11 @@ export function rateLimit(options: RateLimitOptions): MiddlewareHandler<AppBindi
  * When there is no client IP (local dev, the test pool) the request is skipped rather than
  * bucketed under a shared placeholder key, which would make one developer's machine rate limit
  * itself.
+ *
+ * The provider webhook receivers (`/v1/webhooks/`) are exempt (orchestrator ruling I2): a
+ * provider delivers from a few shared addresses, so a per-IP brake would drop real deliveries
+ * before it slowed an attacker, and the receivers are guarded by a 256-bit path token instead.
+ * docs/security/threat-model.md records what that trades away.
  */
 export function ipLimiter(
   limiter: LimiterSelector = (env) => env.PUBLIC_RL,
@@ -108,6 +114,9 @@ export function ipLimiter(
     name: 'PUBLIC_RL',
     limiter,
     key: (c) => {
+      if (new URL(c.req.url).pathname.startsWith(WEBHOOK_PATH_PREFIX)) {
+        return null;
+      }
       const ip = clientIp(c);
       return ip === null ? null : `ip:${ip}`;
     },

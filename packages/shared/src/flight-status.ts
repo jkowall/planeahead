@@ -165,8 +165,9 @@ export const AeroApiEventCodeSchema = tolerantEnum([...AEROAPI_EVENT_CODES, 'unk
  * Where the operating carrier in a flight key came from (ADR 0010). AeroDataBox never names an
  * operator, so the key carries the best-known operator at creation and records how it was
  * decided: `provider` (the provider says the marketing carrier operates it), `callsign` (the ATC
- * callsign's three-letter prefix on a codeshare), `hint` (the regional operator hint table) or
- * `marketing` (nothing better was known). Mirrored by `flight_instances.operator_source`.
+ * callsign on a codeshare, read as the operating designator: its carrier and its number), `hint`
+ * (the regional operator hint table) or `marketing` (nothing better was known). Mirrored by
+ * `flight_instances.operator_source`.
  */
 export const OPERATOR_SOURCES = ['provider', 'callsign', 'hint', 'marketing'] as const;
 export const OperatorSourceSchema = z.enum(OPERATOR_SOURCES);
@@ -273,6 +274,11 @@ export type ProviderRef = z.infer<typeof ProviderRefSchema>;
 export const FlightStatusSchema = z.looseObject({
   key: FlightKeySchema.optional(),
   operatingCarrierIcao: z.string().regex(ICAO_CARRIER_RE),
+  /**
+   * The number that goes with `operatingCarrierIcao`, together the operating designator the key
+   * is built from: a callsign's own number when the operator came from a callsign (ADR 0010),
+   * otherwise the marketing number.
+   */
   flightNumber: z.string().regex(FLIGHT_NUMBER_RE),
   legSeq: z.int().min(1).default(1),
   scheduledDepartureDateLocal: IsoDateSchema.optional(),
@@ -315,7 +321,12 @@ export const BoardRowSchema = z.looseObject({
   direction: z.enum(['dep', 'arr']),
   /** Marketing designator as displayed on the board, e.g. `AA100`. */
   designator: z.string().min(3),
+  /** Resolved like `FlightStatus.operatingCarrierIcao` (ADR 0010); absent when unknowable. */
   operatingCarrierIcao: z.string().regex(ICAO_CARRIER_RE).optional(),
+  /**
+   * The number that goes with `operatingCarrierIcao` (the operating designator, so a board row
+   * matches its tracker's key), or the marketing number when there is no operator.
+   */
   flightNumber: z.string().regex(FLIGHT_NUMBER_RE),
   /** The other end of the flight: destination for departures, origin for arrivals. */
   counterpart: AirportRefSchema,

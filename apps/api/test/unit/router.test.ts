@@ -6,17 +6,23 @@
 
 import { describe, expect, it } from 'vitest';
 import {
+  A2_EXPECTED_POLLS,
   CADENCES,
+  CADENCE_A2,
   DAY_MS,
   MINUTE_MS,
   refreshIntervalFor,
   windowAt,
   type CadenceContext,
+  type CadenceDefinition,
   type FlightDataProvider,
+  type FlightKey,
   type TrackerPhase,
 } from '@planeahead/shared';
-import { AeroApiAdapter } from '../../src/providers/aeroapi.mock';
+import { AeroApiAdapter, AeroApiAlertError, bracketWindow } from '../../src/providers/aeroapi.mock';
 import { AeroDataBoxAdapter } from '../../src/providers/aerodatabox.adapter';
+import { AEROAPI_STANDARD } from '../../src/providers/config';
+import { verifyPathToken } from '../../src/routes/webhooks';
 import {
   AEROAPI_EARLIEST_MINUTES_BEFORE_OUT,
   ProviderConfigError,
@@ -74,9 +80,13 @@ function contextAt(t: number): CadenceContext {
 }
 
 /** Walks a tracker from creation to the end of its cadence, routing every poll. */
-function walk(env: RouterEnv, leadDays: number): { calls: { at: number; provider: string }[] } {
+function walk(
+  env: RouterEnv,
+  leadDays: number,
+  cadences: readonly CadenceDefinition[] = CADENCES,
+): { calls: { at: number; provider: string }[] } {
   const calls: { at: number; provider: string }[] = [];
-  for (const cadence of CADENCES) {
+  for (const cadence of cadences) {
     let t = OUT - leadDays * DAY_MS;
     const first = windowAt(cadence, contextAt(t));
     if (first !== null) {
@@ -130,16 +140,43 @@ describe('providerFor', () => {
     const live = walk(LIVE, 30).calls;
     expect(live.some((c) => c.provider === 'aeroapi' && c.at >= edge)).toBe(true);
     expect(live.filter((c) => c.at < edge).length).toBeGreaterThan(0);
+    // The cadence's first AeroAPI slot is exactly T-48 h, the horizon itself: AeroDataBox serves
+    // it, so a live A2 flight makes one AeroAPI poll fewer than A2_EXPECTED_POLLS
+    // (docs/architecture.md says so under the pre-48 h table).
+    const a2 = walk(LIVE, 30, [CADENCE_A2]).calls;
+    expect(a2.find((c) => c.at === edge)?.provider).toBe('aerodatabox');
+    expect(a2.filter((c) => c.provider === 'aeroapi')).toHaveLength(A2_EXPECTED_POLLS - 1);
   });
 
   it('refuses an AeroAPI window asked for too early, or without saying when, in live mode', () => {
-    const early = { scheduledOut: new Date(OUT), now: new Date(OUT - 49 * 60 * MINUTE_MS) };
-    const inside = { scheduledOut: new Date(OUT), now: new Date(OUT - 48 * 60 * MINUTE_MS) };
+    const at = (minutesBefore: number, extraMs = 0) => ({
+      scheduledOut: new Date(OUT),
+      now: new Date(OUT - minutesBefore * MINUTE_MS + extraMs),
+    });
+    const early = at(49 * 60);
+    // Exactly T-48 h is the horizon itself: the flight is outside every window AeroAPI accepts
+    // (the end is exclusive), so the cadence's first AeroAPI slot is AeroDataBox's.
+    const edge = at(48 * 60);
+    const withinMargin = at(48 * 60, AEROAPI_STANDARD.horizonMarginMs - 1_000);
+    const inside = at(48 * 60, AEROAPI_STANDARD.horizonMarginMs);
     expect(aeroApiAllowedAt(early)).toBe(false);
+    expect(aeroApiAllowedAt(edge)).toBe(false);
+    expect(aeroApiAllowedAt(at(48 * 60, 400))).toBe(false);
+    expect(aeroApiAllowedAt(withinMargin)).toBe(false);
     expect(aeroApiAllowedAt(inside)).toBe(true);
     expect(providerFor('aeroapi', LIVE, DEPS, early).id).toBe('aerodatabox');
+    expect(providerFor('aeroapi', LIVE, DEPS, edge).id).toBe('aerodatabox');
     expect(providerFor('aeroapi', LIVE, DEPS, inside).id).toBe('aeroapi');
     expect(() => providerFor('aeroapi', LIVE, DEPS)).toThrow(ProviderConfigError);
+    // The guard and the bracket agree at every instant around the edge: whenever the router
+    // allows AeroAPI, the adapter's first fetch contains the flight.
+    for (let offset = -2 * MINUTE_MS; offset <= 10 * MINUTE_MS; offset += 500) {
+      const instant = at(48 * 60, offset);
+      expect(aeroApiAllowedAt(instant), String(offset)).toBe(
+        bracketWindow(instant.scheduledOut, instant.now) !== null,
+      );
+    }
+    expect(AEROAPI_EARLIEST_MINUTES_BEFORE_OUT).toBe(AEROAPI_STANDARD.maxDaysAhead * 24 * 60);
   });
 
   it('builds the real adapters from the environment and refuses a missing key', () => {
@@ -158,14 +195,41 @@ describe('providerFor', () => {
     ).toThrow(ProviderConfigError);
   });
 
-  it('builds the per-alert target_url from the public URL and the environment token', () => {
+  it('builds the per-alert target_url from the public URL and a token the receiver accepts', () => {
+    const token = 'gj_nWrnU5i8Hglvb7XEMfwCv186gO2tY84E11Gws6tM';
+    expect(verifyPathToken(token, token)).toBe(true);
     expect(
       aeroApiAlertTargetUrl({
         API_PUBLIC_URL: 'https://api-staging.planeahead.app/',
-        WEBHOOK_TOKEN_AEROAPI: 'tok',
+        WEBHOOK_TOKEN_AEROAPI: token,
       }),
-    ).toBe('https://api-staging.planeahead.app/v1/webhooks/aeroapi/tok');
+    ).toBe(`https://api-staging.planeahead.app/v1/webhooks/aeroapi/${token}`);
     expect(aeroApiAlertTargetUrl({ API_PUBLIC_URL: 'https://x.test' })).toBeUndefined();
+    // A token the receiver would refuse never becomes a target_url: every delivery to it, each
+    // billed, would be answered 404 by our own route.
+    for (const refused of ['', 'tok', 'dev-token-123', `${token}x`]) {
+      expect(verifyPathToken(refused, refused)).toBe(false);
+      expect(
+        aeroApiAlertTargetUrl({ API_PUBLIC_URL: 'https://x.test', WEBHOOK_TOKEN_AEROAPI: refused }),
+        refused,
+      ).toBeUndefined();
+    }
+  });
+
+  it('the adapter built for a malformed token refuses to register an alert, loudly', async () => {
+    const aeroapi = providerFor(
+      'aeroapi',
+      { ...LIVE, API_PUBLIC_URL: 'https://x.test', WEBHOOK_TOKEN_AEROAPI: 'dev-token-123' },
+      {},
+      { scheduledOut: new Date(OUT), now: new Date(OUT) },
+    );
+    await expect(
+      aeroapi.registerAlert?.(
+        'AAL-100-2026-09-30-KJFK' as FlightKey,
+        { events: ['out'], maxWeekly: 1 },
+        providerContext().ctx,
+      ),
+    ).rejects.toThrow(AeroApiAlertError);
   });
 
   it('attributes cost to the provider that answered, not to the window it served', async () => {

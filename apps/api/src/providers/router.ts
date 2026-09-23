@@ -11,7 +11,15 @@
  *   2. Zero AeroAPI calls before T-48 h, in every mode. AeroAPI cannot see a flight more than two
  *      days out and its `/schedules` carries no status at four times the price (facts sheet
  *      section 2), so a pre-48 h window, or an AeroAPI window asked for too early, goes to
- *      AeroDataBox. `test/unit/router.test.ts` walks every cadence to prove it.
+ *      AeroDataBox. The guard is STRICT, with `AEROAPI_STANDARD.horizonMarginMs` of margin: at
+ *      exactly T-48 h (the first slot of every cadence's AeroAPI window) the flight sits on
+ *      AeroAPI's exclusive 2-day horizon and no window it accepts contains it, so that slot is
+ *      AeroDataBox's too. `test/unit/router.test.ts` walks every cadence to prove it.
+ *
+ * The contract a caller (the FlightTracker, increment 7) can rely on for cost: `getFlight` is ONE
+ * billed call per lookup on a tracker's own triggers (`alarm`, `reconcile`, `user_refresh`,
+ * `provider_alert`). Only a person-supplied date (`user_search`, `import`) buys AeroDataBox's
+ * plus or minus one day retry, up to three calls. A tracker alarm never pays for three.
  *
  * The router is also the composition root for the adapters: it reads the keys and settings from
  * the environment, and supplies the one wall clock (`now`) and the one `fetch`. Nothing else in
@@ -20,14 +28,23 @@
 
 import type { CadenceSource, FlightDataProvider } from '@planeahead/shared';
 import type { Env } from '../env';
-import { AeroApiAdapter } from './aeroapi.mock';
+import { AeroApiAdapter, bracketWindow } from './aeroapi.mock';
 import { AeroDataBoxAdapter } from './aerodatabox.adapter';
 import { ProviderBudgetGuard, type ProviderBudgetRpc } from './budget';
-import { providerSettings, type ProviderSettings, type ProviderSettingsEnv } from './config';
+import {
+  AEROAPI_STANDARD,
+  providerSettings,
+  type ProviderSettings,
+  type ProviderSettingsEnv,
+} from './config';
 import type { ProviderFetch } from './http';
+import { isWellFormedWebhookToken } from './webhook-token';
 
-/** AeroAPI is never asked about a flight before this many minutes ahead of scheduled out. */
-export const AEROAPI_EARLIEST_MINUTES_BEFORE_OUT = 48 * 60;
+/**
+ * AeroAPI's horizon in minutes before scheduled out (T-48 h), derived from its 2-day lookahead.
+ * AeroAPI is asked only STRICTLY inside it, by at least `AEROAPI_STANDARD.horizonMarginMs`.
+ */
+export const AEROAPI_EARLIEST_MINUTES_BEFORE_OUT = AEROAPI_STANDARD.maxDaysAhead * 24 * 60;
 
 export interface RouterEnv extends ProviderSettingsEnv {
   readonly AERODATABOX_API_KEY?: string | undefined;
@@ -64,11 +81,17 @@ function defaultNow(): Date {
   return new Date();
 }
 
-/** The per-alert `target_url` for this environment, or undefined when it cannot be built. */
+/**
+ * The per-alert `target_url` for this environment (also the account-wide endpoint the adapter
+ * sets before its first alert), or undefined when it cannot be built. The token must have the
+ * shape the receiver accepts (`isWellFormedWebhookToken`): a URL with any other token would have
+ * every delivery, each billed, answered 404 by our own route, so the adapter is refused one and
+ * `registerAlert` fails loudly instead.
+ */
 export function aeroApiAlertTargetUrl(env: RouterEnv): string | undefined {
   const base = env.API_PUBLIC_URL;
   const token = env.WEBHOOK_TOKEN_AEROAPI;
-  if (base === undefined || token === undefined || token === '') {
+  if (base === undefined || !isWellFormedWebhookToken(token)) {
     return undefined;
   }
   return `${base.replace(/\/+$/, '')}/v1/webhooks/aeroapi/${token}`;
@@ -113,11 +136,16 @@ export function aeroapiFor(env: RouterEnv, deps: RouterDeps = {}): FlightDataPro
   });
 }
 
-/** True when AeroAPI may be asked about a flight at `at` (inside T-48 h). */
+/**
+ * True when AeroAPI may be asked about a flight at `at`: strictly inside T-48 h, by at least
+ * `AEROAPI_STANDARD.horizonMarginMs` (to the whole second AeroAPI's `end` is sent in). At T-48 h
+ * itself the flight is on AeroAPI's exclusive horizon and outside every window it accepts; asked
+ * then, it would answer with the previous day's instance at the window's inclusive start.
+ * Defined as "the adapter's first fetch would contain the flight" (`bracketWindow`), so the guard
+ * and the bracket cannot disagree at any instant.
+ */
 export function aeroApiAllowedAt(at: RoutingInstant): boolean {
-  return (
-    at.now.getTime() >= at.scheduledOut.getTime() - AEROAPI_EARLIEST_MINUTES_BEFORE_OUT * 60_000
-  );
+  return bracketWindow(at.scheduledOut, at.now) !== null;
 }
 
 /**

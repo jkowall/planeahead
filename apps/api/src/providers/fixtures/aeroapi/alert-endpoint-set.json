@@ -1,0 +1,13 @@
+{
+  "synthetic": true,
+  "spec": "specs/aeroapi-v4.17.1.yaml",
+  "schema": null,
+  "note": "PUT /alerts/endpoint answers 204 with no body: the account-wide default URL is set. The spec requires it before any POST /alerts.",
+  "request": {
+    "method": "PUT",
+    "path": "/alerts/endpoint"
+  },
+  "response": {
+    "status": 204
+  }
+}

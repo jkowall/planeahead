@@ -1,0 +1,20 @@
+{
+  "synthetic": true,
+  "spec": "specs/aeroapi-v4.17.1.yaml",
+  "schema": "Error",
+  "note": "UNVERIFIED wording: POST /alerts before PUT /alerts/endpoint. The spec's alerts tag says the 400 carries 'an error message reminding you of this step' and does not quote it.",
+  "request": {
+    "method": "POST",
+    "path": "/alerts"
+  },
+  "response": {
+    "status": 400,
+    "contentType": "application/json; charset=UTF-8",
+    "body": {
+      "title": "Invalid argument",
+      "reason": "INVALID_ARGUMENT",
+      "detail": "An alert endpoint must be configured with PUT /alerts/endpoint before alerts can be created",
+      "status": 400
+    }
+  }
+}

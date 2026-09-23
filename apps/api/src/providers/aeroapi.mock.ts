@@ -11,21 +11,38 @@
  *   - Auth header `x-apikey`; `ident_type` is `designator | registration | fa_flight_id`.
  *   - The FIRST fetch for a flight is a designator lookup bracketed around `scheduled_out`
  *     plus or minus one day (`start` inclusive, `end` exclusive, clamped to 10 days back and 2
- *     days ahead). Every LATER poll asks by `fa_flight_id` with `max_pages=1`, so one poll is
- *     exactly one billed result set.
+ *     days ahead). The clamped window must still CONTAIN the flight, with margin
+ *     (`AEROAPI_STANDARD.horizonMarginMs` before the exclusive end, the start at or before it);
+ *     otherwise nothing is sent. A clamped window that lost the flight still holds the previous
+ *     day's instance at its inclusive start, and that is what AeroAPI would bill and answer. Of
+ *     what comes back, only the instance nearest `scheduled_out` (within 12 h) is returned, since
+ *     the bracket spans two same-numbered departures a day apart. Every LATER poll asks by
+ *     `fa_flight_id` with `max_pages=1`, so one poll is exactly one billed result set.
  *   - A diverted flight comes back as two items with ONE `fa_flight_id`: the original leg and
  *     the diversion. Both are returned; the diversion leg carries `actualDestination`.
  *   - `status` has no enum and no example anywhere in the spec, so it is never read: the status
  *     is derived from the `cancelled` and `diverted` flags and the OOOI times (`deriveStatus`).
- *   - Every non-200 is billed in the ledger until FlightAware confirms otherwise (owner task).
- *   - Alerts: `registerAlert` sends the nine event booleans and a MANDATORY per-alert
- *     `target_url`; the account-wide `PUT /alerts/endpoint` is shared by every environment on one
- *     key and is never used. `max_weekly` is a creation-time rejection threshold and not a spend
- *     cap: deliveries are counted in our own ledger and the alert is deleted when the budget says
- *     so. The id comes from the 201 `Location` header; there is no body.
+ *   - Every non-200 is billed in the ledger until FlightAware confirms otherwise (owner task), and
+ *     so is a `fetch` that rejects (`transport_unknown_billing`): it may have been served.
+ *   - Alerts follow both halves of FlightAware's contract (orchestrator ruling I7). The spec's
+ *     alerts tag says `PUT /alerts/endpoint` "must first be used ... before any alerts can be
+ *     configured", or `POST /alerts` answers 400. So `registerAlert` first makes sure the
+ *     account-wide endpoint is set, with an idempotent PUT of this environment's own
+ *     token-bearing webhook URL (a zero-cost `alert_manage` call, at most once per isolate), and
+ *     then posts the alert with the nine event booleans and a MANDATORY per-alert `target_url`
+ *     (the same URL), so a delivery never depends on the account default, which every environment
+ *     on one key shares. Whether staging and production need separate AeroAPI keys is an open
+ *     owner decision (ADR 0010). `max_weekly` is a creation-time rejection threshold and not a
+ *     spend cap: deliveries are counted in our own ledger and the alert is deleted when the
+ *     budget says so. The id comes from the 201 `Location` header; there is no body.
  *   - A delivery's `event_code` is one of 18 values and may grow: it is mapped tolerantly. Its
  *     `flight` object has no timezone and no status, so it is merged onto the last polled
  *     snapshot (`mergeAeroApiAlert`), never treated as a full status.
+ *   - Boards take the shared `BoardWindow` (airport-local wall clock plus the airport's zone) and
+ *     convert it to UTC. AeroAPI's `departures` and `arrivals` select flights by their ACTUAL off
+ *     or on time (already departed, already landed), unlike AeroDataBox FIDS, which selects by
+ *     schedule: an AeroAPI board of a future window is empty. `scheduled_departures` and
+ *     `scheduled_arrivals` would answer that and are priced apart; Phase 1 decides.
  */
 
 import { z } from 'zod';
@@ -50,6 +67,7 @@ import {
   type AlertEvent,
   type AlertRegistrationOptions,
   type BoardRow,
+  type BoardWindow,
   type CarrierIataToIcaoTable,
   type Codeshare,
   type Exact,
@@ -58,6 +76,7 @@ import {
   type FlightKey,
   type FlightLookup,
   type FlightStatus,
+  type FlightStatusValue,
   type FlightTimeField,
   type FlightTimes,
   type ProviderCallContext,
@@ -83,7 +102,14 @@ import {
 export const AEROAPI_BASE_URL = 'https://aeroapi.flightaware.com/aeroapi/';
 
 const DAY_MS = 86_400_000;
+const HOUR_MS = 3_600_000;
 const STATUTE_MILE_KM = 1.609_344;
+
+/**
+ * The bracket spans two same-numbered departures a day apart; an item is the flight asked about
+ * only when its `scheduled_out` lies within half that spacing of the one asked for.
+ */
+export const AEROAPI_INSTANCE_MATCH_MS = 12 * HOUR_MS;
 
 /** Wait after a 429 when FlightAware sends no `Retry-After` (the spec documents none). */
 export const AEROAPI_DEFAULT_BACKOFF_MS = 1_000;
@@ -205,26 +231,61 @@ function isoSeconds(ms: number): string {
 }
 
 /**
+ * The earliest `start` AeroAPI accepts at `now`, kept `pastLimitMarginMs` inside its 10-day limit
+ * and rounded UP to a whole second: `isoSeconds` truncates, and a start truncated past the limit
+ * (or reaching FlightAware a few hundred milliseconds later than `now`) is a billed 400.
+ */
+function earliestStartMs(nowMs: number): number {
+  const limit =
+    nowMs - AEROAPI_STANDARD.maxDaysBehind * DAY_MS + AEROAPI_STANDARD.pastLimitMarginMs;
+  return Math.ceil(limit / 1_000) * 1_000;
+}
+
+/** The latest exclusive `end` AeroAPI accepts at `now`, rounded down to a whole second. */
+function latestEndMs(nowMs: number): number {
+  return Math.floor((nowMs + AEROAPI_STANDARD.maxDaysAhead * DAY_MS) / 1_000) * 1_000;
+}
+
+/**
+ * `[start, end)` clamped to what AeroAPI accepts, and only when the flight at `centerMs` is still
+ * inside it: at or after the inclusive start, and at least `horizonMarginMs` before the exclusive
+ * end. Null otherwise, and then nothing is sent (an unbilled `outside_aeroapi_window` record).
+ */
+function containingWindow(
+  startMs: number,
+  endMs: number,
+  centerMs: number,
+  nowMs: number,
+): BracketWindow | null {
+  const start = Math.max(startMs, earliestStartMs(nowMs));
+  const end = Math.min(endMs, latestEndMs(nowMs));
+  if (start > centerMs || end - centerMs < AEROAPI_STANDARD.horizonMarginMs) {
+    return null;
+  }
+  return { start: isoSeconds(start), end: isoSeconds(end) };
+}
+
+/**
  * The first fetch's window: `scheduled_out` plus or minus one day, clamped to what AeroAPI
- * accepts (no further than 10 days back and 2 days ahead of `now`). Null when nothing of the
- * window is reachable, which is the case for every flight more than 3 days out: AeroAPI cannot
- * see it, which is why the cadence never routes a pre-48 h window here.
+ * accepts (no further than 10 days back and 2 days ahead of `now`), and null unless the flight
+ * itself is still inside the clamped window (see `containingWindow`). That makes it null for
+ * every flight at or beyond T-48 h less the margin: AeroAPI cannot see it, which is why the
+ * router never sends such a lookup here.
  */
 export function bracketWindow(center: Date | string, now: Date): BracketWindow | null {
   const centerMs = center instanceof Date ? center.getTime() : Date.parse(center);
   if (Number.isNaN(centerMs)) {
     return null;
   }
-  const nowMs = now.getTime();
-  const start = Math.max(centerMs - DAY_MS, nowMs - AEROAPI_STANDARD.maxDaysBehind * DAY_MS);
-  const end = Math.min(centerMs + DAY_MS, nowMs + AEROAPI_STANDARD.maxDaysAhead * DAY_MS);
-  return start < end ? { start: isoSeconds(start), end: isoSeconds(end) } : null;
+  return containingWindow(centerMs - DAY_MS, centerMs + DAY_MS, centerMs, now.getTime());
 }
 
 /**
  * The window when only the origin-local date is known (a designator search before any
  * `scheduled_out` exists): the local day lies inside `[date 00:00Z - 14 h, date 24:00Z + 12 h)`
  * in every zone from UTC+14 to UTC-12, so that span is asked for, clamped like `bracketWindow`.
+ * The span covers more than one local day, so the adapter keeps only the items whose origin-local
+ * departure date is the one asked for.
  */
 export function bracketLocalDate(dateLocal: string, now: Date): BracketWindow | null {
   const midnight = Date.parse(`${dateLocal}T00:00:00Z`);
@@ -232,15 +293,55 @@ export function bracketLocalDate(dateLocal: string, now: Date): BracketWindow | 
     return null;
   }
   const nowMs = now.getTime();
-  const start = Math.max(
-    midnight - 14 * 3_600_000,
-    nowMs - AEROAPI_STANDARD.maxDaysBehind * DAY_MS,
-  );
-  const end = Math.min(
-    midnight + DAY_MS + 12 * 3_600_000,
-    nowMs + AEROAPI_STANDARD.maxDaysAhead * DAY_MS,
-  );
+  const start = Math.max(midnight - 14 * HOUR_MS, earliestStartMs(nowMs));
+  const end = Math.min(midnight + DAY_MS + 12 * HOUR_MS, latestEndMs(nowMs));
   return start < end ? { start: isoSeconds(start), end: isoSeconds(end) } : null;
+}
+
+const LOCAL_MINUTE_RE = /^([0-9]{4})-([0-9]{2})-([0-9]{2})T([0-9]{2}):([0-9]{2})$/;
+
+/** Wall clock minus UTC at `utcMs` in `tz`, in milliseconds. */
+function zoneOffsetMs(utcMs: number, tz: string): number {
+  const parts = new Intl.DateTimeFormat('en-US', {
+    timeZone: tz,
+    hourCycle: 'h23',
+    year: 'numeric',
+    month: '2-digit',
+    day: '2-digit',
+    hour: '2-digit',
+    minute: '2-digit',
+    second: '2-digit',
+  }).formatToParts(new Date(utcMs));
+  const part = (type: Intl.DateTimeFormatPartTypes): number =>
+    Number(parts.find((candidate) => candidate.type === type)?.value ?? Number.NaN);
+  const wall = Date.UTC(
+    part('year'),
+    part('month') - 1,
+    part('day'),
+    part('hour'),
+    part('minute'),
+    part('second'),
+  );
+  return wall - Math.floor(utcMs / 1_000) * 1_000;
+}
+
+/**
+ * An airport-local wall-clock minute (`YYYY-MM-DDTHH:mm`) in `tz` as a UTC instant in ms, or null
+ * for a malformed time or zone. Two passes over the zone's offset, so the answer is right on both
+ * sides of a DST change; a wall time inside a spring-forward gap lands just after it.
+ */
+export function localMinuteToUtcMs(local: string, tz: string): number | null {
+  const match = LOCAL_MINUTE_RE.exec(local);
+  if (match === null || !isValidTimeZone(tz)) {
+    return null;
+  }
+  const [, y, mo, d, h, mi] = match;
+  const wall = Date.UTC(Number(y), Number(mo) - 1, Number(d), Number(h), Number(mi));
+  if (Number.isNaN(wall) || new Date(wall).toISOString().slice(0, 16) !== local) {
+    return null;
+  }
+  const first = wall - zoneOffsetMs(wall, tz);
+  return wall - zoneOffsetMs(first, tz);
 }
 
 /** The alert id in a 201 `Location` header (`/alerts/12345`, or the absolute URL). */
@@ -386,6 +487,30 @@ function flightNumberOf(flight: AeroApiFlight): string | undefined {
   }
 }
 
+/**
+ * The status of an AeroAPI flight from its flags and OOOI times, with the runway times standing
+ * in for missing gate times (a flight AeroAPI knows only by `scheduled_off` is still scheduled).
+ * One function for a polled flight and for a delivery merged onto one, so a merge never loses a
+ * fallback the poll had.
+ */
+export function deriveAeroApiStatus(
+  flags: { readonly cancelled: boolean; readonly diverted: boolean },
+  times: Exact<FlightTimes>,
+  now: Date,
+): FlightStatusValue {
+  return deriveStatus({
+    cancelled: flags.cancelled,
+    diverted: flags.diverted,
+    actualOut: times.actualOut,
+    actualOff: times.actualOff,
+    actualOn: times.actualOn,
+    actualIn: times.actualIn,
+    scheduledOut: times.scheduledOut ?? times.scheduledOff,
+    estimatedOut: times.estimatedOut ?? times.estimatedOff,
+    now,
+  });
+}
+
 /** One AeroAPI flight item as a `FlightStatus`; throws for a flight we cannot key. */
 export function mapAeroApiFlight(
   flight: AeroApiFlight,
@@ -410,17 +535,7 @@ export function mapAeroApiFlight(
       fieldQuality[field] = quality;
     }
   }
-  const status = deriveStatus({
-    cancelled: flight.cancelled,
-    diverted: flight.diverted,
-    actualOut: times.actualOut,
-    actualOff: times.actualOff,
-    actualOn: times.actualOn,
-    actualIn: times.actualIn,
-    scheduledOut: times.scheduledOut ?? times.scheduledOff,
-    estimatedOut: times.estimatedOut ?? times.estimatedOff,
-    now: ctx.now,
-  });
+  const status = deriveAeroApiStatus(flight, times, ctx.now);
   const result: Exact<FlightStatus> = {
     operatingCarrierIcao: operator,
     operatorSource: 'provider',
@@ -518,6 +633,65 @@ export function mapAeroApiFlights(
     data.push(mapped);
   }
   return { data, skipped };
+}
+
+function scheduledOutMs(flight: Exact<FlightStatus>): number | undefined {
+  const value = flight.times.scheduledOut ?? flight.times.scheduledOff;
+  const ms = value === undefined ? Number.NaN : Date.parse(value);
+  return Number.isNaN(ms) ? undefined : ms;
+}
+
+/**
+ * The instance a bracketed lookup asked about: of the items from `originIcao` (when given), the
+ * `fa_flight_id` whose `scheduled_out` is nearest `centerMs`, if within
+ * `AEROAPI_INSTANCE_MATCH_MS`, with every item sharing that id (a diversion leg). The bracket
+ * holds the previous day's departure at its inclusive start, so returning everything would hand
+ * a tracker the wrong day to adopt.
+ */
+export function nearestInstance(
+  flights: readonly Exact<FlightStatus>[],
+  centerMs: number,
+  originIcao?: string,
+): Exact<FlightStatus>[] {
+  let bestId: string | undefined;
+  let bestDistance = Number.POSITIVE_INFINITY;
+  for (const flight of flights) {
+    const ms = scheduledOutMs(flight);
+    const id = flight.providerRefs['aeroapi'];
+    if (ms === undefined || id === undefined) {
+      continue;
+    }
+    if (originIcao !== undefined && flight.origin.icao !== originIcao) {
+      continue;
+    }
+    const distance = Math.abs(ms - centerMs);
+    if (distance < bestDistance) {
+      bestDistance = distance;
+      bestId = id;
+    }
+  }
+  if (bestId === undefined || bestDistance >= AEROAPI_INSTANCE_MATCH_MS) {
+    return [];
+  }
+  return flights.filter((flight) => flight.providerRefs['aeroapi'] === bestId);
+}
+
+/**
+ * The instances departing on the origin-local date asked for (a lookup by date alone spans
+ * parts of three local days). An item whose local date cannot be derived (its origin has no
+ * zone) is kept rather than guessed about.
+ */
+export function onLocalDate(
+  flights: readonly Exact<FlightStatus>[],
+  dateLocal: string,
+  originIcao?: string,
+): Exact<FlightStatus>[] {
+  return flights.filter(
+    (flight) =>
+      (originIcao === undefined || flight.origin.icao === originIcao) &&
+      (flight.scheduledDepartureDateLocal === undefined ||
+        flight.scheduledDepartureDateLocal === dateLocal),
+  );
 }
 
 function boardRowOf(
@@ -718,17 +892,14 @@ export function mergeAeroApiAlert(
   if (patch.baggageClaim !== undefined) {
     fieldQuality['baggage'] = 'live';
   }
-  merged.status = deriveStatus({
-    cancelled: patch.cancelled ?? snapshot.status === 'cancelled',
-    diverted: patch.diverted ?? snapshot.status === 'diverted',
-    actualOut: times.actualOut,
-    actualOff: times.actualOff,
-    actualOn: times.actualOn,
-    actualIn: times.actualIn,
-    scheduledOut: times.scheduledOut,
-    estimatedOut: times.estimatedOut,
+  merged.status = deriveAeroApiStatus(
+    {
+      cancelled: patch.cancelled ?? snapshot.status === 'cancelled',
+      diverted: patch.diverted ?? snapshot.status === 'diverted',
+    },
+    times,
     now,
-  });
+  );
   return merged;
 }
 
@@ -740,15 +911,34 @@ export interface AeroApiAdapterOptions {
   readonly apiKey: string;
   readonly fetch: ProviderFetch;
   /**
-   * The per-alert `target_url`, which includes the environment's path token
-   * (`${API_PUBLIC_URL}/v1/webhooks/aeroapi/${WEBHOOK_TOKEN_AEROAPI}`). Mandatory for
-   * `registerAlert`: without it an alert would fall back to the account-wide endpoint.
+   * The environment's webhook URL, which includes its path token
+   * (`${API_PUBLIC_URL}/v1/webhooks/aeroapi/${WEBHOOK_TOKEN_AEROAPI}`, built by the router only
+   * from a well-formed token). `registerAlert` sets it as the account-wide endpoint (the
+   * prerequisite FlightAware enforces) and sends it as every alert's own `target_url`. Mandatory
+   * for `registerAlert`.
    */
   readonly alertTargetUrl?: string | undefined;
   readonly baseUrl?: string | undefined;
   readonly carriers?: CarrierIataToIcaoTable | undefined;
+  /**
+   * Which account endpoints this isolate has already set (test seam). Defaults to one set per
+   * isolate, so the PUT happens at most once per isolate per key and URL.
+   */
+  readonly alertEndpointsSet?: Set<string> | undefined;
   /** Clock for `parseWebhook` only; every call reads `ctx.now`. */
   readonly now: () => Date;
+}
+
+/**
+ * The account endpoints this isolate has set. Isolate scope on purpose (ruling I7: "at most once
+ * per isolate"): the PUT is idempotent, so losing this on eviction costs one more free call, and
+ * it holds no request data. Keyed by base URL, a digest of the key and the endpoint URL.
+ */
+const ALERT_ENDPOINTS_SET = new Set<string>();
+
+/** Whether an AeroAPI error text is the "set the account endpoint first" refusal. */
+function isMissingEndpointError(error: string | undefined): boolean {
+  return error !== undefined && /alerts\/endpoint|endpoint.*(?:configur|set)/i.test(error);
 }
 
 export class AeroApiAdapter implements FlightDataProvider {
@@ -774,7 +964,11 @@ export class AeroApiAdapter implements FlightDataProvider {
     return { now, carriers: this.#options.carriers ?? CARRIER_IATA_TO_ICAO_FALLBACK };
   }
 
-  /** One budgeted attempt. Every answer AeroAPI gives is billed; only a transport error is not. */
+  /**
+   * One budgeted attempt. Every answer AeroAPI gives is billed, and so is a `fetch` that rejects
+   * (the reservation is kept: the request may have been served). The request is built by the
+   * caller before this reserves, so nothing that fails before sending holds a reservation.
+   */
   async #send(
     ctx: ProviderCallContext,
     operation:
@@ -801,9 +995,8 @@ export class AeroApiAdapter implements FlightDataProvider {
     try {
       response = await this.#options.fetch(request);
     } catch (error) {
-      await ctx.budget.release?.(reservation.request, reservation.request.pollEquivalents);
       return {
-        call: transportErrorRecord(ctx, this.id, operation, startedAt, error, false),
+        call: transportErrorRecord(ctx, this.id, operation, startedAt, error),
         body: null,
         response: null,
       };
@@ -858,7 +1051,13 @@ export class AeroApiAdapter implements FlightDataProvider {
 
   /**
    * By `fa_flight_id` once known (`lookup.providerRef`), otherwise the bracketed designator
-   * lookup. Always `max_pages=1`.
+   * lookup: around `lookup.scheduledOut` when the caller has it, around the midpoint of
+   * `lookup.window` when it passes a bracket, or across the origin-local day. Always
+   * `max_pages=1`. A bracket that no longer contains the flight is not sent (see
+   * `bracketWindow`), and of a designator answer only the flight asked about is returned: the
+   * instance nearest `scheduled_out` (within `AEROAPI_INSTANCE_MATCH_MS`, with its diversion leg),
+   * or every instance departing on the asked origin-local date. Nothing else AeroAPI returned is
+   * ever handed to a tracker to adopt.
    */
   async getFlight(
     lookup: FlightLookup,
@@ -867,6 +1066,7 @@ export class AeroApiAdapter implements FlightDataProvider {
     const now = ctx.now();
     let url: URL;
     let operation: 'flight_by_id' | 'flight_by_ident';
+    let centerMs: number | undefined;
     if (lookup.providerRef?.provider === 'aeroapi') {
       operation = 'flight_by_id';
       url = this.#url(`flights/${encodeURIComponent(lookup.providerRef.id)}`, {
@@ -875,10 +1075,21 @@ export class AeroApiAdapter implements FlightDataProvider {
       });
     } else {
       operation = 'flight_by_ident';
-      const window =
-        lookup.window === undefined
-          ? bracketLocalDate(lookup.dateLocal, now)
-          : clampWindow(lookup.window, now);
+      let window: BracketWindow | null;
+      if (lookup.scheduledOut !== undefined) {
+        centerMs = Date.parse(lookup.scheduledOut);
+        window = bracketWindow(lookup.scheduledOut, now);
+      } else if (lookup.window !== undefined) {
+        const start = Date.parse(lookup.window.start);
+        const end = Date.parse(lookup.window.end);
+        centerMs = start + (end - start) / 2;
+        window =
+          Number.isNaN(start) || Number.isNaN(end) || end <= start
+            ? null
+            : containingWindow(start, end, centerMs, now.getTime());
+      } else {
+        window = bracketLocalDate(lookup.dateLocal, now);
+      }
       if (window === null) {
         return {
           data: [],
@@ -925,7 +1136,26 @@ export class AeroApiAdapter implements FlightDataProvider {
     if (parsed.data.flights.length === 0) {
       return { data: [], call: { ...call, result: 'not_found' } };
     }
-    const { data, skipped } = mapAeroApiFlights(parsed.data.flights, this.#mapping(now));
+    const mapped = mapAeroApiFlights(parsed.data.flights, this.#mapping(now));
+    const skipped = mapped.skipped;
+    let data = mapped.data;
+    if (operation === 'flight_by_ident' && data.length > 0) {
+      // Other instances of the same designator are not errors: the bracket spans them by design.
+      data =
+        centerMs === undefined
+          ? onLocalDate(data, lookup.dateLocal, lookup.originIcao)
+          : nearestInstance(data, centerMs, lookup.originIcao);
+      if (data.length === 0) {
+        return {
+          data,
+          call: {
+            ...call,
+            result: 'not_found',
+            error: `other_instances:${String(mapped.data.length)}`,
+          },
+        };
+      }
+    }
     if (skipped.length === 0) {
       return { data, call };
     }
@@ -939,18 +1169,31 @@ export class AeroApiAdapter implements FlightDataProvider {
     };
   }
 
-  /** Recent departures or arrivals at an airport (`airport_departures` / `airport_arrivals`). */
+  /**
+   * Departures or arrivals at an airport (`airport_departures` / `airport_arrivals`). The window
+   * is the shared `BoardWindow`, airport-local wall clock plus the airport's zone, converted to
+   * UTC here; AeroAPI selects these boards by ACTUAL off or on time (flights that already left or
+   * landed), so a future window answers nothing.
+   */
   async getBoard(
     airportIcao: string,
     direction: 'dep' | 'arr',
-    window: { from: string; to: string },
+    window: BoardWindow,
     ctx: ProviderCallContext,
   ): Promise<ProviderResult<Exact<BoardRow>[]>> {
     const icao = airportIcao.trim().toUpperCase();
     const now = ctx.now();
-    const clamped = clampWindow({ start: window.from, end: window.to }, now);
+    const fromMs = localMinuteToUtcMs(window.from, window.tz);
+    const toMs = localMinuteToUtcMs(window.to, window.tz);
+    if (fromMs === null || toMs === null || toMs <= fromMs) {
+      throw new RangeError(
+        'a board window needs two local times YYYY-MM-DDTHH:mm, from < to, and a valid zone',
+      );
+    }
+    const start = Math.max(fromMs, earliestStartMs(now.getTime()));
+    const end = Math.min(toMs, latestEndMs(now.getTime()));
     const operation = direction === 'dep' ? 'airport_departures' : 'airport_arrivals';
-    if (clamped === null) {
+    if (start >= end) {
       return {
         data: [],
         call: callRecord({
@@ -967,7 +1210,7 @@ export class AeroApiAdapter implements FlightDataProvider {
     }
     const url = this.#url(
       `airports/${encodeURIComponent(icao)}/flights/${direction === 'dep' ? 'departures' : 'arrivals'}`,
-      { start: clamped.start, end: clamped.end, max_pages: '1' },
+      { start: isoSeconds(start), end: isoSeconds(end), max_pages: '1' },
     );
     const { call, body } = await this.#send(
       ctx,
@@ -996,9 +1239,43 @@ export class AeroApiAdapter implements FlightDataProvider {
   }
 
   /**
-   * `POST /alerts` for one flight instance: the nine event booleans, the instance's origin and
-   * date, `max_weekly` (a creation-time threshold, NOT a spend cap) and the mandatory per-alert
-   * `target_url`. Throws `ProviderCallError` (carrying the record) when AeroAPI refuses it.
+   * Makes sure the account-wide alert endpoint is set before the first alert (FlightAware's
+   * prerequisite: without it `POST /alerts` answers 400). An idempotent `PUT /alerts/endpoint`
+   * of this environment's webhook URL, a zero-cost `alert_manage` call made at most once per
+   * isolate, recorded here through `ctx.log` because `registerAlert` returns the POST's record.
+   * A refusal throws `ProviderCallError` carrying the PUT's record (`alert_endpoint_not_set`),
+   * and no alert is posted.
+   */
+  async #ensureAlertEndpoint(url: string, ctx: ProviderCallContext): Promise<string> {
+    const set = this.#options.alertEndpointsSet ?? ALERT_ENDPOINTS_SET;
+    const cacheKey = `${this.#baseUrl} ${await sha256Hex(this.#options.apiKey)} ${url}`;
+    if (set.has(cacheKey)) {
+      return cacheKey;
+    }
+    const request = new Request(this.#url('alerts/endpoint', {}), {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json; charset=UTF-8' },
+      body: JSON.stringify({ url }),
+    });
+    const { call } = await this.#send(ctx, 'alert_manage', request, 204);
+    if (call.result !== 'ok') {
+      throw new ProviderCallError('AeroAPI refused to set the account alert endpoint', {
+        ...call,
+        error: `alert_endpoint_not_set:${call.error ?? ''}`,
+      });
+    }
+    await ctx.log.record(call);
+    set.add(cacheKey);
+    return cacheKey;
+  }
+
+  /**
+   * `POST /alerts` for one flight instance: the nine event booleans, the instance's operating
+   * designator, origin and date, `max_weekly` (a creation-time threshold, NOT a spend cap) and
+   * the mandatory per-alert `target_url`, after `#ensureAlertEndpoint`. Throws
+   * `ProviderCallError` (carrying the record) when AeroAPI refuses; a 400 that names the missing
+   * account endpoint is `alert_endpoint_missing` and forgets this isolate's "already set", so the
+   * next registration PUTs again.
    */
   async registerAlert(
     key: FlightKey,
@@ -1008,10 +1285,11 @@ export class AeroApiAdapter implements FlightDataProvider {
     const targetUrl = this.#options.alertTargetUrl;
     if (targetUrl === undefined || !/^https:\/\//.test(targetUrl)) {
       throw new AeroApiAlertError(
-        'registerAlert needs a per-alert https target_url; the account-wide endpoint is never used',
+        "registerAlert needs this environment's https webhook URL (with a well-formed token) as its target_url",
       );
     }
     const parts = parseFlightKey(key);
+    const cacheKey = await this.#ensureAlertEndpoint(targetUrl, ctx);
     const body = {
       ident: `${parts.operatingCarrierIcao}${parts.flightNumber}`,
       origin: parts.originIcao,
@@ -1029,6 +1307,13 @@ export class AeroApiAdapter implements FlightDataProvider {
     });
     const { call, response } = await this.#send(ctx, 'alert_manage', request, 201);
     if (call.result !== 'ok' || response === null) {
+      if (call.httpStatus === 400 && isMissingEndpointError(call.error)) {
+        (this.#options.alertEndpointsSet ?? ALERT_ENDPOINTS_SET).delete(cacheKey);
+        throw new ProviderCallError(
+          'AeroAPI has no account alert endpoint for this key; the next registration sets it',
+          { ...call, error: `alert_endpoint_missing:${call.error ?? ''}` },
+        );
+      }
       throw new ProviderCallError(`AeroAPI refused the alert for ${key}`, call);
     }
     const alertId = parseAlertLocation(response.headers.get('location'));
@@ -1059,17 +1344,4 @@ export class AeroApiAdapter implements FlightDataProvider {
   async parseWebhook(raw: Request): Promise<Exact<ProviderEvent>[]> {
     return [await parseAeroApiAlert(await raw.text(), this.#options.now())];
   }
-}
-
-/** A caller-supplied window, clamped to 10 days back and 2 days ahead. */
-function clampWindow(window: { start: string; end: string }, now: Date): BracketWindow | null {
-  const start = Date.parse(window.start);
-  const end = Date.parse(window.end);
-  if (Number.isNaN(start) || Number.isNaN(end)) {
-    return null;
-  }
-  const nowMs = now.getTime();
-  const from = Math.max(start, nowMs - AEROAPI_STANDARD.maxDaysBehind * DAY_MS);
-  const to = Math.min(end, nowMs + AEROAPI_STANDARD.maxDaysAhead * DAY_MS);
-  return from < to ? { start: isoSeconds(from), end: isoSeconds(to) } : null;
 }

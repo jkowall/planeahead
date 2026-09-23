@@ -14,6 +14,11 @@
  *
  * No foreign keys, so the delete order does not matter. `CHECK (id = 1)` keeps the two
  * singleton tables single.
+ *
+ * `config.created_at_ms` is the object's LIFETIME epoch: it goes into every outbox message's
+ * origin, so a day's object that is ever recreated after `deleteAll()` can never repeat an
+ * `(origin, seq)` idempotency key. It was added during increment 6's review, before this schema
+ * was applied anywhere, so it lives in 001 rather than in a 002.
  */
 
 export const PROVIDER_BUDGET_MIGRATION_001: readonly string[] = [
@@ -28,6 +33,7 @@ export const PROVIDER_BUDGET_MIGRATION_001: readonly string[] = [
     kill_at_ms INTEGER,
     finalised INTEGER NOT NULL DEFAULT 0 CHECK (finalised IN (0, 1)),
     alarm_at_ms INTEGER,
+    created_at_ms INTEGER NOT NULL,
     updated_at_ms INTEGER NOT NULL
   )`,
   `CREATE TABLE ledger (

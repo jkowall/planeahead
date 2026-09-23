@@ -13,12 +13,15 @@ import costLogSource from '../../src/providers/cost-log.ts?raw';
 import httpSource from '../../src/providers/http.ts?raw';
 import routerSource from '../../src/providers/router.ts?raw';
 import bucketSource from '../../src/providers/token-bucket.ts?raw';
+import webhookTokenSource from '../../src/providers/webhook-token.ts?raw';
 import {
   backoff,
   bucketConfig,
+  bucketForLimit,
   initialBucket,
   refill,
   take,
+  type TokenBucketConfig,
   type TokenBucketState,
 } from '../../src/providers/token-bucket';
 
@@ -87,6 +90,82 @@ describe('token bucket', () => {
   });
 });
 
+/**
+ * Drives a bucket with `attempt(ms)` deciding when a caller tries (every millisecond by default)
+ * and returns the instants it granted.
+ */
+function grants(
+  config: TokenBucketConfig,
+  durationMs: number,
+  attempt: (ms: number) => boolean = () => true,
+): number[] {
+  let state = initialBucket(config, T0);
+  const granted: number[] = [];
+  for (let ms = 0; ms < durationMs; ms += 1) {
+    if (!attempt(ms)) {
+      continue;
+    }
+    const result = take(state, config, T0 + ms);
+    state = result.state;
+    if (result.allowed) {
+      granted.push(ms);
+    }
+  }
+  return granted;
+}
+
+/** The most grants inside any window of `windowMs`, closed at both ends when `closed`. */
+function maxInWindow(granted: readonly number[], windowMs: number, closed: boolean): number {
+  let most = 0;
+  for (let i = 0; i < granted.length; i += 1) {
+    const from = granted[i] ?? 0;
+    const count = granted.filter((ms) =>
+      closed ? ms >= from && ms <= from + windowMs : ms >= from && ms < from + windowMs,
+    ).length;
+    most = Math.max(most, count);
+  }
+  return most;
+}
+
+describe('bucketForLimit: a provider limit held in ANY one-second window', () => {
+  it('splits the limit between burst and rate so burst + rate never exceeds it', () => {
+    expect(bucketForLimit(5)).toEqual({ ratePerSecond: 3, burst: 2 });
+    expect(bucketForLimit(10)).toEqual({ ratePerSecond: 5, burst: 5 });
+    expect(bucketForLimit(20)).toEqual({ ratePerSecond: 10, burst: 10 });
+    expect(bucketForLimit(1)).toEqual({ ratePerSecond: 1, burst: 1 });
+    // A shard's eighth of AeroAPI's 5 per second: one token, refilled slowly.
+    expect(bucketForLimit(0.625)).toEqual({ ratePerSecond: 0.625, burst: 1 });
+    expect(() => bucketForLimit(0)).toThrow(RangeError);
+    expect(() => bucketForLimit(Number.NaN)).toThrow(RangeError);
+  });
+
+  it.each([5, 10, 20])(
+    'at %i per second, no rolling second ever holds more grants than the limit',
+    (limit) => {
+      const config = bucketForLimit(limit);
+      // Greedy: a caller at every millisecond. Then bursty: idle long enough to refill fully,
+      // then hammer, repeatedly, which is the pattern that broke burst = rate.
+      const greedy = grants(config, 5_000);
+      const bursty = grants(config, 10_000, (ms) => ms % 2_500 < 1_200);
+      for (const granted of [greedy, bursty]) {
+        expect(maxInWindow(granted, 1_000, true)).toBeLessThanOrEqual(limit);
+      }
+      // The old sizing (burst equal to the rate) granted almost twice the limit in one second.
+      const old = grants(bucketConfig(limit, limit), 2_000);
+      expect(maxInWindow(old, 1_000, false)).toBe(2 * limit - 1);
+    },
+  );
+
+  it.each([1, 1.25, 0.625])(
+    'below 2 per second (%d) it grants at most one in any second',
+    (limit) => {
+      const granted = grants(bucketForLimit(limit), 6_000);
+      expect(granted.length).toBeGreaterThan(1);
+      expect(maxInWindow(granted, 1_000, false)).toBe(1);
+    },
+  );
+});
+
 describe('no timers in the provider layer', () => {
   it('src/providers and the ProviderBudget object never schedule a setTimeout or setInterval', () => {
     // A pending timer keeps a Durable Object from hibernating (billed while idle), and the bucket
@@ -100,6 +179,7 @@ describe('no timers in the provider layer', () => {
       'providers/http.ts': httpSource,
       'providers/router.ts': routerSource,
       'providers/token-bucket.ts': bucketSource,
+      'providers/webhook-token.ts': webhookTokenSource,
       'do/provider-budget.ts': providerBudgetSource,
     };
     for (const [path, source] of Object.entries(sources)) {

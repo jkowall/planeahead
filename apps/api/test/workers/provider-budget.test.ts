@@ -1,8 +1,10 @@
 /**
  * The ProviderBudget Durable Object against real Durable Object SQLite storage: serialised
  * debits under concurrency, the daily unit cap, the per-second rate, the kill switch (and its
- * alert), release and backoff, the 60 second KV copy the Worker reads, and the daily alarm that
- * writes the final counters and calls `deleteAll()`.
+ * alert, and failing closed when the persistent switch cannot be read), release and backoff, the
+ * 60 second KV copy the Worker reads (written off the debit path), the daily alarm that writes
+ * the final counters and calls `deleteAll()`, and the closed day that a late call never
+ * recreates.
  *
  * Hygiene, as in do-ping.test.ts: every object has a unique name (storage isolation is per file,
  * not per test), and every touched object's alarm is drained in `afterEach`. A budget name must
@@ -16,11 +18,11 @@ import { env } from 'cloudflare:workers';
 import { afterEach, describe, expect, it } from 'vitest';
 import type { BudgetRequest } from '@planeahead/shared';
 import {
+  PERSISTENT_KILL_UNKNOWN,
   persistentKillKey,
   type ProviderBudget,
   type ProviderBudgetMessage,
 } from '../../src/do/provider-budget';
-import { MIGRATIONS_TABLE } from '../../src/do/migrate';
 import type { Env } from '../../src/env';
 import { createLogger } from '../../src/observability/log';
 import {
@@ -66,21 +68,35 @@ function uniqueDate(): string {
 interface Harness {
   readonly stub: DurableObjectStub<ProviderBudget>;
   readonly date: string;
+  /** The object's clock at the start: noon on its own day. */
+  readonly nowMs: number;
   readonly sent: ProviderBudgetMessage[];
   readonly setClock: (ms: number) => Promise<void>;
+  /** Waits for the background KV copy write, which a reservation never waits for. */
+  readonly kvSettled: () => Promise<void>;
 }
 
 async function budget(
   provider: 'aerodatabox' | 'aeroapi' = 'aerodatabox',
-  options: { readonly nowMs?: number; readonly failSends?: boolean } = {},
+  options: {
+    readonly failSends?: boolean;
+    readonly configKv?: Pick<KVNamespace, 'get' | 'put' | 'delete'>;
+    readonly kv?: Pick<KVNamespace, 'put'>;
+  } = {},
 ): Promise<Harness> {
   const date = uniqueDate();
   const stub = testEnv.PROVIDER_BUDGET.getByName(`${provider}:${date}`);
   touched.push(stub);
   const sent: ProviderBudgetMessage[] = [];
-  const nowMs = options.nowMs ?? Date.parse(`${date}T12:00:00Z`);
+  const nowMs = Date.parse(`${date}T12:00:00Z`);
   await runInDurableObject(stub, (instance: ProviderBudget) => {
     instance.clock = () => nowMs;
+    if (options.configKv !== undefined) {
+      instance.configKv = options.configKv;
+    }
+    if (options.kv !== undefined) {
+      instance.kv = options.kv;
+    }
     instance.outboxSink = {
       sendBatch: (messages: Iterable<MessageSendRequest<unknown>>) => {
         if (options.failSends === true) {
@@ -96,13 +112,22 @@ async function budget(
   return {
     stub,
     date,
+    nowMs,
     sent,
     setClock: async (ms) => {
       await runInDurableObject(stub, (instance: ProviderBudget) => {
         instance.clock = () => ms;
       });
     },
+    kvSettled: async () => {
+      await runInDurableObject(stub, (instance: ProviderBudget) => instance.kvCopySettled());
+    },
   };
+}
+
+/** The origin a harness object's outbox messages carry: its name plus its lifetime epoch. */
+function originOf(harness: Harness, provider = 'aerodatabox'): string {
+  return `provider_budget:${provider}:${harness.date}@${String(harness.nowMs)}`;
 }
 
 const ADB_STATUS: BudgetRequest = {
@@ -138,7 +163,8 @@ describe('ProviderBudget: reserve', () => {
   });
 
   it('walks the 70 / 90 / 100 ladder and trips the kill switch at the cap, alerting through the outbox', async () => {
-    const { stub, sent, date } = await budget();
+    const harness = await budget();
+    const { stub, sent, date } = harness;
     await stub.configure({ dailyUnitCap: 10, perSecondLimit: 1_000 });
     const rungs: string[] = [];
     for (let i = 0; i < 5; i += 1) {
@@ -155,7 +181,7 @@ describe('ProviderBudget: reserve', () => {
       {
         kind: PROVIDER_BUDGET_OUTBOX_KINDS.killSwitch,
         seq: 1,
-        origin: `provider_budget:aerodatabox:${date}`,
+        origin: originOf(harness),
         payload: containing({
           provider: 'aerodatabox',
           utcDate: date,
@@ -173,28 +199,38 @@ describe('ProviderBudget: reserve', () => {
     expect(sent).toHaveLength(1);
   });
 
-  it('holds the per-second rate from a bucket refilled on read', async () => {
-    const start = Date.parse('2400-01-01T12:00:00Z');
-    const { stub, setClock } = await budget('aerodatabox', { nowMs: start });
+  it('holds the per-second rate from a bucket refilled on read, never more than the limit in a second', async () => {
+    const { stub, setClock, nowMs: start } = await budget('aerodatabox');
     await stub.configure({ dailyUnitCap: 1_000, perSecondLimit: 5 });
+    expect(await stub.snapshot()).toMatchObject({ perSecondLimit: 5, tokens: 2 });
 
+    // Limit 5: a burst of 2 refilled at 3 a second, so no second holds more than 5 grants.
     const burst = await Promise.all(Array.from({ length: 7 }, () => stub.reserve(ADB_STATUS)));
-    expect(burst.filter((d) => d.allowed)).toHaveLength(5);
-    expect(burst.filter((d) => !d.allowed)).toEqual([
-      { allowed: false, reason: 'provider_rate_limit', retryAfterMs: 200 },
-      { allowed: false, reason: 'provider_rate_limit', retryAfterMs: 200 },
-    ]);
-    await setClock(start + 199);
+    expect(burst.filter((d) => d.allowed)).toHaveLength(2);
+    expect(burst.filter((d) => !d.allowed)).toEqual(
+      Array.from({ length: 5 }, () => ({
+        allowed: false,
+        reason: 'provider_rate_limit',
+        retryAfterMs: 334,
+      })),
+    );
+    await setClock(start + 333);
     expect((await stub.reserve(ADB_STATUS)).allowed).toBe(false);
-    await setClock(start + 200);
+    await setClock(start + 334);
     expect((await stub.reserve(ADB_STATUS)).allowed).toBe(true);
+    let granted = 3;
+    for (let ms = 335; ms <= 1_000; ms += 1) {
+      await setClock(start + ms);
+      granted += (await stub.reserve(ADB_STATUS)).allowed ? 1 : 0;
+    }
+    // Within [start, start + 1000]: the burst of 2 and three refills.
+    expect(granted).toBe(5);
     // A rate refusal never spends units.
-    expect((await stub.snapshot()).units).toBe(12);
+    expect((await stub.snapshot()).units).toBe(10);
   });
 
   it('backs the bucket off on a provider push-back', async () => {
-    const start = Date.parse('2400-01-01T12:00:00Z');
-    const { stub, setClock } = await budget('aerodatabox', { nowMs: start });
+    const { stub, setClock, nowMs: start } = await budget('aerodatabox');
     await stub.configure({ dailyUnitCap: 1_000, perSecondLimit: 10 });
     await stub.backoff(1_500);
     expect(await stub.reserve(ADB_STATUS)).toEqual({
@@ -217,6 +253,19 @@ describe('ProviderBudget: reserve', () => {
     await stub.release(ADB_STATUS, 5);
     await stub.release(ADB_STATUS, 5);
     expect((await stub.snapshot()).units).toBe(0);
+  });
+
+  it('refuses a reservation for another day and ignores a refund of one', async () => {
+    const { stub, date } = await budget();
+    await stub.configure({ dailyUnitCap: 100, perSecondLimit: 1_000 });
+    expect((await stub.reserve({ ...ADB_STATUS, utcDate: date })).allowed).toBe(true);
+    // Yesterday's reservation released after midnight must not refund today.
+    await stub.release({ ...ADB_STATUS, utcDate: '2001-01-01' }, 0.1);
+    expect(await stub.snapshot()).toMatchObject({ units: 2, releasedUnits: 0 });
+    expect(await stub.reserve({ ...ADB_STATUS, utcDate: '2001-01-01' })).toEqual({
+      allowed: false,
+      reason: 'routing_rule',
+    });
   });
 
   it('refuses a request for another provider or an unpriced operation, without throwing', async () => {
@@ -258,9 +307,10 @@ describe('ProviderBudget: reserve', () => {
 
 describe('ProviderBudget: the KV copy the Worker reads', () => {
   it('is written after a debit and says blocked once the kill switch trips', async () => {
-    const { stub, date } = await budget();
+    const { stub, date, kvSettled } = await budget();
     await stub.configure({ dailyUnitCap: 2, perSecondLimit: 1_000 });
     await stub.reserve(ADB_STATUS);
+    await kvSettled();
     const key = budgetKvKey('aerodatabox', date);
     const first = await testEnv.CACHE.get<BudgetKvCopy>(key, 'json');
     expect(first).toMatchObject({
@@ -273,6 +323,7 @@ describe('ProviderBudget: the KV copy the Worker reads', () => {
       ladder: 'degraded',
     });
     await stub.reserve(ADB_STATUS);
+    await kvSettled();
     expect(await testEnv.CACHE.get<BudgetKvCopy>(key, 'json')).toMatchObject({
       killSwitch: true,
       blocked: true,
@@ -280,10 +331,11 @@ describe('ProviderBudget: the KV copy the Worker reads', () => {
   });
 
   it('lets the Worker-side guard refuse without reaching the object', async () => {
-    const { stub, date } = await budget();
+    const { stub, date, kvSettled } = await budget();
     await stub.configure({ dailyUnitCap: 2, perSecondLimit: 1_000 });
     await stub.reserve(ADB_STATUS);
     await stub.reserve(ADB_STATUS);
+    await kvSettled();
     const before = await stub.snapshot();
     const guard = budgetGuardFor(testEnv, () => new Date(`${date}T15:00:00Z`));
     expect(await guard.reserve(ADB_STATUS)).toEqual({
@@ -292,6 +344,47 @@ describe('ProviderBudget: the KV copy the Worker reads', () => {
     });
     // Refused from KV: the object saw no new request, so no new denial was counted.
     expect((await stub.snapshot()).denials).toEqual(before.denials);
+  });
+
+  it('never makes a reservation wait for KV, and a failing KV costs at most one write a second', async () => {
+    let puts = 0;
+    let release: () => void = () => undefined;
+    const hanging = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const failing: Pick<KVNamespace, 'put'> = {
+      put: () => {
+        puts += 1;
+        return hanging.then(() => Promise.reject(new Error('KV 429: too many writes')));
+      },
+    };
+    const { stub, setClock, nowMs, kvSettled } = await budget('aerodatabox', { kv: failing });
+    await stub.configure({ dailyUnitCap: 1_000, perSecondLimit: 1_000 });
+    // The first write is still in flight: 20 reservations at one instant all answer at once.
+    const decisions = await Promise.race([
+      Promise.all(Array.from({ length: 20 }, () => stub.reserve(ADB_STATUS))),
+      new Promise<'waited on KV'>((resolve) => {
+        setTimeout(() => resolve('waited on KV'), 2_000);
+      }),
+    ]);
+    expect(decisions).not.toBe('waited on KV');
+    expect(puts).toBe(1);
+    release();
+    await kvSettled();
+    // The write failed; more reservations in the same second do not retry it.
+    for (let i = 0; i < 20; i += 1) {
+      await stub.reserve(ADB_STATUS);
+    }
+    await kvSettled();
+    expect(puts).toBe(1);
+    // A second later exactly one more attempt is made.
+    await setClock(nowMs + 1_000);
+    for (let i = 0; i < 5; i += 1) {
+      await stub.reserve(ADB_STATUS);
+    }
+    await kvSettled();
+    expect(puts).toBe(2);
+    expect((await stub.snapshot()).calls).toBe(45);
   });
 });
 
@@ -306,7 +399,11 @@ describe('ProviderBudget: the kill switch', () => {
     };
     try {
       const snapshot = await today.stub.setKillSwitch(true, 'runaway spend');
-      expect(snapshot).toMatchObject({ killSwitch: true, killReason: 'manual:runaway spend' });
+      expect(snapshot).toMatchObject({
+        killSwitch: true,
+        killReason: 'manual:runaway spend',
+        persisted: true,
+      });
       expect(today.sent.map((m) => m.kind)).toEqual([PROVIDER_BUDGET_OUTBOX_KINDS.killSwitch]);
       expect(await today.stub.reserve(request)).toEqual({
         allowed: false,
@@ -330,6 +427,79 @@ describe('ProviderBudget: the kill switch', () => {
     expect((await today.stub.reserve(request)).allowed).toBe(true);
     const after = await budget('aeroapi');
     expect((await after.stub.reserve(request)).allowed).toBe(true);
+  });
+
+  it('fails CLOSED when the persistent switch cannot be read, alerts, and lifts itself once it can', async () => {
+    let reads = 0;
+    let down = true;
+    const flaky: Pick<KVNamespace, 'get' | 'put' | 'delete'> = {
+      get: (() => {
+        reads += 1;
+        return down ? Promise.reject(new Error('CONFIG unavailable')) : Promise.resolve(null);
+      }) as unknown as KVNamespace['get'],
+      put: () => Promise.resolve(),
+      delete: () => Promise.resolve(),
+    };
+    const harness = await budget('aerodatabox', { configKv: flaky });
+    const { stub, sent, setClock, nowMs } = harness;
+    // The emergency brake could not be read: the day starts killed rather than spending blind.
+    expect(await stub.reserve(ADB_STATUS)).toEqual({
+      allowed: false,
+      reason: 'provider_kill_switch',
+    });
+    expect((await stub.snapshot()).killReason).toBe(PERSISTENT_KILL_UNKNOWN);
+    // And the operators hear about it, through the same alert as any kill switch.
+    expect(sent).toEqual([
+      {
+        kind: PROVIDER_BUDGET_OUTBOX_KINDS.killSwitch,
+        seq: 1,
+        origin: originOf(harness),
+        payload: containing({ reason: PERSISTENT_KILL_UNKNOWN, configReadFailed: 1 }),
+      },
+    ]);
+    // It retries the read at most every 30 s, not on every call.
+    const readsSoFar = reads;
+    await stub.reserve(ADB_STATUS);
+    expect(reads).toBe(readsSoFar);
+    down = false;
+    await setClock(nowMs + 30_000);
+    // The read now says there is no persistent stop: the day runs.
+    expect((await stub.reserve(ADB_STATUS)).allowed).toBe(true);
+    expect(await stub.snapshot()).toMatchObject({ killSwitch: false, killReason: null });
+  });
+
+  it('a stop the read DOES find keeps the day killed under its real reason', async () => {
+    let down = true;
+    const store: Pick<KVNamespace, 'get' | 'put' | 'delete'> = {
+      get: (() =>
+        down
+          ? Promise.reject(new Error('CONFIG unavailable'))
+          : Promise.resolve({ reason: 'overage' })) as unknown as KVNamespace['get'],
+      put: () => Promise.resolve(),
+      delete: () => Promise.resolve(),
+    };
+    const { stub, setClock, nowMs } = await budget('aerodatabox', { configKv: store });
+    expect((await stub.reserve(ADB_STATUS)).allowed).toBe(false);
+    down = false;
+    await setClock(nowMs + 30_000);
+    expect(await stub.reserve(ADB_STATUS)).toEqual({
+      allowed: false,
+      reason: 'provider_kill_switch',
+    });
+    expect((await stub.snapshot()).killReason).toBe('persistent:overage');
+  });
+
+  it('says so when the kill switch could not be persisted for tomorrow', async () => {
+    const broken: Pick<KVNamespace, 'get' | 'put' | 'delete'> = {
+      get: (() => Promise.resolve(null)) as unknown as KVNamespace['get'],
+      put: () => Promise.reject(new Error('CONFIG write failed')),
+      delete: () => Promise.reject(new Error('CONFIG write failed')),
+    };
+    const { stub } = await budget('aeroapi', { configKv: broken });
+    const result = await stub.setKillSwitch(true, 'overage');
+    // It holds today; the admin page is told it will not carry into tomorrow's object.
+    expect(result).toMatchObject({ killSwitch: true, persisted: false });
+    expect((await stub.setKillSwitch(false)).persisted).toBe(false);
   });
 
   it('the persist consumer turns the kill-switch row into a fatal Sentry event', async () => {
@@ -423,7 +593,8 @@ describe('ProviderBudget: the day ends', () => {
   });
 
   it('at 00:05 the next day it sends the final counters and deletes everything', async () => {
-    const { stub, date, sent, setClock } = await budget();
+    const harness = await budget();
+    const { stub, date, sent, setClock } = harness;
     await stub.configure({ dailyUnitCap: 100, perSecondLimit: 1_000 });
     await stub.reserve(ADB_STATUS);
     await stub.reserve({ ...ADB_STATUS, trigger: 'user_search' });
@@ -435,7 +606,7 @@ describe('ProviderBudget: the day ends', () => {
       {
         kind: PROVIDER_BUDGET_OUTBOX_KINDS.daily,
         seq: 1,
-        origin: `provider_budget:aerodatabox:${date}`,
+        origin: originOf(harness),
         payload: containing({
           provider: 'aerodatabox',
           utcDate: date,
@@ -459,14 +630,76 @@ describe('ProviderBudget: the day ends', () => {
     );
     expect(tables.filter((name) => !name.startsWith('_cf_'))).toEqual([]);
     expect(await runInDurableObject(stub, (_i, state) => state.storage.getAlarm())).toBeNull();
-    // A late call on the same instance recreates the schema instead of failing.
-    expect(await stub.snapshot()).toMatchObject({ units: 0, calls: 0 });
-    const migrations = await runInDurableObject(stub, (_i, state) =>
-      [...state.storage.sql.exec<{ id: number }>(`SELECT id FROM ${MIGRATIONS_TABLE}`)].map(
-        (row) => row.id,
-      ),
+  });
+
+  it('a closed day stays closed: a late call writes nothing, arms nothing and sends nothing', async () => {
+    const { stub, date, sent, setClock } = await budget();
+    await stub.reserve(ADB_STATUS);
+    await stub.reserve(ADB_STATUS);
+    const late = finaliseAtMs(date) + 60_000;
+    await setClock(late);
+    expect(await runDurableObjectAlarm(stub)).toBe(true);
+    expect(sent.map((m) => [m.kind, m.seq])).toEqual([[PROVIDER_BUDGET_OUTBOX_KINDS.daily, 1]]);
+
+    // Every entry point after the day is final: none recreates the day.
+    expect(await stub.snapshot()).toMatchObject({
+      units: 0,
+      calls: 0,
+      finalised: true,
+      dayClosed: true,
+    });
+    expect(await stub.reserve(ADB_STATUS)).toEqual({ allowed: false, reason: 'routing_rule' });
+    await stub.release(ADB_STATUS, 0.1);
+    await stub.backoff(1_000);
+    // Admin writes change nothing and say so.
+    expect(await stub.configure({ dailyUnitCap: 5 })).toMatchObject({
+      dayClosed: true,
+      dailyUnitCap: 0,
+    });
+    expect(await stub.setKillSwitch(true)).toMatchObject({
+      dayClosed: true,
+      killSwitch: false,
+      persisted: false,
+    });
+    expect(await testEnv.CONFIG.get(persistentKillKey('aerodatabox'))).toBeNull();
+    const storage = await runInDurableObject(stub, async (_i, state) => ({
+      alarm: await state.storage.getAlarm(),
+      tables: [
+        ...state.storage.sql.exec<{ name: string }>(
+          "SELECT name FROM sqlite_master WHERE type = 'table'",
+        ),
+      ]
+        .map((row) => row.name)
+        .filter((name) => !name.startsWith('_cf_')),
+    }));
+    expect(storage).toEqual({ alarm: null, tables: [] });
+    // No second daily row with a colliding (origin, seq): nothing more was ever sent.
+    expect(await runDurableObjectAlarm(stub)).toBe(false);
+    expect(sent).toHaveLength(1);
+  });
+
+  it('a closed day touched for the first time is read-only too, and its recreated schema is cleaned up', async () => {
+    const { stub, date, sent, setClock } = await budget();
+    const late = finaliseAtMs(date) + 60_000;
+    await setClock(late);
+    expect(await stub.reserve(ADB_STATUS)).toEqual({ allowed: false, reason: 'routing_rule' });
+    expect(await stub.snapshot()).toMatchObject({ units: 0, dayClosed: true });
+    // The constructor created the (empty) schema; a cleanup alarm, in the future, removes it.
+    const alarm = await runInDurableObject(stub, (_i, state) => state.storage.getAlarm());
+    expect(alarm).not.toBeNull();
+    expect(alarm ?? 0).toBeGreaterThan(late);
+    expect(await runDurableObjectAlarm(stub)).toBe(true);
+    const tables = await runInDurableObject(stub, (_i, state) =>
+      [
+        ...state.storage.sql.exec<{ name: string }>(
+          "SELECT name FROM sqlite_master WHERE type = 'table'",
+        ),
+      ]
+        .map((row) => row.name)
+        .filter((name) => !name.startsWith('_cf_')),
     );
-    expect(migrations).toEqual([1]);
+    expect(tables).toEqual([]);
+    expect(sent).toEqual([]);
   });
 
   it('keeps the rows and retries when the final send fails', async () => {

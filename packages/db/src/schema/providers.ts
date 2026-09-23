@@ -69,10 +69,10 @@ export const CALL_TRIGGERS = [
 export const CALL_RESULTS = ['ok', 'not_found', 'rate_limited', 'error'] as const;
 
 /**
- * ALERT_EVENTS in @planeahead/shared plus `hold_start` and `hold_end`, which increment 6 removed
- * from the shared list (AeroAPI 4.17.1 has no hold events). The check constraint in migration
- * 0000 was generated from this list, so it stays until a schema migration drops the two; nothing
- * writes them. The contracts test asserts that exactly those two are the difference.
+ * Mirrors ALERT_EVENTS in @planeahead/shared: the nine event booleans of AeroAPI 4.17.1
+ * `POST /alerts`. Increment 6 removed `hold_start` and `hold_end` (the spec has no hold events);
+ * migration 0000 was regenerated rather than amended, because it had never been applied to a
+ * deployed database.
  */
 export const ALERT_EVENTS = [
   'filed',
@@ -84,8 +84,6 @@ export const ALERT_EVENTS = [
   'off',
   'on',
   'in',
-  'hold_start',
-  'hold_end',
 ] as const;
 
 /** One row per outbound provider call (including LLM extractions). Purged at 90 days. */

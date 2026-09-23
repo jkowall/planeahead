@@ -22,12 +22,14 @@ import {
   type AircraftPosition,
   type AircraftPositionProvider,
   type AircraftPositionQuery,
+  type AirlineCallsign,
   type AirportRef,
   type AirportRefInput,
   type AlertEvent,
   type AlertRegistrationOptions,
   type AnyProviderOperation,
   type BoardRow,
+  type BoardWindow,
   type BudgetDecision,
   type BudgetDenialReason,
   type BudgetGuard,
@@ -208,6 +210,7 @@ interface TypeSurface {
   liveActivityContentStateV1: LiveActivityContentStateV1;
   // operator
   codeshareStatus: CodeshareStatus;
+  airlineCallsign: AirlineCallsign;
   resolveOperatorInput: ResolveOperatorInput;
   resolvedOperator: ResolvedOperator;
   // preferences
@@ -216,6 +219,7 @@ interface TypeSurface {
   userPreferencesPatch: UserPreferencesPatch;
   // providers
   flightLookup: FlightLookup;
+  boardWindow: BoardWindow;
   providerCapabilities: ProviderCapabilities;
   budgetDenialReason: BudgetDenialReason;
   budgetDecision: BudgetDecision;
@@ -391,6 +395,7 @@ describe('optional contract properties', () => {
       dateLocal: '2026-09-19',
       originIcao: maybe<string>(undefined),
       providerRef: maybe<{ provider: ProviderId; id: string }>(undefined),
+      scheduledOut: maybe<string>(undefined),
       window: maybe<{ start: string; end: string }>(undefined),
     };
     const context: ProviderCallContext = {
@@ -408,6 +413,7 @@ describe('optional contract properties', () => {
       pollEquivalents: 1,
       trigger: 'alarm',
       flightKey: maybe<FlightKey>(undefined),
+      utcDate: maybe<string>(undefined),
     };
     const query: AircraftPositionQuery = {
       icaoHexes: maybe<readonly string[]>(undefined),

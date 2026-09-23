@@ -7,26 +7,35 @@
  *
  *   - Base `https://api.aerodatabox.com/`, auth header `X-Api-Key` (the direct gateway's own
  *     security scheme, not RapidAPI's header pair).
- *   - Flight status is `GET /flights/Number/{designator}/{dateLocal}` with the `searchBy` enum's
- *     own casing. `withFlightPlan` is never set: it bills the call twice on Starter. Nor are
+ *   - Flight status is `GET /flights/Number/{designator}/{dateLocal}?dateLocalRole=Departure`
+ *     with the `searchBy` enum's own casing. `dateLocalRole=Departure` makes the date the
+ *     ORIGIN-LOCAL DEPARTURE date, the date a flight key carries (the default `Both` also returns
+ *     a flight that only ARRIVES that day, so an overnight flight's previous-day departure came
+ *     back first). `withFlightPlan` is never set: it bills the call twice on Starter. Nor are
  *     `withAircraftImage` or `withLocation`; the defaults are false.
- *   - 200 is a JSON array, 204 is a miss. Both bill 2 units (TIER 2). A 204 is never parsed.
+ *   - 200 is a JSON array, 204 is a miss. Both bill 2 units (TIER 2). A 204 is never parsed, and
+ *     a 200 with an empty array is recorded as the same billed `not_found`.
  *   - 451 is legal suppression: terminal for that key, never retried.
- *   - 429 and 503 (neither is declared in the spec, though per-second limits exist) and any body
- *     that is not JSON (an unauthenticated or throttled request meets a Cloudflare HTML 403) are
- *     `rate_limited` at zero cost: the reservation is released and the token bucket backs off.
+ *   - 429 and 503 and any body that is not JSON (an unauthenticated or throttled request meets a
+ *     Cloudflare HTML 403) are `rate_limited` at zero cost: the reservation is released and the
+ *     token bucket backs off. The spec declares 503 (Service Unavailable, no body) but not 429,
+ *     although per-second limits exist; both are treated alike.
+ *   - A `fetch` that rejects keeps its reservation and is recorded billed
+ *     (`transport_unknown_billing`, see `transportErrorRecord`): the request may have been served.
  *   - Other error statuses are recorded as billed `error`s until AeroDataBox says otherwise;
  *     over-counting in our own ledger is the safe direction for a budget.
  *   - Times come from `.utc` only (`parseAdbDateTime`); `revisedTime` is split into estimate or
  *     actual by the status enum (`disambiguateRevisedTime`); the status itself is derived from
  *     flags and OOOI times (`deriveStatus`), never mapped from the enum's name.
- *   - AeroDataBox never names an operator: `resolveOperator` picks the best-known one and the
- *     status records `operatorSource` (ADR 0010). There is no codeshare sibling list, so
- *     `codeshares` is always empty.
+ *   - AeroDataBox never names an operator: `resolveOperator` picks the best-known operating
+ *     designator (carrier AND number: a callsign supplies both) and the status records
+ *     `operatorSource` (ADR 0010). There is no codeshare sibling list, so `codeshares` is always
+ *     empty.
  *
  * Recording rule: the caller records `result.call`. The plus or minus one day retry makes up to
- * three HTTP calls for one lookup; every attempt this method does not return is recorded here,
- * through `ctx.log`, so the ledger sees every billed call exactly once.
+ * three HTTP calls for one lookup, and ONLY for a person-supplied date (`user_search`, `import`);
+ * a tracker's own triggers make exactly one. Every attempt this method does not return is
+ * recorded here, through `ctx.log`, so the ledger sees every billed call exactly once.
  */
 
 import { z } from 'zod';
@@ -43,6 +52,7 @@ import {
   deriveStatus,
   disambiguateRevisedTime,
   flightNumberToken,
+  isActualAt,
   isValidIsoDate,
   isValidTimeZone,
   normalizeFlightNumber,
@@ -55,12 +65,15 @@ import {
   type AdbStatus,
   type AirportRef,
   type BoardRow,
+  type BoardWindow,
+  type CodeshareStatus,
   type CarrierIataToIcaoTable,
   type Exact,
   type FieldQuality,
   type FlightDataProvider,
   type FlightLookup,
   type FlightStatus,
+  type FlightStatusValue,
   type FlightTimes,
   type ProviderCallContext,
   type ProviderCallRecord,
@@ -68,6 +81,7 @@ import {
   type ProviderEvent,
   type ProviderResult,
   type RegionalOperatorRule,
+  type ResolvedOperator,
 } from '@planeahead/shared';
 import type { AdbPlan } from './config';
 import {
@@ -90,6 +104,9 @@ export const ADB_DEFAULT_BACKOFF_MS = 1_000;
 
 /** Triggers on which the date came from a person and may be a day off. */
 const RETRY_ADJACENT_DAY_TRIGGERS: ReadonlySet<string> = new Set(['user_search', 'import']);
+
+/** The flight-status query: the path date is the origin-local DEPARTURE date, nothing else. */
+const FLIGHT_STATUS_QUERY = new URLSearchParams({ dateLocalRole: 'Departure' }).toString();
 
 // ---------------------------------------------------------------------------------------------
 // Response schemas. Tolerant of fields the spec may add (a newer gateway must not break the
@@ -263,6 +280,30 @@ function parseAdbNumber(
   };
 }
 
+/**
+ * The operating designator of one AeroDataBox item: `resolveOperator` with the regional hint
+ * looked up for the marketing designator. One helper for flights and board rows, so a board row
+ * and the tracker it should match resolve the same way.
+ */
+function operatorOf(
+  parsed: ParsedNumber & { readonly marketingIcao: string },
+  codeshareStatus: CodeshareStatus,
+  callSign: string | null | undefined,
+  regionalRules: readonly RegionalOperatorRule[],
+): ResolvedOperator {
+  const hint =
+    parsed.marketingIata === undefined
+      ? undefined
+      : regionalOperatorHint({ iata: parsed.marketingIata }, parsed.number, regionalRules);
+  return resolveOperator({
+    marketingIcao: parsed.marketingIcao,
+    marketingNumber: parsed.number,
+    codeshareStatus,
+    callSign,
+    hint,
+  });
+}
+
 function hasLiveQuality(movement: AdbMovementContract): boolean {
   return (movement.quality ?? []).some((quality) => quality === 'Live');
 }
@@ -285,7 +326,8 @@ export function mapAdbFlight(
     }
     throw error;
   }
-  if (parsed.marketingIcao === undefined) {
+  const marketingIcao = parsed.marketingIcao;
+  if (marketingIcao === undefined) {
     throw new AdbMappingError(`no ICAO code for the carrier of ${parsed.compact}`);
   }
   const origin = adbAirportRef(flight.departure.airport);
@@ -339,17 +381,12 @@ export function mapAdbFlight(
     }
   }
 
-  const hint =
-    parsed.marketingIata === undefined
-      ? undefined
-      : regionalOperatorHint({ iata: parsed.marketingIata }, parsed.number, ctx.regionalRules);
-  const operator = resolveOperator({
-    marketingIcao: parsed.marketingIcao,
-    marketingNumber: parsed.number,
-    codeshareStatus: flight.codeshareStatus,
-    callSign: flight.callSign,
-    hint,
-  });
+  const operator = operatorOf(
+    { ...parsed, marketingIcao },
+    flight.codeshareStatus,
+    flight.callSign,
+    ctx.regionalRules,
+  );
 
   const flags = adbFlags(status);
   const derived = deriveStatus({
@@ -367,9 +404,11 @@ export function mapAdbFlight(
   const result: Exact<FlightStatus> = {
     operatingCarrierIcao: operator.operatingCarrierIcao,
     operatorSource: operator.operatorSource,
-    marketingCarrierIcao: parsed.marketingIcao,
+    marketingCarrierIcao: marketingIcao,
     marketingFlightNumber: parsed.number,
-    flightNumber: parsed.number,
+    // The operating number: a codeshare resolved by its callsign keys under the callsign's own
+    // number (BA 1512 flown as AAL100 is AAL-100-...), never under the marketing one.
+    flightNumber: operator.operatingFlightNumber,
     legSeq: 1,
     codeshares: [],
     origin,
@@ -448,6 +487,11 @@ export class WebhookPayloadError extends Error {
  * payload keeps only what routes it, and the tracker re-reads the flight rather than trusting
  * the delivery. `externalId` is the notification id plus the item index; AeroDataBox keeps the
  * id across delivery retries, so a retried delivery dedupes.
+ *
+ * The delivery's own billing travels too, so the ledger records the provider's number instead of
+ * assuming one credit per item: every event carries `deliverySeqNo` and `deliveryItemCount`, and
+ * the FIRST event of a notification alone carries `deliveryCostCredits` (the whole delivery's
+ * cost, counted once however many items it held).
  */
 export function parseAdbNotification(body: unknown, receivedAt: Date): Exact<ProviderEvent>[] {
   const parsed = AdbNotificationSchema.safeParse(body);
@@ -482,6 +526,11 @@ export function parseAdbNotification(body: unknown, receivedAt: Date): Exact<Pro
         notificationId: notification.id,
         subscriptionId: notification.subscription.id,
         lastUpdatedUtc: item.lastUpdatedUtc,
+        deliverySeqNo: notification.deliveryAttempt.seqNo,
+        deliveryItemCount: notification.flights.length,
+        ...(events.length === 0
+          ? { deliveryCostCredits: notification.deliveryAttempt.costCredits }
+          : {}),
       },
     });
   }
@@ -571,14 +620,20 @@ export class AeroDataBoxAdapter implements FlightDataProvider {
   }
 
   /**
-   * One budgeted HTTP attempt: reserve, fetch, classify, record. Push-backs release the
-   * reservation and back the bucket off; nothing here retries.
+   * One budgeted HTTP attempt: build the request, reserve, fetch, classify, record. Push-backs
+   * release the reservation and back the bucket off; nothing here retries. The request is built
+   * BEFORE the reservation, so a failure that provably never left the Worker holds no budget,
+   * and a rejected `fetch` (which may have been served) keeps it.
    */
   async #attempt(
     ctx: ProviderCallContext,
     operation: 'flight_status' | 'fids' | 'airport' | 'health',
     path: string,
   ): Promise<Attempt> {
+    const outgoing = new Request(new URL(path, this.#baseUrl), {
+      method: 'GET',
+      headers: { 'X-Api-Key': this.#options.apiKey, Accept: 'application/json' },
+    });
     const { request, decision } = await reserve(ctx, this.id, operation);
     if (!decision.allowed) {
       return {
@@ -590,16 +645,10 @@ export class AeroDataBoxAdapter implements FlightDataProvider {
     const startedAt = ctx.now();
     let response: Response;
     try {
-      response = await this.#options.fetch(
-        new Request(new URL(path, this.#baseUrl), {
-          method: 'GET',
-          headers: { 'X-Api-Key': this.#options.apiKey, Accept: 'application/json' },
-        }),
-      );
+      response = await this.#options.fetch(outgoing);
     } catch (error) {
-      await ctx.budget.release?.(request, request.pollEquivalents);
       return {
-        call: transportErrorRecord(ctx, this.id, operation, startedAt, error, false),
+        call: transportErrorRecord(ctx, this.id, operation, startedAt, error),
         body: null,
         terminal: true,
       };
@@ -655,11 +704,16 @@ export class AeroDataBoxAdapter implements FlightDataProvider {
   }
 
   /**
-   * Flight status by marketing designator and origin-local date. Returns every flight the
-   * gateway answers with, mapped; an item that cannot be keyed is skipped and named in the
-   * record's `error`. A miss on a person-supplied date (`user_search`, `import`) retries the day
-   * before and the day after; a tracker's own polls never do, because the key's date is canonical
-   * and a neighbouring day's flight is a different instance.
+   * Flight status by marketing designator and ORIGIN-LOCAL DEPARTURE date
+   * (`dateLocalRole=Departure`: the date in the path is the date the flight key carries, so a
+   * tracker's lookup never gets back the neighbouring day's overnight departure). Returns every
+   * flight the gateway answers with, mapped; an item that cannot be keyed is skipped and named in
+   * the record's `error`.
+   *
+   * The plus or minus one day retry runs ONLY for a person-supplied date (`user_search` and
+   * `import`), where the day may be off by one: up to three billed calls. A tracker's own triggers
+   * (`alarm`, `reconcile`, `user_refresh`, `provider_alert`) make exactly one call per lookup,
+   * because the key's date is canonical and a neighbouring day's flight is a different instance.
    */
   async getFlight(
     lookup: FlightLookup,
@@ -698,17 +752,20 @@ export class AeroDataBoxAdapter implements FlightDataProvider {
       const attempt = await this.#attempt(
         ctx,
         'flight_status',
-        `flights/Number/${encodeURIComponent(designator)}/${date}`,
+        `flights/Number/${encodeURIComponent(designator)}/${date}?${FLIGHT_STATUS_QUERY}`,
       );
-      attempts.push(attempt);
       if (attempt.terminal) {
+        attempts.push(attempt);
         break;
       }
       const flights = this.#flightsFrom(attempt, ctx);
       if (flights !== null) {
+        attempts.push(attempt);
         await this.#recordAllBut(attempts, ctx);
         return flights;
       }
+      // A miss: a 204, or a 200 whose array is empty, which is the same billed `not_found`.
+      attempts.push({ ...attempt, call: { ...attempt.call, result: 'not_found' } });
     }
     const last = attempts.at(-1);
     if (last === undefined) {
@@ -779,12 +836,14 @@ export class AeroDataBoxAdapter implements FlightDataProvider {
 
   /**
    * FIDS by airport (TIER 2, 2 units). `window.from` and `window.to` are airport-local times
-   * (`YYYY-MM-DDTHH:mm`); a window wider than the plan allows is cut to `fidsWindowHours`.
+   * (`YYYY-MM-DDTHH:mm`, the `BoardWindow` contract), sent as they are: FIDS asks in local time,
+   * so `window.tz` is not needed here. FIDS selects by SCHEDULED time. A window wider than the plan
+   * allows is cut to `fidsWindowHours`.
    */
   async getBoard(
     airportIcao: string,
     direction: 'dep' | 'arr',
-    window: { from: string; to: string },
+    window: BoardWindow,
     ctx: ProviderCallContext,
   ): Promise<ProviderResult<Exact<BoardRow>[]>> {
     const icao = airportIcao.trim().toUpperCase();
@@ -938,6 +997,39 @@ function formatLocalMinute(ms: number): string {
   return new Date(ms).toISOString().slice(0, 16);
 }
 
+/**
+ * A board row's status from the data the row has. FIDS gives one movement: the departure at a
+ * departures board, the arrival at an arrivals board.
+ *
+ * - Departures: `deriveStatus` over the departure's schedule, estimate and actual, as for a flight.
+ * - Arrivals: there is no departure time on the row, so `deriveStatus` cannot see that the flight
+ *   left. Flags and an actual arrival first (cancelled, diverted, arrived); then `en_route` once
+ *   the status enum says the aircraft has left the origin (`isActualAt('departure')`, the same
+ *   disambiguation the revised times use, never a mapping of the enum's name); `scheduled`
+ *   before that, whatever the estimate says.
+ */
+function boardRowStatus(
+  status: AdbStatus,
+  direction: 'dep' | 'arr',
+  times: { scheduled: string; estimated: string | undefined; actual: string | undefined },
+  now: Date,
+): FlightStatusValue {
+  const flags = adbFlags(status);
+  if (direction === 'dep') {
+    return deriveStatus({
+      ...flags,
+      actualOut: times.actual,
+      scheduledOut: times.scheduled,
+      estimatedOut: times.estimated,
+      now,
+    });
+  }
+  if (flags.cancelled || flags.diverted || times.actual !== undefined) {
+    return deriveStatus({ ...flags, actualIn: times.actual, now });
+  }
+  return isActualAt('departure', status) ? 'en_route' : 'scheduled';
+}
+
 function boardRow(
   flight: z.infer<typeof AirportFlightSchema>,
   movement: AdbMovementContract,
@@ -964,14 +1056,12 @@ function boardRow(
   );
   const actual = revised?.quality === 'live' ? revised.value : undefined;
   const estimated = revised?.quality === 'estimated' ? revised.value : undefined;
-  const status = deriveStatus({
-    ...adbFlags(flight.status),
-    actualOut: direction === 'dep' ? actual : undefined,
-    actualIn: direction === 'arr' ? actual : undefined,
-    scheduledOut: direction === 'dep' ? scheduled.instant : undefined,
-    estimatedOut: direction === 'dep' ? estimated : undefined,
-    now: mapping.now,
-  });
+  const status = boardRowStatus(
+    flight.status,
+    direction,
+    { scheduled: scheduled.instant, estimated, actual },
+    mapping.now,
+  );
   const row: Exact<BoardRow> = {
     direction,
     designator: parsed.compact,
@@ -982,13 +1072,18 @@ function boardRow(
     codeshares: [],
     source: 'aerodatabox',
   };
-  if (parsed.marketingIcao !== undefined) {
-    row.operatingCarrierIcao = resolveOperator({
-      marketingIcao: parsed.marketingIcao,
-      marketingNumber: parsed.number,
-      codeshareStatus: flight.codeshareStatus,
-      callSign: flight.callSign,
-    }).operatingCarrierIcao;
+  const marketingIcao = parsed.marketingIcao;
+  if (marketingIcao !== undefined) {
+    // The same resolution as `mapAdbFlight`, regional hint included, so a row matches the key of
+    // the tracker for the same operation: (operator, operating number).
+    const operator = operatorOf(
+      { ...parsed, marketingIcao },
+      flight.codeshareStatus,
+      flight.callSign,
+      mapping.regionalRules,
+    );
+    row.operatingCarrierIcao = operator.operatingCarrierIcao;
+    row.flightNumber = operator.operatingFlightNumber;
   }
   if (estimated !== undefined) {
     row.estimated = estimated;

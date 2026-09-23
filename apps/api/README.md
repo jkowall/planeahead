@@ -184,8 +184,21 @@ hand, with a key.
 
 **Webhooks authenticate by path token.** Neither provider signs deliveries, so each receiver has a
 256-bit `WEBHOOK_TOKEN_*` per environment in its URL, compared in constant time; a wrong token is
-the ordinary 404. The token is never logged by our code and the Sentry scrubber redacts it, but
-Cloudflare's own request logs keep URLs (ADR 0010 records the residual risk).
+the ordinary 404. Generate one with `openssl rand -base64 32 | tr '+/' '-_' | tr -d '='` (43
+base64url characters): any other shape disables the receiver and, for AeroAPI, stops the router
+building a `target_url` at all. The token is never logged by our code and the Sentry scrubber
+redacts it from every string in an event, but Cloudflare's own request logs keep URLs (ADR 0010
+records the residual risk). The receivers are exempt from the per-IP limiter by design
+([threat model](../../docs/security/threat-model.md) section 3.1).
+
+**AeroAPI alerts need the account endpoint, and the adapter sets it.** FlightAware refuses
+`POST /alerts` with a 400 until `PUT /alerts/endpoint` has set an account-wide delivery URL. There
+is no manual owner step: the first `registerAlert` in an isolate PUTs this environment's webhook
+URL (`${API_PUBLIC_URL}/v1/webhooks/aeroapi/${WEBHOOK_TOKEN_AEROAPI}`, idempotent, free) and every
+alert also carries that URL as its own `target_url`. Never `DELETE /alerts/endpoint`: the next
+registration would put it back, and until then every alert creation fails. Whether staging and
+production get separate AeroAPI keys (they share the account endpoint on one key) is an open
+owner decision recorded in ADR 0010.
 
 **Rate limit `namespace_id` values are account-wide counters.** Staging, production and local each
 get their own block of ids in `wrangler.jsonc`, or staging load spends production's allowance.

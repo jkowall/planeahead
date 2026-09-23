@@ -157,6 +157,7 @@ const EXPECTED_EXPORTS = [
   'CODESHARE_STATUSES',
   'CodeshareStatusSchema',
   'callsignOperator',
+  'parseAirlineCallsign',
   'resolveOperator',
   // preferences
   'DEFAULT_USER_PREFERENCES',

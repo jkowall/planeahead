@@ -434,7 +434,7 @@ export function renderCadenceSection(): string {
     '',
     '### Pre-48 h AeroDataBox calls and per-flight totals by lead time',
     '',
-    `${pre48hRule()} AeroDataBox status calls are the same for every cadence: the creation fetch plus every weekly slot after it, so 1 / 2 / 4 calls at 3 / 14 / 30 days (the plan's daily-inside-14-days and every-2-days-beyond grids gave 1 / 12 / 20). The poll at exactly T-48 h is the AeroAPI bracketed fetch, not an AeroDataBox call. The per-cadence columns add the inside-48 h figures (and, for B, the assumed AeroDataBox alert items).`,
+    `${pre48hRule()} AeroDataBox status calls are the same for every cadence: the creation fetch plus every weekly slot after it, so 1 / 2 / 4 calls at 3 / 14 / 30 days (the plan's daily-inside-14-days and every-2-days-beyond grids gave 1 / 12 / 20). The poll at exactly T-48 h opens the AeroAPI window, but the router serves that one slot from AeroDataBox in every mode: at T-48 h the flight sits on AeroAPI's exclusive 2-day horizon, so no window AeroAPI accepts contains it (increment 6 review); in \`live\` mode a flight therefore makes one more AeroDataBox call and one fewer AeroAPI poll than these columns show. The per-cadence columns add the inside-48 h figures (and, for B, the assumed AeroDataBox alert items).`,
     '',
     leadTimeTable(),
     '',

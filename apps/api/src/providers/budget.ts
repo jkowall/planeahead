@@ -62,7 +62,12 @@ export function utcDate(now: Date): string {
  * rate. `parseProviderBudgetName` already accepts the suffix so the switch is a caller change.
  */
 export function providerBudgetName(provider: BudgetProvider, now: Date): string {
-  return `${provider}:${utcDate(now)}`;
+  return providerBudgetNameFor(provider, utcDate(now));
+}
+
+/** The object name for a given UTC day (`YYYY-MM-DD`). */
+export function providerBudgetNameFor(provider: BudgetProvider, date: string): string {
+  return `${provider}:${date}`;
 }
 
 export interface ProviderBudgetIdentity {
@@ -179,12 +184,16 @@ export class ProviderBudgetGuard implements BudgetGuard {
     this.#options = options;
   }
 
+  /**
+   * Debits the day the request names (`utcDate`, set when the request was built), or today by
+   * this guard's clock when it names none. Either way the day travels with the request into the
+   * object, so `release` finds the same one.
+   */
   async reserve(request: BudgetRequest): Promise<BudgetDecision> {
     if (!isBudgetProvider(request.provider)) {
       return { allowed: true, granted: request.pollEquivalents, ladder: 'normal' };
     }
-    const now = this.#options.now();
-    const date = utcDate(now);
+    const date = request.utcDate ?? utcDate(this.#options.now());
     const copy = await readBudgetCopy(this.#options.kv, request.provider, date);
     if (copy !== null && copy.blocked) {
       return {
@@ -192,25 +201,35 @@ export class ProviderBudgetGuard implements BudgetGuard {
         reason: copy.killSwitch ? 'provider_kill_switch' : 'provider_daily_cap',
       };
     }
-    return this.#stub(request.provider, now).reserve(request);
+    return this.#stub(request.provider, date).reserve({ ...request, utcDate: date });
   }
 
+  /**
+   * Refunds the day the reservation was DEBITED on (`request.utcDate`), not the day it is when
+   * the refund arrives: a 429 answered at 00:00:00.3 for a reservation made at 23:59:59.9 gives
+   * yesterday's units back to yesterday.
+   */
   async release(request: BudgetRequest, unusedPollEquivalents: number): Promise<void> {
     if (!isBudgetProvider(request.provider) || unusedPollEquivalents <= 0) {
       return;
     }
-    await this.#stub(request.provider, this.#options.now()).release(request, unusedPollEquivalents);
+    const date = request.utcDate ?? utcDate(this.#options.now());
+    await this.#stub(request.provider, date).release(
+      { ...request, utcDate: date },
+      unusedPollEquivalents,
+    );
   }
 
+  /** A push-back slows the NEXT reservations, so it goes to today's object. */
   async backoff(provider: ProviderId, retryAfterMs: number): Promise<void> {
     if (!isBudgetProvider(provider)) {
       return;
     }
-    await this.#stub(provider, this.#options.now()).backoff(retryAfterMs);
+    await this.#stub(provider, utcDate(this.#options.now())).backoff(retryAfterMs);
   }
 
-  #stub(provider: BudgetProvider, now: Date): ProviderBudgetRpc {
-    return this.#options.stubFor(providerBudgetName(provider, now));
+  #stub(provider: BudgetProvider, date: string): ProviderBudgetRpc {
+    return this.#options.stubFor(providerBudgetNameFor(provider, date));
   }
 }
 

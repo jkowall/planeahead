@@ -127,10 +127,15 @@ function percentile(sorted, p) {
   return sorted[Math.max(0, index)];
 }
 
+/** The adapter asks by origin-local DEPARTURE date (apps/api/src/providers/aerodatabox.adapter.ts). */
+const STATUS_QUERY = '?dateLocalRole=Departure';
+
 async function main() {
   const latencies = [];
   for (const designator of designators) {
-    const result = await get(`flights/Number/${encodeURIComponent(designator)}/${date}`);
+    const result = await get(
+      `flights/Number/${encodeURIComponent(designator)}/${date}${STATUS_QUERY}`,
+    );
     latencies.push(result.latencyMs);
     write(
       `flight-${designator.toLowerCase()}-${date}.json`,
@@ -166,7 +171,9 @@ async function main() {
   const extra = Number(values.samples);
   const first = designators[0];
   for (let i = 0; first !== undefined && i < extra; i += 1) {
-    latencies.push((await get(`flights/Number/${encodeURIComponent(first)}/${date}`)).latencyMs);
+    latencies.push(
+      (await get(`flights/Number/${encodeURIComponent(first)}/${date}${STATUS_QUERY}`)).latencyMs,
+    );
   }
   const sorted = [...latencies].sort((a, b) => a - b);
   process.stdout.write(
@@ -180,7 +187,9 @@ async function main() {
     while (low < high) {
       const mid = Math.ceil((low + high) / 2);
       const probe = new Date(Date.now() + mid * 86_400_000).toISOString().slice(0, 10);
-      const { status } = await get(`flights/Number/${encodeURIComponent(first)}/${probe}`);
+      const { status } = await get(
+        `flights/Number/${encodeURIComponent(first)}/${probe}${STATUS_QUERY}`,
+      );
       if (status === 200 || status === 204) {
         low = mid;
       } else {

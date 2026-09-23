@@ -14,12 +14,25 @@
  * `backoff` is how a provider's push-back (a 429, a 503, a Cloudflare HTML page) reaches the
  * bucket: it empties the bucket and blocks it until the given instant, so the next reservations
  * wait instead of retrying into the same wall.
+ *
+ * SEMANTICS OF A LIMIT. Neither provider says whether "N per second" is a fixed or a rolling
+ * window, so the bucket assumes the stricter: at most N grants in ANY one-second window. A bucket
+ * of burst `b` refilled at `r` per second grants at most `b + r` in one second (the full bucket,
+ * then a second of refill), so `bucketForLimit` splits the limit between the two: `b` is half the
+ * limit rounded down, `r` the rest. A limit below 2 cannot be split with whole tokens; it gets a
+ * burst of 1 and a rate of at most 1, which also stays within one grant per second. The earlier
+ * `burst = rate` handed out up to `2N - 1` in a second (9 at 5 per second).
+ *
+ * Sharding caveat: the burst cannot go below one token, so eight shards of one provider each keep
+ * a burst of 1 and can release 8 grants in the same instant against a limit of 5. The sharding
+ * escape hatch (src/do/provider-budget.ts) must route the per-second limit through one object or
+ * accept that edge.
  */
 
 export interface TokenBucketConfig {
-  /** Tokens added per second; the provider's per-second limit. */
+  /** Tokens added per second. */
   readonly ratePerSecond: number;
-  /** The most tokens the bucket holds; one second's worth by default. */
+  /** The most tokens the bucket holds. */
   readonly burst: number;
 }
 
@@ -53,6 +66,21 @@ export function bucketConfig(
     throw new RangeError(`token bucket burst must be at least 1, got ${String(burst)}`);
   }
   return { ratePerSecond: perSecondLimit, burst };
+}
+
+/**
+ * The bucket for a provider limit of `limit` requests per second: at most `limit` grants in any
+ * one-second window (see the module comment), and never less than one grant a second.
+ */
+export function bucketForLimit(limit: number): TokenBucketConfig {
+  if (!Number.isFinite(limit) || limit <= 0) {
+    throw new RangeError(`per-second limit must be positive, got ${String(limit)}`);
+  }
+  if (limit < 2) {
+    return bucketConfig(Math.min(limit, 1), 1);
+  }
+  const burst = Math.floor(limit / 2);
+  return bucketConfig(limit - burst, burst);
 }
 
 /** A full bucket at `nowMs`. */

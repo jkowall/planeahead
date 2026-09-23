@@ -69,6 +69,13 @@ export interface WorkerCostLoggerOptions {
   /** `ENVIRONMENT`, the fifth blob of the Analytics Engine point. */
   readonly environment: string;
   readonly log?: Logger | undefined;
+  /**
+   * The INVOCATION's Analytics Engine budget (built at the top of `queue()`, `scheduled()` or
+   * `alarm()`, src/queues/analytics.ts), so every writer in one invocation counts against one
+   * 200-point budget under the platform's 250. Pass it wherever one exists; the logger builds its
+   * own only for a one-off call from a route, where it is the invocation's only writer.
+   */
+  readonly analytics?: AnalyticsBudget | undefined;
 }
 
 /**
@@ -84,7 +91,8 @@ export class WorkerCostLogger implements CostLogger {
   constructor(env: WorkerCostLoggerEnv, options: WorkerCostLoggerOptions) {
     this.#env = env;
     this.#environment = options.environment;
-    this.#analytics = new AnalyticsBudget(env.PROVIDER_CALLS, options.log ?? createLogger());
+    this.#analytics =
+      options.analytics ?? new AnalyticsBudget(env.PROVIDER_CALLS, options.log ?? createLogger());
   }
 
   async record(call: ProviderCallRecord): Promise<void> {
@@ -102,12 +110,22 @@ export class WorkerCostLogger implements CostLogger {
 
 export type CostLoggerScope =
   | { readonly outbox: OutboxAppender }
-  | { readonly env: WorkerCostLoggerEnv; readonly environment: string; readonly log?: Logger };
+  | {
+      readonly env: WorkerCostLoggerEnv;
+      readonly environment: string;
+      readonly log?: Logger;
+      /** The invocation's shared budget; see `WorkerCostLoggerOptions.analytics`. */
+      readonly analytics?: AnalyticsBudget;
+    };
 
 /** The logger for where the code runs: an outbox inside a Durable Object, the database outside. */
 export function createCostLogger(scope: CostLoggerScope): CostLogger {
   if ('outbox' in scope) {
     return new DurableObjectCostLogger(scope.outbox);
   }
-  return new WorkerCostLogger(scope.env, { environment: scope.environment, log: scope.log });
+  return new WorkerCostLogger(scope.env, {
+    environment: scope.environment,
+    log: scope.log,
+    analytics: scope.analytics,
+  });
 }

@@ -38,10 +38,23 @@
  *   - Tripping the kill switch writes an outbox row that goes to the `persist` queue at once; the
  *     persist consumer raises the Sentry event (a queue handler has a Sentry client, a Durable
  *     Object RPC does not). A manual kill switch also persists in `CONFIG` KV, so tomorrow's
- *     object starts killed; the automatic one (the daily cap) ends with the day.
+ *     object starts killed; the automatic one (the daily cap) ends with the day. The brake fails
+ *     CLOSED: when the persistent kill switch cannot be read before the day's first decision, the
+ *     day starts killed (`persistent:unknown`, with the same alert) and re-reads it every 30 s,
+ *     lifting the stop on its own once the read says there is none.
  *   - The alarm, armed when the day's config is first written (never in the constructor), fires at
  *     00:05 UTC the next day: it writes the final counters to the outbox, sends them, and calls
  *     `deleteAll()`, because storage bills until it is deleted.
+ *   - From 00:05 the next day the object is READ-ONLY: a late call never recreates the day (no
+ *     config, no alarm, no second daily row). `reserve` refuses with `routing_rule`, `release`
+ *     and `backoff` do nothing, `configure` and `setKillSwitch` change nothing and answer the
+ *     closed snapshot (`dayClosed: true`, and `persisted: false` for the switch), and `snapshot`
+ *     reports the day closed. Nothing throws across the RPC boundary for it. Every outbox origin
+ *     also carries the object's lifetime epoch (`config.created_at_ms`), so `(origin, seq)` stays
+ *     unique even if a day were recreated.
+ *   - The KV fast-path copy is written in the background (`ctx.waitUntil`), one write at a time,
+ *     and never on a debit's critical path: a slow or failing KV adds nothing to a reservation's
+ *     latency, and a failed write waits out KV's one-write-a-second limit before the next try.
  *
  * Durable Objects never open Postgres (ADR 0007); every counter leaves through the outbox.
  */
@@ -71,7 +84,7 @@ import {
 import { budgetDefaults, providerSettings, type BudgetProvider } from '../providers/config';
 import {
   backoff as bucketBackoff,
-  bucketConfig,
+  bucketForLimit,
   initialBucket,
   take,
   type TokenBucketConfig,
@@ -99,6 +112,12 @@ const KV_REFRESH_MS = 10_000;
 const KV_MIN_WRITE_GAP_MS = 1_000;
 /** Shards divide the cap and the rate. */
 const SHARDS = 8;
+/** Re-read an unreadable persistent kill switch this often while the day runs killed. */
+const PERSISTENT_KILL_RETRY_MS = 30_000;
+/** The kill reason of a day that started killed because the persistent switch was unreadable. */
+export const PERSISTENT_KILL_UNKNOWN = 'persistent:unknown';
+/** How long after a late touch of a closed day the storage it recreated is deleted again. */
+const CLOSED_DAY_CLEANUP_MS = 60_000;
 
 /**
  * Provider units one reservation debits, or null for an operation `cost.ts` does not price.
@@ -115,9 +134,9 @@ function unitsFor(provider: ProviderId, operation: string): number | null {
   }
 }
 
-/** The bucket for a per-second limit: one second of burst, never less than one token. */
+/** The bucket for a per-second limit (at most that many grants in any one-second window). */
 function bucketFor(perSecondLimit: number): TokenBucketConfig {
-  return bucketConfig(perSecondLimit, Math.max(1, perSecondLimit));
+  return bucketForLimit(perSecondLimit);
 }
 
 export interface BudgetSnapshot {
@@ -138,6 +157,20 @@ export interface BudgetSnapshot {
   readonly percentUsed: number;
   readonly tokens: number;
   readonly finalised: boolean;
+  /**
+   * True from 00:05 UTC the next day: the object is read-only and the counters are final (or,
+   * when the day's storage was already deleted, gone: every counter then reads zero).
+   */
+  readonly dayClosed: boolean;
+}
+
+/** What `setKillSwitch` answers: the snapshot, and whether `CONFIG` KV took the change. */
+export interface KillSwitchResult extends BudgetSnapshot {
+  /**
+   * False when the `CONFIG` write failed: the switch holds today but will NOT carry into
+   * tomorrow's object (on) or will come back tomorrow (off). The admin page shows it.
+   */
+  readonly persisted: boolean;
 }
 
 export interface BudgetConfigPatch {
@@ -154,6 +187,7 @@ interface ConfigRow extends Row {
   kill_reason: string | null;
   finalised: number;
   alarm_at_ms: number | null;
+  created_at_ms: number;
 }
 
 interface LedgerRow extends Row {
@@ -187,7 +221,10 @@ interface OutboxRow extends Row {
 export interface ProviderBudgetMessage {
   readonly kind: string;
   readonly seq: number;
-  /** `provider_budget:${name}`: with `seq`, the idempotency key on the consumer side. */
+  /**
+   * `provider_budget:${name}@${epoch}` (the epoch is `config.created_at_ms`): with `seq`, the
+   * idempotency key on the consumer side, unique per object LIFETIME and not only per name.
+   */
   readonly origin: string;
   readonly payload: unknown;
 }
@@ -195,6 +232,11 @@ export interface ProviderBudgetMessage {
 class BudgetIdentityError extends Error {
   override readonly name = 'BudgetIdentityError';
 }
+
+type PersistentKillState =
+  | { readonly state: 'unread' }
+  | { readonly state: 'known'; readonly reason: string | null }
+  | { readonly state: 'unknown'; readonly retryAtMs: number };
 
 export class ProviderBudget extends DurableObject<Env> {
   /** Schema version this build expects. Reported by `GET /health` without touching an object. */
@@ -209,14 +251,22 @@ export class ProviderBudget extends DurableObject<Env> {
   outboxSink: Pick<Queue, 'sendBatch'>;
   /** Test seam: where the fast-path copy is written (`CACHE`). */
   kv: Pick<KVNamespace, 'put'>;
+  /** Test seam: where the persistent manual kill switch lives (`CONFIG`). */
+  configKv: Pick<KVNamespace, 'get' | 'put' | 'delete'>;
 
   #schema: MigrationResult = EMPTY_MIGRATION_RESULT;
   readonly #identity: ProviderBudgetIdentity | null;
   readonly #log: Logger;
-  #persistentKill: string | null = null;
+  #persistentKill: PersistentKillState = { state: 'unread' };
   #deleted = false;
+  #alertAppended = false;
+  #cleanupArmed = false;
+  /** The copy KV last ACCEPTED; a failed write leaves it as it was. */
   #kvSignature = '';
   #kvWrittenAtMs = 0;
+  #kvRetryNotBeforeMs = 0;
+  #kvInFlight: Promise<void> | null = null;
+  #kvDirty = false;
 
   constructor(ctx: DurableObjectState, env: Env) {
     super(ctx, env);
@@ -225,26 +275,10 @@ export class ProviderBudget extends DurableObject<Env> {
     this.#log = createLogger({ durable_object: 'ProviderBudget', name: name ?? 'unnamed' });
     this.outboxSink = env.PERSIST_QUEUE;
     this.kv = env.CACHE;
+    this.configKv = env.CONFIG;
     blockOnMigrations(ctx, ProviderBudget.MIGRATIONS, (result) => {
       this.#schema = result;
     });
-    const identity = this.#identity;
-    if (identity !== null) {
-      // A manual kill switch set on an earlier day. Read once per construction, before the
-      // first request, so the first `reserve` of the day already sees it.
-      void ctx.blockConcurrencyWhile(async () => {
-        try {
-          const stored = await env.CONFIG.get<{ reason?: unknown }>(
-            persistentKillKey(identity.provider),
-            'json',
-          );
-          this.#persistentKill =
-            stored === null ? null : typeof stored.reason === 'string' ? stored.reason : 'manual';
-        } catch (error) {
-          this.#log.warn('provider_budget_kill_read_failed', errorFields(error));
-        }
-      });
-    }
   }
 
   /** Liveness and schema probe. Cheap, does no I/O, and creates the object if it did not exist. */
@@ -266,7 +300,7 @@ export class ProviderBudget extends DurableObject<Env> {
    */
   async reserve(request: BudgetRequest): Promise<BudgetDecision> {
     const identity = this.#requireIdentity();
-    if (request.provider !== identity.provider) {
+    if (request.provider !== identity.provider || this.#otherDay(request)) {
       return { allowed: false, reason: 'routing_rule' };
     }
     const units = unitsFor(identity.provider, request.operation);
@@ -275,7 +309,12 @@ export class ProviderBudget extends DurableObject<Env> {
       return { allowed: false, reason: 'routing_rule' };
     }
     const now = this.clock();
-    this.#ensureSchema();
+    if (this.#dayClosed(now)) {
+      this.#log.warn('provider_budget_day_closed', { operation: request.operation });
+      this.#armClosedDayCleanup(now);
+      return { allowed: false, reason: 'routing_rule' };
+    }
+    await this.#prepare(now);
     let tripped = false;
     const decision = this.ctx.storage.transactionSync((): BudgetDecision => {
       const config = this.#ensureConfig(now);
@@ -308,10 +347,11 @@ export class ProviderBudget extends DurableObject<Env> {
         ladder: ladderFor(spent + units, config.daily_unit_cap),
       };
     });
-    if (tripped) {
+    // `#trip` and a fail-closed first touch both queue an alert; send it now, once.
+    if (this.#takeAlertAppended()) {
       await this.#flushOutbox(now);
     }
-    await this.#refreshKvCopy(now, tripped);
+    this.#refreshKvCopy(now, tripped);
     return decision;
   }
 
@@ -322,7 +362,13 @@ export class ProviderBudget extends DurableObject<Env> {
    */
   async release(request: BudgetRequest, unusedPollEquivalents: number): Promise<void> {
     const identity = this.#requireIdentity();
-    if (request.provider !== identity.provider || unusedPollEquivalents <= 0) {
+    if (
+      request.provider !== identity.provider ||
+      unusedPollEquivalents <= 0 ||
+      this.#otherDay(request)
+    ) {
+      // A refund for another day's reservation would under-count this day and leave the other
+      // day's debit in place; `utcDate` on the request says which day it was debited on.
       return;
     }
     const units = unitsFor(identity.provider, request.operation) ?? 0;
@@ -332,7 +378,11 @@ export class ProviderBudget extends DurableObject<Env> {
         : 1;
     const refund = units * share;
     const now = this.clock();
-    this.#ensureSchema();
+    if (this.#dayClosed(now)) {
+      this.#armClosedDayCleanup(now);
+      return;
+    }
+    await this.#prepare(now);
     this.ctx.storage.transactionSync(() => {
       this.#ensureConfig(now);
       this.ctx.storage.sql.exec(
@@ -347,20 +397,29 @@ export class ProviderBudget extends DurableObject<Env> {
         request.trigger,
       );
     });
-    await this.#refreshKvCopy(now, false);
+    if (this.#takeAlertAppended()) {
+      await this.#flushOutbox(now);
+    }
+    this.#refreshKvCopy(now, false);
   }
 
   /** The provider pushed back: empty the bucket and block it for `retryAfterMs`. */
   async backoff(retryAfterMs: number): Promise<void> {
     this.#requireIdentity();
     const now = this.clock();
-    this.#ensureSchema();
+    if (this.#dayClosed(now)) {
+      this.#armClosedDayCleanup(now);
+      return;
+    }
+    await this.#prepare(now);
     this.ctx.storage.transactionSync(() => {
       const config = this.#ensureConfig(now);
       const bucket = bucketFor(config.per_second_limit);
       this.#saveBucket(bucketBackoff(this.#bucket(bucket, now), bucket, now, retryAfterMs));
     });
-    return Promise.resolve();
+    if (this.#takeAlertAppended()) {
+      await this.#flushOutbox(now);
+    }
   }
 
   /**
@@ -368,16 +427,18 @@ export class ProviderBudget extends DurableObject<Env> {
    * the `persist` queue (and from there to Sentry), and `CONFIG` KV remembers it so the next
    * day's object starts killed. Off: clears both.
    */
-  async setKillSwitch(on: boolean, reason = 'manual'): Promise<BudgetSnapshot> {
+  async setKillSwitch(on: boolean, reason = 'manual'): Promise<KillSwitchResult> {
     const identity = this.#requireIdentity();
     const now = this.clock();
-    this.#ensureSchema();
-    let tripped = false;
+    if (this.#dayClosed(now)) {
+      this.#log.warn('provider_budget_day_closed', { action: 'setKillSwitch', on });
+      return { ...this.#readClosed(now), persisted: false };
+    }
+    await this.#prepare(now);
     this.ctx.storage.transactionSync(() => {
       const config = this.#ensureConfig(now);
       if (on && config.kill_switch === 0) {
         this.#trip(now, `manual:${reason}`, {});
-        tripped = true;
       } else if (!on && config.kill_switch === 1) {
         this.ctx.storage.sql.exec(
           'UPDATE config SET kill_switch = 0, kill_reason = NULL, kill_at_ms = NULL, updated_at_ms = ? WHERE id = 1',
@@ -385,31 +446,38 @@ export class ProviderBudget extends DurableObject<Env> {
         );
       }
     });
+    let persisted = true;
     try {
       if (on) {
-        await this.env.CONFIG.put(
+        await this.configKv.put(
           persistentKillKey(identity.provider),
           JSON.stringify({ reason, atMs: now }),
         );
       } else {
-        await this.env.CONFIG.delete(persistentKillKey(identity.provider));
+        await this.configKv.delete(persistentKillKey(identity.provider));
       }
-      this.#persistentKill = on ? reason : null;
+      this.#persistentKill = { state: 'known', reason: on ? reason : null };
     } catch (error) {
-      this.#log.error('provider_budget_kill_persist_failed', errorFields(error));
+      persisted = false;
+      this.#log.error('provider_budget_kill_persist_failed', { on, ...errorFields(error) });
     }
-    if (tripped) {
+    // `#trip` and a fail-closed first touch both queue an alert; send it now, once.
+    if (this.#takeAlertAppended()) {
       await this.#flushOutbox(now);
     }
-    await this.#refreshKvCopy(now, true);
-    return this.#snapshot(now);
+    this.#refreshKvCopy(now, true);
+    return { ...this.#snapshot(now), persisted };
   }
 
   /** Changes the day's cap or per-second limit (the admin page, increment 12; the tests). */
   async configure(patch: BudgetConfigPatch): Promise<BudgetSnapshot> {
     this.#requireIdentity();
     const now = this.clock();
-    this.#ensureSchema();
+    if (this.#dayClosed(now)) {
+      this.#log.warn('provider_budget_day_closed', { action: 'configure' });
+      return this.#readClosed(now);
+    }
+    await this.#prepare(now);
     this.ctx.storage.transactionSync(() => {
       this.#ensureConfig(now);
       if (patch.dailyUnitCap !== undefined) {
@@ -423,28 +491,48 @@ export class ProviderBudget extends DurableObject<Env> {
         );
       }
       if (patch.perSecondLimit !== undefined) {
+        // Validates the limit (a RangeError rolls the whole patch back) before storing it.
         const bucket = bucketFor(patch.perSecondLimit);
         this.ctx.storage.sql.exec(
           'UPDATE config SET per_second_limit = ?, updated_at_ms = ? WHERE id = 1',
-          bucket.ratePerSecond,
+          patch.perSecondLimit,
           now,
         );
         this.#saveBucket(initialBucket(bucket, now));
       }
     });
-    await this.#refreshKvCopy(now, true);
+    if (this.#takeAlertAppended()) {
+      await this.#flushOutbox(now);
+    }
+    this.#refreshKvCopy(now, true);
     return this.#snapshot(now);
   }
 
-  /** The day so far. Creates the day's config if this is the first touch. */
-  snapshot(): BudgetSnapshot {
+  /**
+   * The day so far. Creates the day's config if this is the first touch of an open day; a closed
+   * day is only ever read, and a closed day whose storage is gone reads as zeros.
+   */
+  async snapshot(): Promise<BudgetSnapshot> {
     this.#requireIdentity();
     const now = this.clock();
-    this.#ensureSchema();
+    if (this.#dayClosed(now)) {
+      return this.#readClosed(now);
+    }
+    await this.#prepare(now);
     this.ctx.storage.transactionSync(() => {
       this.#ensureConfig(now);
     });
+    if (this.#takeAlertAppended()) {
+      await this.#flushOutbox(now);
+    }
     return this.#snapshot(now);
+  }
+
+  /** Test seam: resolves once no fast-path KV write is in flight. */
+  async kvCopySettled(): Promise<void> {
+    while (this.#kvInFlight !== null) {
+      await this.#kvInFlight;
+    }
   }
 
   /**
@@ -456,6 +544,10 @@ export class ProviderBudget extends DurableObject<Env> {
     const identity = this.#identity;
     if (identity === null) {
       await this.ctx.storage.deleteAll();
+      return;
+    }
+    if (this.#deleted) {
+      // Already finalised and deleted by this instance: nothing to recreate or send.
       return;
     }
     this.#ensureSchema();
@@ -512,7 +604,10 @@ export class ProviderBudget extends DurableObject<Env> {
     return this.#identity;
   }
 
-  /** After `deleteAll()` the tables are gone; a later call on the same instance recreates them. */
+  /**
+   * After `deleteAll()` the tables are gone. Only an OPEN day ever gets here (every entry point
+   * refuses a closed day first), so recreating them is safe: it is the same day, not yet final.
+   */
   #ensureSchema(): void {
     if (this.#deleted) {
       this.#schema = runSqlMigrations(this.ctx, ProviderBudget.MIGRATIONS);
@@ -520,19 +615,129 @@ export class ProviderBudget extends DurableObject<Env> {
     }
   }
 
+  /** From 00:05 UTC the next day the counters are final and the object is read-only. */
+  #dayClosed(now: number): boolean {
+    return now >= finaliseAtMs(this.#requireIdentity().utcDate);
+  }
+
+  /** A request that names another day's budget than this object's. */
+  #otherDay(request: BudgetRequest): boolean {
+    return request.utcDate !== undefined && request.utcDate !== this.#requireIdentity().utcDate;
+  }
+
+  /** A closed day, read without writing: its final counters, or zeros once they are deleted. */
+  #readClosed(now: number): BudgetSnapshot {
+    if (this.#deleted || this.#config() === null) {
+      this.#armClosedDayCleanup(now);
+      return this.#closedSnapshot(now);
+    }
+    return this.#snapshot(now);
+  }
+
+  /**
+   * A late touch on a closed day whose storage was already deleted: the constructor's migration
+   * run recreated the (empty) schema, which would otherwise bill forever. Deleted again a minute
+   * later by the alarm's no-config path, which sends nothing. Never armed at or before `now`, and
+   * never when this instance did not recreate anything.
+   */
+  #armClosedDayCleanup(now: number): void {
+    if (this.#cleanupArmed || this.#deleted || this.#schema.applied.length === 0) {
+      return;
+    }
+    if (this.#config() !== null) {
+      return;
+    }
+    this.#cleanupArmed = true;
+    void this.ctx.storage.setAlarm(now + CLOSED_DAY_CLEANUP_MS);
+  }
+
+  /**
+   * Everything an open day needs before its first synchronous decision: the schema, and the
+   * persistent kill switch when the day's config does not exist yet (or started killed because
+   * it could not be read). The only awaited step; it never runs inside a transaction.
+   */
+  async #prepare(now: number): Promise<void> {
+    this.#ensureSchema();
+    const config = this.#config();
+    if (config !== null && config.kill_reason !== PERSISTENT_KILL_UNKNOWN) {
+      return;
+    }
+    await this.#readPersistentKill(now);
+    if (config === null || this.#persistentKill.state !== 'known') {
+      return;
+    }
+    const known = this.#persistentKill.reason;
+    this.ctx.storage.transactionSync(() => {
+      const current = this.#config();
+      if (current?.kill_reason !== PERSISTENT_KILL_UNKNOWN) {
+        return;
+      }
+      if (known === null) {
+        this.ctx.storage.sql.exec(
+          'UPDATE config SET kill_switch = 0, kill_reason = NULL, kill_at_ms = NULL, updated_at_ms = ? WHERE id = 1',
+          now,
+        );
+        this.#log.warn('provider_budget_kill_read_recovered', { lifted: true });
+      } else {
+        this.ctx.storage.sql.exec(
+          'UPDATE config SET kill_reason = ?, updated_at_ms = ? WHERE id = 1',
+          `persistent:${known}`,
+          now,
+        );
+        this.#log.warn('provider_budget_kill_read_recovered', { lifted: false });
+      }
+    });
+  }
+
+  /** Reads the persistent manual kill switch from `CONFIG`, at most once per retry interval. */
+  async #readPersistentKill(now: number): Promise<void> {
+    const current = this.#persistentKill;
+    if (current.state === 'known' || (current.state === 'unknown' && now < current.retryAtMs)) {
+      return;
+    }
+    const identity = this.#requireIdentity();
+    try {
+      const stored = await this.configKv.get<{ reason?: unknown }>(
+        persistentKillKey(identity.provider),
+        'json',
+      );
+      this.#persistentKill = {
+        state: 'known',
+        reason:
+          stored === null ? null : typeof stored.reason === 'string' ? stored.reason : 'manual',
+      };
+    } catch (error) {
+      this.#persistentKill = { state: 'unknown', retryAtMs: now + PERSISTENT_KILL_RETRY_MS };
+      this.#log.error('provider_budget_kill_read_failed', errorFields(error));
+    }
+  }
+
+  /** Whether the last transaction appended an alert that must be sent now; resets the flag. */
+  #takeAlertAppended(): boolean {
+    const appended = this.#alertAppended;
+    this.#alertAppended = false;
+    return appended;
+  }
+
   #config(): ConfigRow | null {
     const rows = this.ctx.storage.sql
       .exec<ConfigRow>(
-        'SELECT daily_unit_cap, per_second_limit, kill_switch, kill_reason, finalised, alarm_at_ms FROM config WHERE id = 1',
+        'SELECT daily_unit_cap, per_second_limit, kill_switch, kill_reason, finalised, alarm_at_ms, created_at_ms FROM config WHERE id = 1',
       )
       .toArray();
     return rows[0] ?? null;
   }
 
   /**
-   * The day's config, created on first touch from the plan defaults (and a persistent manual
+   * The day's config, created on first touch from the plan defaults (and the persistent manual
    * kill switch), together with a full token bucket and the finalising alarm. `setAlarm` is not
-   * awaited: inside `transactionSync` it is covered by the rollback (facts sheet section 3).
+   * awaited: inside `transactionSync` it is covered by the rollback (facts sheet section 3). The
+   * alarm is only ever armed in the future: callers refuse a closed day before getting here, and
+   * the guard below holds even if one did not.
+   *
+   * Fail closed: when the persistent kill switch could not be read (`#prepare` tried), the day
+   * starts killed with `persistent:unknown` and the kill-switch alert is queued, exactly as if an
+   * operator had stopped the provider; `#prepare` lifts it once a read succeeds.
    */
   #ensureConfig(now: number): ConfigRow {
     const existing = this.#config();
@@ -544,24 +749,37 @@ export class ProviderBudget extends DurableObject<Env> {
     const sharded = identity.shard !== undefined;
     const cap = sharded ? Math.floor(defaults.dailyUnitCap / SHARDS) : defaults.dailyUnitCap;
     const rate = sharded ? defaults.perSecondLimit / SHARDS : defaults.perSecondLimit;
-    const killed = this.#persistentKill !== null;
+    const persistent = this.#persistentKill;
+    const killReason =
+      persistent.state === 'known'
+        ? persistent.reason === null
+          ? null
+          : `persistent:${persistent.reason}`
+        : PERSISTENT_KILL_UNKNOWN;
     const due = finaliseAtMs(identity.utcDate);
     this.ctx.storage.sql.exec(
       `INSERT INTO config (id, provider, utc_date, daily_unit_cap, per_second_limit, kill_switch,
-                           kill_reason, kill_at_ms, finalised, alarm_at_ms, updated_at_ms)
-       VALUES (1, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?)`,
+                           kill_reason, kill_at_ms, finalised, alarm_at_ms, created_at_ms,
+                           updated_at_ms)
+       VALUES (1, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?, ?)`,
       identity.provider,
       identity.utcDate,
       cap,
       rate,
-      killed ? 1 : 0,
-      killed ? `persistent:${this.#persistentKill ?? ''}` : null,
-      killed ? now : null,
-      due,
+      killReason === null ? 0 : 1,
+      killReason,
+      killReason === null ? null : now,
+      due > now ? due : null,
+      now,
       now,
     );
     this.#saveBucket(initialBucket(bucketFor(rate), now));
-    void this.ctx.storage.setAlarm(due);
+    if (due > now) {
+      void this.ctx.storage.setAlarm(due);
+    }
+    if (killReason === PERSISTENT_KILL_UNKNOWN) {
+      this.#appendKillAlert(now, PERSISTENT_KILL_UNKNOWN, { configReadFailed: 1 });
+    }
     const created = this.#config();
     if (created === null) {
       throw new Error('ProviderBudget config row missing after insert');
@@ -638,13 +856,18 @@ export class ProviderBudget extends DurableObject<Env> {
 
   /** Flips the kill switch on and queues the alert. */
   #trip(now: number, reason: string, detail: Readonly<Record<string, number>>): void {
-    const identity = this.#requireIdentity();
     this.ctx.storage.sql.exec(
       'UPDATE config SET kill_switch = 1, kill_reason = ?, kill_at_ms = ?, updated_at_ms = ? WHERE id = 1',
       reason,
       now,
       now,
     );
+    this.#appendKillAlert(now, reason, detail);
+  }
+
+  /** Queues the kill-switch alert (the persist consumer raises it in Sentry). */
+  #appendKillAlert(now: number, reason: string, detail: Readonly<Record<string, number>>): void {
+    const identity = this.#requireIdentity();
     const payload = {
       provider: identity.provider,
       utcDate: identity.utcDate,
@@ -653,6 +876,7 @@ export class ProviderBudget extends DurableObject<Env> {
       ...detail,
     };
     this.#appendOutbox(PROVIDER_BUDGET_OUTBOX_KINDS.killSwitch, payload, now);
+    this.#alertAppended = true;
     this.#log.error('provider_kill_switch_tripped', payload);
   }
 
@@ -689,9 +913,10 @@ export class ProviderBudget extends DurableObject<Env> {
     if (last === undefined) {
       return true;
     }
+    const epoch = this.#config()?.created_at_ms ?? 0;
     const origin = `provider_budget:${identity.provider}:${identity.utcDate}${
       identity.shard === undefined ? '' : `:${String(identity.shard)}`
-    }`;
+    }@${String(epoch)}`;
     try {
       await this.outboxSink.sendBatch(
         rows.map((row) => ({
@@ -758,23 +983,59 @@ export class ProviderBudget extends DurableObject<Env> {
       percentUsed: cap > 0 ? Math.round((totals.units / cap) * 10_000) / 100 : 100,
       tokens: this.#bucket(bucket, now).tokens,
       finalised: config?.finalised === 1,
+      dayClosed: this.#dayClosed(now),
+    };
+  }
+
+  /** A closed day whose storage is gone: nothing is known any more, and nothing is written. */
+  #closedSnapshot(now: number): BudgetSnapshot {
+    const identity = this.#requireIdentity();
+    return {
+      provider: identity.provider,
+      utcDate: identity.utcDate,
+      shard: identity.shard ?? null,
+      units: 0,
+      pollEquivalents: 0,
+      calls: 0,
+      releasedUnits: 0,
+      byTrigger: {},
+      denials: {},
+      dailyUnitCap: 0,
+      perSecondLimit: 0,
+      killSwitch: false,
+      killReason: null,
+      ladder: ladderFor(0, 0),
+      percentUsed: 0,
+      tokens: 0,
+      finalised: true,
+      dayClosed: this.#dayClosed(now),
     };
   }
 
   /**
-   * Writes the fast-path copy. A change in what a reader decides (blocked or killed) is written at
-   * once; a change of ladder rung, or a copy older than `KV_REFRESH_MS` while debits flow, waits
-   * out the KV per-key limit of one write a second. A KV failure (a 429 included) is logged, never
-   * fails the reservation, and leaves the copy marked unwritten so the next call retries it.
+   * Schedules the fast-path copy; never awaited on a caller's path. A change in what a reader
+   * decides (blocked or killed) is written as soon as no other write is in flight; a change of
+   * ladder rung, or a copy older than `KV_REFRESH_MS` while debits flow, waits out the KV per-key
+   * limit of one write a second. A failed write (a 429 included) is logged, keeps the last
+   * accepted signature (so the change is still pending) and blocks every write until
+   * `KV_MIN_WRITE_GAP_MS` later, so a KV failure costs at most one attempt a second instead of
+   * one per debit. A change that arrives while a write is in flight is written when it lands.
    */
-  async #refreshKvCopy(now: number, force: boolean): Promise<void> {
+  #refreshKvCopy(now: number, force: boolean): void {
     const identity = this.#requireIdentity();
     if (identity.shard !== undefined) {
       // A shard sees an eighth of the day; the copy is the unsharded object's to write.
       return;
     }
+    if (this.#deleted) {
+      return;
+    }
     const config = this.#config();
     if (config === null) {
+      return;
+    }
+    if (this.#kvInFlight !== null) {
+      this.#kvDirty = true;
       return;
     }
     const units = this.#totals().units;
@@ -796,18 +1057,35 @@ export class ProviderBudget extends DurableObject<Env> {
     if (!urgent && !changed && !stale) {
       return;
     }
+    if (now < this.#kvRetryNotBeforeMs) {
+      return;
+    }
     if (!urgent && now - this.#kvWrittenAtMs < KV_MIN_WRITE_GAP_MS) {
       return;
     }
-    this.#kvSignature = signature;
     this.#kvWrittenAtMs = now;
-    try {
-      await this.kv.put(budgetKvKey(identity.provider, identity.utcDate), JSON.stringify(copy), {
+    this.#kvDirty = false;
+    const write = this.kv
+      .put(budgetKvKey(identity.provider, identity.utcDate), JSON.stringify(copy), {
         expirationTtl: BUDGET_KV_TTL_SECONDS,
+      })
+      .then(
+        () => {
+          this.#kvSignature = signature;
+        },
+        (error: unknown) => {
+          this.#kvRetryNotBeforeMs = now + KV_MIN_WRITE_GAP_MS;
+          this.#log.warn('provider_budget_kv_write_failed', errorFields(error));
+        },
+      )
+      .finally(() => {
+        this.#kvInFlight = null;
+        if (this.#kvDirty) {
+          this.#kvDirty = false;
+          this.#refreshKvCopy(this.clock(), false);
+        }
       });
-    } catch (error) {
-      this.#kvSignature = '';
-      this.#log.warn('provider_budget_kv_write_failed', errorFields(error));
-    }
+    this.#kvInFlight = write;
+    this.ctx.waitUntil(write);
   }
 }

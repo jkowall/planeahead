@@ -323,4 +323,50 @@ describe('ProviderBudgetGuard (the Worker side)', () => {
     await budgetGuard.backoff('nws', 750);
     expect(calls).toEqual(['release', 'backoff:750']);
   });
+
+  it('a release after midnight refunds the day the reservation was debited on', async () => {
+    let clock = new Date('2026-09-22T23:59:59.900Z');
+    const names: string[] = [];
+    const seen: BudgetRequest[] = [];
+    const stub: ProviderBudgetRpc = {
+      reserve: (request) => {
+        seen.push(request);
+        return Promise.resolve({
+          allowed: true,
+          granted: request.pollEquivalents,
+          ladder: 'normal',
+        });
+      },
+      release: (request) => {
+        seen.push(request);
+        return Promise.resolve();
+      },
+      backoff: () => Promise.resolve(),
+    };
+    const guard = new ProviderBudgetGuard({
+      stubFor: (name) => {
+        names.push(name);
+        return stub;
+      },
+      kv: { get: () => Promise.resolve(null) } as unknown as Pick<KVNamespace, 'get'>,
+      now: () => clock,
+    });
+    // Built the way the adapters build it: the day is named once, from the call's clock.
+    const request: BudgetRequest = { ...REQUEST, utcDate: '2026-09-22' };
+    await guard.reserve(request);
+    clock = new Date('2026-09-23T00:00:00.300Z');
+    await guard.release(request, request.pollEquivalents);
+    // A push-back slows the NEXT reservations, which land on the new day.
+    await guard.backoff('aerodatabox', 500);
+    expect(names).toEqual([
+      'aerodatabox:2026-09-22',
+      'aerodatabox:2026-09-22',
+      'aerodatabox:2026-09-23',
+    ]);
+    expect(seen.map((r) => r.utcDate)).toEqual(['2026-09-22', '2026-09-22']);
+    // A request that names no day gets the guard's day, and carries it into the object.
+    clock = new Date('2026-09-23T08:00:00Z');
+    await guard.reserve(REQUEST);
+    expect(seen.at(-1)?.utcDate).toBe('2026-09-23');
+  });
 });
