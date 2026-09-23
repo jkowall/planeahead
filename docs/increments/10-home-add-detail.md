@@ -1,6 +1,6 @@
 # Increment 10: next-flight home, add flight, flight detail
 
-Status: spec (2026-09-20). Builder: Opus 5. Reviewers: Opus 5 (React Native and data-flow correctness) plus orchestrator read. Branch `inc10-home-add-detail` based on `inc9-mobile-scaffold`.
+Status: complete (2026-09-23) on branch `inc10-home-add-detail`, PR merged into main. Outcome, rulings and deviations are in `docs/build-log.md` and `docs/increments/10-verification.md`; where the text below disagrees with the review rulings recorded there (the timeline built from the snapshot on the subscription row because the sync feed carries no event rows, the home pull-to-refresh syncing only while the per-flight provider refresh lives on the detail screen, the provider-call acceptance proven in the API's Workers suite, the local tombstone for rows a queued DELETE names), the build log wins. Device steps that need an API are pending until staging or a Neon branch exists. Builder: Opus 5. Reviewers: two Opus 5 lenses (offline data flow and outbox correctness, screens and contract correctness) plus orchestrator read. Branch `inc10-home-add-detail` based on `main`.
 
 ## Goal
 

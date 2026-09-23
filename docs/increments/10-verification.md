@@ -19,8 +19,8 @@ final run.
 
 | Check | Command | Result |
 | --- | --- | --- |
-| Full check | `pnpm turbo run typecheck lint test --force && pnpm prettier --check . && node scripts/toolchain-guard.mjs && node scripts/vitest-exit-guard.mjs && node scripts/mobile-migrations-guard.mjs --base origin/main` | passed (re-review round): 14 turbo tasks in 1 min 40 s; 1998 tests passed (tools 19, shared 577, db 176, api 707 with 1 skipped, mobile 519); Prettier clean; toolchain guard ok; exit guard ok; migrations guard ok. The review round's run: 1983 tests, mobile 504; the build's: 1896, mobile 417. One earlier attempt of the review round's final run hung after all 64 api test files had passed, in the api suite's teardown (embedded Postgres left holding idle connections) while another project's Workers suite ran on the machine; it was interrupted and the rerun passed. `apps/api` is untouched by both rounds |
-| Mobile Jest (inside the turbo `test` task) | `pnpm --filter @planeahead/mobile test` | 28 suites, 519 tests, 12 snapshots (light and dark of home, empty home, the first add in the top slot, add sheet, detail, settings) |
+| Full check | `pnpm turbo run typecheck lint test --force && pnpm prettier --check . && node scripts/toolchain-guard.mjs && node scripts/vitest-exit-guard.mjs && node scripts/mobile-migrations-guard.mjs --base origin/main` | passed (close-out, after the second re-review's fix and the merge of `main`): 14 turbo tasks; 2000 tests passed (tools 19, shared 577, db 176, api 707 with 1 skipped, mobile 521). The re-review round's run: 1998 tests, mobile 519, in 1 min 40 s; Prettier clean; toolchain guard ok; exit guard ok; migrations guard ok. The review round's run: 1983 tests, mobile 504; the build's: 1896, mobile 417. One earlier attempt of the review round's final run hung after all 64 api test files had passed, in the api suite's teardown (embedded Postgres left holding idle connections) while another project's Workers suite ran on the machine; it was interrupted and the rerun passed. `apps/api` is untouched by both rounds |
+| Mobile Jest (inside the turbo `test` task) | `pnpm --filter @planeahead/mobile test` | 28 suites, 521 tests, 12 snapshots (light and dark of home, empty home, the first add in the top slot, add sheet, detail, settings) |
 | Mobile migrations guard | `node scripts/mobile-migrations-guard.mjs --base origin/main` | ok, 4 migrations, the 6 committed files unchanged (0002 and 0003 appended; the re-review round adds none) |
 | `expo prebuild` (development variant) | `cd apps/mobile && LANG=en_US.UTF-8 EXPO_NO_GIT_STATUS=1 CI=1 pnpm prebuild` | passed, 25 s, 132 pods (run again after the review round's last code change; not re-run in the re-review round, which changed JavaScript only and no dependency, config or native file) |
 | iOS simulator compile | `xcodebuild -workspace ios/PlaneAheadDev.xcworkspace -scheme PlaneAheadDev -configuration Debug -sdk iphonesimulator -destination 'platform=iOS Simulator,name=iPhone 17 Pro' build` (with `SENTRY_DISABLE_AUTO_UPLOAD=true`) | BUILD SUCCEEDED, 2 min 58 s (review round; the native project is unchanged by the round's later JavaScript edits and by the re-review round, which Metro serves; the build's own run: 2 min 14 s incremental) |
@@ -415,6 +415,16 @@ The files named are under `apps/mobile/`.
   answers it locally: `offline-flow.test.ts` section 1, `detail.test.tsx` "follows an add the
   server answered under its own id", `flight-model.test.ts` "matches by designator and date".
 - `readFlightFollowing` loses its injectable `take` parameter (only the default was ever used).
+
+**The second re-review.** One nit: after Y1 the outbox gate read `isConnected` only, while the
+reconnect drain in `session.ts` fires on `isInternetReachable`. expo-network on Android derives
+the two separately (the transport class and the VALIDATED capability), so a validated network on
+a transport it does not classify (USB, Thread, LoWPAN, satellite; iOS is unaffected) reported
+`isConnected: false, isInternetReachable: true`: the pull ran, every drain returned `deferred`,
+and adds, removes and preference patches never left the phone while it stayed on that network.
+Fixed in the close-out: `watchNetwork` counts either field as online and the launch read applies
+offline only when neither is true. `online-state.test.ts` gains the mixed state (kept online at
+launch and on a change; offline once both are false), 2 tests more than the round's count.
 
 ## Known issues and open questions
 
