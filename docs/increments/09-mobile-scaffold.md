@@ -1,6 +1,6 @@
 # Increment 9: mobile scaffold
 
-Status: spec (2026-09-20). Builder: Opus 5. Reviewers: Opus 5 (Expo and React Native correctness) plus orchestrator read. Branch `inc9-mobile-scaffold` based on `inc8-flight-routes`.
+Status: complete (2026-09-23) on branch `inc9-mobile-scaffold`, stacked PR opened for CI. Outcome, rulings and deviations are in `docs/build-log.md`, ADR 0001 and ADR 0005; where the text below disagrees with the review rulings recorded there (the live-query hook driven by a store signal rather than a trailing microtask, a 410 reset completed by the snapshot page, per-element envelope validation, native Sentry network breadcrumbs off, MapLibre unlinked, per-variant universal-link ownership, the APNs environment from the EAS profile, the `/auth/magic-link*` prefix), the build log wins. Device acceptance past the sign-in screen is pending until an API is reachable. Builder: Opus 5. Reviewers: two Opus 5 lenses (Expo and React Native correctness, auth and offline-store correctness) plus orchestrator read. Branch `inc9-mobile-scaffold` based on `inc8-flight-routes`.
 
 Read `docs/increments/09-11-mobile.facts.md` sections 1 to 4 and `08-flight-routes-and-sync.facts.md` section 4 first. Several plan statements about Expo were wrong or incomplete and are corrected below.
 

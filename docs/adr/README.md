@@ -16,9 +16,11 @@ else belongs in a code comment.
 | ADR                                | Title                                                  | Status   |
 | ---------------------------------- | ------------------------------------------------------ | -------- |
 | [0000](0000-template.md)           | Template                                               | n/a      |
+| [0001](0001-expo.md)               | Expo SDK 57, CNG, three variants, pnpm isolated        | Accepted |
 | [0002](0002-neon-not-d1.md)        | Neon Postgres 18 through Hyperdrive, not Cloudflare D1 | Accepted |
 | [0003](0003-flight-key.md)         | Flight identity: the canonical flight key              | Accepted |
 | [0004](0004-hono-rpc.md)           | Hono with an exported RPC type as the API framework    | Accepted |
+| [0005](0005-identifiers.md)        | App identifiers, links, the install and analytics ids  | Accepted |
 | [0006](0006-uuidv7.md)             | UUIDv7 primary keys generated in `@planeahead/shared`  | Accepted |
 | [0007](0007-do-postgres-free.md)   | Durable Objects never open Postgres                    | Accepted |
 | [0009](0009-postgres-js-driver.md) | postgres.js as the single Postgres driver              | Accepted |
@@ -29,8 +31,6 @@ else belongs in a code comment.
 0003 (flight key) and 0006 (uuidv7) were written in increment 2; 0002, 0007 and 0009 in
 increment 3; 0004 in increment 4; 0010 (provider identity) in increment 6, which also amended 0003;
 0011 (alarm idempotency) in increment 7, which also amended 0007 with its third reason; 0012 (sync
-cursor) in increment 8. The Phase 0
-plan lists the ADRs still due in later increments:
-0001 Expo, 0005 identifiers, 0008 expo-widgets. Their rationale is already written up in
-[docs/plans/phase0-plan.md](../plans/phase0-plan.md) section 3; each increment lifts the relevant
-row into its own ADR.
+cursor) in increment 8; 0001 (Expo) and 0005 (identifiers) in increment 9. The Phase 0 plan lists
+one ADR still due: 0008 expo-widgets (increment 11). Its rationale is already written up in
+[docs/plans/phase0-plan.md](../plans/phase0-plan.md) section 3.

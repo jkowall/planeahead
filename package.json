@@ -24,6 +24,7 @@
     "@types/node": "catalog:",
     "eslint": "catalog:",
     "eslint-config-prettier": "catalog:",
+    "eslint-plugin-react-hooks": "catalog:",
     "globals": "catalog:",
     "prettier": "catalog:",
     "turbo": "catalog:",

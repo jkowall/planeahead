@@ -1,0 +1,40 @@
+{
+  "$schema": "https://turborepo.com/schema.json",
+  "extends": ["//"],
+  "tasks": {
+    "typecheck": {
+      // `^typecheck` (inherited) builds @planeahead/api first: its `tsc -b` emits the client
+      // declaration (apps/api/dist/src/client.d.ts) this package type-checks against.
+      "inputs": ["src/**", "__tests__/**", "plugins/**", "*.ts", "tsconfig.json", "package.json"],
+      "outputs": []
+    },
+    "lint": {
+      "inputs": [
+        "src/**",
+        "__tests__/**",
+        "plugins/**",
+        "*.ts",
+        "*.js",
+        "tsconfig.json",
+        "../../eslint.config.js"
+      ]
+    },
+    "test": {
+      // app-config.test.ts also reads eas.json, react-native.config.js and the preview update
+      // workflow, whose inputs must stay equal to the preview build profile's.
+      "inputs": [
+        "src/**",
+        "__tests__/**",
+        "plugins/**",
+        "*.ts",
+        "jest.config.js",
+        "babel.config.js",
+        "react-native.config.js",
+        "eas.json",
+        "package.json",
+        "../../.github/workflows/mobile-preview.yml"
+      ],
+      "outputs": []
+    }
+  }
+}

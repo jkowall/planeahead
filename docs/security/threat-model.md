@@ -214,9 +214,11 @@ Threats considered:
   `GET /api/auth/magic-link/verify` over its own fetch with NO `callbackURL`, Better Auth then
   answers JSON plus `Set-Cookie`, and the wrapper in `src/routes/auth.ts` refuses the three
   callback query parameters with 400 (`auth-magic-link.test.ts` asserts the JSON-plus-cookie
-  shape, the absence of a `Location` header and the refusal). Whether the anonymous cookie
-  reaches that request on a real device is still an open item for increment 9 (the Workers test
-  attaches it by hand).
+  shape, the absence of a `Location` header and the refusal). Increment 9's
+  `apps/mobile/__tests__/auth-transport.test.tsx` runs the real Better Auth Expo client over an
+  in-memory SecureStore and a recorded fetch and asserts that the verify request carries the
+  anonymous cookie and no `callbackURL`; a device run against a deployed API is the owner's
+  acceptance step (apps/mobile/README.md).
 - **Login CSRF through a forwarded link (the requester binding).** A verified link signs the
   verifier in as the address owner and the after-hook then merged the VERIFIER'S anonymous
   account into that owner. An attacker who requested a link for their own address and got the
@@ -227,8 +229,37 @@ Threats considered:
   (`src/auth/magic-link-requester.ts`), and `onLinkAccount` on `/magic-link/verify` merges only
   when the verifying anonymous user is that requester. Otherwise the sign-in still succeeds (it
   is a valid link for the address it was sent to), nothing is merged, and the skip is logged
-  (`merge_skipped`, reason `requester_mismatch`). Both cases are tested. Increment 9 should also
-  auto-verify only links requested on the same install.
+  (`merge_skipped`, reason `requester_mismatch`). Both cases are tested.
+- **The app's half of the binding (increment 9, built).** The server-side requester binding is
+  the backstop, not the whole answer: a login-CSRF link still signs the phone in. The app
+  (`apps/mobile/src/lib/magic-link.ts`, `src/app/auth/magic-link.tsx`) therefore:
+  - verifies a link WITHOUT asking only when this install requested a magic link in the last
+    fifteen minutes AND the link arrived as a universal link: an `https` URL on the one host the
+    build claims (`runtimeConfig().universalLinkHosts`), on `/auth/magic-link`, carrying the
+    token on screen. How it arrived is the router's own record of the delivered URL
+    (`src/app/+native-intent.tsx`, `src/lib/delivered-url.ts`), never `Linking.getLinkingURL()`,
+    which on iOS keeps the first URL the process received and would report a later universal
+    link as, say, the development client's launch URL. The custom scheme
+    `planeahead://auth/magic-link?token=...` routes to the same screen and any app on the device,
+    or a tapped web link, can open it without the user asking, so such a delivery, like a link
+    this install never requested, waits for an explicit "Sign in" tap;
+  - whenever this install has a pending request, compares the verified account's email,
+    case-insensitively, with the addresses it requested; on a mismatch it signs that session out
+    (revoking it server-side) and puts the pre-verify cookie map back, so the phone is the
+    anonymous user it was and nothing added afterwards lands in the other account;
+  - holds the outbox (the apply gate) while the verify and the check run, so no queued mutation
+    is sent under a session about to be undone.
+
+  `apps/mobile/__tests__/sign-in.test.tsx` pins it ("asks first for a link delivered on the
+  custom scheme ...", "verifies a requested universal link that follows an earlier custom-scheme
+  URL in the same process", "signs out of an account another address owns and restores the
+  anonymous session", "checks the address after a confirmed tap too ...").
+  Residual: an attacker link that arrives as a genuine universal link while the user waits for
+  theirs is verified at once and then undone by the email check, so the phone is briefly signed
+  in to the attacker's account (a pull of the attacker's rows may land and is wiped when the
+  session returns). The complete binding, the emailed URL carrying a per-request tag the app
+  matches before verifying, needs the server and is recorded for increment 12.
+
 - **A crash between the two callers.** Both are safe to replay: the marker is set inside the
   transaction, so a retry sees `already_merged`.
 - **A lost queue message.** The rows are moved and the marker is set before the send; if the send
@@ -396,9 +427,10 @@ logs keep request URLs.
 
 ## 4. Open items carried to later increments
 
-- Whether the anonymous cookie reaches `GET /magic-link/verify` on a real device (increment 9),
-  and the increment 9 rule that the app auto-verifies only links requested on the same install
-  (the server-side requester binding in section 1.5 is the backstop, not the whole answer).
+- The anonymous cookie on `GET /magic-link/verify`: proven on the real client in Jest by
+  increment 9 (section 1.5); the device run is the owner's acceptance step once an API is
+  reachable. The app-side binding is built (section 1.5); a per-request tag in the emailed URL
+  that the app matches before verifying is the remaining step, for increment 12.
 - The session gate's `getSession()` call on launch and foreground (section 1.5): the `/v1`
   path no longer refreshes, so if increment 9 ships without that call a session that only ever
   syncs in the background expires after 30 days. A Jest test in increment 9 asserts the call.

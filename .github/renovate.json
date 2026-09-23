@@ -28,6 +28,39 @@
       "matchPackageNames": ["expo", "expo-*", "@expo/**"],
       "matchUpdateTypes": ["major"],
       "dependencyDashboardApproval": true
+    },
+    {
+      "description": "Expo SDK 57 manifest pins (expo/bundledNativeModules.json): grouped, never auto-merged; scripts/toolchain-guard.mjs and `expo install --check` hold the ranges",
+      "groupName": "expo-sdk",
+      "matchPackageNames": [
+        "expo",
+        "expo-*",
+        "@expo/**",
+        "jest-expo",
+        "babel-preset-expo",
+        "react",
+        "react-dom",
+        "react-native",
+        "@react-native/**",
+        "react-native-gesture-handler",
+        "react-native-reanimated",
+        "react-native-worklets",
+        "react-native-safe-area-context",
+        "react-native-screens",
+        "@sentry/react-native"
+      ],
+      "automerge": false
+    },
+    {
+      "description": "Exact mobile pins from docs/increments/09-11-mobile.facts.md: never auto-merged, reviewed together once a quarter (nitro-google-signin shipped 25 releases and two breaking majors in four months; MapLibre is outside Expo's manifest)",
+      "groupName": "mobile exact pins (quarterly review)",
+      "matchPackageNames": [
+        "react-native-nitro-google-signin",
+        "react-native-nitro-modules",
+        "@maplibre/maplibre-react-native"
+      ],
+      "automerge": false,
+      "schedule": ["* * 1 1,4,7,10 *"]
     }
   ]
 }

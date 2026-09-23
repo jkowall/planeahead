@@ -1,0 +1,126 @@
+name: Mobile preview
+
+# An EAS Update of the preview variant for every pull request that touches the app, and the
+# Sentry source maps for that update (increment 9). EAS Update bundles do not get source maps
+# automatically: `sentry-expo-upload-sourcemaps` uploads the `dist/` that `eas update` exported.
+#
+# Which builds receive these updates: the INTERNAL PREVIEW builds, and only them. Preview builds
+# are made with the `preview` profile (eas.json), whose channel `preview` points at the update
+# branch `preview`, so every pull request publishes to that one branch (`--branch preview`, not
+# a branch named after the git branch) and the last pull request published is what every
+# preview build runs on its next launch. Production builds (channel `production`) and development
+# builds (channel `development`, which load JavaScript from Metro) never receive them.
+#
+# An update only reaches a build with the same runtime version, and the runtime version is the
+# fingerprint of the whole resolved app config, `extra` and plugin props included. So the update
+# is resolved from exactly the build's inputs:
+#   - `--environment preview`: the EAS environment variables the preview build profile uses
+#     (eas.json `environment: preview`): SENTRY_DSN, SENTRY_ORG, SENTRY_PROJECT,
+#     GOOGLE_WEB_CLIENT_ID, GOOGLE_IOS_CLIENT_ID and EAS_PROJECT_ID, set once in EAS by the owner;
+#   - the preview profile's own `env` (APP_VARIANT, APNS_ENVIRONMENT), which `eas update` does not
+#     read from eas.json, repeated in the job env below (__tests__/app-config.test.ts asserts they
+#     stay equal);
+#   - EAS_PROJECT_ID also from the GitHub variable, because eas-cli needs the project id from the
+#     config before it can fetch the environment (same value as the EAS variable).
+# A missing input changes the fingerprint and the update silently never applies (increment 9
+# review, expo-correctness-1). Two inputs `eas update --environment` can never read, because it
+# loads only Plain text and Sensitive variables (re-review, expo-correctness-1): a Secret, which
+# is why the six variables above must never be given Secret visibility (apps/mobile/README.md,
+# owner tasks); and the GOOGLE_SERVICES_JSON FILE variable, which a builder receives as a path to
+# a real file and this job not at all, so apps/mobile/fingerprint.config.js keeps that file out of
+# the fingerprint on both sides (ADR 0001 records the parity check).
+#
+# Skipped, with a notice, until the owner has created the Expo project and set the secrets
+# (apps/mobile/README.md, owner tasks):
+#   - EXPO_TOKEN          an Expo robot token with access to the project
+#   - vars.EAS_PROJECT_ID the project id `eas init` prints (app.config.ts reads EAS_PROJECT_ID)
+#   - SENTRY_AUTH_TOKEN   for the source-map step (skipped on its own when the token is absent)
+#
+# Never an EAS build: native builds run on GitHub runners in increment 11's nightly job, not on
+# EAS credit (Starter plan).
+
+on:
+  pull_request:
+    paths:
+      - 'apps/mobile/**'
+      - 'packages/shared/**'
+      - 'apps/api/src/client.ts'
+      - 'pnpm-lock.yaml'
+      - '.github/workflows/mobile-preview.yml'
+
+concurrency:
+  # One branch receives every pull request's update, so publishes run one at a time.
+  group: mobile-preview
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  update:
+    runs-on: ubuntu-latest
+    # Job-level, so every step's `if` can read them (a step cannot read its own `env` there).
+    env:
+      EXPO_TOKEN: ${{ secrets.EXPO_TOKEN }}
+      SENTRY_AUTH_TOKEN: ${{ secrets.SENTRY_AUTH_TOKEN }}
+      EAS_PROJECT_ID: ${{ vars.EAS_PROJECT_ID }}
+      # eas.json build.preview.env, exactly.
+      APP_VARIANT: preview
+      APNS_ENVIRONMENT: production
+      EXPO_NO_GIT_STATUS: '1'
+    steps:
+      - name: Skip without an Expo token
+        if: env.EXPO_TOKEN == ''
+        run: echo "::notice title=Mobile preview skipped::EXPO_TOKEN is not set; no EAS Update was published"
+
+      - uses: actions/checkout@v5
+        if: env.EXPO_TOKEN != ''
+      - uses: pnpm/action-setup@v4
+        if: env.EXPO_TOKEN != ''
+      - uses: actions/setup-node@v6
+        if: env.EXPO_TOKEN != ''
+        with:
+          node-version-file: .node-version
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+        if: env.EXPO_TOKEN != ''
+
+      - name: Set up EAS
+        if: env.EXPO_TOKEN != ''
+        uses: expo/expo-github-action@v8
+        with:
+          eas-version: latest
+          token: ${{ secrets.EXPO_TOKEN }}
+
+      # `--auto` takes the update message from the commit; `--branch preview` is the branch the
+      # preview channel serves (see the header). The update exports the bundle into
+      # apps/mobile/dist, which the next step uploads from.
+      - name: Publish the EAS Update to the preview builds
+        if: env.EXPO_TOKEN != ''
+        working-directory: apps/mobile
+        run: eas update --auto --branch preview --environment preview --non-interactive --json > update.json
+
+      # Parity between the update's runtime version and the builds it should reach rests on the
+      # visibility rule in the header and on fingerprint.config.js; this step is the check that
+      # nothing drifted. It warns rather than fails (no finished preview build exists before the
+      # first EAS build, and the CLI's JSON shapes are unverified without an Expo account).
+      - name: Check the update's runtime version against the latest preview build
+        if: env.EXPO_TOKEN != ''
+        working-directory: apps/mobile
+        run: |
+          update=$(jq -r '[.[] | .runtimeVersion] | unique | join(",")' update.json 2>/dev/null || true)
+          build=$(eas build:list --profile preview --status finished --limit 1 --json --non-interactive 2>/dev/null | jq -r '.[0].runtimeVersion // empty' || true)
+          if [ -z "$build" ]; then
+            echo "::notice title=Runtime version unchecked::no finished preview build yet (update runtime version: ${update:-unknown})"
+          elif [ "$update" != "$build" ]; then
+            echo "::warning title=Runtime version mismatch::the update has ${update:-unknown} and the latest finished preview build has $build; the update will not reach that build"
+          else
+            echo "runtime version $build matches the latest preview build"
+          fi
+
+      # SENTRY_ORG and SENTRY_PROJECT come from the same EAS environment the build and the update
+      # used, so the maps land in the project the DSN reports to.
+      - name: Upload the update's source maps to Sentry
+        if: env.EXPO_TOKEN != '' && env.SENTRY_AUTH_TOKEN != ''
+        working-directory: apps/mobile
+        run: eas env:exec preview "pnpm exec sentry-expo-upload-sourcemaps dist" --non-interactive
