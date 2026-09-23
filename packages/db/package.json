@@ -45,6 +45,7 @@
   },
   "devDependencies": {
     "@types/node": "catalog:",
+    "async-exit-hook": "catalog:",
     "drizzle-kit": "catalog:",
     "embedded-postgres": "catalog:",
     "eslint": "catalog:",

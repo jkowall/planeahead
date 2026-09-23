@@ -40,6 +40,10 @@
     "ProviderBudget": { "type": "durable-object", "storage": "sqlite" },
   },
 
+  // Queue consumers (increment 7): `max_concurrency: 10` on the persist consumer in every
+  // environment is the Neon connection budget, not a throughput choice (a default of 250
+  // concurrent invocations against ~100 Hyperdrive origin connections is oversubscribed).
+  //
   // Inheritable. Five fields, not the abbreviated forms in the plan: "*/15 * * * *" is every
   // fifteen minutes, "0 3 * * *" is 03:00 UTC daily. A cron with an interval under one hour gets
   // 30 seconds of CPU on the Paid plan, which is why the reconcile handler pages and fans out to
@@ -100,10 +104,12 @@
       { "binding": "NOTIFY_QUEUE", "queue": "planeahead-notify-local" },
       { "binding": "PROVIDER_EVENTS_QUEUE", "queue": "planeahead-provider-events-local" },
       { "binding": "IMPORTS_QUEUE", "queue": "planeahead-imports-local" },
+      { "binding": "RECONCILE_QUEUE", "queue": "planeahead-reconcile-local" },
     ],
     "consumers": [
       {
         "queue": "planeahead-persist-local",
+        "max_concurrency": 10,
         "max_batch_size": 100,
         "max_retries": 5,
         "dead_letter_queue": "planeahead-persist-dlq-local",
@@ -123,6 +129,20 @@
         "max_retries": 5,
         "dead_letter_queue": "planeahead-imports-dlq-local",
       },
+      {
+        "queue": "planeahead-reconcile-local",
+        "max_batch_size": 100,
+        "max_retries": 3,
+        "dead_letter_queue": "planeahead-reconcile-dlq-local",
+      },
+      // Dead letter consumers (increment 7): one per queue. The handler archives every message to
+      // PRIVATE_BUCKET under dlq/{queue}/{messageId}.json, raises the ops alert and acknowledges;
+      // without a consumer a thrice-failed message is deleted after four days without a trace.
+      { "queue": "planeahead-persist-dlq-local", "max_retries": 2 },
+      { "queue": "planeahead-notify-dlq-local", "max_retries": 2 },
+      { "queue": "planeahead-provider-events-dlq-local", "max_retries": 2 },
+      { "queue": "planeahead-imports-dlq-local", "max_retries": 2 },
+      { "queue": "planeahead-reconcile-dlq-local", "max_retries": 2 },
     ],
   },
 
@@ -190,10 +210,12 @@
           { "binding": "NOTIFY_QUEUE", "queue": "planeahead-notify-staging" },
           { "binding": "PROVIDER_EVENTS_QUEUE", "queue": "planeahead-provider-events-staging" },
           { "binding": "IMPORTS_QUEUE", "queue": "planeahead-imports-staging" },
+          { "binding": "RECONCILE_QUEUE", "queue": "planeahead-reconcile-staging" },
         ],
         "consumers": [
           {
             "queue": "planeahead-persist-staging",
+            "max_concurrency": 10,
             "max_batch_size": 100,
             "max_retries": 5,
             "dead_letter_queue": "planeahead-persist-dlq-staging",
@@ -213,6 +235,20 @@
             "max_retries": 5,
             "dead_letter_queue": "planeahead-imports-dlq-staging",
           },
+          {
+            "queue": "planeahead-reconcile-staging",
+            "max_batch_size": 100,
+            "max_retries": 3,
+            "dead_letter_queue": "planeahead-reconcile-dlq-staging",
+          },
+          // Dead letter consumers (increment 7): one per queue. The handler archives every message to
+          // PRIVATE_BUCKET under dlq/{queue}/{messageId}.json, raises the ops alert and acknowledges;
+          // without a consumer a thrice-failed message is deleted after four days without a trace.
+          { "queue": "planeahead-persist-dlq-staging", "max_retries": 2 },
+          { "queue": "planeahead-notify-dlq-staging", "max_retries": 2 },
+          { "queue": "planeahead-provider-events-dlq-staging", "max_retries": 2 },
+          { "queue": "planeahead-imports-dlq-staging", "max_retries": 2 },
+          { "queue": "planeahead-reconcile-dlq-staging", "max_retries": 2 },
         ],
       },
 
@@ -276,10 +312,12 @@
           { "binding": "NOTIFY_QUEUE", "queue": "planeahead-notify" },
           { "binding": "PROVIDER_EVENTS_QUEUE", "queue": "planeahead-provider-events" },
           { "binding": "IMPORTS_QUEUE", "queue": "planeahead-imports" },
+          { "binding": "RECONCILE_QUEUE", "queue": "planeahead-reconcile" },
         ],
         "consumers": [
           {
             "queue": "planeahead-persist",
+            "max_concurrency": 10,
             "max_batch_size": 100,
             "max_retries": 5,
             "dead_letter_queue": "planeahead-persist-dlq",
@@ -299,6 +337,20 @@
             "max_retries": 5,
             "dead_letter_queue": "planeahead-imports-dlq",
           },
+          {
+            "queue": "planeahead-reconcile",
+            "max_batch_size": 100,
+            "max_retries": 3,
+            "dead_letter_queue": "planeahead-reconcile-dlq",
+          },
+          // Dead letter consumers (increment 7): one per queue. The handler archives every message to
+          // PRIVATE_BUCKET under dlq/{queue}/{messageId}.json, raises the ops alert and acknowledges;
+          // without a consumer a thrice-failed message is deleted after four days without a trace.
+          { "queue": "planeahead-persist-dlq", "max_retries": 2 },
+          { "queue": "planeahead-notify-dlq", "max_retries": 2 },
+          { "queue": "planeahead-provider-events-dlq", "max_retries": 2 },
+          { "queue": "planeahead-imports-dlq", "max_retries": 2 },
+          { "queue": "planeahead-reconcile-dlq", "max_retries": 2 },
         ],
       },
 

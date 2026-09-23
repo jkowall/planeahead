@@ -131,6 +131,20 @@ export interface WorkerSettings {
   readonly ADB_PLAN?: string;
   /** `true` enables the AeroDataBox webhook receiver; anything else answers 404. */
   readonly ADB_ALERTS_ENABLED?: string;
+  /**
+   * Test seam (increment 7): the AeroDataBox base URL the router hands the adapter. Unset in
+   * every deployed environment, where the adapter's own `https://api.aerodatabox.com/` applies;
+   * the Workers suite points it at `test/fake-providers.ts` (`TEST_FAKE_PROVIDERS_ORIGIN` plus
+   * `/aerodatabox`), so a FlightTracker alarm in a test fetches scripted fixtures over HTTP
+   * through the real adapter and the real router.
+   */
+  readonly AERODATABOX_BASE_URL?: string;
+  /**
+   * Test seam (increment 7): `true` lets the FlightTracker and DesignatorResolver `_setClock`
+   * RPC replace the clock every decision reads. Set ONLY by test/globalSetup.ts, never in
+   * wrangler.jsonc or `.dev.vars`; with it unset the RPC throws and the objects read `Date.now()`.
+   */
+  readonly TEST_CLOCK?: string;
 }
 
 export const WORKER_SETTING_NAMES = [

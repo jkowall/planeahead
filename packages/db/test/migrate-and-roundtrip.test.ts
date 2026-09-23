@@ -44,13 +44,13 @@ afterAll(async () => {
 });
 
 describe('migrations', () => {
-  it('records both migrations and creates every table', async () => {
-    expect(tdb.migration.migrations).toBe(2);
+  it('records every migration and creates every table', async () => {
+    expect(tdb.migration.migrations).toBe(3);
     expect(tdb.migration.serverVersionNum).toBeGreaterThanOrEqual(180000);
     const [applied] = await tdb.sql<{ n: string }[]>`
       select count(*)::text as n from drizzle.__drizzle_migrations
     `;
-    expect(Number(applied?.n)).toBe(2);
+    expect(Number(applied?.n)).toBe(3);
     const tables = await tdb.sql<{ table_name: string }[]>`
       select table_name from information_schema.tables
       where table_schema = 'public' and table_type = 'BASE TABLE' order by table_name
@@ -66,11 +66,11 @@ describe('migrations', () => {
   it('is idempotent: a second migrate run applies nothing', async () => {
     const { migrateDatabase } = await import('../src/migrate');
     const again = await migrateDatabase(tdb.url);
-    expect(again.migrations).toBe(2);
+    expect(again.migrations).toBe(3);
     const [applied] = await tdb.sql<{ n: string }[]>`
       select count(*)::text as n from drizzle.__drizzle_migrations
     `;
-    expect(Number(applied?.n)).toBe(2);
+    expect(Number(applied?.n)).toBe(3);
   });
 });
 

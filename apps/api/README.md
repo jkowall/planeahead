@@ -25,6 +25,7 @@ pnpm --filter @planeahead/api run typecheck
 pnpm --filter @planeahead/api run dev           # wrangler dev on http://localhost:8787
 pnpm --filter @planeahead/api run cf-typegen    # regenerate worker-configuration.d.ts
 pnpm --filter @planeahead/api exec wrangler deploy --dry-run --env staging
+node scripts/vitest-exit-guard.mjs              # proves a failing test fails the run (see Rules)
 ```
 
 `dev`, `test` and `typecheck` all run `scripts/gen-migration-hash.mjs` first, which rewrites
@@ -174,6 +175,17 @@ merge needs that cookie to find the account being upgraded.
 a binary blob has no diff, no line-level review comment and no three-way merge.
 `planeahead/no-literal-control-characters` fails the lint on the byte; `.gitattributes` is the
 second line of defence. Write the escape (`'\u0000'`), which compiles to the same string.
+
+**Vitest's exit code is real only because the harness unhooks embedded-postgres.** The package
+registers `async-exit-hook` at import, and that library's first registration hooks `beforeExit`
+with exit code 0: `process.exit(0)` overrode the `exitCode = 1` Vitest sets on a failure, so this
+suite and `packages/db`'s reported failures and exited 0 (locally and in CI, whose service
+container skips the embedded cluster but not the import). `packages/db/test/embedded.ts` removes
+the `beforeExit` and `exit` handlers right after the import, and `scripts/vitest-exit-guard.mjs`
+runs `test/exit-guard/deliberate-failure.guard.ts` through `vitest.exit-guard.config.ts` (the
+ordinary configuration with only that file included) in both packages and asserts a non-zero exit;
+CI runs it after the test jobs. When a green `turbo run test` looks suspicious, run the guard, and
+read the `Tests` summary line rather than trusting the task's status alone.
 
 **No test calls a real provider.** Every adapter takes an injected `fetch`; the router passes the
 Worker's, the tests pass a stub that serves fixtures shaped from the vendored specs. Every call

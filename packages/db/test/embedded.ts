@@ -5,7 +5,28 @@
 
 import { rm } from 'node:fs/promises';
 import { createServer } from 'node:net';
+import AsyncExitHook from 'async-exit-hook';
 import EmbeddedPostgres from 'embedded-postgres';
+
+// embedded-postgres registers `async-exit-hook` at MODULE SCOPE (dist/index.js:
+// `AsyncExitHook(gracefulShutdown)`), and that library's first registration hooks `beforeExit`
+// with exit code 0: when Node's event loop drains it calls `process.exit(0)`, which overrides the
+// `process.exitCode = 1` Vitest sets on a failed run. The import above is enough to arm it, so a
+// failing suite in this package and in apps/api (whose global setup imports this module through
+// the test harness) exited 0, with or without an embedded cluster. Both process-end handlers are
+// removed right here, before anything else runs: `beforeExit` for the exit code, and `exit`
+// because without the first it would be the hook's first run and async-exit-hook runs `exit`
+// handlers synchronously, without the `done` callback `gracefulShutdown(done)` calls after its
+// awaits (a `TypeError: done is not a function` printed at the end of every run). Neither is
+// needed: the harness teardown stops the cluster explicitly. The signal hooks stay, so a SIGINT
+// still stops a running cluster. `async-exit-hook` is a devDependency of this package at the same
+// catalog version so this import resolves to the one module instance embedded-postgres
+// registered with; scripts/vitest-exit-guard.mjs proves the exit code in both packages.
+for (const event of ['beforeExit', 'exit']) {
+  if (AsyncExitHook.hookedEvents().includes(event)) {
+    AsyncExitHook.unhookEvent(event);
+  }
+}
 
 export const EMBEDDED_TIMEOUT_MS = 60_000;
 

@@ -52,8 +52,10 @@ describe('parseQueueName', () => {
     ['planeahead-notify-staging', 'notify', false],
     ['planeahead-provider-events-production', 'provider-events', false],
     ['planeahead-imports-staging', 'imports', false],
+    ['planeahead-reconcile-local', 'reconcile', false],
     ['planeahead-persist-dlq-staging', 'persist', true],
     ['planeahead-provider-events-dlq-production', 'provider-events', true],
+    ['planeahead-reconcile-dlq', 'reconcile', true],
     ['something-else', 'unknown', false],
   ])('routes %s', (queueName, kind, deadLetter) => {
     expect(parseQueueName(queueName)).toEqual({ kind, deadLetter });
@@ -61,7 +63,9 @@ describe('parseQueueName', () => {
 });
 
 describe('queue()', () => {
-  it('acknowledges every message on a persist batch', async () => {
+  it('acknowledges every message on a persist batch, unreadable ones included', async () => {
+    // Neither message is a valid PersistMessageV1 (increment 7): a message this build cannot
+    // read can never succeed on retry, so it is logged at error level and acknowledged.
     const result = await runQueue('planeahead-persist-local', [
       { kind: 'flight_upsert', flightKey: 'AAL-100-2026-09-20-KJFK', seq: 1 },
       { kind: 'flight_event', flightKey: 'AAL-100-2026-09-20-KJFK', seq: 2 },
@@ -83,10 +87,11 @@ describe('queue()', () => {
     expect(result.retryBatch.retry).toBe(false);
   });
 
-  it('acknowledges a dead letter batch rather than looping it', async () => {
+  it('acknowledges a dead letter batch per message rather than looping it', async () => {
+    // Increment 7: the dead letter consumer archives each message to R2 and acknowledges it.
     const result = await runQueue('planeahead-persist-dlq-local', [{ kind: 'flight_upsert' }]);
 
-    expect(result.ackAll).toBe(true);
+    expect(result.explicitAcks).toEqual(['message-0']);
     expect(result.retryBatch.retry).toBe(false);
   });
 

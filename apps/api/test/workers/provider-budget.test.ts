@@ -227,7 +227,9 @@ describe('ProviderBudget: reserve', () => {
     expect(granted).toBe(5);
     // A rate refusal never spends units.
     expect((await stub.snapshot()).units).toBe(10);
-  });
+    // Some 670 clock-set and reserve round trips: past the 60 s file default under full host
+    // parallelism, so the test carries its own budget. The code under test is unchanged.
+  }, 180_000);
 
   it('backs the bucket off on a provider push-back', async () => {
     const { stub, setClock, nowMs: start } = await budget('aerodatabox');
@@ -516,6 +518,8 @@ describe('ProviderBudget: the kill switch', () => {
     const batch = {
       queue: 'planeahead-persist-local',
       messages: [
+        // Increment 7: the persist consumer validates every message against the shared
+        // `PersistMessageV1` union, so the fixtures carry what the object really sends.
         message('m1', {
           kind: PROVIDER_BUDGET_OUTBOX_KINDS.killSwitch,
           seq: 1,
@@ -524,6 +528,7 @@ describe('ProviderBudget: the kill switch', () => {
             provider: 'aerodatabox',
             utcDate: '2026-09-22',
             reason: 'daily_cap',
+            atMs: 1_758_542_400_000,
             spentUnits: 13_333,
           },
         }),
@@ -531,7 +536,13 @@ describe('ProviderBudget: the kill switch', () => {
           kind: PROVIDER_BUDGET_OUTBOX_KINDS.daily,
           seq: 2,
           origin: 'provider_budget:aerodatabox:2026-09-22',
-          payload: { units: 13_333 },
+          payload: {
+            provider: 'aerodatabox',
+            utcDate: '2026-09-22',
+            units: 13_333,
+            pollEquivalents: 666.65,
+            calls: 6_667,
+          },
         }),
       ],
       ackAll: () => undefined,

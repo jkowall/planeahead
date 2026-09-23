@@ -16,7 +16,7 @@ its own schedule (hourly at T-48h, every 15 minutes near departure, every 30 min
 plus a DesignatorResolver object per search, a UserInbox per user and eight ProviderBudget shards
 per provider per day.
 
-Two forces decide where those objects may write:
+Three forces decide where those objects may write:
 
 1. **Connection budget.** Hyperdrive opens roughly 100 origin connections per configuration on
    Workers Paid (a soft ceiling) and Neon reserves 7 of its per-compute limit, leaving 97 usable
@@ -32,6 +32,15 @@ Two forces decide where those objects may write:
    Keeping the object's own SQLite storage as the only thing an alarm writes makes the
    idempotency argument local: one `transactionSync` records the attempt and the outbox intent
    before any I/O, so a retry finds the attempt and skips.
+3. **Eviction and billing.** (Added in increment 7, from
+   `docs/increments/06-07-providers-and-trackers.facts.md` section 5.) An outbound socket, a
+   `connect()` or an outbound WebSocket, defers the object's eviction and keeps it billable for
+   duration up to 15 minutes; an object with only a pending alarm hibernates and is not billed
+   while idle. A Postgres client is a socket. Ten thousand in-window trackers each holding one
+   open would be ten thousand objects that never hibernate, billed for wall time between polls
+   they spend doing nothing, against the 400,000 GB-s allowance the cost model sits 4 percent
+   under (https://developers.cloudflare.com/durable-objects/concepts/durable-object-lifecycle/,
+   https://developers.cloudflare.com/durable-objects/platform/pricing/).
 
 ## Decision
 
@@ -44,9 +53,10 @@ connections.
 ## Consequences
 
 - Easier: the connection budget has two consumers to size (request handlers and queue batches
-  of 100), the alarm handler's idempotency lives entirely inside `transactionSync`, and Postgres
+  of 100), the alarm handler's idempotency lives entirely inside `transactionSync`, Postgres
   writes arrive in batches with `on conflict` on `(flight_instance_id, seq)` and on the provider
-  call id, so replays are harmless.
+  call id, so replays are harmless, and a tracker between polls holds no socket, so it hibernates
+  and costs storage only.
 - Harder: persistence lags the object by the queue's delivery time (seconds), so
   `flight_instances` is eventually consistent with the tracker; readers that need the live state
   read the KV snapshot or call `getState()`. Durable Object storage is authoritative only until
@@ -70,4 +80,6 @@ connections.
 - Hyperdrive limits: https://developers.cloudflare.com/hyperdrive/platform/limits/
 - Hyperdrive connection lifecycle: https://developers.cloudflare.com/hyperdrive/concepts/connection-lifecycle/
 - Neon connection limits and the 7 reserved connections: https://neon.com/docs/connect/connection-pooling
+- Durable Object lifecycle (sockets defer eviction; a pending alarm hibernates): https://developers.cloudflare.com/durable-objects/concepts/durable-object-lifecycle/
 - Phase 0 plan section 5 (Durable Objects, outbox, persist queue), `docs/plans/phase0-plan.md`.
+- ADR 0011 (alarm idempotency and the outbox confirmation protocol), increment 7.

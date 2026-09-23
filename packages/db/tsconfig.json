@@ -9,6 +9,7 @@
     "src/**/*.json",
     "test/**/*.ts",
     "vitest.config.ts",
+    "vitest.exit-guard.config.ts",
     "drizzle.config.ts"
   ],
   "references": [{ "path": "../shared" }]

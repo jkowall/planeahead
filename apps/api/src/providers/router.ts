@@ -48,6 +48,8 @@ export const AEROAPI_EARLIEST_MINUTES_BEFORE_OUT = AEROAPI_STANDARD.maxDaysAhead
 
 export interface RouterEnv extends ProviderSettingsEnv {
   readonly AERODATABOX_API_KEY?: string | undefined;
+  /** Test seam (increment 7): the adapter's base URL; unset in every deployment. */
+  readonly AERODATABOX_BASE_URL?: string | undefined;
   readonly AEROAPI_API_KEY?: string | undefined;
   readonly WEBHOOK_TOKEN_AEROAPI?: string | undefined;
   readonly API_PUBLIC_URL?: string | undefined;
@@ -110,11 +112,15 @@ export function aerodataboxFor(
   if (apiKey === undefined || apiKey === '') {
     throw new ProviderConfigError('AERODATABOX_API_KEY is not set');
   }
+  const baseUrl = env.AERODATABOX_BASE_URL;
   return new AeroDataBoxAdapter({
     apiKey,
     fetch: deps.fetch ?? defaultFetch(),
     plan: settings.adbPlan,
     alertsEnabled: settings.adbAlertsEnabled,
+    // Increment 7: the Workers suite serves AeroDataBox from test/fake-providers.ts; a deployment
+    // never sets the variable and gets the adapter's own default.
+    baseUrl: baseUrl === undefined || baseUrl === '' ? undefined : baseUrl,
     now: deps.now ?? defaultNow,
   });
 }

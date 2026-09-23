@@ -213,23 +213,23 @@ by design, pseudonymous). Rows: order of magnitude twelve months in, after reten
 
 ### Providers and models
 
-| Table                          | Purpose                                               | Writer                    | Readers                      | PII | Enc  | Retention          | GDPR | Rows 1k / 10k / 100k   |
-| ------------------------------ | ----------------------------------------------------- | ------------------------- | ---------------------------- | --- | ---- | ------------------ | ---- | ---------------------- |
-| `provider_calls`               | One row per provider call including LLM               | persist consumer          | admin, rollup                | 0   | none | 90 d               | kept | 400k / 4M / 40M        |
-| `provider_call_daily`          | Durable daily series                                  | housekeeping rollup       | admin, cost model            | 0   | none | kept               | kept | hundreds / 1k / 5k     |
-| `provider_budget_config`       | Caps and kill switch per provider                     | admin                     | ProviderBudget DO            | 0   | none | kept               | n/a  | 11                     |
-| `provider_alert_registrations` | AeroAPI and ADB alert ids per flight                  | FlightTracker via persist | reconcile, admin             | 0   | none | follows the flight | n/a  | 1k / 10k / 100k active |
-| `provider_webhook_events`      | Raw webhook envelopes                                 | webhook routes            | provider-events queue        | 0   | none | 30 d               | n/a  | 12k / 120k / 1.2M      |
-| `delay_predictions`            | Model output per flight                               | prediction job            | API                          | 0   | none | 13 months          | n/a  | 24k / 240k / 2.4M      |
-| `delay_outcomes`               | Ground truth per finished flight                      | housekeeping              | model training               | 0   | none | kept               | n/a  | 12k / 120k / 1.2M      |
-| `airport_wx_observations`      | METAR and TAF                                         | weather cron              | API, model                   | 0   | none | 90 d               | n/a  | 500k at every tier     |
-| `airport_nas_events`           | FAA ground stops and delay programs                   | NAS cron                  | API                          | 0   | none | 13 months          | n/a  | 20k at every tier      |
-| `airport_delay_snapshots`      | Board-derived delay index                             | airport sweep             | hourly rollup                | 0   | none | 30 d               | n/a  | 300k at every tier     |
-| `airport_delay_hourly`         | Hourly delay aggregates                               | housekeeping              | API, model                   | 0   | none | 13 months          | n/a  | 2M at every tier       |
-| `bts_carrier_flight_monthly`   | BTS marketing and operating carrier per flight number | BTS import                | regional operator job, model | 0   | none | kept               | n/a  | 6M at every tier       |
-| `bts_route_monthly`            | BTS route aggregates                                  | BTS import                | model                        | 0   | none | kept               | n/a  | 1M at every tier       |
-| `bts_airport_hourly`           | BTS airport hour-of-day aggregates                    | BTS import                | model                        | 0   | none | kept               | n/a  | 500k at every tier     |
-| `bts_import_runs`              | One row per month import with source hash             | BTS import                | admin                        | 0   | none | kept               | n/a  | 100                    |
+| Table                          | Purpose                                                                                    | Writer                                | Readers                      | PII | Enc  | Retention          | GDPR | Rows 1k / 10k / 100k   |
+| ------------------------------ | ------------------------------------------------------------------------------------------ | ------------------------------------- | ---------------------------- | --- | ---- | ------------------ | ---- | ---------------------- |
+| `provider_calls`               | One row per provider call including LLM                                                    | persist consumer                      | admin, rollup                | 0   | none | 90 d               | kept | 400k / 4M / 40M        |
+| `provider_call_daily`          | Durable daily series; `budget_daily*` rows are the ProviderBudget's own totals (section 6) | housekeeping rollup, persist consumer | admin, cost model            | 0   | none | kept               | kept | hundreds / 1k / 5k     |
+| `provider_budget_config`       | Caps and kill switch per provider                                                          | admin                                 | ProviderBudget DO            | 0   | none | kept               | n/a  | 11                     |
+| `provider_alert_registrations` | AeroAPI and ADB alert ids per flight                                                       | FlightTracker via persist             | reconcile, admin             | 0   | none | follows the flight | n/a  | 1k / 10k / 100k active |
+| `provider_webhook_events`      | Raw webhook envelopes                                                                      | webhook routes                        | provider-events queue        | 0   | none | 30 d               | n/a  | 12k / 120k / 1.2M      |
+| `delay_predictions`            | Model output per flight                                                                    | prediction job                        | API                          | 0   | none | 13 months          | n/a  | 24k / 240k / 2.4M      |
+| `delay_outcomes`               | Ground truth per finished flight                                                           | housekeeping                          | model training               | 0   | none | kept               | n/a  | 12k / 120k / 1.2M      |
+| `airport_wx_observations`      | METAR and TAF                                                                              | weather cron                          | API, model                   | 0   | none | 90 d               | n/a  | 500k at every tier     |
+| `airport_nas_events`           | FAA ground stops and delay programs                                                        | NAS cron                              | API                          | 0   | none | 13 months          | n/a  | 20k at every tier      |
+| `airport_delay_snapshots`      | Board-derived delay index                                                                  | airport sweep                         | hourly rollup                | 0   | none | 30 d               | n/a  | 300k at every tier     |
+| `airport_delay_hourly`         | Hourly delay aggregates                                                                    | housekeeping                          | API, model                   | 0   | none | 13 months          | n/a  | 2M at every tier       |
+| `bts_carrier_flight_monthly`   | BTS marketing and operating carrier per flight number                                      | BTS import                            | regional operator job, model | 0   | none | kept               | n/a  | 6M at every tier       |
+| `bts_route_monthly`            | BTS route aggregates                                                                       | BTS import                            | model                        | 0   | none | kept               | n/a  | 1M at every tier       |
+| `bts_airport_hourly`           | BTS airport hour-of-day aggregates                                                         | BTS import                            | model                        | 0   | none | kept               | n/a  | 500k at every tier     |
+| `bts_import_runs`              | One row per month import with source hash                                                  | BTS import                            | admin                        | 0   | none | kept               | n/a  | 100                    |
 
 ### Notifications
 
@@ -304,6 +304,22 @@ Natural keys used for idempotent upserts by the seed loaders: `airports.icao`, `
 - `flight_instances.operator_source` records how the operating carrier in the key was decided
   (`provider`, `callsign`, `hint`, `marketing`); AeroDataBox never returns an operator, so the key
   carries the best-known operator at creation and the Phase 1 merge path reconciles (ADR 0010).
+- `flight_instances.do_lifetime_epoch_ms` (migration 0002, increment 7) names the FlightTracker
+  LIFETIME the row was last written from: the object's `created_at_ms`, the `@{epochMs}` every
+  outbox origin carries. The persist consumer ignores instance and event rows from an older
+  lifetime and refuses a newer lifetime for a row whose tracking state is terminal (`finished`,
+  `archived`, `superseded`) with the `flight_lifetime_rejected` ops alert: a finished flight
+  never gets a second lifetime, and the R2 events archive is keyed per lifetime
+  (`events/{flight_key}@{epochMs}.json`, never overwritten). Null on rows written before the
+  column existed. Migration 0002 also recreates the `flight_instances_set_updated_at` trigger
+  with the new column in its WHEN clause (section 12).
+- `provider_call_daily` rows with operation `budget_daily` (unsharded) or `budget_daily:{n}`
+  (one per ProviderBudget shard, `n` 0 to 7) are the budget object's OWN daily totals for the
+  day and provider, written by the persist consumer with replace semantics from the object's
+  final snapshot; they are not a provider operation. The increment 12 roll-up of
+  `provider_calls` fills the per-operation rows next to them and MUST exclude every operation
+  starting with `budget_daily` from per-operation sums, and must never sum the shard rows into
+  one (at-least-once delivery would count a redelivery twice; the per-shard rows are exact).
 - `flight_instances (origin_airport_id, origin_icao, origin_tz)` references
   `airports (id, icao, tz)`, so a resolved origin cannot disagree with the airport row on code or
   zone; the zone is what decides the origin-local date inside the frozen key.
@@ -368,14 +384,20 @@ Retention purges (`flight_events`, `provider_calls`, `airport_wx_observations`,
 
 ## 9. Durable Object schemas, outbox and migration runner
 
-Owned by increment 7; summarised here so the boundary is visible. Each class runs a
-`PRAGMA user_version` migration runner in its constructor under `blockConcurrencyWhile`.
-FlightTracker tables: `flight`, `subscribers`, `events`, `positions`, `budget`, `user_refresh`,
-`outbox`, `notif_dedupe`, `alert_registrations`. The outbox is the only path from an object to
-Postgres: rows are sent to the `persist` queue and the consumer upserts `flight_instances`,
-`flight_events` (`on conflict (flight_instance_id, seq) do nothing`) and `provider_calls`
-(`on conflict (id) do nothing`). DO schema changes are additive only for one release, because a
-new Worker version can call an old object during gradual rollout.
+Owned by increment 7; summarised here so the boundary is visible. Each class runs the
+migrations-table runner (`_sql_schema_migrations`; `PRAGMA user_version` is not available in
+Durable Object SQLite) in its constructor under `blockConcurrencyWhile`. FlightTracker tables
+(migration 001): `flight`, `subscribers`, `events`, `positions`, `budget`, `attempts`,
+`user_refresh`, `outbox`, `notif_dedupe`, `alert_registrations`, `kv_debounce`. DesignatorResolver
+tables: `resolution`, `outbox` (001), `flush_state` and `resolution.tracker` (002). The outbox is
+the only path from an object to Postgres: rows are sent to the `persist` queue and the consumer
+upserts `flight_instances` (monotonic on `version` within a lifetime, lifetime-aware on
+`do_lifetime_epoch_ms`), `flight_events` (`on conflict (flight_instance_id, seq) do nothing`)
+and `provider_calls` (`on conflict (id) do nothing`), and writes `provider_call_daily` from the
+ProviderBudget's daily row. Outbox rows are deleted only on confirmation (the tracker) or once
+sent (the resolver); neither object ever `deleteAll()`s an unsent or unconfirmed row (ADR 0011).
+DO schema changes are additive only for one release, because a new Worker version can call an
+old object during gradual rollout.
 
 ## 10. KV and R2 catalogs
 
@@ -389,7 +411,10 @@ rate limits.
 R2: public `airlines/logos/{ICAO}.svg`, `share/cards/{YYYY}/{MM}/{id}.png` (30 d),
 `og/{random_id}.png` (7 d); private `exports/{user_id}/{job_id}.zip` (7 d),
 `imports/{user_id}/{import_id}/...` (30 d), `tracks/{YYYY}/{MM}/{flight_key}.jsonl.gz` (365 d),
-`events/{YYYY}/{MM}/{flight_key}.jsonl.gz` (365 d), `bts/raw/...` (kept).
+`events/{flight_key}@{epochMs}.json` (a finished FlightTracker's timeline, one object per tracker
+lifetime, written with `onlyIf: { etagDoesNotMatch: '*' }` so it is never overwritten; increment
+7 replaced the planned `events/{YYYY}/{MM}/{flight_key}.jsonl.gz`), `dlq/{queue}/{messageId}.json`
+(a dead letter message's raw body), `bts/raw/...` (kept).
 
 ## 11. Connection budget
 

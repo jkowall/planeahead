@@ -10,8 +10,8 @@
  *      SQLite state and the second one would see a warm object.
  *   2. An `afterEach` alarm drain. A scheduled alarm fires on its own wall clock inside the test
  *      pool (spike 2 measured it firing 200 ms after it was set, with no `runDurableObjectAlarm`
- *      call), so an alarm left pending by one test runs during another. None of these classes
- *      schedules an alarm yet, so the drain is a no-op today and a guard from increment 7 on.
+ *      call), so an alarm left pending by one test runs during another. From increment 7 the
+ *      FlightTracker and DesignatorResolver do schedule alarms, so the drain is load bearing.
  */
 
 import { listDurableObjectIds, runDurableObjectAlarm, runInDurableObject } from 'cloudflare:test';
@@ -45,20 +45,24 @@ afterEach(async () => {
 interface PingCase {
   readonly className: string;
   readonly ping: (name: string) => Promise<DurableObjectPing>;
-  /** The class's migrations: none for the shells, one for ProviderBudget from increment 6. */
+  /**
+   * The class's migrations: one for ProviderBudget (increment 6), two each for FlightTracker
+   * (increment 7 and its final re-review round) and DesignatorResolver (increment 7 and its
+   * review fix round); none for the two shells.
+   */
   readonly version: number;
 }
 
 const CLASSES: readonly PingCase[] = [
   {
     className: 'FlightTracker',
-    ping: (name) => track(env.FLIGHT_TRACKER.getByName(name)).ping(),
-    version: 0,
+    ping: (name) => track(env.FLIGHT_TRACKER.getByName(name, { locationHint: 'enam' })).ping(),
+    version: 2,
   },
   {
     className: 'DesignatorResolver',
     ping: (name) => track(env.DESIGNATOR_RESOLVER.getByName(name)).ping(),
-    version: 0,
+    version: 2,
   },
   {
     className: 'AirportState',
@@ -109,7 +113,9 @@ describe('Durable Object shells', () => {
     // does), but it is what decides the storage backend, and local-dev support for it is not
     // documented anywhere. A class that silently got "legacy-kv" storage would have no
     // `state.storage.sql` at all and every later increment's schema would fail at run time.
-    const stub = track(env.FLIGHT_TRACKER.getByName(uniqueName('sqlite')));
+    const stub = track(
+      env.FLIGHT_TRACKER.getByName(uniqueName('sqlite'), { locationHint: 'enam' }),
+    );
 
     const note = await runInDurableObject(stub, (_instance, state) => {
       state.storage.sql.exec('CREATE TABLE spike (id INTEGER PRIMARY KEY, note TEXT NOT NULL)');

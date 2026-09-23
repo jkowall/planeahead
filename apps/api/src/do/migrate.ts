@@ -46,11 +46,20 @@ export interface MigrationResult {
   readonly version: number;
   /** Migration ids this call applied, in order. Empty when the object was already current. */
   readonly applied: readonly number[];
+  /**
+   * Rows the run wrote, summed from every cursor (the migrations table's `CREATE TABLE IF NOT
+   * EXISTS`, each DDL statement, each id row). DDL is billed as rows written like any other
+   * statement (about two per `CREATE TABLE`), and the FlightTracker adds this to its lifetime
+   * meter so the budgeted number includes the schema an object pays for at creation (increment
+   * 7 review, outbox-and-data-flow-10).
+   */
+  readonly rowsWritten: number;
 }
 
 export const EMPTY_MIGRATION_RESULT: MigrationResult = Object.freeze({
   version: 0,
   applied: Object.freeze([]),
+  rowsWritten: 0,
 });
 
 /**
@@ -130,10 +139,14 @@ export function runSqlMigrations(
   migrations: SqlMigrations,
 ): MigrationResult {
   const sql = ctx.storage.sql;
+  let rowsWritten = 0;
+  const run = (statement: string, ...bindings: (string | number)[]): void => {
+    rowsWritten += sql.exec(statement, ...bindings).rowsWritten;
+  };
 
   // Idempotent and outside the per-migration transaction: the table must exist before the version
   // probe, and creating it is not part of any migration's rollback unit.
-  sql.exec(
+  run(
     `CREATE TABLE IF NOT EXISTS ${MIGRATIONS_TABLE} (` +
       'id INTEGER PRIMARY KEY, ' +
       "applied_at TEXT NOT NULL DEFAULT (datetime('now'))" +
@@ -164,13 +177,13 @@ export function runSqlMigrations(
     assertStatementSizes(id, statements);
     ctx.storage.transactionSync(() => {
       for (const statement of statements) {
-        sql.exec(statement);
+        run(statement);
       }
-      sql.exec(`INSERT INTO ${MIGRATIONS_TABLE} (id) VALUES (?)`, id);
+      run(`INSERT INTO ${MIGRATIONS_TABLE} (id) VALUES (?)`, id);
     });
     applied.push(id);
     version = id;
   }
 
-  return { version, applied };
+  return { version, applied, rowsWritten };
 }

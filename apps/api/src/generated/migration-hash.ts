@@ -8,10 +8,10 @@
  * be matched to the schema it was built against without a database round trip.
  */
 
-export const MIGRATION_HASH = 'cffe493a964b92ba461d75ff24ef5200270c7bf59021850bfb6c33b68dba2763';
+export const MIGRATION_HASH = 'e2eef54585ee05b4df14daeb080f8c92041dcd61995006de989229bdb0f7db94';
 
 /** Number of migrations in the journal at build time. */
-export const MIGRATION_COUNT = 2;
+export const MIGRATION_COUNT = 3;
 
 /** Tag of the newest migration in the journal at build time. */
-export const LATEST_MIGRATION = '0001_add_set_updated_at';
+export const LATEST_MIGRATION = '0002_add_do_lifetime_epoch';

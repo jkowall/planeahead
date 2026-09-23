@@ -16,7 +16,8 @@
     "test:tools": "vitest run --dir tools",
     "format": "prettier --write .",
     "format:check": "prettier --check .",
-    "toolchain-guard": "node scripts/toolchain-guard.mjs"
+    "toolchain-guard": "node scripts/toolchain-guard.mjs",
+    "vitest-exit-guard": "node scripts/vitest-exit-guard.mjs"
   },
   "devDependencies": {
     "@eslint/js": "catalog:",

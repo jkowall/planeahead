@@ -36,6 +36,10 @@ catalog:
   # Real PostgreSQL 18.4 binaries inside the npm tarball, no Docker or Homebrew. Exact prerelease
   # pin; the package has open hang reports so the test harness wraps every call in a timeout.
   embedded-postgres: 18.4.0-beta.17
+  # embedded-postgres's own dependency, declared by packages/db too so the test harness can
+  # unhook the `beforeExit` handler it registers at import (packages/db/test/embedded.ts). The
+  # range matches what embedded-postgres declares so pnpm resolves one instance.
+  async-exit-hook: ^2.0.1
   # geo-tz is used only by scripts/fetch-seed-data.mjs to propose a timezone for airports that
   # mwgg/Airports does not cover. Its boundary data is ODbL, so it never runs at build or runtime
   # and the reviewed output is committed as curated data.

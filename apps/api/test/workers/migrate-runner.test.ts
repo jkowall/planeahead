@@ -77,7 +77,8 @@ describe('runSqlMigrations', () => {
     // One row, and its value is SQL NULL. The runner turns that into 0; nothing else may.
     expect(result.rows).toHaveLength(1);
     expect(result.rows[0]?.version).toBeNull();
-    expect(result.run).toEqual({ version: 0, applied: [] });
+    expect(result.run).toMatchObject({ version: 0, applied: [] });
+    expect(typeof result.run.rowsWritten).toBe('number');
   });
 
   it('applies both migrations once and records their ids', async () => {
@@ -87,7 +88,11 @@ describe('runSqlMigrations', () => {
       ids: appliedIds(state),
     }));
 
-    expect(result.run).toEqual({ version: 2, applied: [1, 2] });
+    expect(result.run).toMatchObject({ version: 2, applied: [1, 2] });
+    expect(typeof result.run.rowsWritten).toBe('number');
+    // DDL is billed as rows written like any other statement, and the runner reports it so a
+    // Durable Object can add it to its lifetime meter.
+    expect(result.run.rowsWritten).toBeGreaterThan(0);
     expect(result.tables).toContain('alpha');
     expect(result.tables).toContain('beta');
     expect(result.ids).toEqual([1, 2]);
@@ -106,8 +111,11 @@ describe('runSqlMigrations', () => {
       ids: appliedIds(state),
     }));
 
-    expect(first).toEqual({ version: 2, applied: [1, 2] });
-    expect(second.run).toEqual({ version: 2, applied: [] });
+    expect(first).toMatchObject({ version: 2, applied: [1, 2] });
+    expect(typeof first.rowsWritten).toBe('number');
+    expect(second.run).toMatchObject({ version: 2, applied: [] });
+    expect(typeof second.run.rowsWritten).toBe('number');
+    expect(second.run.rowsWritten).toBeLessThan(first.rowsWritten);
     expect(second.ids).toEqual([1, 2]);
   });
 
@@ -119,7 +127,8 @@ describe('runSqlMigrations', () => {
       runSqlMigrations(state, [...TWO, ['CREATE TABLE gamma (id INTEGER PRIMARY KEY)']]),
     );
 
-    expect(grown).toEqual({ version: 3, applied: [3] });
+    expect(grown).toMatchObject({ version: 3, applied: [3] });
+    expect(typeof grown.rowsWritten).toBe('number');
   });
 
   it('rolls the whole migration back when one of its statements fails', async () => {
@@ -164,7 +173,8 @@ describe('runSqlMigrations', () => {
       tables: tableNames(state),
     }));
 
-    expect(fixed.run).toEqual({ version: 3, applied: [3] });
+    expect(fixed.run).toMatchObject({ version: 3, applied: [3] });
+    expect(typeof fixed.run.rowsWritten).toBe('number');
     expect(fixed.tables).toContain('gamma');
   });
 
