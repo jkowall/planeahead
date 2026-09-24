@@ -26,6 +26,7 @@ const CHECK = /gen-migration-hash\.mjs --check\b/;
 const MUST_CHECK = {
   'ci.yml': ['test-workers', 'wrangler-dry-run'],
   'deploy-staging.yml': ['deploy'],
+  'deploy-production.yml': ['verify', 'deploy'],
 };
 
 /** Whether one non-comment line runs something that rewrites the generated constant. */

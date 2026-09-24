@@ -15,12 +15,15 @@
  *
  * Increment 7 adds the `reconcile` queue and the dead letter consumers: every `-dlq` queue is
  * dispatched to one handler that archives the raw message to R2, raises the ops alert and
- * acknowledges (src/queues/dlq.ts).
+ * acknowledges (src/queues/dlq.ts). Increment 12 adds the `housekeeping` queue (and its dead
+ * letter queue), which the nightly cron fills with one message per step
+ * (src/queues/housekeeping.ts).
  */
 
 import type { Env } from '../env';
 import { type Logger, createLogger, errorFields } from '../observability/log';
 import { handleDeadLetterBatch } from './dlq';
+import { handleHousekeepingBatch } from './housekeeping';
 import { handleImportsBatch } from './imports';
 import { handleNotifyBatch } from './notify';
 import { handlePersistBatch } from './persist';
@@ -28,7 +31,7 @@ import { handleProviderEventsBatch } from './provider-events';
 import { handleReconcileBatch } from './reconcile';
 
 export type QueueKind =
-  'persist' | 'notify' | 'provider-events' | 'imports' | 'reconcile' | 'unknown';
+  'persist' | 'notify' | 'provider-events' | 'imports' | 'reconcile' | 'housekeeping' | 'unknown';
 
 export interface QueueRoute {
   readonly kind: QueueKind;
@@ -50,6 +53,7 @@ const KINDS: readonly QueueKind[] = [
   'provider-events',
   'imports',
   'reconcile',
+  'housekeeping',
 ];
 
 /** Turns `planeahead-provider-events-dlq-staging` into `{ kind, deadLetter }`. */
@@ -95,6 +99,9 @@ export async function queue(
         return;
       case 'reconcile':
         await handleReconcileBatch(batch, context);
+        return;
+      case 'housekeeping':
+        await handleHousekeepingBatch(batch, context);
         return;
       case 'notify':
         await handleNotifyBatch(batch as MessageBatch<never>, context);

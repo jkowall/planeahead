@@ -1,7 +1,7 @@
 # Schema review: `@planeahead/db`
 
-Status: first complete draft, increment 3 (2026-09-20). Increment 12 finalises it. Reviewers sign
-off in section 17.
+Status: final for Phase 0 (increment 12, 2026-09-23); first complete draft increment 3
+(2026-09-20), amended by increments 6 to 11. Reviewers sign off in section 17.
 
 This document is the reference for the Postgres 18 schema in `packages/db/src/schema`, the
 migrations in `packages/db/migrations`, and the rules every later increment must keep. Where it
@@ -66,9 +66,11 @@ orchestrator read. See section 17 for the checklist each reviewer walks.
    an IP, so the deletion job purges them by subject and the housekeeping cron by age
    (section 5).
 8. **Append-only tables get a BRIN index on `created_at`:** `flight_events`,
-   `provider_calls`, `airport_wx_observations`, `notification_deliveries`, `audit_log`. Insert
-   order correlates with `created_at` (UUIDv7 ids, single writer), which is what makes BRIN
-   cheap and effective there.
+   `provider_calls`, `airport_wx_observations`, `notification_deliveries`, `audit_log`, and
+   (migration 0005, increment 12) `user_sync_changes` and `flight_sync_changes`. Insert order
+   correlates with `created_at` (UUIDv7 ids, single writer), which is what makes BRIN cheap and
+   effective there. The two change tables also get a btree on `xid` for the paged purge
+   (section 6): PostgreSQL 18 has no BRIN operator class for `xid8`.
 9. **No Postgres array columns anywhere.** `jsonb` or a junction table instead. This is what
    makes `fetch_types: false` safe in the driver (ADR 0009); the contracts test asserts it from
    the migration snapshot.
@@ -163,22 +165,22 @@ by design, pseudonymous). Rows: order of magnitude twelve months in, after reten
 
 ### Identity
 
-| Table               | Purpose                                                                                  | Writer                                     | Readers                          | PII | Enc                                                                                           | Retention                                                                               | GDPR                                                                   | Rows 1k / 10k / 100k |
-| ------------------- | ---------------------------------------------------------------------------------------- | ------------------------------------------ | -------------------------------- | --- | --------------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------- | ---------------------------------------------------------------------- | -------------------- |
-| `users`             | Better Auth user plus status, plan cache, home airport                                   | Better Auth, API                           | API, auth, jobs                  | 2   | none (email in plaintext, unique on `lower(email)`)                                           | until deletion                                                                          | hard delete                                                            | 1k / 10k / 100k      |
-| `sessions`          | Better Auth sessions                                                                     | Better Auth                                | auth                             | 2   | `token` plaintext (Better Auth-owned)                                                         | expired rows purged at 30 d                                                             | cascade                                                                | 3k / 30k / 300k      |
-| `accounts`          | Better Auth OAuth and credential accounts                                                | Better Auth, Apple route                   | auth, deletion job               | 3   | `refresh_token_enc`; Better Auth's own token columns plaintext                                | until deletion                                                                          | cascade                                                                | 1.5k / 15k / 150k    |
-| `verifications`     | Magic link and OAuth state (`storeToken: 'hashed'`)                                      | Better Auth                                | auth                             | 2   | magic-link tokens hashed by the plugin; `identifier` may be an email                          | expired rows purged by the increment 12 cron over `verifications_expires_at_idx`        | by subject (rows whose `identifier` is the user's email)               | hundreds / 1k / 10k  |
-| `rate_limits`       | Better Auth database rate limiting                                                       | Better Auth                                | auth                             | 2   | none: `key` is an IP or an email in plaintext                                                 | rows idle over 24 h purged by the increment 12 cron over `rate_limits_last_request_idx` | by subject (rows whose `key` embeds the user's email; IP rows age out) | 1k / 10k / 100k      |
-| `user_keys`         | Wrapped per-user DEK and KEK version                                                     | crypto module                              | crypto module                    | 3   | `wrapped_dek` is AES-KW ciphertext                                                            | until deletion                                                                          | cascade                                                                | 1k / 10k / 100k      |
-| `devices`           | Installs, platform, OS, attestation reserved                                             | `POST /v1/devices`                         | push, analytics                  | 1   | none                                                                                          | until deletion                                                                          | cascade                                                                | 1.5k / 15k / 150k    |
-| `user_preferences`  | Units, time format, settings blob (sync entity)                                          | API                                        | API, sync                        | 1   | none                                                                                          | tombstoned, purged at 30 d                                                              | cascade                                                                | 1k / 10k / 100k      |
-| `user_consents`     | Terms, privacy, marketing, email import consents                                         | API                                        | export, compliance               | 1   | none                                                                                          | until deletion                                                                          | cascade                                                                | 3k / 30k / 300k      |
-| `user_sync_changes` | Change feed with `xid8` watermark for `GET /v1/sync`                                     | API (same tx as the row)                   | sync                             | 1   | none                                                                                          | 30 d                                                                                    | cascade                                                                | 20k / 200k / 2M      |
-| `idempotency_keys`  | Replay store for mutating routes                                                         | idempotency middleware                     | idempotency middleware           | 1   | request hash                                                                                  | 24 h                                                                                    | cascade                                                                | hundreds / 5k / 50k  |
-| `deleted_subjects`  | Pseudonymous record that a subject was deleted                                           | deletion route                             | auth middleware, webhooks, audit | 1   | Apple, Google and session subjects HMAC-SHA-256 under a Workers secret; RevenueCat id SHA-256 | `expires_at`: 400 d (provider subject), 31 d (session); purged by the increment 12 cron | kept (that is its job)                                                 | tens / hundreds / 1k |
-| `sync_epoch`        | Database timeline every sync cursor names (one row, seeded 1; increment 8)               | restore runbook only                       | sync route                       | 0   | none                                                                                          | forever                                                                                 | n/a                                                                    | 1                    |
-| `sync_horizon`      | Purge horizon H of both change tables (one row, null until the first purge; increment 8) | increment 12 purge (same tx as the delete) | sync route                       | 0   | none                                                                                          | forever                                                                                 | n/a                                                                    | 1                    |
+| Table               | Purpose                                                                                  | Writer                                     | Readers                          | PII | Enc                                                                                           | Retention                                                                                        | GDPR                                                                   | Rows 1k / 10k / 100k |
+| ------------------- | ---------------------------------------------------------------------------------------- | ------------------------------------------ | -------------------------------- | --- | --------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------ | ---------------------------------------------------------------------- | -------------------- |
+| `users`             | Better Auth user plus status, plan cache, home airport                                   | Better Auth, API                           | API, auth, jobs                  | 2   | none (email in plaintext, unique on `lower(email)`)                                           | until deletion                                                                                   | hard delete                                                            | 1k / 10k / 100k      |
+| `sessions`          | Better Auth sessions                                                                     | Better Auth                                | auth                             | 2   | `token` plaintext (Better Auth-owned)                                                         | expired rows purged at 30 d                                                                      | cascade                                                                | 3k / 30k / 300k      |
+| `accounts`          | Better Auth OAuth and credential accounts                                                | Better Auth, Apple route                   | auth, deletion job               | 3   | `refresh_token_enc`; Better Auth's own token columns plaintext                                | until deletion                                                                                   | cascade                                                                | 1.5k / 15k / 150k    |
+| `verifications`     | Magic link and OAuth state (`storeToken: 'hashed'`)                                      | Better Auth                                | auth                             | 2   | magic-link tokens hashed by the plugin; `identifier` may be an email                          | expired rows purged nightly (housekeeping, `verifications_expires_at_idx`)                       | by subject (rows whose `identifier` is the user's email)               | hundreds / 1k / 10k  |
+| `rate_limits`       | Better Auth database rate limiting                                                       | Better Auth                                | auth                             | 2   | none: `key` is an IP or an email in plaintext                                                 | rows idle past the longest limiter window (60 s) purged nightly (`rate_limits_last_request_idx`) | by subject (rows whose `key` embeds the user's email; IP rows age out) | 1k / 10k / 100k      |
+| `user_keys`         | Wrapped per-user DEK and KEK version                                                     | crypto module                              | crypto module                    | 3   | `wrapped_dek` is AES-KW ciphertext                                                            | until deletion                                                                                   | cascade                                                                | 1k / 10k / 100k      |
+| `devices`           | Installs, platform, OS, attestation reserved                                             | `POST /v1/devices`                         | push, analytics                  | 1   | none                                                                                          | until deletion                                                                                   | cascade                                                                | 1.5k / 15k / 150k    |
+| `user_preferences`  | Units, time format, settings blob (sync entity)                                          | API                                        | API, sync                        | 1   | none                                                                                          | tombstoned, purged at 30 d                                                                       | cascade                                                                | 1k / 10k / 100k      |
+| `user_consents`     | Terms, privacy, marketing, email import consents                                         | API                                        | export, compliance               | 1   | none                                                                                          | until deletion                                                                                   | cascade                                                                | 3k / 30k / 300k      |
+| `user_sync_changes` | Change feed with `xid8` watermark for `GET /v1/sync`                                     | API (same tx as the row)                   | sync                             | 1   | none                                                                                          | 30 d                                                                                             | cascade                                                                | 20k / 200k / 2M      |
+| `idempotency_keys`  | Replay store for mutating routes                                                         | idempotency middleware                     | idempotency middleware           | 1   | request hash                                                                                  | 24 h                                                                                             | cascade                                                                | hundreds / 5k / 50k  |
+| `deleted_subjects`  | Pseudonymous record that a subject was deleted                                           | deletion route                             | auth middleware, webhooks, audit | 1   | Apple, Google and session subjects HMAC-SHA-256 under a Workers secret; RevenueCat id SHA-256 | `expires_at`: 400 d (provider subject), 31 d (session); purged nightly at `expires_at`           | kept (that is its job)                                                 | tens / hundreds / 1k |
+| `sync_epoch`        | Database timeline every sync cursor names (one row, seeded 1; increment 8)               | restore runbook only                       | sync route                       | 0   | none                                                                                          | forever                                                                                          | n/a                                                                    | 1                    |
+| `sync_horizon`      | Purge horizon H of both change tables (one row, null until the first purge; increment 8) | nightly sync purge (same tx as the delete) | sync route                       | 0   | none                                                                                          | forever                                                                                          | n/a                                                                    | 1                    |
 
 ### Reference
 
@@ -194,14 +196,14 @@ by design, pseudonymous). Rows: order of magnitude twelve months in, after reten
 
 ### Flight core
 
-| Table                    | Purpose                                                                             | Writer                                        | Readers                        | PII | Enc  | Retention                            | GDPR | Rows 1k / 10k / 100k |
-| ------------------------ | ----------------------------------------------------------------------------------- | --------------------------------------------- | ------------------------------ | --- | ---- | ------------------------------------ | ---- | -------------------- |
-| `flight_instances`       | Registry of every tracked flight; generated unique `flight_key`                     | persist consumer only                         | API, reconcile cron, sync join | 0   | none | finished rows kept 13 months         | n/a  | 12k / 120k / 1.2M    |
-| `flight_instance_merges` | Audit of merged instances                                                           | persist consumer                              | admin                          | 0   | none | kept                                 | n/a  | tens / hundreds / 5k |
-| `flight_designators`     | Marketing designator to instance                                                    | API (search), persist                         | search route                   | 0   | none | follows the instance                 | n/a  | 20k / 200k / 2M      |
-| `flight_events`          | Append-only timeline per instance                                                   | persist consumer only                         | detail route, admin            | 0   | none | 90 d, then R2 and `timeline_summary` | n/a  | 120k / 1.2M / 12M    |
-| `flight_sync_changes`    | Flight half of the sync feed: the snapshot each applied upsert stored (increment 8) | persist consumer only (same tx as the upsert) | sync route                     | 0   | none | 30 d                                 | n/a  | 120k / 1.2M / 12M    |
-| `flight_tracks`          | Pointer to the archived track sample plus preview                                   | persist consumer                              | detail route                   | 0   | none | follows the instance                 | n/a  | 12k / 120k / 1.2M    |
+| Table                    | Purpose                                                                             | Writer                                        | Readers                        | PII | Enc  | Retention                                                                                                                          | GDPR | Rows 1k / 10k / 100k |
+| ------------------------ | ----------------------------------------------------------------------------------- | --------------------------------------------- | ------------------------------ | --- | ---- | ---------------------------------------------------------------------------------------------------------------------------------- | ---- | -------------------- |
+| `flight_instances`       | Registry of every tracked flight; generated unique `flight_key`                     | persist consumer only                         | API, reconcile cron, sync join | 0   | none | finished rows kept 13 months                                                                                                       | n/a  | 12k / 120k / 1.2M    |
+| `flight_instance_merges` | Audit of merged instances                                                           | persist consumer                              | admin                          | 0   | none | kept                                                                                                                               | n/a  | tens / hundreds / 5k |
+| `flight_designators`     | Marketing designator to instance                                                    | API (search), persist                         | search route                   | 0   | none | follows the instance                                                                                                               | n/a  | 20k / 200k / 2M      |
+| `flight_events`          | Append-only timeline per instance                                                   | persist consumer only                         | detail route, admin            | 0   | none | 90 d, then the R2 timeline (`timeline_summary` unwritten in Phase 0: the app derives its timeline from the snapshot, increment 10) | n/a  | 120k / 1.2M / 12M    |
+| `flight_sync_changes`    | Flight half of the sync feed: the snapshot each applied upsert stored (increment 8) | persist consumer only (same tx as the upsert) | sync route                     | 0   | none | 30 d                                                                                                                               | n/a  | 120k / 1.2M / 12M    |
+| `flight_tracks`          | Pointer to the archived track sample plus preview                                   | persist consumer                              | detail route                   | 0   | none | follows the instance                                                                                                               | n/a  | 12k / 120k / 1.2M    |
 
 ### Trips and subscriptions
 
@@ -216,23 +218,23 @@ by design, pseudonymous). Rows: order of magnitude twelve months in, after reten
 
 ### Providers and models
 
-| Table                          | Purpose                                                                                    | Writer                                | Readers                      | PII | Enc  | Retention          | GDPR | Rows 1k / 10k / 100k   |
-| ------------------------------ | ------------------------------------------------------------------------------------------ | ------------------------------------- | ---------------------------- | --- | ---- | ------------------ | ---- | ---------------------- |
-| `provider_calls`               | One row per provider call including LLM                                                    | persist consumer                      | admin, rollup                | 0   | none | 90 d               | kept | 400k / 4M / 40M        |
-| `provider_call_daily`          | Durable daily series; `budget_daily*` rows are the ProviderBudget's own totals (section 6) | housekeeping rollup, persist consumer | admin, cost model            | 0   | none | kept               | kept | hundreds / 1k / 5k     |
-| `provider_budget_config`       | Caps and kill switch per provider                                                          | admin                                 | ProviderBudget DO            | 0   | none | kept               | n/a  | 11                     |
-| `provider_alert_registrations` | AeroAPI and ADB alert ids per flight                                                       | FlightTracker via persist             | reconcile, admin             | 0   | none | follows the flight | n/a  | 1k / 10k / 100k active |
-| `provider_webhook_events`      | Raw webhook envelopes                                                                      | webhook routes                        | provider-events queue        | 0   | none | 30 d               | n/a  | 12k / 120k / 1.2M      |
-| `delay_predictions`            | Model output per flight                                                                    | prediction job                        | API                          | 0   | none | 13 months          | n/a  | 24k / 240k / 2.4M      |
-| `delay_outcomes`               | Ground truth per finished flight                                                           | housekeeping                          | model training               | 0   | none | kept               | n/a  | 12k / 120k / 1.2M      |
-| `airport_wx_observations`      | METAR and TAF                                                                              | weather cron                          | API, model                   | 0   | none | 90 d               | n/a  | 500k at every tier     |
-| `airport_nas_events`           | FAA ground stops and delay programs                                                        | NAS cron                              | API                          | 0   | none | 13 months          | n/a  | 20k at every tier      |
-| `airport_delay_snapshots`      | Board-derived delay index                                                                  | airport sweep                         | hourly rollup                | 0   | none | 30 d               | n/a  | 300k at every tier     |
-| `airport_delay_hourly`         | Hourly delay aggregates                                                                    | housekeeping                          | API, model                   | 0   | none | 13 months          | n/a  | 2M at every tier       |
-| `bts_carrier_flight_monthly`   | BTS marketing and operating carrier per flight number                                      | BTS import                            | regional operator job, model | 0   | none | kept               | n/a  | 6M at every tier       |
-| `bts_route_monthly`            | BTS route aggregates                                                                       | BTS import                            | model                        | 0   | none | kept               | n/a  | 1M at every tier       |
-| `bts_airport_hourly`           | BTS airport hour-of-day aggregates                                                         | BTS import                            | model                        | 0   | none | kept               | n/a  | 500k at every tier     |
-| `bts_import_runs`              | One row per month import with source hash                                                  | BTS import                            | admin                        | 0   | none | kept               | n/a  | 100                    |
+| Table                          | Purpose                                                                                                                                                                                                                                        | Writer                                | Readers                      | PII | Enc  | Retention          | GDPR | Rows 1k / 10k / 100k   |
+| ------------------------------ | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------- | ---------------------------- | --- | ---- | ------------------ | ---- | ---------------------- |
+| `provider_calls`               | One row per provider call including LLM                                                                                                                                                                                                        | persist consumer                      | admin, rollup                | 0   | none | 90 d               | kept | 400k / 4M / 40M        |
+| `provider_call_daily`          | Durable daily series; `budget_daily*` rows are the ProviderBudget's own totals (section 6); `ledger_calls` (migration 0006) is the day's `count(*)` of `provider_calls` as the rollup found it, the figure the purge judges the rollup against | housekeeping rollup, persist consumer | admin, cost model            | 0   | none | kept               | kept | hundreds / 1k / 5k     |
+| `provider_budget_config`       | Caps and kill switch per provider                                                                                                                                                                                                              | admin                                 | ProviderBudget DO            | 0   | none | kept               | n/a  | 11                     |
+| `provider_alert_registrations` | AeroAPI and ADB alert ids per flight                                                                                                                                                                                                           | FlightTracker via persist             | reconcile, admin             | 0   | none | follows the flight | n/a  | 1k / 10k / 100k active |
+| `provider_webhook_events`      | Raw webhook envelopes                                                                                                                                                                                                                          | webhook routes                        | provider-events queue        | 0   | none | 30 d               | n/a  | 12k / 120k / 1.2M      |
+| `delay_predictions`            | Model output per flight                                                                                                                                                                                                                        | prediction job                        | API                          | 0   | none | 13 months          | n/a  | 24k / 240k / 2.4M      |
+| `delay_outcomes`               | Ground truth per finished flight                                                                                                                                                                                                               | housekeeping                          | model training               | 0   | none | kept               | n/a  | 12k / 120k / 1.2M      |
+| `airport_wx_observations`      | METAR and TAF                                                                                                                                                                                                                                  | weather cron                          | API, model                   | 0   | none | 90 d               | n/a  | 500k at every tier     |
+| `airport_nas_events`           | FAA ground stops and delay programs                                                                                                                                                                                                            | NAS cron                              | API                          | 0   | none | 13 months          | n/a  | 20k at every tier      |
+| `airport_delay_snapshots`      | Board-derived delay index                                                                                                                                                                                                                      | airport sweep                         | hourly rollup                | 0   | none | 30 d               | n/a  | 300k at every tier     |
+| `airport_delay_hourly`         | Hourly delay aggregates                                                                                                                                                                                                                        | housekeeping                          | API, model                   | 0   | none | 13 months          | n/a  | 2M at every tier       |
+| `bts_carrier_flight_monthly`   | BTS marketing and operating carrier per flight number                                                                                                                                                                                          | BTS import                            | regional operator job, model | 0   | none | kept               | n/a  | 6M at every tier       |
+| `bts_route_monthly`            | BTS route aggregates                                                                                                                                                                                                                           | BTS import                            | model                        | 0   | none | kept               | n/a  | 1M at every tier       |
+| `bts_airport_hourly`           | BTS airport hour-of-day aggregates                                                                                                                                                                                                             | BTS import                            | model                        | 0   | none | kept               | n/a  | 500k at every tier     |
+| `bts_import_runs`              | One row per month import with source hash                                                                                                                                                                                                      | BTS import                            | admin                        | 0   | none | kept               | n/a  | 100                    |
 
 ### Notifications
 
@@ -271,8 +273,39 @@ by design, pseudonymous). Rows: order of magnitude twelve months in, after reten
 | `subscriptions`             | Store subscription ledger                             | billing job        | finance           | 1   | none         | kept           | kept    | 300 / 3k / 30k       |
 | `api_tokens`                | `pa_<kind>_` tokens with scopes                       | API                | auth middleware   | 1   | `token_hash` | until revoked  | cascade | 100 / 1k / 10k       |
 | `audit_log`                 | Append-only, pseudonymous                             | every write path   | admin, compliance | 1   | IP hashed    | 2 years        | kept    | 50k / 500k / 5M      |
-| `data_export_jobs`          | GDPR export jobs                                      | API, export queue  | API               | 1   | none         | 30 d           | cascade | tens / hundreds / 5k |
+| `data_export_jobs`          | GDPR export jobs                                      | API, export queue  | API               | 1   | none         | 7 d            | cascade | tens / hundreds / 5k |
 | `account_deletion_requests` | PII-free deletion request and step outcomes           | API, deletion job  | admin             | 1   | none         | kept           | kept    | tens / hundreds / 5k |
+
+### Retention as built (increment 12)
+
+The nightly housekeeping (`src/queues/housekeeping.ts`; one queue message per step or page, one
+`audit_log` row per message with one count per table, every delete batched under the message's
+30 s wall budget with a continuation; ruling AA2) enforces every retention above whose table has a
+Phase 0 writer:
+
+| Table                                                     | Purge                                                                                                                                                                                                                                                                                                                                              | Step |
+| --------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ---- |
+| `idempotency_keys`                                        | `expires_at` passed (24 h after the response; a dead lease sooner)                                                                                                                                                                                                                                                                                 | 1    |
+| `user_sync_changes`, `flight_sync_changes`                | `xid < H`, one horizon for both, recorded in `sync_horizon` in the same transaction, paged at 10,000 rows per step under the 10 s `statement_timeout`                                                                                                                                                                                              | 2    |
+| `provider_calls`                                          | whole UTC days older than 90 days, per provider, only when the day's per-operation rollup is above zero and within 20 percent of the `count(*)` the rollup recorded in `ledger_calls` (the live count only for a row older than that column, recorded before the first delete), so a purge cut short and retried judges the day by the same figure | 3    |
+| `notifications`                                           | older than 90 days                                                                                                                                                                                                                                                                                                                                 | 4    |
+| `data_export_jobs`                                        | requested more than 7 days ago                                                                                                                                                                                                                                                                                                                     | 4    |
+| `deleted_subjects`                                        | `expires_at` passed                                                                                                                                                                                                                                                                                                                                | 4    |
+| `rate_limits`                                             | last request older than the longest limiter window (60 s)                                                                                                                                                                                                                                                                                          | 4    |
+| `verifications`                                           | `expires_at` passed                                                                                                                                                                                                                                                                                                                                | 4    |
+| `flight_events`                                           | older than 90 days (the R2 timeline keeps 365)                                                                                                                                                                                                                                                                                                     | 4    |
+| `sessions`                                                | `expires_at` passed                                                                                                                                                                                                                                                                                                                                | 4    |
+| `usage_counters`                                          | day windows older than 30 days (never the epoch window of the two non-monotonic caps)                                                                                                                                                                                                                                                              | 4    |
+| sync-entity tombstones                                    | `deleted_at` older than 30 days (`flight_subscriptions`, `trips`, `trip_members`, `user_preferences`, `notification_preferences`, `logbook_entries`)                                                                                                                                                                                               | 4    |
+| `usage_counters` (`active_subscriptions`, `live_tracked`) | repaired to the live rows; orphans of deleted users removed                                                                                                                                                                                                                                                                                        | 5    |
+| `users` (anonymous, `deleting`)                           | deleted an hour after their merge, after the tracker lists are repaired                                                                                                                                                                                                                                                                            | 6    |
+
+Not built, because nothing writes the rows the retention would remove in Phase 0 (each arrives
+with its writer): `push_tokens` invalidated rows (Phase 1 sender), `live_activities` (Phase 1),
+`notification_deliveries` (Phase 1 notify), `provider_webhook_events` (the receivers only
+enqueue), `inbound_messages`, `imports`, `share_link_views`, `email_extractions` (Phases 3 to 5),
+`airport_*` observations (Phase 2); and two whose window cannot elapse before 2027:
+`flight_instances` finished rows (13 months) and `audit_log` (2 years).
 
 ## 6. Invariants and natural keys
 
@@ -319,9 +352,12 @@ Natural keys used for idempotent upserts by the seed loaders: `airports.icao`, `
 - `provider_call_daily` rows with operation `budget_daily` (unsharded) or `budget_daily:{n}`
   (one per ProviderBudget shard, `n` 0 to 7) are the budget object's OWN daily totals for the
   day and provider, written by the persist consumer with replace semantics from the object's
-  final snapshot; they are not a provider operation. The increment 12 roll-up of
-  `provider_calls` fills the per-operation rows next to them and MUST exclude every operation
-  starting with `budget_daily` from per-operation sums, and must never sum the shard rows into
+  final snapshot; they are not a provider operation. The nightly Analytics Engine rollup
+  (increment 12, `src/lib/provider-rollup.ts`: the SQL API per provider per UTC day,
+  `SUM(_sample_interval)`, replace semantics on the unique index) fills the per-operation rows
+  next to them; it and the admin page exclude every operation starting with `budget_daily` from
+  per-operation sums (`BUDGET_DAILY_OPERATION_PATTERN`), and the admin page shows those rows apart
+  as the object's own daily total, and must never sum the shard rows into
   one (at-least-once delivery would count a redelivery twice; the per-shard rows are exact).
 - `flight_instances (origin_airport_id, origin_icao, origin_tz)` references
   `airports (id, icao, tz)`, so a resolved origin cannot disagree with the airport row on code or
@@ -342,7 +378,7 @@ Natural keys used for idempotent upserts by the seed loaders: `airports.icao`, `
 | Only the increment 8 counter names, and `refresh:{flightKey}`, are stored                         | `usage_counters_counter_check` (migration 0003)                                                                                                                                                                                                                                                                                                                                                                                                                        |
 | A subscription that took a `live_tracked` slot releases exactly that slot                         | `flight_subscriptions.live_tracked` (migration 0003): set at subscribe (flight already live) or by the persist consumer at window entry; cleared, with its slot, by the unsubscribe, by the consumer when the flight is over, and by the merge for a tombstoned loser                                                                                                                                                                                                  |
 | A cursor from another principal or database timeline is never served                              | the cursor's `hash8` (SHA-256 of the user id) and `epoch` (`sync_epoch`, migration 0003) are checked before the page; 410 `resync_required`; `sync.test.ts`                                                                                                                                                                                                                                                                                                            |
-| A cursor below the purge horizon is never served as complete                                      | `sync_horizon` (one row, migration 0003) written by the purge in the transaction that deletes `xid < H` from both tables, read by the route after the page; `sync.late-commit.test.ts` (the seq/xid inversion)                                                                                                                                                                                                                                                         |
+| A cursor below the purge horizon is never served as complete                                      | `sync_horizon` (one row, migration 0003) written by the purge in the transaction that deletes `xid < H` from both tables (each paged step's H_i likewise), read by the route after the page; `sync.late-commit.test.ts` (the seq/xid inversion), `crons.test.ts` (every step of a paged purge exact for every cursor)                                                                                                                                                  |
 | A `deleted_subjects` hash is keyed and namespaced                                                 | `deleted_subjects_provider_subject_hash_check` (`apple:`, `google:` or `session:` plus 43 base64url characters)                                                                                                                                                                                                                                                                                                                                                        |
 | A subscribe never removes a tracker subscriber that another request recorded                      | after a lost deadline the only unsubscribe is for a caller whose `users` row no longer exists (monotonic: no request can record a subscriber after the deletion); the in-request compensation runs under the idempotency in-flight lease; `flights.subscribe.test.ts` (the timed-out call and its retry parked on one in-flight fetch; a late landing after a deletion, and after a retry)                                                                             |
 
@@ -364,10 +400,20 @@ Natural keys used for idempotent upserts by the seed loaders: `airports.icao`, `
   tombstoned row (same id) rather than inserting a second one.
 - **The watermark is cluster-global.** One long writing transaction anywhere freezes every user's
   feed; the guards are `statement_timeout` and `idle_in_transaction_session_timeout` on the app
-  role (section 12) and the watermark-lag metric on the admin page (increment 12).
-- **Retention and 410 (ruling O9).** Both change tables keep 30 days. The increment 12 purge picks
-  ONE horizon H below the watermark and, in ONE transaction, deletes `where xid < H` from BOTH
-  tables and writes H to `sync_horizon.horizon_xid`; `GET /v1/sync` answers 410
+  role (section 12) and the watermark lag on the admin page (increment 12: `now()` minus the start
+  of the oldest in-progress transaction holding an xid, from `pg_stat_activity`).
+- **Retention and 410 (ruling O9).** Both change tables keep 30 days. The nightly purge
+  (increment 12, `src/lib/sync-purge.ts`) locks the `sync_horizon` row and moves toward ONE
+  horizon H: the smallest xid among the rows younger than 30 days across BOTH tables (or one above
+  the largest old xid when no row is young), never above `pg_snapshot_xmin`, never lower than the
+  recorded H. It is paged (ruling AA15) because the app role's `statement_timeout` is 10 s: each
+  queue message reads the oldest 10,001 rows of both tables in xid order through the `xid` btree
+  (migration 0005), picks a step horizon H_i with at most 10,000 rows below it (the first young
+  row's xid, which is H and ends the purge, when one is among them; one transaction's rows are
+  never split), and in the same transaction deletes `where xid < H_i` from BOTH tables and writes
+  H_i to `sync_horizon.horizon_xid`, then sends a continuation. Every H_i is a valid horizon (all
+  rows below it are gone, none can still land below it) and the last one equals H. `GET /v1/sync`
+  answers 410
   `resync_required` exactly when a cursor's xid is below H (and to a cursor from another principal
   or `sync_epoch`, or beyond `pg_snapshot_xmax`). A purge in `seq` order is NOT an exact horizon
   (an earlier version of this section said it was): a row's xid is fixed at its transaction's
@@ -381,7 +427,7 @@ Natural keys used for idempotent upserts by the seed loaders: `airports.icao`, `
   judged fresh once the new timeline passes it and every new-timeline row at or below it is
   skipped; with it, every such cursor answers 410 and its device re-snapshots.
 - **Hyperdrive query caching stays disabled on `DB`** (ADR 0012 item 7): a correctness
-  requirement of the no-cursor snapshot page, checked by the increment 12 first-deploy runbook.
+  requirement of the no-cursor snapshot page, checked by `docs/runbooks/first-deploy.md` step 5.
 - **Caps are counters, reconciled nightly.** `active_subscriptions` (window at the epoch) goes up
   at subscribe and down at unsubscribe. `live_tracked` (window at the epoch, ruling O3) is taken
   where a flight actually ENTERS its live window: at subscribe for a flight already inside it,
@@ -396,8 +442,10 @@ Natural keys used for idempotent upserts by the seed loaders: `airports.icao`, `
   (window the UTC day) only go up; the refresh sub-budget is charged per call, coalesced or not.
   The merge sums the two users' counters and then gives a tombstoned loser's slots back. A crash
   between a take and its compensating release, or a subscribe that commits just after the
-  consumer's window-entry pass, leaves drift, which the increment 12 housekeeping reconciliation
-  repairs against `flight_subscriptions` (not built in increment 8).
+  consumer's window-entry pass, leaves drift, which the nightly housekeeping repair (increment 12,
+  `src/lib/counter-reconcile.ts`) sets back to the live rows once the counter and the user's
+  subscriptions have both been quiet for 10 minutes (a request between its take and its row is
+  never undone), creating a missing counter and deleting user counters whose user is gone.
 - **The anonymous-to-account merge (ruling O2).** `mergeUsers` writes, under the account, an
   upsert for every subscription it moves, a delete for every conflict loser it tombstones and an
   upsert or delete for every singleton (`user_preferences`, `notification_preferences`) winner or
@@ -410,9 +458,12 @@ Natural keys used for idempotent upserts by the seed loaders: `airports.icao`, `
   two errors are not symmetric. A STRAY subscriber (no live row) costs little in Phase 0: the
   shared tracker polls the flight for its other subscribers regardless, and every list the user
   sees is Postgres'. A WRONG unsubscribe loses a real subscription until the user subscribes again,
-  which the app (already subscribed) never prompts. The safety net for every stray is the increment
-  12 tracker-subscriber reconciliation, a housekeeping pass that lists each active tracker's
-  subscribers and unsubscribes every id with no live `flight_subscriptions` row. So
+  which the app (already subscribed) never prompts. The safety net for every stray is the nightly
+  tracker-subscriber reconciliation (increment 12, `src/lib/subscriber-reconcile.ts`): it lists
+  each active tracker's subscribers through the `listSubscribers` RPC, unsubscribes every entry
+  with no live row (live meaning not tombstoned and owned by a user who is not `deleting`),
+  re-points an entry whose subscription moved to another user in a merge, subscribes a live row the
+  tracker lost, and leaves anything younger than 10 minutes alone. So
   `POST /v1/flights` compensates inside the request whose tracker call answered `subscribed` and
   whose transaction then failed, where the idempotency in-flight lease still blocks a same-key
   retry, so nothing can race it. After a LOST DEADLINE the route answers 504, and whether a live
@@ -423,8 +474,8 @@ Natural keys used for idempotent upserts by the seed loaders: `airports.icao`, `
   201 for. The one check it makes is monotonic: when the late call lands `subscribed` and the
   caller's `users` row no longer exists, the subscriber is removed. A deleted user never comes
   back, and every retry after the deletion answers 401 or fails 23503 at its insert, so no request
-  can have recorded it; a merge keeps the anonymous row (marked `deleting`) until increment 12
-  housekeeping, long after any `waitUntil` has run. While the row exists nothing is undone, and a
+  can have recorded it; a merge keeps the anonymous row (marked `deleting`) until the nightly
+  reconciliation deletes it (an hour or more after the merge), long after any `waitUntil` has run. While the row exists nothing is undone, and a
   deletion that commits after the check leaves a stray for the reconciliation. Every answer that
   says "already subscribed" re-sends the idempotent `subscribe` for the live row, so a retry
   repairs drift in the other direction.
@@ -464,7 +515,7 @@ search routes, `insert ... on conflict (flight_key) do nothing`, because a subsc
 row before the persist consumer's first write lands; every tracked column stays the consumer's).
 `deleted_subjects` and the deletion `audit_log` row are written by `POST /v1/me/delete`. The two
 one-row tables of the sync contract have one writer each and no route writes them: `sync_horizon`
-the increment 12 purge (in the purge's transaction), `sync_epoch` the restore runbook.
+the nightly purge (in the purge's transaction), `sync_epoch` the restore runbook.
 
 ### Account deletion (`POST /v1/me/delete`, increment 8)
 
@@ -620,8 +671,9 @@ upserts `flight_instances` (monotonic on `version` within a lifetime, lifetime-a
 and `provider_calls` (`on conflict (id) do nothing`), and writes `provider_call_daily` from the
 ProviderBudget's daily row. Outbox rows are deleted only on confirmation (the tracker) or once
 sent (the resolver); neither object ever `deleteAll()`s an unsent or unconfirmed row (ADR 0011).
-DO schema changes are additive only for one release, because a new Worker version can call an
-old object during gradual rollout.
+DO schema and RPC changes are additive only (a Worker and an object from different deploys can
+talk while a new version rolls out across locations): increment 12's one Durable Object change,
+the FlightTracker's `listSubscribers` RPC, is a new read-only method with `rpcVersion` unchanged.
 
 ## 10. KV and R2 catalogs
 
@@ -629,8 +681,12 @@ KV (all TTLs in seconds): `wx:metar:{ICAO}` 600, `wx:taf:{ICAO}` 1800, `nas:airp
 `airport:delay:{ICAO}` 300, `board:{ICAO}:{dep|arr}:{YYYYMMDDHH}` 300,
 `search:number:{XX1234}:{YYYY-MM-DD}` 900, `flight:snapshot:{flight_key}` 180,
 `ref:airport:{ICAO}` 86400, `budget:day:{date}:{provider}` 172800,
-`share:page:{sha256(token)[0:32]}` 60, `cfg:flags`. Never auth, entitlements, idempotency or
-rate limits.
+`share:page:{sha256(token)[0:32]}` 60, `cfg:flags`, `used_id_tokens:{provider}:{jti or digest}`
+(the identity token's remaining lifetime, increment 5), `tombstone:session:{base64url HMAC}` (the
+`deleted_subjects` row's remaining lifetime, at most 31 days; increment 12). Never auth,
+entitlements, idempotency or rate limits: the two token markers only ever REFUSE (a replayed
+identity token, a cached session of a deleted account), and a KV failure falls back to the
+database.
 
 R2: public `airlines/logos/{ICAO}.svg`, `share/cards/{YYYY}/{MM}/{id}.png` (30 d),
 `og/{random_id}.png` (7 d); private `exports/{user_id}/{job_id}.zip` (7 d),
@@ -638,7 +694,9 @@ R2: public `airlines/logos/{ICAO}.svg`, `share/cards/{YYYY}/{MM}/{id}.png` (30 d
 `events/{flight_key}@{epochMs}.json` (a finished FlightTracker's timeline, one object per tracker
 lifetime, written with `onlyIf: { etagDoesNotMatch: '*' }` so it is never overwritten; increment
 7 replaced the planned `events/{YYYY}/{MM}/{flight_key}.jsonl.gz`), `dlq/{queue}/{messageId}.json`
-(a dead letter message's raw body), `bts/raw/...` (kept).
+(a dead letter message's raw body; `dlq/persist/` replayed nightly and deleted once sent, a
+message replayed three times parked under `dlq/persist-parked/`; lifecycle rule 30 d),
+`bts/raw/...` (kept).
 
 ## 11. Connection budget
 
@@ -776,6 +834,10 @@ transaction, so a refresh lands completely or not at all. Loaded on 2026-09-20 i
 
 ## 16. Open decisions for the orchestrator
 
+The project-wide list is `docs/open-decisions.md` (increment 12); items 1, 2 and 7 below, the
+ones still open, are its section 4 with their current answer, status and when. The
+schema-specific ones as recorded at increment 3:
+
 1. **Table count.** The spec says 61 tables; its normative list names 70 and all 70 are built.
    Confirm the list is the contract and retire the number.
 2. **Airports without a four-character code.** Of the 829 seeded airports whose code is an
@@ -819,4 +881,6 @@ transaction, so a refresh lands completely or not at all. Loaded on 2026-09-20 i
 - [ ] Migrations run only over the direct endpoint, refuse PG17 and `-pooler` hosts.
 - [ ] Seed loaders are idempotent and the manifest matches the committed files.
 - [ ] Connection budget arithmetic matches the current Neon and Hyperdrive limits.
-- [ ] Retention crons exist for every table with a retention shorter than "kept" (increment 12).
+- [ ] Retention crons exist for every table with a retention shorter than "kept" AND a Phase 0
+      writer (section 5, "Retention as built"); the rest are listed with the phase that adds
+      their writer.

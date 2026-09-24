@@ -75,19 +75,29 @@ describe('POST /api/auth/sign-in/anonymous', () => {
     expect(response.status).toBe(400);
   });
 
-  it('never answers a /v1 request from the cookie cache: a revoked session is refused at once', async () => {
+  it('reads the session row for every write; a GET may use the 300 s cookie cache (increment 12)', async () => {
     // `session.cookieCache.enabled` (spec) trades a database read per request for a revocation
-    // lag of up to `maxAge` (300 s, the default). Under /v1 that trade is refused (ruling O5): the
-    // auth middleware reads the session row on every /v1 request, so a client that keeps
-    // replaying the signed `session_data` cookie after a revocation (the merge's, or a deleted
-    // account's other device) is refused on its next call, a GET included. The threat model
-    // records the cost and the increment 12 alternative.
+    // lag of up to `maxAge` (300 s, the default). Increment 8 (ruling O5) refused that trade for
+    // every /v1 request; increment 12 (ruling W2 step 8) takes it back for GET and HEAD only and
+    // closes the hole that mattered with a KV tombstone per deleted account's session
+    // (session-tombstone.test.ts, me.delete.test.ts). What the trade still allows, and the threat
+    // model records: a session revoked WITHOUT an account deletion (the merge's revocation, a
+    // sign-out elsewhere) keeps the read-only paths, never a write or the flight search (ruling
+    // AA11, session-tombstone.test.ts), until its cache cookie expires.
     const anonymous = await signInAnonymously();
     expect(anonymous.cookie).toContain('session_data=');
     await withDb(testEnv, (db) => db.delete(sessions).where(eq(sessions.userId, anonymous.userId)));
 
-    const cached = await worker(
+    const cachedRead = await worker(
       jsonRequest('/v1/me', 'GET', undefined, { ip: anonymous.ip, cookie: anonymous.cookie }),
+    );
+    const cachedWrite = await worker(
+      jsonRequest(
+        '/v1/me/preferences',
+        'PATCH',
+        { distanceUnit: 'km' },
+        { ip: anonymous.ip, cookie: anonymous.cookie },
+      ),
     );
     const direct = await worker(
       jsonRequest('/v1/me', 'GET', undefined, {
@@ -96,7 +106,8 @@ describe('POST /api/auth/sign-in/anonymous', () => {
       }),
     );
 
-    expect(cached.status).toBe(401);
+    expect(cachedRead.status).toBe(200);
+    expect(cachedWrite.status).toBe(401);
     expect(direct.status).toBe(401);
   });
 

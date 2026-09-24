@@ -131,6 +131,14 @@ export const providerCallDaily = pgTable(
     costUsdMicros: bigint('cost_usd_micros', { mode: 'number' }).notNull().default(0),
     tokensIn: bigint('tokens_in', { mode: 'number' }).notNull().default(0),
     tokensOut: bigint('tokens_out', { mode: 'number' }).notNull().default(0),
+    /**
+     * `count(*)` of `provider_calls` for this (day, provider) as the housekeeping rollup found it
+     * when it wrote the row (migration 0006, increment 12 re-review): the fixed figure the ledger
+     * purge judges the rollup against, so a partly purged day is never judged by its shrunken
+     * count. Null on the ProviderBudget's own `budget_daily*` rows and on rows older than the
+     * column, which the purge judges once against the live count and then records here.
+     */
+    ledgerCalls: integer('ledger_calls'),
     ...timestamps(),
   },
   (t) => [

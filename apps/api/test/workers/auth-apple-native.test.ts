@@ -10,14 +10,18 @@
  * email is refused; `fullName` is sanitised and stored only once; an anonymous session that
  * signs in with Apple is merged exactly once, and the anonymous after-hook is proven to fire for
  * this plugin endpoint over HTTP (docs/increments/05-auth.facts.md section 2 had it unverified).
+ * Increment 12: the accepted `aud` is a list (`APPLE_BUNDLE_IDS`, defaulting to the environment's
+ * variants), and the code is exchanged for the bundle id the token names.
  */
 
 import { eq } from 'drizzle-orm';
 import { accounts, devices, openDb, userKeys, users, withDb } from '@planeahead/db';
 import { decodeJwt, decodeProtectedHeader } from 'jose';
 import { describe, expect, it } from 'vitest';
+import { appleBundleIds } from '../../src/auth/apple-native';
 import { Envelope } from '../../src/crypto/envelope';
 import { createWorkersSecretKeyProvider, readKekSecrets } from '../../src/crypto/key-provider';
+import { BUNDLE_IDS_BY_ENVIRONMENT } from '../../src/routes/well-known';
 import {
   appleAuthorizationCode,
   appleNativeSignIn,
@@ -114,6 +118,49 @@ describe('POST /api/auth/sign-in/apple-native', () => {
     expect(wrongAudience.response.status).toBe(401);
     expect(stale.response.status).toBe(401);
     expect((await stale.response.json<SignInBody>()).code).toBe('INVALID_IDENTITY_TOKEN');
+  });
+
+  it("accepts every bundle id of the environment's list and exchanges the code for the app that signed in (increment 12)", async () => {
+    // The test Worker runs as ENVIRONMENT=test, whose variants are the development build's
+    // (BUNDLE_IDS_BY_ENVIRONMENT, the association files' list), plus APPLE_BUNDLE_ID.
+    const sub = `00${crypto.randomUUID().replaceAll('-', '')}.dev-variant`;
+    const { response, authorizationCode } = await appleNativeSignIn({
+      sub,
+      audience: 'app.planeahead.mobile.dev',
+    });
+
+    expect(response.status).toBe(200);
+    const exchange = (await tokenRequests()).find(
+      (entry) => entry.form['code'] === authorizationCode,
+    );
+    // The code is bound to the app that signed in: its bundle id is the client_id and the
+    // client secret's subject, not APPLE_BUNDLE_ID.
+    expect(exchange?.form['client_id']).toBe('app.planeahead.mobile.dev');
+    expect(decodeJwt(exchange?.form['client_secret'] ?? '').sub).toBe('app.planeahead.mobile.dev');
+
+    // A variant this environment does not serve (preview belongs to production) is refused
+    // before any exchange.
+    const preview = await appleNativeSignIn({ audience: 'app.planeahead.mobile.preview' });
+    expect(preview.response.status).toBe(401);
+    expect((await preview.response.json<SignInBody>()).code).toBe('INVALID_IDENTITY_TOKEN');
+    expect(await exchangeAttempted(preview.authorizationCode)).toBe(false);
+  });
+
+  it('builds the audience list from APPLE_BUNDLE_IDS, the environment defaults and APPLE_BUNDLE_ID', () => {
+    expect(
+      appleBundleIds(undefined, BUNDLE_IDS_BY_ENVIRONMENT.production, 'app.planeahead.mobile'),
+    ).toEqual(['app.planeahead.mobile', 'app.planeahead.mobile.preview']);
+    expect(
+      appleBundleIds('', BUNDLE_IDS_BY_ENVIRONMENT.staging, 'app.planeahead.mobile.dev'),
+    ).toEqual(['app.planeahead.mobile.dev']);
+    expect(
+      appleBundleIds(
+        ' app.planeahead.mobile , not a bundle id, app.planeahead.mobile.preview ',
+        BUNDLE_IDS_BY_ENVIRONMENT.production,
+        'app.planeahead.primary',
+      ),
+    ).toEqual(['app.planeahead.mobile', 'app.planeahead.mobile.preview', 'app.planeahead.primary']);
+    expect(appleBundleIds(undefined, [], undefined)).toEqual([]);
   });
 
   it('signs a new user in, exchanges the code with an ES256 client secret and stores only the encrypted refresh token', async () => {

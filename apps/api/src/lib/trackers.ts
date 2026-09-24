@@ -19,6 +19,7 @@
 import {
   ForceRefreshResponseV1,
   GetStateResponseV1,
+  ListSubscribersResponseV1,
   RPC_SCHEMA_VERSION,
   SubscribeResponseV1,
   UnsubscribeResponseV1,
@@ -62,7 +63,7 @@ export async function getTrackerState(tracker: TrackerRpc): Promise<GetStateResp
 }
 
 export async function subscribeTracker(
-  tracker: TrackerRpc,
+  tracker: Pick<TrackerRpc, 'subscribe'>,
   request: Omit<SubscribeRequestV1, 'rpcVersion'>,
 ): Promise<SubscribeResponseV1> {
   return SubscribeResponseV1.parse(
@@ -71,7 +72,7 @@ export async function subscribeTracker(
 }
 
 export async function unsubscribeTracker(
-  tracker: TrackerRpc,
+  tracker: Pick<TrackerRpc, 'unsubscribe'>,
   request: Omit<UnsubscribeRequestV1, 'rpcVersion'>,
 ): Promise<UnsubscribeResponseV1> {
   return UnsubscribeResponseV1.parse(
@@ -85,5 +86,24 @@ export async function forceRefreshTracker(
 ): Promise<ForceRefreshResponseV1> {
   return ForceRefreshResponseV1.parse(
     await tracker.forceRefresh({ ...request, rpcVersion: RPC_SCHEMA_VERSION }),
+  );
+}
+
+/**
+ * The tracker RPCs the housekeeping subscriber reconciliation uses (increment 12): the new
+ * `listSubscribers`, and the existing idempotent `subscribe` and `unsubscribe`. Separate from
+ * `TrackerRpc` so the route fakes need no new method.
+ */
+export interface SubscriberListingTracker {
+  listSubscribers(input: unknown): Promise<unknown>;
+  subscribe(input: unknown): Promise<unknown>;
+  unsubscribe(input: unknown): Promise<unknown>;
+}
+
+export async function listTrackerSubscribers(
+  tracker: Pick<SubscriberListingTracker, 'listSubscribers'>,
+): Promise<ListSubscribersResponseV1> {
+  return ListSubscribersResponseV1.parse(
+    await tracker.listSubscribers({ rpcVersion: RPC_SCHEMA_VERSION }),
   );
 }

@@ -47,7 +47,9 @@
   // Inheritable. Five fields, not the abbreviated forms in the plan: "*/15 * * * *" is every
   // fifteen minutes, "0 3 * * *" is 03:00 UTC daily. A cron with an interval under one hour gets
   // 30 seconds of CPU on the Paid plan, which is why the reconcile handler pages and fans out to
-  // a queue rather than doing the work inline (increment 7).
+  // a queue rather than doing the work inline (increment 7). The daily expression runs both the
+  // housekeeping and the Analytics Engine rollup planners, which only enqueue onto the
+  // `housekeeping` queue (increment 12, src/cron/index.ts).
   "triggers": {
     "crons": ["*/15 * * * *", "0 3 * * *"],
   },
@@ -57,9 +59,19 @@
     "head_sampling_rate": 1,
   },
 
+  // ACCESS_TEAM_DOMAIN and ACCESS_AUD (increment 12) name the Cloudflare Access application in
+  // front of /admin: the team domain (`<team>.cloudflareaccess.com`) and the application's AUD
+  // tag. Empty means not configured, and the admin page answers 403 to everyone (fail closed).
+  // CF_ACCOUNT_ID is the account the admin page and the Analytics Engine rollup query through the
+  // Cloudflare API (with the optional CF_API_TOKEN secret); empty shows those figures as
+  // unavailable. SUPPORT_EMAIL is the inbox the account-deletion page names.
   "vars": {
     "ENVIRONMENT": "local",
     "API_PUBLIC_URL": "http://localhost:8787",
+    "ACCESS_TEAM_DOMAIN": "",
+    "ACCESS_AUD": "",
+    "CF_ACCOUNT_ID": "",
+    "SUPPORT_EMAIL": "support@planeahead.app",
   },
 
   "durable_objects": {
@@ -105,6 +117,7 @@
       { "binding": "PROVIDER_EVENTS_QUEUE", "queue": "planeahead-provider-events-local" },
       { "binding": "IMPORTS_QUEUE", "queue": "planeahead-imports-local" },
       { "binding": "RECONCILE_QUEUE", "queue": "planeahead-reconcile-local" },
+      { "binding": "HOUSEKEEPING_QUEUE", "queue": "planeahead-housekeeping-local" },
     ],
     "consumers": [
       {
@@ -135,6 +148,16 @@
         "max_retries": 3,
         "dead_letter_queue": "planeahead-reconcile-dlq-local",
       },
+      // Housekeeping (increment 12): one message per step or page, one at a time, so the nightly
+      // steps never hold more than one Neon connection. Delivery order is best effort: the steps
+      // are independent and order-insensitive (src/queues/housekeeping.ts), nothing chains.
+      {
+        "queue": "planeahead-housekeeping-local",
+        "max_batch_size": 1,
+        "max_concurrency": 1,
+        "max_retries": 3,
+        "dead_letter_queue": "planeahead-housekeeping-dlq-local",
+      },
       // Dead letter consumers (increment 7): one per queue. The handler archives every message to
       // PRIVATE_BUCKET under dlq/{queue}/{messageId}.json, raises the ops alert and acknowledges;
       // without a consumer a thrice-failed message is deleted after four days without a trace.
@@ -143,6 +166,7 @@
       { "queue": "planeahead-provider-events-dlq-local", "max_retries": 2 },
       { "queue": "planeahead-imports-dlq-local", "max_retries": 2 },
       { "queue": "planeahead-reconcile-dlq-local", "max_retries": 2 },
+      { "queue": "planeahead-housekeeping-dlq-local", "max_retries": 2 },
     ],
   },
 
@@ -155,11 +179,13 @@
   // Rate limit namespace ids are account-wide counters: two Workers that name the same id share
   // the same budget. Staging traffic must never spend production's allowance, so every
   // environment gets its own block of ids (1001-1003 staging, 2001-2003 production, 3001-3003
-  // local). `period` is hard enumerated to 10 or 60 seconds by the platform.
+  // local). `period` is hard enumerated to 10 or 60 seconds by the platform. EVENTS_RL is 300
+  // batches per 60 s per client IP in every environment (ruling AA4): carrier NAT puts many
+  // installs behind one address, and a batch is one write of a few Analytics Engine points.
   "ratelimits": [
     { "name": "PUBLIC_RL", "namespace_id": "3001", "simple": { "limit": 120, "period": 10 } },
     { "name": "USER_RL", "namespace_id": "3002", "simple": { "limit": 600, "period": 60 } },
-    { "name": "EVENTS_RL", "namespace_id": "3003", "simple": { "limit": 60, "period": 60 } },
+    { "name": "EVENTS_RL", "namespace_id": "3003", "simple": { "limit": 300, "period": 60 } },
   ],
 
   "env": {
@@ -196,9 +222,15 @@
         ],
       },
 
+      // Filled in by the owner from docs/runbooks/first-deploy.md (the Access application and the
+      // account id); empty keeps /admin closed and the Cloudflare API figures unavailable.
       "vars": {
         "ENVIRONMENT": "staging",
         "API_PUBLIC_URL": "https://api-staging.planeahead.app",
+        "ACCESS_TEAM_DOMAIN": "",
+        "ACCESS_AUD": "",
+        "CF_ACCOUNT_ID": "",
+        "SUPPORT_EMAIL": "support@planeahead.app",
       },
 
       "durable_objects": {
@@ -236,6 +268,7 @@
           { "binding": "PROVIDER_EVENTS_QUEUE", "queue": "planeahead-provider-events-staging" },
           { "binding": "IMPORTS_QUEUE", "queue": "planeahead-imports-staging" },
           { "binding": "RECONCILE_QUEUE", "queue": "planeahead-reconcile-staging" },
+          { "binding": "HOUSEKEEPING_QUEUE", "queue": "planeahead-housekeeping-staging" },
         ],
         "consumers": [
           {
@@ -266,6 +299,16 @@
             "max_retries": 3,
             "dead_letter_queue": "planeahead-reconcile-dlq-staging",
           },
+          // Housekeeping (increment 12): one message per step or page, one at a time, so the nightly
+          // steps never hold more than one Neon connection. Delivery order is best effort: the steps
+          // are independent and order-insensitive (src/queues/housekeeping.ts), nothing chains.
+          {
+            "queue": "planeahead-housekeeping-staging",
+            "max_batch_size": 1,
+            "max_concurrency": 1,
+            "max_retries": 3,
+            "dead_letter_queue": "planeahead-housekeeping-dlq-staging",
+          },
           // Dead letter consumers (increment 7): one per queue. The handler archives every message to
           // PRIVATE_BUCKET under dlq/{queue}/{messageId}.json, raises the ops alert and acknowledges;
           // without a consumer a thrice-failed message is deleted after four days without a trace.
@@ -274,6 +317,7 @@
           { "queue": "planeahead-provider-events-dlq-staging", "max_retries": 2 },
           { "queue": "planeahead-imports-dlq-staging", "max_retries": 2 },
           { "queue": "planeahead-reconcile-dlq-staging", "max_retries": 2 },
+          { "queue": "planeahead-housekeeping-dlq-staging", "max_retries": 2 },
         ],
       },
 
@@ -286,7 +330,7 @@
       "ratelimits": [
         { "name": "PUBLIC_RL", "namespace_id": "1001", "simple": { "limit": 120, "period": 10 } },
         { "name": "USER_RL", "namespace_id": "1002", "simple": { "limit": 600, "period": 60 } },
-        { "name": "EVENTS_RL", "namespace_id": "1003", "simple": { "limit": 60, "period": 60 } },
+        { "name": "EVENTS_RL", "namespace_id": "1003", "simple": { "limit": 300, "period": 60 } },
       ],
     },
 
@@ -323,9 +367,15 @@
         ],
       },
 
+      // Filled in by the owner from docs/runbooks/first-deploy.md (the Access application and the
+      // account id); empty keeps /admin closed and the Cloudflare API figures unavailable.
       "vars": {
         "ENVIRONMENT": "production",
         "API_PUBLIC_URL": "https://api.planeahead.app",
+        "ACCESS_TEAM_DOMAIN": "",
+        "ACCESS_AUD": "",
+        "CF_ACCOUNT_ID": "",
+        "SUPPORT_EMAIL": "support@planeahead.app",
       },
 
       "durable_objects": {
@@ -363,6 +413,7 @@
           { "binding": "PROVIDER_EVENTS_QUEUE", "queue": "planeahead-provider-events" },
           { "binding": "IMPORTS_QUEUE", "queue": "planeahead-imports" },
           { "binding": "RECONCILE_QUEUE", "queue": "planeahead-reconcile" },
+          { "binding": "HOUSEKEEPING_QUEUE", "queue": "planeahead-housekeeping" },
         ],
         "consumers": [
           {
@@ -393,6 +444,16 @@
             "max_retries": 3,
             "dead_letter_queue": "planeahead-reconcile-dlq",
           },
+          // Housekeeping (increment 12): one message per step or page, one at a time, so the nightly
+          // steps never hold more than one Neon connection. Delivery order is best effort: the steps
+          // are independent and order-insensitive (src/queues/housekeeping.ts), nothing chains.
+          {
+            "queue": "planeahead-housekeeping",
+            "max_batch_size": 1,
+            "max_concurrency": 1,
+            "max_retries": 3,
+            "dead_letter_queue": "planeahead-housekeeping-dlq",
+          },
           // Dead letter consumers (increment 7): one per queue. The handler archives every message to
           // PRIVATE_BUCKET under dlq/{queue}/{messageId}.json, raises the ops alert and acknowledges;
           // without a consumer a thrice-failed message is deleted after four days without a trace.
@@ -401,6 +462,7 @@
           { "queue": "planeahead-provider-events-dlq", "max_retries": 2 },
           { "queue": "planeahead-imports-dlq", "max_retries": 2 },
           { "queue": "planeahead-reconcile-dlq", "max_retries": 2 },
+          { "queue": "planeahead-housekeeping-dlq", "max_retries": 2 },
         ],
       },
 
@@ -413,7 +475,7 @@
       "ratelimits": [
         { "name": "PUBLIC_RL", "namespace_id": "2001", "simple": { "limit": 120, "period": 10 } },
         { "name": "USER_RL", "namespace_id": "2002", "simple": { "limit": 600, "period": 60 } },
-        { "name": "EVENTS_RL", "namespace_id": "2003", "simple": { "limit": 60, "period": 60 } },
+        { "name": "EVENTS_RL", "namespace_id": "2003", "simple": { "limit": 300, "period": 60 } },
       ],
     },
   },

@@ -93,7 +93,7 @@ import {
 import * as z from 'zod';
 import { authRuntime } from '../auth/runtime';
 import type { AppBindings, Env } from '../env';
-import { currentUser, requireScope } from '../middleware/auth';
+import { currentUser, requireFreshSession, requireScope } from '../middleware/auth';
 import { idempotencyGate } from '../middleware/idempotency';
 import { clientIp } from '../middleware/rate-limit';
 import { errorFields, type Logger } from '../observability/log';
@@ -470,11 +470,15 @@ export function createFlightRoutes(options: FlightRoutesOptions = {}) {
   return (
     new Hono<AppBindings>()
       // -----------------------------------------------------------------------------------------
-      // Search.
+      // Search. It takes creation caps and may spend a provider call, so it never acts on a cached
+      // session cookie: `requireFreshSession()` reads the session row whatever path spelling
+      // reached the handler (re-review finding rr-ops-2; the auth middleware reads it for the
+      // canonical path already, and then this reads nothing again).
       // -----------------------------------------------------------------------------------------
       .get(
         '/search',
         requireScope('user'),
+        requireFreshSession(),
         validate('query', FlightSearchQuerySchema),
         async (c) => {
           const user = currentUser(c.var.user);

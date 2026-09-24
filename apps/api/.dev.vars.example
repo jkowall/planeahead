@@ -117,3 +117,16 @@ IP_SALT_SECRET=
 # `true` calls RevenueCat's DELETE /v1/subscribers/{id} on account deletion. Off in Phase 0: the
 # call is a typed stub that logs what it would have done.
 REVENUECAT_DELETE_ENABLED=false
+
+# ---------------------------------------------------------------------------------------------
+# The operational surface (increment 12). All optional.
+
+# Cloudflare API token with Account Analytics Read and Queues Read, nothing else: the nightly
+# Analytics Engine rollup and the admin page's figures for today and its queue depths (with the
+# CF_ACCOUNT_ID var in wrangler.jsonc). Unset: the rollup records a skipped run and the admin
+# page shows those figures as unavailable. Secret: `wrangler secret put CF_API_TOKEN --env <env>`.
+CF_API_TOKEN=
+# The bundle ids a native Apple identity token may name as `aud`, comma separated. Unset: the
+# environment's variants as the association files name them (production and preview against
+# production, the development build against staging and locally) plus APPLE_BUNDLE_ID.
+# APPLE_BUNDLE_IDS=

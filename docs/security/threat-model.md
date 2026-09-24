@@ -1,11 +1,13 @@
 # PlaneAhead threat model
 
-Status: first version (2026-09-22, increment 5). This document grows one section per increment
-that adds an attack surface. Increment 5 adds authentication, the envelope-encryption module and
-the account routes; increment 6 adds the provider webhook receivers (section 3.1); the share-link and MCP sections named in `docs/plans/phase0-plan.md` section
-10 arrive with the phases that ship those features. Everything below refers to the code as built
-in `apps/api`; where a fact came from research rather than from running code it cites
-`docs/increments/05-auth.facts.md`.
+Status: complete for Phase 0 (increment 12, 2026-09-23); first version 2026-09-22 (increment 5).
+Increment 5 added authentication, the envelope-encryption module and the account routes;
+increment 6 the provider webhook receivers (section 3.1); increment 8 account deletion (section 5);
+increment 12 the anonymous events endpoint (3.2), the admin page behind Cloudflare Access (3.3),
+the public account-deletion page (3.4), the operational surface (section 6), the share-link and
+MCP threats as documentation only (section 7) and the KEK rotation runbook (section 8). Everything
+below refers to the code as built in `apps/api`; where a fact came from research rather than from
+running code it cites the facts sheet (`docs/increments/05-auth.facts.md` and its siblings).
 
 ## 1. Authentication (increment 5)
 
@@ -116,7 +118,11 @@ the Drizzle adapter (section 1.6) and `onAPIError: { throw: true }` (section 1.7
 
 - Apple: `jose.jwtVerify` with `algorithms: ['RS256']` (the live JWKS serves RSA keys; ES256 is
   only the client secret PlaneAhead mints), `issuer` `https://appleid.apple.com`, `audience` the
-  bundle id, `maxTokenAge: '1h'`. `rawNonce` is REQUIRED in the body (400 `NONCE_REQUIRED`) and
+  environment's bundle ids (increment 12: `APPLE_BUNDLE_IDS`, defaulting to the variants the
+  association files name, production and preview against production and the development build
+  against staging, plus `APPLE_BUNDLE_ID`), `maxTokenAge: '1h'`. The code exchange uses the
+  bundle id the token names as its `client_id` and as the client secret's subject, because the code
+  belongs to the app that signed in; a token for any other bundle id is refused before the exchange. `rawNonce` is REQUIRED in the body (400 `NONCE_REQUIRED`) and
   the token's `nonce` must equal the lowercase SHA-256 hex of it (401 `NONCE_MISMATCH`, also for
   a token with no nonce claim). The comparison is over SHA-256 digests with
   `crypto.subtle.timingSafeEqual` after a length check (the primitive throws on unequal lengths).
@@ -146,7 +152,7 @@ the Drizzle adapter (section 1.6) and `onAPIError: { throw: true }` (section 1.7
   presentations racing through different colos can both pass; a KV failure is logged and does not
   block the sign-in, because the signature, issuer, audience, expiry and nonce checks are the
   authentication and the marker is a brake. A server-issued nonce is the stronger long-term
-  option (section 4).
+  option (section 9).
 - JWKS resolvers are `createRemoteJWKSet` instances memoised per isolate (`src/auth/jwks.ts`):
   no I/O at construction, jose's own 10-minute cache with a 30 s refetch cooldown. They are never
   put in KV, so a key rotation at the provider is seen by a refetch rather than served stale from
@@ -194,18 +200,27 @@ Threats considered:
   and foreground (increment 9). `auth-session-refresh.test.ts` pins both halves.
 - **Cookie theft during the upgrade.** The anonymous session is revoked in the merge
   transaction, so a stolen session token stops working the moment its owner upgrades (tested:
-  the old token answers 401 afterwards). The signed `session_data` cookie cache
-  (`session.cookieCache`, 300 s) is no longer an exception under `/v1` (increment 8, ruling O5):
-  the auth middleware resolves every `/v1` request with the cache disabled, so a revoked or
-  deleted session is refused on its next `/v1` call, GETs included, and a deleted account's other
-  device is told `account_deleted` at once instead of reading an empty account (and, through
-  `GET /v1/flights/search`, writing counters and seeding trackers under a user id that no longer
-  exists) for five minutes. The cost is one indexed `sessions` read per `/v1` request, accepted
-  at Phase 0 scale. The increment 12 alternative, if that read shows up in the latency budget: a
-  KV tombstone per deleted or revoked session-token hash, checked only when the cache cookie is
-  present, which restores the cache for everyone else. Better Auth's own `/api/auth/get-session`
-  still answers from the cache, which exposes nothing a `/v1` route would act on.
-  `auth-anonymous.test.ts` and `me.delete.test.ts` pin the behaviour.
+  the old token answers 401 afterwards) for every WRITE. The signed `session_data` cookie cache
+  (`session.cookieCache`, 300 s): increment 8 (ruling O5) resolved every `/v1` request with the
+  cache disabled, at one indexed `sessions` read per request; increment 12 (ruling W2 step 8)
+  re-enabled it for GET and HEAD and closed the hole that mattered with a KV tombstone per
+  deleted account's session (`tombstone:session:{HMAC}` in `CACHE`, the keyed hash
+  `deleted_subjects` stores): the deletion writes one for every session it removes, after its
+  transaction commits and before it answers, the housekeeping re-writes any that is missing, and
+  the auth middleware looks it up for EVERY request that resolved its session through the
+  cacheable read, whatever the cache cookie is called (Better Auth also reads it in chunks,
+  `session_data.0`, `.1`, ...; review ruling AA14: one KV read per cacheable GET), answering 401
+  `account_deleted`. A mutating request never uses the cache, and neither does
+  `GET /v1/flights/search` (ruling AA11): it takes creation caps and may spend a provider call
+  through the DesignatorResolver, so it reads the session row like a write. When the tombstone
+  cannot be checked (no `DELETED_SUBJECT_HMAC_KEY`, or the KV read fails) the request reads the
+  row. Accepted residuals, both bounded: a session revoked WITHOUT an account deletion (this
+  merge's revocation, a sign-out on another device) can still use the read-only paths for up to
+  300 s from a cached cookie (never a write, never the search); and KV's propagation (a write is
+  visible in its own location at once, elsewhere within about 60 s, and a location that read the
+  key recently may serve its cached miss for up to 60 s) lets a deleted account's other device use
+  the read-only paths for up to about a minute after the deletion. `auth-anonymous.test.ts`,
+  `session-tombstone.test.ts` and `me.delete.test.ts` pin the behaviour.
 - **The `?cookie=` redirect.** The Expo server plugin's after-hook appends the raw `Set-Cookie`
   value as a `cookie` query parameter to any non-http redirect it trusts, which would put the
   session cookie into a URL (logs, referrers, the OS's URL history). PlaneAhead makes the branch
@@ -258,14 +273,17 @@ Threats considered:
   theirs is verified at once and then undone by the email check, so the phone is briefly signed
   in to the attacker's account (a pull of the attacker's rows may land and is wiped when the
   session returns). The complete binding, the emailed URL carrying a per-request tag the app
-  matches before verifying, needs the server and is recorded for increment 12.
+  matches before verifying, needs the server; it was not built in increment 12 and is a Phase 1
+  item (`docs/open-decisions.md`).
 
 - **A crash between the two callers.** Both are safe to replay: the marker is set inside the
   transaction, so a retry sees `already_merged`.
 - **A lost queue message.** The rows are moved and the marker is set before the send; if the send
-  fails the failure is logged (`merge_enqueue_failed`) and increment 8's housekeeping sweep of
-  `status = 'deleting'` anonymous users re-enqueues. The anonymous row itself is deleted only by
-  the queue consumer after it verifies nothing points at it any more (increment 8).
+  fails the failure is logged (`merge_enqueue_failed`). The nightly tracker subscriber
+  reconciliation (increment 12, section 6) repairs what the message would have done: a tracker
+  entry that names the anonymous user for a subscription now live under the account is
+  re-pointed, and entries of the `deleting` user are unsubscribed; the anonymous `users` row is
+  deleted by the same pass once its merge is an hour old (every table referencing it cascades).
 
 ### 1.6 The sign-in transaction and the non-atomic refresh-token write
 
@@ -361,7 +379,8 @@ Design choices written down rather than left implicit:
 
 - **KEK rotation is a re-wrap.** `rotateKek(userId, toVersion)` unwraps the DEK under the old
   KEK and wraps it under the new; ciphertexts never change. Old `TOKEN_KEK_V{n}` secrets stay
-  configured until every `user_keys` row has moved (a housekeeping job, increment 12). The
+  configured until every `user_keys` row has moved (the nightly `kek_rewrap` housekeeping step,
+  increment 12; the runbook is section 8). The
   `key_version` column beside each secret records which KEK wrapped the owner's DEK when the
   value was written, and decryption refuses a version the Worker no longer knows, so a rotation
   that was not finished fails loudly rather than silently.
@@ -425,12 +444,196 @@ such as `url.path` included; `webhooks.test.ts` drives a real delivery through t
 and asserts the serialised envelopes. Residual, recorded in ADR 0010: Cloudflare's own invocation
 logs keep request URLs.
 
-## 4. Open items carried to later increments
+### 3.2 `POST /v1/events` (increment 12)
+
+The first-party analytics endpoint is anonymous by design (ADR 0005): the app sends its
+install-scoped analytics id, never a session cookie or the install id, so no event can be joined
+to an account on the server. What bounds it: `PUBLIC_RL` per IP, then `EVENTS_RL` (300 batches
+per 60 s, ruling AA4) keyed by the client IP, never by the analytics id (a value the client chooses
+and rotates cannot key a brake, increment 5's rule); a 256 KiB body limit (413); a strict envelope (a UUID
+analytics id, 1 to 100 events) and per-event validation (a name from `PRODUCT_EVENT_NAMES`, an ISO
+time, a flat props bag of at most 16 keys and 1 KiB). Nothing is written to Postgres, only
+Analytics Engine points through the invocation's 200-point budget. Accepted: a forger can write
+plausible events under any analytics id (analytics integrity, not security; no decision reads
+them), and a future client could put personal data in the props bag (the schema allows only
+snake_case keys and short scalars; review what the app sends before adding an event name).
+Residual of keying by IP: carrier-grade NAT puts many installs behind one address, which is why the
+limit is 300 batches a minute and not 60; one abusive install behind a shared address can still
+spend that address's allowance and drop the others' events for the rest of the minute (analytics
+loss only, nothing the app depends on).
+
+### 3.3 The admin page behind Cloudflare Access (increment 12)
+
+`GET /admin` (and every path below it) is read-only except one action (below), server-rendered
+HTML with no script under a CSP of `default-src 'none'` plus one hashed stylesheet, `no-store`,
+`frame-ancestors 'none'`.
+Cloudflare Access sits in front of the path, and the Worker validates the
+`Cf-Access-Jwt-Assertion` itself (`src/middleware/access.ts`), because a request can reach the
+Worker without passing Access (a misconfigured policy, a route added later, the workers.dev host):
+RS256 against the team's certs (`https://<team>.cloudflareaccess.com/cdn-cgi/access/certs`,
+fetched and cached per isolate, refetched at most every 30 s for an unknown key id), the issuer
+must be the team domain, the audience must contain `ACCESS_AUD`. The team domain must be a
+`*.cloudflareaccess.com` host, so a mistaken var can never make the Worker fetch keys from
+somewhere else. Anything missing or wrong is a 403 with an empty body; the reason goes to the log
+only. With `ACCESS_TEAM_DOMAIN` or `ACCESS_AUD` empty (every environment until the owner creates
+the Access application) the page answers 403 to everyone. What the page shows is operational
+(call counts per flight key and per provider, never a user), and the Cloudflare API token behind
+two of its sections is read-only and optional.
+
+The one write action (review ruling AA9) is the operator account deletion for a request that
+reached the support inbox: `GET /admin/accounts/delete?user_id=` shows the account's status and
+creation date (no email), and `POST /admin/accounts/delete` with the id typed a second time runs
+the same `deleteAccount` as `POST /v1/me/delete` (trackers, the Apple revocation, the one
+transaction, the `deleted_subjects` hashes, the KV tombstones), whose one audit row carries actor
+`admin` and the Access assertion's email and subject. Its CSRF defence: the POST must carry an
+`Origin` equal to `API_PUBLIC_URL`'s origin (a cross-site form still carries the Access cookie, so
+Access alone is not enough), no cookie of the API authorises it, and a confirmation that does not
+match the id changes nothing. Only that page's CSP allows `form-action 'self'`. The social
+engineering risk of an emailed request stays a procedure (section 3.4).
+
+### 3.4 The public account-deletion page (increment 12)
+
+`GET /account/delete` is static: no session, no script, no form, the same strict CSP, cached for
+an hour. It names the in-app path and a support inbox (`SUPPORT_EMAIL`, created and tested by the
+runbook before the Play listing); the out-of-app process it describes (a reply to the account's
+address before anything is deleted) is a person following a procedure, because a request by email
+is also the obvious social-engineering path to deleting someone else's account. The operator
+carries it out with the admin page's deletion action (section 3.3), never with SQL, so the
+trackers, the Apple revocation, the hashes and the tombstones happen as they do in the app.
+
+## 4. Encryption and tokens, in one view
+
+Two encryption schemes exist and one is used (section 2): PlaneAhead's AES-KW-wrapped per-user DEK
+with AES-256-GCM values bound by AAD to their cell, keyed by `TOKEN_KEK_V{n}`; Better Auth's
+`encryptOAuthTokens` is off and has nothing to encrypt. Tokens a client presents are stored as
+hashes (magic links hashed by the plugin, identity-token replay markers as digests, the sessions
+of deleted accounts as HMACs); the live session token is Better Auth's plaintext lookup key, the
+documented exception (docs/schema-review.md section 12). The webhook path tokens are 256-bit
+secrets compared in constant time (section 3.1). Every hop is TLS, and no secret is ever a query
+parameter.
+
+## 5. Account deletion and the disclosure (increment 8, completed in increment 12)
+
+`POST /v1/me/delete` is synchronous and accepts an anonymous session (Apple 5.1.1(v) requires
+guest accounts to be deletable). Order: read outside a transaction (subscriptions, the Apple
+refresh token decrypted while its DEK exists, provider subjects, session tokens); unsubscribe every
+tracker; revoke at Apple, best effort (TN3194: deletion completes without a usable token); one short
+transaction that locks the user row, deletes every user-owned row leaf to root, writes the
+`deleted_subjects` rows and the audit row, and deletes the user; then (increment 12) the KV session
+tombstones; then an unsubscribe of any subscription that committed while the deletion ran.
+
+- Another device of the deleted account is told 401 `account_deleted` (wipe the store) on its next
+  request: a dead cookie whose token's HMAC is in `deleted_subjects`, a cached cookie whose token
+  is tombstoned in KV (section 1.5), or (increment 12) a request that authenticated just before the
+  deletion committed and then failed a `users` foreign key (SQLSTATE 23503 on a `*_user_id` key):
+  the global error handler re-reads `users` for the principal and answers the same 401 instead of
+  a 500 (`error-handler.test.ts` drives it through the idempotency lease insert).
+- **What survives, pseudonymously** (GDPR Art. 17(3)(b) and (e)): `audit_log` (two years),
+  `notification_deliveries` (90 days), `revenuecat_events` and `subscriptions` (the finance
+  ledger), `provider_calls` and `provider_call_daily` (about flights, no user linkage), and
+  `deleted_subjects` (HMAC-SHA-256 under a Workers secret of the Apple and Google subjects for 400
+  days and of the session tokens for 31 days, purged nightly at `expires_at`).
+- **The disclosure**: deleted immediately from the live database; the encrypted change history
+  (Neon's history window, set to 1 day explicitly) is retained up to 24 hours. It is on the public
+  page (`/account/delete`) and in docs/schema-review.md section 7. Per-user DEKs are not
+  crypto-shredding while the wrapped DEK sits in the history window (section 2).
+- Accepted: an Apple account whose refresh token was never stored (section 1.6), or whose token
+  belongs to another bundle id (a preview build, `docs/open-decisions.md`), is not revoked at
+  Apple; the user can revoke from their Apple ID settings, and the deletion completes.
+
+## 6. The operational surface (increment 12)
+
+- **Crons plan, queues work.** The crons only page or plan and enqueue (ruling W1); the housekeeping
+  consumer runs one message at a time within a 30 s wall budget and writes an audit row per message.
+  A failed step is retried by the queue and dead-lettered to R2 with an ops alert, never looped by
+  the cron.
+- **The subscriber reconciliation never removes a fresh entry.** An entry or a row younger than
+  10 minutes is left alone, because a subscribe route calls the tracker before its transaction
+  commits; a wrong unsubscribe loses a real subscription, a stray costs nothing in Phase 0
+  (increment 8, ruling O13).
+- **The counter repair never races a request.** A counter is repaired only when it and the user's
+  subscriptions have been quiet for 10 minutes, and the UPDATE re-checks the value it read.
+- **The dead-letter replay cannot loop.** Only the archives whose sender keeps no copy (the
+  DesignatorResolver, the ProviderBudget) are replayed, at most three times each (`replayCount` on
+  the body); after that one is parked under `dlq/persist-parked/` with an error log. A
+  FlightTracker's archive is never replayed (the tracker re-sends its own copy, so a replay would
+  multiply a poison row's dead-letterings), and the lifecycle rule expires `dlq/` after 30 days.
+- **The ledger is never purged against a bad rollup.** A rollup sum that is not a number fails the
+  message loudly instead of becoming a 0 row, and a day of `provider_calls` is deleted only when
+  its rollup is above zero and within 20 percent of the day's `count(*)` as the rollup itself
+  recorded it (`ledger_calls`, rulings AA13 and AB3), never the live count once one is recorded,
+  so a purge that deleted part of a day and was retried judges the day by the same figure and
+  cannot strand the rest of it.
+- **The Cloudflare API token** the Worker may hold (`CF_API_TOKEN`) is scoped to Account Analytics
+  Read and Queues Read: it can read call counts and queue depths, nothing else. The deploy token
+  lives only in GitHub environment secrets, with the scopes docs/runbooks/first-deploy.md lists.
+- **The deploy.** Production deploys only from a manual run on a `v*` tag with the tag typed back
+  (until GitHub Pro allows a required-reviewer gate), migrates before it deploys, and smokes
+  `/health` against the build's own migration hash and Durable Object versions; secrets are set out
+  of band, never by the workflow.
+
+## 7. Share links and MCP (documented only; Phases 5 and 6)
+
+Neither exists in Phase 0; the tables are reserved (`share_links`, `share_link_views`, and
+`api_tokens` with `pa_<kind>_<base64url32>` tokens stored as SHA-256 plus a prefix). The threats
+and the mitigations those phases must ship:
+
+- **Share links.** Token guessing: 256-bit tokens, hashed at rest, looked up by hash, per-IP
+  limits on the share host. Cache poisoning and a revoked link served from cache: the share page on
+  its own hostname, `share:page:{sha256(token)[0:32]}` in KV for 60 s only, revocation deletes the
+  key and the page answers `no-store` afterwards. Open Graph image enumeration: images keyed by an
+  unguessable id, never by the flight key. Scraping: the page shows the flight, never the user or
+  the trip; views counted in `share_link_views` and kept 30 days.
+- **MCP.** Token theft: short-lived scoped tokens in `api_tokens`, revocable, never in URLs. The
+  confused deputy under the 2026-07-28 MCP authorization spec: audience-bound tokens and no token
+  passthrough to providers. Prompt injection in tool output: provider and user text returned as
+  data, never as instructions, with a length cap. Write actions: a two-step confirmation and an
+  audit row for every write. Rate abuse: a per-token limiter and the same provider budgets as the
+  app. A separate hostname (plan section 19 item 14).
+- **App Attest and Play Integrity** are deferred; `devices.attestation` is reserved.
+
+## 8. KEK rotation runbook
+
+Rotation is a re-wrap: each user's DEK is re-wrapped under the new KEK and no ciphertext changes
+(section 2). The nightly `kek_rewrap` housekeeping step does the re-wrap in the background.
+
+1. Generate the new key and keep an offline copy: `openssl rand -base64 32` (standard padded
+   base64, 32 bytes; base64url is refused with a message saying so).
+2. `pnpm exec wrangler secret put TOKEN_KEK_V2 --env <env>` (the next unused version). Nothing
+   else is deployed: the next request imports it, `currentVersion` becomes 2, and every NEW DEK is
+   wrapped under V2 at once. V1 stays configured, so every existing value still decrypts.
+3. Wait for the next 03:00 UTC run: the `kek_rewrap` step re-wraps every `user_keys` row whose
+   `kek_version` is not the current one, 100 per message with continuations, one audit row per
+   message (`housekeeping.kek_rewrap` with `rewrapped`, `superseded` and `failed`). Each new wrap
+   is proven before it is written (unwrapped under the new KEK back to the same DEK, byte for
+   byte; a failure leaves the row untouched and counts as failed), and the UPDATE is conditional
+   on the `kek_version` it read, so a redelivered message or a concurrent run can never overwrite
+   a newer wrap (`superseded`).
+4. Check: `select kek_version, count(*) from user_keys group by 1` shows only 2, and the admin
+   page's last `housekeeping.kek_rewrap` rows show `failed: 0`. A failed row is logged with its
+   user id (`kek_rewrap_failed`): a row wrapped under a version the Worker no longer holds, which a
+   person resolves before going on.
+5. Only then retire V1. `TOKEN_KEK_V1` is in `secrets.required` and `WORKER_SECRET_NAMES`, so
+   retiring it is a reviewed change that removes it from both (and from `.dev.vars.example`),
+   deployed, followed by `pnpm exec wrangler secret delete TOKEN_KEK_V1 --env <env>`. A value still
+   carrying `key_version` 1 then fails loudly (`UnknownKeyVersionError`) rather than silently.
+6. Suspected compromise of a KEK: do steps 1 and 2 at once, run the housekeeping early rather than
+   waiting for the night, and treat every DEK the old KEK wrapped as exposed to whoever holds it:
+   the per-user secrets (today only Apple refresh tokens) should be revoked or re-obtained. The
+   Neon history window (1 day) keeps the old wrapped DEKs for a day.
+
+`BETTER_AUTH_SECRET` rotates separately (every session and cookie signed with the old one is
+invalidated unless Better Auth is given both). `DELETED_SUBJECT_HMAC_KEY` and `IP_SALT_SECRET`
+must NOT be rotated casually: a new HMAC key orphans every `deleted_subjects` hash (a deleted
+account's other device then sees `unauthenticated` instead of `account_deleted`), and a new salt
+root restarts the anonymous per-IP caps.
+
+## 9. Open items
 
 - The anonymous cookie on `GET /magic-link/verify`: proven on the real client in Jest by
   increment 9 (section 1.5); the device run is the owner's acceptance step once an API is
   reachable. The app-side binding is built (section 1.5); a per-request tag in the emailed URL
-  that the app matches before verifying is the remaining step, for increment 12.
+  that the app matches before verifying is the remaining step (Phase 1, `docs/open-decisions.md`).
 - The session gate's `getSession()` call on launch and foreground (section 1.5): the `/v1`
   path no longer refreshes, so if increment 9 ships without that call a session that only ever
   syncs in the background expires after 30 days. A Jest test in increment 9 asserts the call.
@@ -443,11 +646,13 @@ logs keep request URLs.
 - Mail scanners and the landing page: the two-step page in section 1.3 answers the scanner
   prefetch risk raised in `docs/increments/09-11-mobile.facts.md`; the universal-link prefix the
   app claims is `/auth/magic-link`, on the API host.
-- Account deletion: Apple revoke in `user.deleteUser.beforeDelete`, and the `freshAge` question
-  (increment 8).
+- Account deletion: built in increment 8 as PlaneAhead's own route (section 5); `freshAge` stays
+  at Better Auth's default and `deleteUser` stays disabled.
 - The Vitest Workers pool does NOT enforce the global-scope entropy restriction (a module-scope
   `crypto.getRandomValues` call succeeded in the pool during this increment), so a regression of
   that kind passes CI and fails on deploy. The staging smoke test is the backstop; an ESLint rule
-  is a candidate for increment 12.
-- KEK rotation runbook (increment 12, with the housekeeping job that drives `rotateKek`).
+  is still a candidate (not built in increment 12).
+- The residual windows of the re-enabled cookie cache (section 1.5): a revoked session keeps the
+  read-only paths for up to 300 s; tombstoning revoked sessions too, not only deleted accounts',
+  would close it (`docs/open-decisions.md`).
 - Share-link and MCP threats (Phases 5 and 6), App Attest and Play Integrity (columns reserved).

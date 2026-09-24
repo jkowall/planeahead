@@ -1,7 +1,7 @@
 # @planeahead/api
 
 The PlaneAhead API: one Cloudflare Worker that serves the HTTP surface, owns five Durable Object
-classes, consumes four queues and runs two cron triggers. The design is in
+classes, consumes six queues (and their dead letter queues) and runs two cron triggers. The design is in
 [docs/plans/phase0-plan.md](../../docs/plans/phase0-plan.md) section 5; the framework decision and
 the Durable Object migration runner are in [ADR 0004](../../docs/adr/0004-hono-rpc.md).
 
@@ -19,6 +19,15 @@ subscribe, list, detail, unsubscribe, refresh), the pull sync feed (`GET /v1/syn
 free-tier caps in `usage_counters`, the `/v1` idempotency instance, synchronous account deletion
 (`POST /v1/me/delete`) and the reserved Apple and RevenueCat webhook stubs; its design is in
 [docs/increments/08-flight-routes-and-sync.md](../../docs/increments/08-flight-routes-and-sync.md).
+Increment 12 adds the operational surface: the nightly housekeeping queue and its steps, the
+Analytics Engine rollup, the FlightTracker's `listSubscribers` RPC, the admin page at `/admin`
+behind Cloudflare Access (read-only except the operator account deletion at
+`/admin/accounts/delete`), the public account-deletion page at `/account/delete`,
+`POST /v1/events`, the KV session tombstones that let GETs use Better Auth's cookie cache again,
+the `account_deleted` mapping of a user foreign-key violation, a list of Apple bundle ids, and
+the production deploy workflow; the whole system is described in
+[docs/architecture.md](../../docs/architecture.md) and the owner's setup in
+[docs/runbooks/first-deploy.md](../../docs/runbooks/first-deploy.md).
 The auth design is in [docs/increments/05-auth.md](../../docs/increments/05-auth.md) and its
 threat model in [docs/security/threat-model.md](../../docs/security/threat-model.md).
 
@@ -81,10 +90,14 @@ src/mail/                 sender.ts (MailSender, the magic-link message), resend
 src/routes/               health.ts, auth.ts (/api/auth: the gate, the verify wrapper, the browser
                           consume route), magic-link-landing.ts (/auth/magic-link, the emailed
                           non-consuming page), v1.ts (/v1: devices.ts, flights.ts, me.ts, sync.ts,
-                          webhooks.ts, the stub)
+                          events.ts, webhooks.ts), well-known.ts, admin.ts (/admin behind
+                          middleware/access.ts), account-delete-page.ts (/account/delete)
 src/lib/                  increment 8: validate.ts (the one validator), caps.ts, deadline.ts,
                           sync-cursor.ts, sync-rows.ts, trackers.ts, flight-search.ts,
-                          flight-registry.ts, flight-snapshots.ts, account-deletion.ts, hmac.ts
+                          flight-registry.ts, flight-snapshots.ts, account-deletion.ts, hmac.ts;
+                          increment 12: batched-delete.ts, sync-purge.ts, counter-reconcile.ts,
+                          subscriber-reconcile.ts, dlq-replay.ts, session-tombstone.ts,
+                          provider-rollup.ts, cloudflare-api.ts, html.ts
 src/client.ts             hcWithType, the typed RPC client the mobile app builds from AppType
 src/providers/            aerodatabox.adapter.ts, aeroapi.mock.ts, router.ts, cost-log.ts,
                           budget.ts, token-bucket.ts, config.ts (plans and settings), http.ts;
@@ -93,8 +106,10 @@ src/validation/           nul.ts (U+0000 is refused at every JSON boundary; Post
 src/do/                   migrate.ts (the SQLite schema runner), base.ts, the five classes,
                           migrations/<class>/NNN.ts (ProviderBudget has the first)
 src/queues/               index.ts dispatch, consume.ts (per-message ack), analytics.ts, consumers
-                          (persist.ts also routes the anonymous merge's `merge` message to merge.ts)
-src/cron/                 index.ts dispatch, reconcile.ts, housekeeping.ts
+                          (persist.ts also routes the anonymous merge's `merge` message to merge.ts;
+                          housekeeping.ts runs the nightly steps, one message each)
+src/cron/                 index.ts dispatch, reconcile.ts (pages overdue trackers), housekeeping.ts
+                          and ae-rollup.ts (plan the nightly messages; never work inline)
 src/observability/log.ts  structured JSON logging with the request id
 test/workers/             everything that drives the Worker, inside workerd
 test/unit/                pure WebCrypto and jose tests, ALSO inside workerd (that is the point:
@@ -247,6 +262,27 @@ real staging deploy is that check, and the queues plus their dead letter queues 
 with `wrangler queues create` beforehand, because deploy fails on a missing queue rather than
 creating one. Secrets are set out of band with `wrangler secret put --env staging`; the deploy
 workflow passes an empty `secrets` input on purpose.
+
+Production deploys from `.github/workflows/deploy-production.yml`: a `v*` tag verifies (checks,
+the Worker suite, the production dry run) and a manual run on that tag with `deploy <tag>` typed
+into `confirm` migrates `NEON_PRODUCTION_DIRECT_URL`, deploys and smokes `/health` with
+`scripts/health-smoke.mjs`, which requires this commit's migration hash and Durable Object schema
+versions (staging's workflow runs the same smoke). The complete owner checklist, every resource and
+command in order, is [docs/runbooks/first-deploy.md](../../docs/runbooks/first-deploy.md).
+
+### Crons and CPU budgets
+
+| Cron           | CPU budget (Paid)       | What it does                                                                      |
+| -------------- | ----------------------- | --------------------------------------------------------------------------------- |
+| `*/15 * * * *` | 30 s (25 s wall budget) | pages overdue active trackers onto the `reconcile` queue                          |
+| `0 3 * * *`    | 15 min (uses ms)        | plans one `housekeeping` message per step and one `ae_rollup` message per UTC day |
+
+The housekeeping consumer (`max_batch_size` 1, `max_concurrency` 1) runs each message within a
+30 s wall budget, enqueues a continuation when a step has more to do, and writes one `audit_log`
+row (`housekeeping.{step}`) per message; `/admin` shows the last ones. The steps are independent
+and order-insensitive (Queues delivers in best-effort order), and each is paged so no statement
+nears the app role's 10 s `statement_timeout`: the sync purge moves its horizon 10,000 rows per
+message (migration 0005's `xid` btree), the other purges delete in batches of 5,000.
 
 ### Deploy checklist
 

@@ -110,7 +110,9 @@ them by the pair `(xid, seq)` strictly below `pg_snapshot_xmin(pg_current_snapsh
      (docs/schema-review.md section 6) bumps the epoch after any restore;
    - it names an xid the cluster has not assigned (`> pg_snapshot_xmax`, a replaced database);
    - its xid is below the purge horizon H. Rows are kept `SYNC_RETENTION_DAYS` (30). The
-     increment 12 purge picks ONE H below the watermark, deletes `where xid < H` from BOTH change
+     nightly purge (built in increment 12, `src/lib/sync-purge.ts`: H is the smallest xid younger
+     than the window across both tables, capped at `pg_snapshot_xmin`, never lowered) picks ONE H
+     below the watermark, deletes `where xid < H` from BOTH change
      tables and records H in the one-row `sync_horizon` table (migration 0003, null until the first
      purge), all in one transaction; the route answers 410 exactly when `cursor.xid < H`, reading H
      AFTER the page so a purge that committed before the page's statement is always seen. That is
@@ -121,6 +123,10 @@ them by the pair `(xid, seq)` strictly below `pg_snapshot_xmin(pg_current_snapsh
      lowest-seq row) removes a row a legitimate cursor has not seen without a 410
      (`sync.late-commit.test.ts` reproduces the inversion). A horizon is also untouched by an
      account deletion, which removes one user's rows and so could move an "oldest row" forward.
+     The purge is paged (increment 12 review, ruling AA15): each queue message moves the recorded
+     horizon at most 10,000 rows toward H (the oldest rows in xid order, through the `xid` btree of
+     migration 0005), deleting and recording in one transaction, so no statement nears the app
+     role's 10 s `statement_timeout`; every intermediate horizon is exact in the same sense.
 7. **The operational guards.** The watermark is CLUSTER-GLOBAL: one long writing transaction
    anywhere freezes the feed for every user until it ends. `statement_timeout` and
    `idle_in_transaction_session_timeout` are set on the app role per environment

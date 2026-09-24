@@ -132,8 +132,15 @@ We will make the alarm handler idempotent per cadence slot with these mechanisms
    sixth deferral) still fires and now says how many of the rows are dead-lettered. The finished
    object stays alive while rows remain, and the R2 copy under `dlq/persist/` remains the
    durable record. Accepted Phase 0 residual: the DesignatorResolver's cost records are deleted
-   on send, not on confirmation, so after a dead-lettering they exist only in R2; the increment
-   12 housekeeping replay of `dlq/persist/` objects is the planned closer. The `IN (...)` lists
+   on send, not on confirmation (and the ProviderBudget object deletes its storage at the end of
+   its day), so after a dead-lettering they exist only in R2; the increment 12 housekeeping
+   replay of `dlq/persist/` objects closes it for exactly those two senders (every
+   `designator_resolver:` or `provider_budget:` archive older than an hour is sent back to the
+   persist queue and deleted once sent; a message replayed three times is parked under
+   `dlq/persist-parked/`, `src/lib/dlq-replay.ts`). A FlightTracker's archive is NOT replayed
+   (review ruling AA16): the tracker re-sends its own stored copy on the doubling spacing above,
+   so a replay would only multiply a poison row's dead-letterings and alerts, each tracker
+   re-send arriving as a fresh archive; its R2 object stays as the record. The `IN (...)` lists
    of the confirmation delete and of the sent-marking update run in chunks of `SQL_BIND_CHUNK`
    (90) through one shared helper, inside one transaction, because Durable Object SQLite binds
    at most 100 parameters per statement; the DesignatorResolver's flush uses the same helper (a
@@ -205,8 +212,9 @@ slot; the hard cap's own finish reason; the ProviderBudget's daily row under ope
   every active tracker's storage, and a finished object whose rows never confirm lives on at
   storage cost (alerted after six hours, deleted only when the rows drain: rows that never
   reached the queue, and dead-lettered rows, which it keeps re-sending on a spacing that doubles
-  to a day, so a poison row keeps its object, and one dead-letter event a day, until increment
-  12's replay or an operator deletes it); the alarm handler is
+  to a day, so a poison row keeps its object, and one dead-letter event a day, until an operator
+  deletes it: increment 12's replay deliberately leaves a tracker's archives alone); the alarm
+  handler is
   five steps with two transactions, not one function; every RPC that reads the snapshot has to
   know about `#inflight` and `#finishing`; and a new lifetime for a flight that is still active in
   Postgres (a recovery, never a rebirth) is applied under the lifetime rule and its events keep

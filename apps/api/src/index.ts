@@ -33,6 +33,8 @@ import type { Env } from './env';
 import { scheduled } from './cron/index';
 import { sentryOptions } from './middleware/sentry';
 import { queue } from './queues/index';
+import { accountDeletePage } from './routes/account-delete-page';
+import { adminRoutes } from './routes/admin';
 import { authRoutes } from './routes/auth';
 import { health } from './routes/health';
 import { magicLinkLanding } from './routes/magic-link-landing';
@@ -63,6 +65,10 @@ app.route('/api/auth', authRoutes);
 // The universal-link and App Links association files (increment 9). Discarded for the same
 // reason: Apple's and Google's crawlers fetch them, no client of `AppType` does.
 app.route('/.well-known', wellKnownRoutes);
+// The operator page behind Cloudflare Access and the public account-deletion page (increment
+// 12). Browsers fetch them, no client of `AppType` does, so both are discarded mounts too.
+app.route('/admin', adminRoutes);
+app.route('/account', accountDeletePage);
 
 /** The RPC surface `hc<AppType>()` in apps/mobile is typed from. */
 export type AppType = typeof routes;

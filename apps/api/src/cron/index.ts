@@ -17,20 +17,38 @@
  * promise a handler starts is also simply abandoned when a `void` `scheduled()` returns.
  * `ExportedHandler<Env>` accepts `void | Promise<void>` for `scheduled`, so the default export is
  * unaffected. `runCron` awaits inside its try, so a rejected handler is logged, not unhandled.
+ *
+ * Increment 12 (ruling W1): no cron does work inline. Each handler pages or plans within its CPU
+ * budget and enqueues one message per unit of work:
+ *
+ *   `RECONCILE_CRON` (every 15 minutes, 30 s of CPU on Paid, a 25 s wall budget): pages overdue
+ *   active `flight_instances` onto the `reconcile` queue (src/cron/reconcile.ts).
+ *   `DAILY_CRON` (03:00 UTC, 15 minutes of CPU): two planners, each run even when the other
+ *   throws: housekeeping (one message per step, src/cron/housekeeping.ts) and the Analytics Engine
+ *   rollup (one message per day, src/cron/ae-rollup.ts), both on the `housekeeping` queue. The
+ *   spec gives both the same expression, and a Worker routes a cron by expression, so they share
+ *   one handler rather than two triggers.
  */
 
 import type { Env } from '../env';
 import { type Logger, createLogger, errorFields } from '../observability/log';
+import { aeRollupCron } from './ae-rollup';
 import { housekeepingCron } from './housekeeping';
 import { reconcileCron } from './reconcile';
 
 export const RECONCILE_CRON = '*/15 * * * *';
 export const HOUSEKEEPING_CRON = '0 3 * * *';
+/** The daily expression, housekeeping and the Analytics Engine rollup together. */
+export const DAILY_CRON = HOUSEKEEPING_CRON;
 
 export interface CronContext {
   readonly env: Env;
   readonly ctx: ExecutionContext;
   readonly log: Logger;
+  /** `controller.scheduledTime`; absent when a test drives a handler directly. */
+  readonly scheduledTime?: number | undefined;
+  /** The scheduled time as ISO-8601, the run id every message of the invocation carries. */
+  readonly runId?: string | undefined;
 }
 
 /** What a cron handler looks like. Sync handlers stay legal; awaited work is now expressible. */
@@ -39,9 +57,31 @@ export type CronHandler = (context: CronContext) => Promise<void> | void;
 /** Expression to handler. A table rather than a switch so a test can supply its own. */
 export type CronHandlers = Readonly<Record<string, CronHandler>>;
 
+/**
+ * Runs every handler even when one throws, then rethrows the first failure (so `runCron` logs it):
+ * a failed housekeeping plan must not cost the night its rollup, or the other way round.
+ */
+export function allOf(...handlers: readonly CronHandler[]): CronHandler {
+  return async (context) => {
+    const failures: unknown[] = [];
+    for (const handler of handlers) {
+      try {
+        await handler(context);
+      } catch (error) {
+        failures.push(error);
+      }
+    }
+    if (failures.length > 0) {
+      throw failures[0] instanceof Error ? failures[0] : new Error(String(failures[0]));
+    }
+  };
+}
+
+export const dailyCron: CronHandler = allOf(housekeepingCron, aeRollupCron);
+
 export const CRON_HANDLERS: CronHandlers = {
   [RECONCILE_CRON]: reconcileCron,
-  [HOUSEKEEPING_CRON]: housekeepingCron,
+  [DAILY_CRON]: dailyCron,
 };
 
 /** Routes one cron expression. Exported so a test can drive it without a ScheduledController. */
@@ -70,5 +110,11 @@ export async function scheduled(
   ctx: ExecutionContext,
 ): Promise<void> {
   const log = createLogger({ cron: controller.cron, scheduled_time: controller.scheduledTime });
-  await runCron(controller.cron, { env, ctx, log });
+  await runCron(controller.cron, {
+    env,
+    ctx,
+    log,
+    scheduledTime: controller.scheduledTime,
+    runId: new Date(controller.scheduledTime).toISOString(),
+  });
 }

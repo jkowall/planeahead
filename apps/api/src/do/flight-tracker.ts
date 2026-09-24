@@ -99,6 +99,7 @@ import {
   FlightStatusSchema,
   FREE_TIER_LIMITS,
   INFLIGHT_STALE_MS,
+  ListSubscribersRequestV1,
   ProviderEventV1,
   RPC_SCHEMA_VERSION,
   RpcRequestError,
@@ -131,6 +132,7 @@ import {
   type GetStateResponseV1,
   type HealthResponseV1,
   type IngestProviderEventResponseV1,
+  type ListSubscribersResponseV1,
   type ProviderCallContext,
   type ProviderCallRecord,
   type ProviderCallTrigger,
@@ -300,6 +302,12 @@ interface EventRow extends Row {
 
 interface CountRow extends Row {
   n: number;
+}
+
+interface SubscriberListRow extends Row {
+  subscription_id: string;
+  user_id: string;
+  created_at_ms: number;
 }
 
 interface DebounceRow extends Row {
@@ -820,6 +828,37 @@ export class FlightTracker extends DurableObject<Env> {
       return this.#count('subscribers') < before ? 'unsubscribed' : 'absent';
     });
     return { rpcVersion: RPC_SCHEMA_VERSION, status, subscriberCount: this.#count('subscribers') };
+  }
+
+  /**
+   * The subscriber list (increment 12, the one Durable Object change of that increment): every
+   * entry's subscription id, the user id it was stored under and when it was written, for the
+   * housekeeping reconciliation that makes this list follow Postgres. Read only; `rpcVersion`
+   * unchanged (the method is new, nothing else moved). A tracker that holds no flight answers
+   * phase `absent` with an empty list and arms its cleanup, like `unsubscribe`.
+   */
+  listSubscribers(input: unknown = {}): Exact<ListSubscribersResponseV1> {
+    parseRpcRequest(ListSubscribersRequestV1, input);
+    this.#ensureSchema();
+    const row = this.#flight();
+    if (row === null) {
+      this.#armAbsentCleanup(this.#now());
+      return { rpcVersion: RPC_SCHEMA_VERSION, flightKey: null, phase: 'absent', subscribers: [] };
+    }
+    const subscribers = this.#exec<SubscriberListRow>(
+      `SELECT subscription_id, user_id, created_at_ms FROM subscribers
+       ORDER BY created_at_ms, subscription_id`,
+    ).map((entry) => ({
+      subscriptionId: entry.subscription_id,
+      userId: entry.user_id,
+      createdAtMs: entry.created_at_ms,
+    }));
+    return {
+      rpcVersion: RPC_SCHEMA_VERSION,
+      flightKey: row.key as FlightKey,
+      phase: row.phase as TrackerHealthPhase,
+      subscribers,
+    };
   }
 
   getState(): Exact<GetStateResponseV1> {

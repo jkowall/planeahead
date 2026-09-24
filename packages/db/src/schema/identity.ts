@@ -294,6 +294,11 @@ export const SYNC_OPS = ['upsert', 'delete'] as const;
  * database, so the reader can exclude in-flight transactions with
  * `xid < pg_snapshot_xmin(pg_current_snapshot())`. `seq` is an identity, the one non-uuid key
  * in the schema, because the cursor needs a total order inside a transaction.
+ *
+ * Migration 0005 (increment 12, ruling AA15) adds the two indexes the paged retention purge
+ * reads: a btree on `xid` (the purge walks the oldest rows in xid order and deletes `xid < H`;
+ * PostgreSQL 18 has no BRIN operator class for `xid8`, so the ruling's BRIN on `xid` is a btree)
+ * and a BRIN on `created_at` (the table is append-only).
  */
 export const userSyncChanges = pgTable(
   'user_sync_changes',
@@ -318,6 +323,8 @@ export const userSyncChanges = pgTable(
   },
   (t) => [
     index('user_sync_changes_user_id_xid_seq_idx').on(t.userId, t.xid, t.seq),
+    index('user_sync_changes_xid_idx').on(t.xid),
+    index('user_sync_changes_created_at_brin_idx').using('brin', t.createdAt),
     check('user_sync_changes_entity_check', sql`${t.entity} in (${inList(SYNC_CHANGE_ENTITIES)})`),
     check('user_sync_changes_op_check', sql`${t.op} in (${inList(SYNC_OPS)})`),
   ],

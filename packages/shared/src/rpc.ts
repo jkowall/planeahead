@@ -12,8 +12,8 @@ import {
 /**
  * Versioned payloads for Durable Object RPC (FlightTracker `subscribe`, `unsubscribe`,
  * `getState`, `forceRefresh`, `getCostLedger`, `ingestProviderEvent`, `seed`,
- * `confirmPersisted`, `health`; DesignatorResolver `resolve`; and provider events pushed into
- * a tracker). Every schema is a `looseObject` so a Worker and a DO on different deploy versions
+ * `confirmPersisted`, `health`, `listSubscribers`; DesignatorResolver `resolve`; and provider
+ * events pushed into a tracker). Every schema is a `looseObject` so a Worker and a DO on different deploy versions
  * can still talk: unknown fields pass through, missing new fields must be optional, and a
  * tracker phase this build does not know parses as `unknown` (the phase itself stays required).
  * A breaking change gets a `V2` schema next to the `V1`, never an edit of `V1`.
@@ -314,6 +314,36 @@ export const HealthResponseV1 = z.looseObject({
   subscriberCount: z.int().nonnegative(),
 });
 export type HealthResponseV1 = z.infer<typeof HealthResponseV1>;
+
+/**
+ * `listSubscribers` (increment 12): the tracker's subscriber list, for the housekeeping
+ * reconciliation that makes every active tracker's list follow Postgres (unsubscribing an entry
+ * with no live `flight_subscriptions` row, re-pointing one whose row moved to another user in a
+ * merge). The only Durable Object change of increment 12; additive, so `rpcVersion` stays 1 and a
+ * Worker one build ahead of a tracker still reads everything else. `getState`, `health` and
+ * `unsubscribe` carry only `subscriberCount`, which is why this exists. A tracker that holds no
+ * flight answers phase `absent` and an empty list (never throws), like `unsubscribe`.
+ */
+export const ListSubscribersRequestV1 = z.looseObject({ rpcVersion });
+export type ListSubscribersRequestV1 = z.infer<typeof ListSubscribersRequestV1>;
+
+/** One entry of a tracker's subscriber list: the subscription it names and that row's user. */
+export const TrackerSubscriberV1 = z.looseObject({
+  subscriptionId: z.uuid(),
+  /** The subscriber's user id as the tracker stored it at `subscribe`. */
+  userId: z.string().min(1),
+  /** When the entry was written, in milliseconds of the tracker's clock. */
+  createdAtMs: z.int().nonnegative(),
+});
+export type TrackerSubscriberV1 = z.infer<typeof TrackerSubscriberV1>;
+
+export const ListSubscribersResponseV1 = z.looseObject({
+  rpcVersion,
+  flightKey: FlightKeySchema.nullable(),
+  phase: TrackerHealthPhaseSchema,
+  subscribers: z.array(TrackerSubscriberV1),
+});
+export type ListSubscribersResponseV1 = z.infer<typeof ListSubscribersResponseV1>;
 
 /**
  * A search: a marketing designator (`AA100`) and its origin-local departure date. The existing-

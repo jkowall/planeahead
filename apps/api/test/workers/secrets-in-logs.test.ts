@@ -19,7 +19,7 @@ import { withDb } from '@planeahead/db';
 import { describe, expect, it } from 'vitest';
 import { createApp } from '../../src/app';
 import { normalisePem } from '../../src/auth/apple-client-secret';
-import { TEST_SEAM_NAMES, WORKER_SECRET_NAMES } from '../../src/env';
+import { OPTIONAL_SECRET_NAMES, TEST_SEAM_NAMES, WORKER_SECRET_NAMES } from '../../src/env';
 import wranglerConfig from '../../wrangler.jsonc?raw';
 import {
   API_ORIGIN,
@@ -54,6 +54,9 @@ describe('.dev.vars.example and .dev.vars.test', () => {
     }
     for (const name of TEST_SEAM_NAMES) {
       expect(exampleKeys, `${name} documented as an optional seam`).toContain(name);
+    }
+    for (const name of OPTIONAL_SECRET_NAMES) {
+      expect(exampleKeys, `${name} documented as an optional secret`).toContain(name);
     }
   });
 

@@ -35,12 +35,14 @@ import { and, eq } from 'drizzle-orm';
 import { accounts, type Db, users } from '@planeahead/db';
 import * as z from 'zod';
 import type { Envelope } from '../crypto/envelope';
-import type { Env } from '../env';
+import { environmentName, type Env } from '../env';
 import { type Logger, errorFields } from '../observability/log';
+import { BUNDLE_IDS_BY_ENVIRONMENT } from '../routes/well-known';
 import { AppleKeyError, appleClientSecrets } from './apple-client-secret';
 import {
   AppleExchangeError,
   AppleTokenError,
+  appleBundleIds,
   appleJwks,
   exchangeAppleAuthorizationCode,
   sanitizeFullName,
@@ -142,6 +144,13 @@ export function planeaheadPlugin(deps: PlaneaheadPluginDeps): BetterAuthPlugin {
           },
         },
         async (ctx) => {
+          // Increment 12: every bundle id this environment's apps sign in with (the preview
+          // variant against production, the development variant against staging), not one.
+          const bundleIds = appleBundleIds(
+            env.APPLE_BUNDLE_IDS,
+            BUNDLE_IDS_BY_ENVIRONMENT[environmentName(env)],
+            env.APPLE_BUNDLE_ID,
+          );
           const bundleId = env.APPLE_BUNDLE_ID;
           const teamId = env.APPLE_SIWA_TEAM_ID;
           const keyId = env.APPLE_SIWA_KEY_ID;
@@ -175,7 +184,7 @@ export function planeaheadPlugin(deps: PlaneaheadPluginDeps): BetterAuthPlugin {
           try {
             claims = await verifyAppleIdentityToken(identityToken, {
               getKey,
-              audience: bundleId,
+              audience: bundleIds,
               rawNonce,
             });
           } catch (error) {
@@ -234,19 +243,21 @@ export function planeaheadPlugin(deps: PlaneaheadPluginDeps): BetterAuthPlugin {
           // token with someone else's code).
           let refreshToken: string;
           try {
+            // The code belongs to the app that signed in: its bundle id (the token's `aud`) is
+            // the `client_id` of the exchange and the subject of the client secret.
             const clientSecret = await appleClientSecrets.get({
               teamId,
               keyId,
-              clientId: bundleId,
+              clientId: claims.audience,
               privateKeyPem,
             });
             const exchanged = await exchangeAppleAuthorizationCode({
               code: authorizationCode,
-              clientId: bundleId,
+              clientId: claims.audience,
               clientSecret,
               binding: {
                 getKey,
-                audience: bundleId,
+                audience: claims.audience,
                 expectedSub: claims.sub,
                 expectedNonce: claims.nonce,
               },
