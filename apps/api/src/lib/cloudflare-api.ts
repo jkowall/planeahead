@@ -58,9 +58,23 @@ export class CloudflareApiError extends Error {
 /** A number or a numeric string (the SQL API quotes 64-bit integers in some formats). */
 const Numeric = z.union([z.number(), z.string().regex(/^-?\d+(\.\d+)?(e[+-]?\d+)?$/i)]);
 
+/**
+ * A figure for DISPLAY: anything that is not a number reads as 0. Never for a value something
+ * is decided on or stored (the rollup uses `strictNumeric`: a coerced 0 there once let the
+ * `provider_calls` purge delete the exact ledger against a row that said nothing was called).
+ */
 export function numeric(value: unknown): number {
+  return strictNumeric(value) ?? 0;
+}
+
+/** A finite number or numeric string as a number; null for anything else (null, '', 'n/a'). */
+export function strictNumeric(value: unknown): number | null {
   const parsed = Numeric.safeParse(value);
-  return parsed.success ? Number(parsed.data) : 0;
+  if (!parsed.success) {
+    return null;
+  }
+  const number = Number(parsed.data);
+  return Number.isFinite(number) ? number : null;
 }
 
 const SqlJsonResponse = z.looseObject({

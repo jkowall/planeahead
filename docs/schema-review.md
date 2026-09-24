@@ -66,9 +66,11 @@ orchestrator read. See section 17 for the checklist each reviewer walks.
    an IP, so the deletion job purges them by subject and the housekeeping cron by age
    (section 5).
 8. **Append-only tables get a BRIN index on `created_at`:** `flight_events`,
-   `provider_calls`, `airport_wx_observations`, `notification_deliveries`, `audit_log`. Insert
-   order correlates with `created_at` (UUIDv7 ids, single writer), which is what makes BRIN
-   cheap and effective there.
+   `provider_calls`, `airport_wx_observations`, `notification_deliveries`, `audit_log`, and
+   (migration 0005, increment 12) `user_sync_changes` and `flight_sync_changes`. Insert order
+   correlates with `created_at` (UUIDv7 ids, single writer), which is what makes BRIN cheap and
+   effective there. The two change tables also get a btree on `xid` for the paged purge
+   (section 6): PostgreSQL 18 has no BRIN operator class for `xid8`.
 9. **No Postgres array columns anywhere.** `jsonb` or a junction table instead. This is what
    makes `fetch_types: false` safe in the driver (ADR 0009); the contracts test asserts it from
    the migration snapshot.
@@ -276,25 +278,27 @@ by design, pseudonymous). Rows: order of magnitude twelve months in, after reten
 
 ### Retention as built (increment 12)
 
-The nightly housekeeping (`src/queues/housekeeping.ts`; one queue message per step, one
-`audit_log` row per message) enforces every retention above whose table has a Phase 0 writer:
+The nightly housekeeping (`src/queues/housekeeping.ts`; one queue message per step or page, one
+`audit_log` row per message with one count per table, every delete batched under the message's
+30 s wall budget with a continuation; ruling AA2) enforces every retention above whose table has a
+Phase 0 writer:
 
-| Table                                                     | Purge                                                                                                                                                | Step |
-| --------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------- | ---- |
-| `idempotency_keys`                                        | `expires_at` passed (24 h after the response; a dead lease sooner)                                                                                   | 1    |
-| `user_sync_changes`, `flight_sync_changes`                | `xid < H`, one horizon for both, recorded in `sync_horizon` in the same transaction                                                                  | 2    |
-| `provider_calls`                                          | older than 90 days, only for (day, provider) pairs with a per-operation rollup row                                                                   | 3    |
-| `notifications`                                           | older than 90 days                                                                                                                                   | 4    |
-| `data_export_jobs`                                        | requested more than 7 days ago                                                                                                                       | 4    |
-| `deleted_subjects`                                        | `expires_at` passed                                                                                                                                  | 4    |
-| `rate_limits`                                             | last request older than the longest limiter window (60 s)                                                                                            | 4    |
-| `verifications`                                           | `expires_at` passed                                                                                                                                  | 4    |
-| `flight_events`                                           | older than 90 days (the R2 timeline keeps 365)                                                                                                       | 4    |
-| `sessions`                                                | `expires_at` passed                                                                                                                                  | 4    |
-| `usage_counters`                                          | day windows older than 30 days (never the epoch window of the two non-monotonic caps)                                                                | 4    |
-| sync-entity tombstones                                    | `deleted_at` older than 30 days (`flight_subscriptions`, `trips`, `trip_members`, `user_preferences`, `notification_preferences`, `logbook_entries`) | 4    |
-| `usage_counters` (`active_subscriptions`, `live_tracked`) | repaired to the live rows; orphans of deleted users removed                                                                                          | 5    |
-| `users` (anonymous, `deleting`)                           | deleted an hour after their merge, after the tracker lists are repaired                                                                              | 6    |
+| Table                                                     | Purge                                                                                                                                                 | Step |
+| --------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------- | ---- |
+| `idempotency_keys`                                        | `expires_at` passed (24 h after the response; a dead lease sooner)                                                                                    | 1    |
+| `user_sync_changes`, `flight_sync_changes`                | `xid < H`, one horizon for both, recorded in `sync_horizon` in the same transaction, paged at 10,000 rows per step under the 10 s `statement_timeout` | 2    |
+| `provider_calls`                                          | whole UTC days older than 90 days, per provider, only when the day's per-operation rollup is above zero and within 20 percent of its `count(*)`       | 3    |
+| `notifications`                                           | older than 90 days                                                                                                                                    | 4    |
+| `data_export_jobs`                                        | requested more than 7 days ago                                                                                                                        | 4    |
+| `deleted_subjects`                                        | `expires_at` passed                                                                                                                                   | 4    |
+| `rate_limits`                                             | last request older than the longest limiter window (60 s)                                                                                             | 4    |
+| `verifications`                                           | `expires_at` passed                                                                                                                                   | 4    |
+| `flight_events`                                           | older than 90 days (the R2 timeline keeps 365)                                                                                                        | 4    |
+| `sessions`                                                | `expires_at` passed                                                                                                                                   | 4    |
+| `usage_counters`                                          | day windows older than 30 days (never the epoch window of the two non-monotonic caps)                                                                 | 4    |
+| sync-entity tombstones                                    | `deleted_at` older than 30 days (`flight_subscriptions`, `trips`, `trip_members`, `user_preferences`, `notification_preferences`, `logbook_entries`)  | 4    |
+| `usage_counters` (`active_subscriptions`, `live_tracked`) | repaired to the live rows; orphans of deleted users removed                                                                                           | 5    |
+| `users` (anonymous, `deleting`)                           | deleted an hour after their merge, after the tracker lists are repaired                                                                               | 6    |
 
 Not built, because nothing writes the rows the retention would remove in Phase 0 (each arrives
 with its writer): `push_tokens` invalidated rows (Phase 1 sender), `live_activities` (Phase 1),
@@ -374,7 +378,7 @@ Natural keys used for idempotent upserts by the seed loaders: `airports.icao`, `
 | Only the increment 8 counter names, and `refresh:{flightKey}`, are stored                         | `usage_counters_counter_check` (migration 0003)                                                                                                                                                                                                                                                                                                                                                                                                                        |
 | A subscription that took a `live_tracked` slot releases exactly that slot                         | `flight_subscriptions.live_tracked` (migration 0003): set at subscribe (flight already live) or by the persist consumer at window entry; cleared, with its slot, by the unsubscribe, by the consumer when the flight is over, and by the merge for a tombstoned loser                                                                                                                                                                                                  |
 | A cursor from another principal or database timeline is never served                              | the cursor's `hash8` (SHA-256 of the user id) and `epoch` (`sync_epoch`, migration 0003) are checked before the page; 410 `resync_required`; `sync.test.ts`                                                                                                                                                                                                                                                                                                            |
-| A cursor below the purge horizon is never served as complete                                      | `sync_horizon` (one row, migration 0003) written by the purge in the transaction that deletes `xid < H` from both tables, read by the route after the page; `sync.late-commit.test.ts` (the seq/xid inversion)                                                                                                                                                                                                                                                         |
+| A cursor below the purge horizon is never served as complete                                      | `sync_horizon` (one row, migration 0003) written by the purge in the transaction that deletes `xid < H` from both tables (each paged step's H_i likewise), read by the route after the page; `sync.late-commit.test.ts` (the seq/xid inversion), `crons.test.ts` (every step of a paged purge exact for every cursor)                                                                                                                                                  |
 | A `deleted_subjects` hash is keyed and namespaced                                                 | `deleted_subjects_provider_subject_hash_check` (`apple:`, `google:` or `session:` plus 43 base64url characters)                                                                                                                                                                                                                                                                                                                                                        |
 | A subscribe never removes a tracker subscriber that another request recorded                      | after a lost deadline the only unsubscribe is for a caller whose `users` row no longer exists (monotonic: no request can record a subscriber after the deletion); the in-request compensation runs under the idempotency in-flight lease; `flights.subscribe.test.ts` (the timed-out call and its retry parked on one in-flight fetch; a late landing after a deletion, and after a retry)                                                                             |
 
@@ -399,11 +403,17 @@ Natural keys used for idempotent upserts by the seed loaders: `airports.icao`, `
   role (section 12) and the watermark lag on the admin page (increment 12: `now()` minus the start
   of the oldest in-progress transaction holding an xid, from `pg_stat_activity`).
 - **Retention and 410 (ruling O9).** Both change tables keep 30 days. The nightly purge
-  (increment 12, `src/lib/sync-purge.ts`) locks the `sync_horizon` row and picks ONE horizon H: the
-  smallest xid among the rows younger than 30 days across BOTH tables (or one above the largest old
-  xid when no row is young), never above `pg_snapshot_xmin`, never lower than the recorded H; then,
-  in the same transaction, deletes `where xid < H` from BOTH
-  tables and writes H to `sync_horizon.horizon_xid`; `GET /v1/sync` answers 410
+  (increment 12, `src/lib/sync-purge.ts`) locks the `sync_horizon` row and moves toward ONE
+  horizon H: the smallest xid among the rows younger than 30 days across BOTH tables (or one above
+  the largest old xid when no row is young), never above `pg_snapshot_xmin`, never lower than the
+  recorded H. It is paged (ruling AA15) because the app role's `statement_timeout` is 10 s: each
+  queue message reads the oldest 10,001 rows of both tables in xid order through the `xid` btree
+  (migration 0005), picks a step horizon H_i with at most 10,000 rows below it (the first young
+  row's xid, which is H and ends the purge, when one is among them; one transaction's rows are
+  never split), and in the same transaction deletes `where xid < H_i` from BOTH tables and writes
+  H_i to `sync_horizon.horizon_xid`, then sends a continuation. Every H_i is a valid horizon (all
+  rows below it are gone, none can still land below it) and the last one equals H. `GET /v1/sync`
+  answers 410
   `resync_required` exactly when a cursor's xid is below H (and to a cursor from another principal
   or `sync_epoch`, or beyond `pg_snapshot_xmax`). A purge in `seq` order is NOT an exact horizon
   (an earlier version of this section said it was): a row's xid is fixed at its transaction's
@@ -824,8 +834,9 @@ transaction, so a refresh lands completely or not at all. Loaded on 2026-09-20 i
 
 ## 16. Open decisions for the orchestrator
 
-The project-wide list, with the decisions below that are still open, is `docs/open-decisions.md`
-(increment 12). The schema-specific ones as recorded at increment 3:
+The project-wide list is `docs/open-decisions.md` (increment 12); items 1, 2 and 7 below, the
+ones still open, are its section 4 with their current answer, status and when. The
+schema-specific ones as recorded at increment 3:
 
 1. **Table count.** The spec says 61 tables; its normative list names 70 and all 70 are built.
    Confirm the list is the contract and retire the number.

@@ -439,7 +439,8 @@ export const flightTracks = pgTable(
  * BOTH tables in one transaction (the upsert's snapshot, and the `live_tracked` changes of the
  * flight's subscriptions), so one xid can carry rows in both, and only a shared sequence keeps an
  * `(xid, seq)` pair naming at most one row across the two tables. Purged by the housekeeping cron
- * (increment 12) together with `user_sync_changes`, below one horizon (`sync_horizon`).
+ * (increment 12) together with `user_sync_changes`, below one horizon (`sync_horizon`), through
+ * the same two indexes (migration 0005): a btree on `xid` and a BRIN on `created_at`.
  */
 export const flightSyncChanges = pgTable(
   'flight_sync_changes',
@@ -463,5 +464,7 @@ export const flightSyncChanges = pgTable(
       t.xid,
       t.seq,
     ),
+    index('flight_sync_changes_xid_idx').on(t.xid),
+    index('flight_sync_changes_created_at_brin_idx').using('brin', t.createdAt),
   ],
 );

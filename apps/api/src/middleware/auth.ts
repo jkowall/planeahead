@@ -42,20 +42,23 @@
  *
  * The cookie cache (increment 12, ruling W2 step 8, replacing increment 8's ruling O5). Every
  * MUTATING request skips Better Auth's 300 s cookie cache and reads the `sessions` row, so a write
- * never acts for a revoked or deleted session. GET and HEAD may be answered from the signed
- * `session_data` cookie again (increment 8 had disabled that for every `/v1` request, at one
- * indexed read each): when such a request resolves while presenting the cache cookie, its session
- * token's keyed hash is looked up as a KV tombstone (src/lib/session-tombstone.ts), which the
- * account deletion writes for every session it removes, and a hit answers 401 `account_deleted`.
- * So a deleted account's other device is still told `account_deleted` on its next GET (and
- * `GET /v1/flights/search`, which takes caps and may seed a tracker, cannot write under a deleted
- * user id) without a database read per GET. When the tombstone cannot be checked (no
+ * never acts for a revoked or deleted session, and so does `GET /v1/flights/search`
+ * (`ROW_READ_GET_PATHS`, ruling AA11): a GET that takes creation caps and can seed a tracker,
+ * which spends a provider call, is a write in all but method. The other GETs and HEADs, the
+ * read-only paths, may be answered from the signed session cookie cache again (increment 8 had
+ * disabled that for every `/v1` request, at one indexed read each): whenever such a request
+ * resolves a session through that cacheable read, whatever the cache cookie is called (Better Auth
+ * also accepts it in chunks, `session_data.0`, `.1`, ...; ruling AA14), its session token's keyed
+ * hash is looked up as a KV tombstone (src/lib/session-tombstone.ts), which the account deletion
+ * writes for every session it removes, and a hit answers 401 `account_deleted`: one KV read per
+ * cacheable GET, by design. So a deleted account's other device is still told `account_deleted`
+ * on its next GET without a database read per GET. When the tombstone cannot be checked (no
  * `DELETED_SUBJECT_HMAC_KEY`, or the KV read fails) the request reads the row as before. What the
  * cache still allows, and the threat model records: a session revoked WITHOUT an account deletion
- * (sign-out elsewhere, the anonymous merge's revocation) can read, never write, until its cache
- * cookie expires (at most 300 s); and KV's propagation (about 60 s) bounds how soon another
- * location sees a new tombstone. `/api/auth/*` is untouched: Better Auth's own `get-session`
- * keeps its cache.
+ * (sign-out elsewhere, the anonymous merge's revocation) keeps the read-only paths, never a write
+ * or a search, until its cache cookie expires (at most 300 s); and KV's propagation (about 60 s)
+ * bounds how soon another location sees a new tombstone. `/api/auth/*` is untouched: Better
+ * Auth's own `get-session` keeps its cache.
  */
 
 import { and, eq, gt, sql } from 'drizzle-orm';
@@ -73,33 +76,33 @@ import { errorFields } from '../observability/log';
 export { AUTH_PATH_PREFIX };
 /** Both cookie names Better Auth can use carry this suffix (`__Secure-` prefixed over https). */
 const SESSION_COOKIE_MARKER = 'session_token';
-/** Better Auth's cookie cache (`session_data`, `__Secure-` prefixed over https). */
-const CACHE_COOKIE_MARKER = 'session_data=';
 
 /** The methods that may be answered from the cookie cache (increment 12); everything else reads. */
 const CACHEABLE_METHODS: ReadonlySet<string> = new Set(['GET', 'HEAD']);
 
 /**
- * Whether this request must read the session row itself rather than the cookie cache: every
- * method but GET and HEAD. The path no longer matters (increment 8 bypassed the cache for every
- * `/v1` request; increment 12 replaced that with the tombstone check below). `path` is kept in the
- * signature for the callers and tests that pass it.
+ * GETs that read the session row like a mutating request (ruling AA11): the flight search takes
+ * `usage_counters` slots and may spend a provider call through the DesignatorResolver.
  */
-export function bypassesCookieCache(method: string, path?: string): boolean {
-  void path;
-  return !CACHEABLE_METHODS.has(method);
+export const ROW_READ_GET_PATHS: ReadonlySet<string> = new Set(['/v1/flights/search']);
+
+/**
+ * Whether this request must read the session row itself rather than the cookie cache: every
+ * method but GET and HEAD, and the GETs of `ROW_READ_GET_PATHS`. Every other path is read-only
+ * and may use the cache, checked against the KV tombstone below.
+ */
+export function bypassesCookieCache(method: string, path: string): boolean {
+  if (!CACHEABLE_METHODS.has(method)) {
+    return true;
+  }
+  const trimmed = path.length > 1 && path.endsWith('/') ? path.slice(0, -1) : path;
+  return ROW_READ_GET_PATHS.has(trimmed);
 }
 
 /** Whether the request presents anything that could resolve to a session. */
 export function presentsSession(headers: Headers): boolean {
   const cookie = headers.get('cookie');
   return cookie !== null && cookie.includes(SESSION_COOKIE_MARKER);
-}
-
-/** Whether the request presents Better Auth's cookie cache, so a session may not have been read. */
-export function presentsCookieCache(headers: Headers): boolean {
-  const cookie = headers.get('cookie');
-  return cookie !== null && cookie.includes(CACHE_COOKIE_MARKER);
 }
 
 /**
@@ -203,7 +206,9 @@ export function authMiddleware(): MiddlewareHandler<AppBindings> {
           query: { disableRefresh: true },
         })
       : await readRow();
-    if (session !== null && cacheable && presentsCookieCache(c.req.raw.headers)) {
+    // Any session the cacheable read resolved may have come from the cache cookie, whatever it is
+    // called (ruling AA14), so every one is checked: one KV read per cacheable GET.
+    if (session !== null && cacheable) {
       const tombstone = await cachedSessionTombstone(c);
       if (tombstone === 'present') {
         c.set('accountDeleted', true);

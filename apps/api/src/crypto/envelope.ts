@@ -18,9 +18,9 @@
  * `user_keys` row carries now. AAD deliberately excludes the key version (threat model).
  */
 
-import { eq } from 'drizzle-orm';
+import { and, eq } from 'drizzle-orm';
 import { type Db, userKeys } from '@planeahead/db';
-import { utf8 } from './hash';
+import { timingSafeEqualBytes, utf8 } from './hash';
 import type { KeyProvider } from './key-provider';
 
 export const IV_BYTES = 12;
@@ -156,6 +156,45 @@ export interface UserDek {
 }
 
 /**
+ * What `rotateKek` did: `rotated`; `current` (already under the target KEK); `superseded` (the
+ * row moved to another version between the read and the conditional UPDATE, which wrote nothing);
+ * `absent` (no `user_keys` row).
+ */
+export type RotateKekOutcome = 'rotated' | 'current' | 'superseded' | 'absent';
+
+async function rawKeyBytes(key: CryptoKey): Promise<Uint8Array> {
+  const raw = await crypto.subtle.exportKey('raw', key);
+  if (!(raw instanceof ArrayBuffer)) {
+    throw new EnvelopeError('a raw key export returned no bytes');
+  }
+  return new Uint8Array(raw);
+}
+
+/**
+ * Proves a re-wrap before it is stored: the fresh wrap must unwrap under the target KEK to the
+ * very DEK it was made from. Throws `EnvelopeError` (or WebCrypto's own error) otherwise.
+ */
+async function proveRewrap(
+  dek: CryptoKey,
+  wrapped: Uint8Array<ArrayBuffer>,
+  toKek: CryptoKey,
+): Promise<void> {
+  const back = await crypto.subtle.unwrapKey(
+    'raw',
+    wrapped,
+    toKek,
+    'AES-KW',
+    { name: 'AES-GCM', length: 256 },
+    true,
+    ['encrypt', 'decrypt'],
+  );
+  const [expected, actual] = await Promise.all([rawKeyBytes(dek), rawKeyBytes(back)]);
+  if (!timingSafeEqualBytes(expected, actual)) {
+    throw new EnvelopeError('the re-wrapped DEK does not unwrap to the original under the new KEK');
+  }
+}
+
+/**
  * The envelope over a database handle and a key provider. One instance per request; it holds
  * nothing but the two references.
  */
@@ -229,17 +268,30 @@ export class Envelope {
     return decryptWithDek(dek, value.ciphertext, aadFor(table, column, rowId));
   }
 
-  /** Re-wraps the user's DEK under `toVersion`. Ciphertexts are untouched. */
-  async rotateKek(userId: string, toVersion: number): Promise<void> {
+  /**
+   * Re-wraps the user's DEK under `toVersion`. Ciphertexts are untouched. Safe to repeat and to
+   * race (ruling AA1):
+   *
+   *   - the new wrap is PROVEN before it is written: it is unwrapped with the target KEK and the
+   *     DEK that comes back must equal the one unwrapped from the row, byte for byte; any failure
+   *     (a target KEK that cannot unwrap, a mismatch) throws and leaves the row untouched;
+   *   - the UPDATE is conditional on the row still carrying the `kek_version` read here, so a
+   *     redelivered housekeeping message or a concurrent rotation that already moved the row can
+   *     never be overwritten by this one (`superseded`);
+   *   - a row under a KEK this Worker no longer holds rejects with `UnknownKeyVersionError`: loud,
+   *     and left for a person (the KEK rotation runbook, docs/security/threat-model.md section 8).
+   */
+  async rotateKek(userId: string, toVersion: number): Promise<RotateKekOutcome> {
     const row = await this.readRow(userId);
     if (row === null) {
-      return;
+      return 'absent';
     }
     if (row.kekVersion === toVersion) {
-      return;
+      return 'current';
     }
+    const fromVersion = row.kekVersion;
     const [fromKek, toKek] = await Promise.all([
-      this.keys.getKek(row.kekVersion),
+      this.keys.getKek(fromVersion),
       this.keys.getKek(toVersion),
     ]);
     // An extractable copy is needed for the re-wrap: unwrap with `extractable: true` here only.
@@ -253,10 +305,13 @@ export class Envelope {
       ['encrypt', 'decrypt'],
     );
     const wrapped = await wrapDek(dek, toKek);
-    await this.db
+    await proveRewrap(dek, wrapped, toKek);
+    const updated = await this.db
       .update(userKeys)
       .set({ wrappedDek: wrapped, kekVersion: toVersion, rotatedAt: new Date().toISOString() })
-      .where(eq(userKeys.userId, userId));
+      .where(and(eq(userKeys.userId, userId), eq(userKeys.kekVersion, fromVersion)))
+      .returning({ userId: userKeys.userId });
+    return updated.length === 0 ? 'superseded' : 'rotated';
   }
 
   private async readRow(

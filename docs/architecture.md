@@ -69,7 +69,7 @@ are in `docs/adr/`; the data model is `docs/schema-review.md`; threats are
   `PRODUCT_EVENTS` (increment 12, one point per accepted app event, index = the analytics id),
   `API_METRICS` (reserved). Every sum weights rows by `_sample_interval`; Postgres stays the ledger.
 - **Rate limit bindings**: `PUBLIC_RL` (120 per 10 s per IP), `USER_RL` (600 per 60 s per user),
-  `EVENTS_RL` (60 per 60 s per IP on `/v1/events`). Abuse brakes only; every quota is a
+  `EVENTS_RL` (300 per 60 s per IP on `/v1/events`). Abuse brakes only; every quota is a
   `usage_counters` row.
 - **Outside the Worker**: Cloudflare Access in front of `/admin`; Sentry (errors, scrubbed);
   Workers Logs (JSON lines, 10% sampled in production); GitHub Actions (CI, the staging and
@@ -104,13 +104,15 @@ to production (ADR 0005).
 | `GET /.well-known/*`                                                  | Apple's and Google's crawlers           | none                                                                          | the association files from vars                                                                                                           |
 | `GET /v1/me`, `PATCH /v1/me/preferences`, `POST /v1/me/delete`        | the app                                 | session                                                                       | Postgres; the deletion unsubscribes trackers, revokes at Apple, deletes in one transaction, writes KV session tombstones                  |
 | `POST /v1/devices`                                                    | the app                                 | session                                                                       | `devices`, `push_tokens`                                                                                                                  |
-| `GET /v1/flights/search`                                              | the app                                 | session (anonymous accepted)                                                  | KV, `flight_designators`, then the DesignatorResolver (one provider call per designator and date) and caps                                |
+| `GET /v1/flights/search`                                              | the app                                 | session (anonymous accepted), always read from the session row                | KV, `flight_designators`, then the DesignatorResolver (one provider call per designator and date) and caps                                |
 | `POST /v1/flights`, `GET /v1/flights[/:id]`, `DELETE /v1/flights/:id` | the app                                 | session, `Idempotency-Key` on the POST                                        | caps in `usage_counters`, the tracker's `subscribe` or `unsubscribe` under an 8 s deadline, then one transaction with the sync change row |
 | `POST /v1/flights/:id/refresh`                                        | the app                                 | session                                                                       | the per-user refresh budget, then the tracker's coalesced `forceRefresh`                                                                  |
 | `GET /v1/sync`                                                        | the app                                 | session                                                                       | the two change tables below the watermark (section 6)                                                                                     |
 | `POST /v1/events`                                                     | the app's analytics client              | none (install-scoped analytics id)                                            | `EVENTS_RL`, one `PRODUCT_EVENTS` point per accepted event, 202                                                                           |
 | `POST /v1/webhooks/{aerodatabox,aeroapi}/{token}`                     | the providers                           | 256-bit path token                                                            | enqueue on `provider-events` only                                                                                                         |
+| `POST /v1/webhooks/{apple,revenuecat}`                                | reserved (Apple, RevenueCat)            | none yet                                                                      | nothing: 501 until the Phase 1 handlers land                                                                                              |
 | `GET /admin`                                                          | the operator, through Cloudflare Access | `Cf-Access-Jwt-Assertion` validated                                           | read-only Postgres, the Analytics Engine SQL API, the Queues API                                                                          |
+| `GET`, `POST /admin/accounts/delete`                                  | the operator, through Cloudflare Access | the Access assertion; the POST also same-origin and the user id typed twice   | the one write action: `deleteAccount`, exactly as `POST /v1/me/delete`, with an audit row naming the operator                             |
 | `GET /account/delete`                                                 | Google Play's listing, anyone           | none                                                                          | a static page                                                                                                                             |
 
 Every non-2xx JSON answer under `/v1` is the envelope `{ error, message, requestId, ... }`
@@ -161,8 +163,11 @@ error handler maps SQLSTATE 23503 on a user foreign key, for a principal whose `
 - **Finish and deletion.** The flight finishes after the cadence's post-arrival tail poll, at the
   hard cap, or at `MAX_LIFETIME` (`min(scheduledIn + 6 h, actualOff + 2 x block)`); the object
   deletes itself 22 hours later, and never while an outbox row is unconfirmed.
-- Measured (increment 7): 74 provider calls per A2 lifecycle, 1,200 rows written per flight
-  including the schema DDL (budget 1,600), largest outbox message 1,635 bytes.
+- Measured (increment 7, re-run in increment 12): 74 provider calls per A2 lifecycle, 1,203 rows
+  written per flight including the schema DDL (budget 1,600), 16.3 per alarm on average, largest
+  outbox message 1,635 bytes. Source: the line `[lifecycle] polls=74 alarms=74
+rows_written_lifetime=1203 ... per_alarm_avg=16.3 ... max_message_bytes=1635` that
+  `test/workers/flight-tracker.lifecycle.test.ts` prints.
 
 ## 5. The outbox and the persist path
 
@@ -186,10 +191,13 @@ REPORTS the dead-lettering to the tracker lifetime that sent it (`confirmPersist
 `deadLettered`): the tracker keeps the row and re-sends it on a spacing that doubles from an hour
 to a day, so a transient Postgres outage heals on the first re-send after recovery and a poison row
 settles at one dead-letter event a day. The DesignatorResolver deletes its provider-call rows on
-send, so for those the R2 archive is the only copy: the nightly housekeeping replays every
-`dlq/persist/` archive older than an hour onto the persist queue and deletes it once sent (ADR 0011;
-increment 12). A message replayed three times and dead-lettered again is parked under
-`dlq/persist-parked/` with an error log instead of looping.
+send, and the ProviderBudget object its whole storage at the end of its day, so for those two the
+R2 archive is the only copy: the nightly housekeeping replays their `dlq/persist/` archives older
+than an hour onto the persist queue and deletes each once sent (ADR 0011; increment 12). A message
+replayed three times and dead-lettered again is parked under `dlq/persist-parked/` with an error
+log instead of looping. A FlightTracker's archive is never replayed: the tracker re-sends its own
+copy, so a replay would only multiply a poison row's dead-letterings; the archive stays as the
+record.
 
 Every search's provider-call record carries the flight key it resolved (increment 12: the resolver
 appends its records after resolution), and a failed resolution's records carry none, so
@@ -218,7 +226,11 @@ and in, gates, terminals, baggage; increment 10, ruling T4), and `flight_events`
 Retention: 30 days, purged nightly BY XID below one horizon H (the smallest xid younger than the
 window across both tables, never above the watermark, never lower than before), both tables and
 `sync_horizon` in one transaction; a cursor below H answers 410 `resync_required` and the app
-re-snapshots. After a point-in-time restore the runbook bumps `sync_epoch`, which answers 410 to
+re-snapshots. The purge is paged so no statement nears the app role's 10 s `statement_timeout`:
+each housekeeping message reads the oldest 10,001 rows in xid order (a btree on `xid`, migration
+0005), moves the horizon to at most 10,000 rows further (or to the first young row, which ends
+it), deletes below it and records it in one transaction, and sends a continuation; every
+intermediate horizon is exact, so the 410 stays exact between steps. After a point-in-time restore the runbook bumps `sync_epoch`, which answers 410 to
 every cursor from the lost timeline.
 
 ## 7. Crons and the housekeeping queue
@@ -231,18 +243,23 @@ message per unit of work.
 | every 15 minutes (reconcile)            | 30 s on Paid (a 25 s wall budget)  | one `reconcile` message per active tracker whose refresh is 20 min overdue                                   |
 | 03:00 UTC daily (housekeeping + rollup) | 15 min on Paid (uses milliseconds) | one `housekeeping` message per step, then one `ae_rollup` message per UTC day (yesterday and the day before) |
 
-The housekeeping consumer (`max_batch_size` 1, `max_concurrency` 1, so the steps run in the order
-sent on one connection) runs each message within a 30 s wall budget and enqueues a continuation of
-the step when more is left. Every step is idempotent and re-entrant, and every message writes one
-`audit_log` row (`housekeeping.{step}`) with its counts. The steps, in order: expired
-`idempotency_keys`; the sync purge (section 6); `provider_calls` over 90 days for days the rollup
-holds; retention (notifications 90 d, export jobs 7 d, expired `deleted_subjects`, idle
+The housekeeping consumer (`max_batch_size` 1, `max_concurrency` 1, so one message at a time on
+one connection) runs each message within a 30 s wall budget and enqueues a continuation of the
+step when more is left. Every step is idempotent and re-entrant, and every message writes one
+`audit_log` row (`housekeeping.{step}`) with its counts. The steps are independent and
+order-insensitive: Queues delivers in best-effort order and retries and continuations reorder
+messages, so the list below documents them in the order the cron sends them and nothing depends on
+it (nothing chains). The steps: expired `idempotency_keys`; the paged sync purge (section 6); whole
+days of `provider_calls` over 90 days whose rollup is plausible (above zero and within 20 percent of
+the day's `count(*)`, the other days kept and counted); retention (notifications 90 d, export jobs 7 d, expired `deleted_subjects`, idle
 `rate_limits`, expired `verifications`, `flight_events` 90 d, expired sessions, day-window counters
 30 d, sync tombstones 30 d); the `usage_counters` repair against `flight_subscriptions`; the tracker
 subscriber reconciliation (and the deletion of anonymous users a merge marked `deleting`); the
-`dlq/persist/` replay; the KV session tombstones; and the KEK re-wrap. The rollup queries the
-Analytics Engine SQL API per provider per day with `SUM(_sample_interval)` and replaces the
-per-operation `provider_call_daily` rows.
+`dlq/persist/` replay of the resolver's and the budget object's archives; the KV session
+tombstones; and the KEK re-wrap (each new wrap proven before it is written, the UPDATE conditional
+on the version read). The rollup queries the Analytics Engine SQL API per provider per day with
+`SUM(_sample_interval)` and replaces the per-operation `provider_call_daily` rows; a sum that is
+not a number fails the message (retried, then dead-lettered with the ops alert), never a 0 row.
 
 ## 8. Observability
 
@@ -250,8 +267,10 @@ JSON log lines with the request id on every line (`src/observability/log.ts`); S
 exceptions and ops alerts (dead letters, kill switch, stuck outboxes, lifetime rejections), with
 bodies, headers, queries and webhook tokens scrubbed; Analytics Engine for provider calls and
 product events; and the admin page (`/admin`, behind Cloudflare Access): provider calls per flight
-key and per provider per day, the Durable Object schema versions, the sync watermark lag, the queue
-depths, the sync horizon and epoch, and the last housekeeping runs.
+key and per provider per day, the Durable Object schema versions, the sync watermark lag (marked
+partial when the role lacks `pg_read_all_stats`), the queue depths, the sync horizon and epoch, and
+the last housekeeping runs. Its one write action is the operator account deletion
+(`/admin/accounts/delete`) for a request that reached the support inbox.
 
 ## Refresh cadence
 

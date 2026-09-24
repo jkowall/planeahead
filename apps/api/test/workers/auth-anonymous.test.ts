@@ -82,7 +82,8 @@ describe('POST /api/auth/sign-in/anonymous', () => {
     // closes the hole that mattered with a KV tombstone per deleted account's session
     // (session-tombstone.test.ts, me.delete.test.ts). What the trade still allows, and the threat
     // model records: a session revoked WITHOUT an account deletion (the merge's revocation, a
-    // sign-out elsewhere) reads, never writes, until its cache cookie expires.
+    // sign-out elsewhere) keeps the read-only paths, never a write or the flight search (ruling
+    // AA11, session-tombstone.test.ts), until its cache cookie expires.
     const anonymous = await signInAnonymously();
     expect(anonymous.cookie).toContain('session_data=');
     await withDb(testEnv, (db) => db.delete(sessions).where(eq(sessions.userId, anonymous.userId)));

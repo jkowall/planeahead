@@ -29,11 +29,22 @@ import {
 import { DAILY_CRON, RECONCILE_CRON, scheduled } from '../../src/cron/index';
 import { RECONCILE_OVERDUE_MS } from '../../src/cron/reconcile';
 import { Envelope } from '../../src/crypto/envelope';
-import { createWorkersSecretKeyProvider, readKekSecrets } from '../../src/crypto/key-provider';
+import {
+  UnknownKeyVersionError,
+  createWorkersSecretKeyProvider,
+  readKekSecrets,
+  type KeyProvider,
+} from '../../src/crypto/key-provider';
 import type { Env } from '../../src/env';
 import { sessionTombstoneKey } from '../../src/lib/session-tombstone';
-import { chooseHorizon } from '../../src/lib/sync-purge';
-import { rollupDays } from '../../src/lib/provider-rollup';
+import { chooseHorizon, stepHorizon } from '../../src/lib/sync-purge';
+import { isBelowHorizon } from '../../src/lib/sync-cursor';
+import {
+  ROLLUP_PLAUSIBILITY_TOLERANCE,
+  isPlausibleRollup,
+  rollupDays,
+  rollupRows,
+} from '../../src/lib/provider-rollup';
 import type { SubscriberListingTracker } from '../../src/lib/trackers';
 import { createLogger } from '../../src/observability/log';
 import {
@@ -93,7 +104,9 @@ function message(step: string, run: string, extra: Record<string, unknown> = {})
 
 interface StepRun {
   readonly acked: readonly string[];
-  readonly continued: readonly unknown[];
+  /** Messages the consumer handed back for a retry (the step threw). */
+  readonly retried: readonly string[];
+  readonly continued: readonly Record<string, unknown>[];
   readonly audits: Record<string, unknown>[];
 }
 
@@ -122,7 +135,8 @@ async function runStep(
   `);
   return {
     acked: result.explicitAcks,
-    continued: sink.sent,
+    retried: result.retryMessages.map((retry) => retry.msgId),
+    continued: sink.sent as Record<string, unknown>[],
     audits: audits.map((row) => row.details),
   };
 }
@@ -424,8 +438,191 @@ describe('housekeeping step 2: the sync purge by xid', () => {
   });
 });
 
+interface ChangeRow {
+  readonly table: 'user' | 'flight';
+  readonly xid: string;
+  readonly seq: string;
+}
+
+async function changeRows(tables: Awaited<ReturnType<typeof syncCopies>>): Promise<ChangeRow[]> {
+  const rows = await db().execute<{ table: 'user' | 'flight'; xid: string; seq: string }>(sql`
+    select 'user' as "table", xid::text as xid, seq::text as seq
+    from ${sql.identifier(tables.userChanges)}
+    union all
+    select 'flight', xid::text, seq::text from ${sql.identifier(tables.flightChanges)}
+  `);
+  return rows
+    .map((row) => ({ table: row.table, xid: row.xid, seq: row.seq }))
+    .sort((a, b) =>
+      BigInt(a.xid) === BigInt(b.xid)
+        ? Number(BigInt(a.seq) - BigInt(b.seq))
+        : BigInt(a.xid) < BigInt(b.xid)
+          ? -1
+          : 1,
+    );
+}
+
+/**
+ * What `GET /v1/sync` owes a cursor at `(xid, 0)` against these tables and horizon, by the route's
+ * own rule (`isBelowHorizon`): 410, or every row after the cursor.
+ */
+function answerFor(
+  rows: readonly ChangeRow[],
+  horizon: string | null,
+  cursorXid: bigint,
+): 'resync_required' | string[] {
+  if (isBelowHorizon({ xid: cursorXid.toString(), seq: '0' }, horizon)) {
+    return 'resync_required';
+  }
+  return rows
+    .filter((row) => BigInt(row.xid) >= cursorXid)
+    .map((row) => `${row.table}:${row.xid}:${row.seq}`);
+}
+
+describe('housekeeping step 2: the paged purge (ruling AA15)', () => {
+  async function plant(tables: Awaited<ReturnType<typeof syncCopies>>): Promise<void> {
+    for (const [xid, age] of [
+      ['100', '40 days'],
+      ['101', '40 days'],
+      ['102', '39 days'],
+      ['103', '38 days'],
+      ['104', '35 days'],
+    ] as const) {
+      await userChange(tables.userChanges, xid, age);
+    }
+    await userChange(tables.userChanges, '120', '10 days'); // young: the one-pass horizon
+    await userChange(tables.userChanges, '130', '45 days'); // old, above the young xid: kept
+    await flightChange(tables.flightChanges, '110', '35 days');
+    await flightChange(tables.flightChanges, '111', '33 days');
+    await flightChange(tables.flightChanges, '150', '1 day');
+  }
+
+  it('advances the horizon in bounded steps to the one-pass horizon, every step exact for any cursor', async () => {
+    const paged = await syncCopies();
+    const onePass = await syncCopies();
+    await plant(paged);
+    await plant(onePass);
+    const original = await changeRows(paged);
+
+    const reference = await runStep(message('sync_purge', runId()), { syncTables: onePass });
+    expect(reference.audits[0]).toMatchObject({ horizon: '120', done: true });
+    expect(reference.continued).toEqual([]);
+
+    const run = runId();
+    let body: Record<string, unknown> = message('sync_purge', run);
+    const horizons: string[] = [];
+    const deleted: number[] = [];
+    for (let page = 0; page < 20; page += 1) {
+      const step = await runStep(body, { syncTables: paged, syncPurgeRowsPerStep: 2 });
+      const audit = step.audits.at(-1) ?? {};
+      const horizon = String(audit['horizon']);
+      horizons.push(horizon);
+      deleted.push(Number(audit['user_changes_deleted']) + Number(audit['flight_changes_deleted']));
+      expect(audit).toMatchObject({ page, rows_per_step: 2 });
+      // Between steps the recorded horizon is exact: every cursor below it answers 410, every
+      // cursor at or above it gets exactly the rows the unpurged tables held after it.
+      const now = await changeRows(paged);
+      for (let cursor = 95n; cursor <= 155n; cursor += 1n) {
+        const expected =
+          cursor < BigInt(horizon) ? 'resync_required' : answerFor(original, null, cursor);
+        expect(answerFor(now, horizon, cursor), `cursor ${String(cursor)} at H ${horizon}`).toEqual(
+          expected,
+        );
+      }
+      const next = step.continued[0];
+      if (next === undefined) {
+        expect(audit['done']).toBe(true);
+        break;
+      }
+      expect(audit['done']).toBe(false);
+      expect(next).toMatchObject({ kind: 'housekeeping', step: 'sync_purge', runId: run });
+      body = next;
+    }
+
+    // Four steps of at most two rows each, never above the one-pass horizon, ending on it.
+    expect(horizons).toEqual(['102', '104', '111', '120']);
+    expect(deleted.every((n) => n <= 2)).toBe(true);
+    expect(await xidsOf(paged.userChanges)).toEqual(await xidsOf(onePass.userChanges));
+    expect(await xidsOf(paged.flightChanges)).toEqual(await xidsOf(onePass.flightChanges));
+  });
+
+  it('never splits one transaction: a step takes every row of the oldest xid even past the bound', async () => {
+    const tables = await syncCopies();
+    for (let i = 0; i < 3; i += 1) {
+      await userChange(tables.userChanges, '200', '40 days');
+    }
+    await userChange(tables.userChanges, '300', '2 days');
+    const run = runId();
+
+    const first = await runStep(message('sync_purge', run), {
+      syncTables: tables,
+      syncPurgeRowsPerStep: 2,
+    });
+    expect(first.audits[0]).toMatchObject({ horizon: '201', user_changes_deleted: 3, done: false });
+    const second = await runStep(first.continued[0] ?? {}, {
+      syncTables: tables,
+      syncPurgeRowsPerStep: 2,
+    });
+    expect(second.audits.at(-1)).toMatchObject({ horizon: '300', done: true });
+    expect(await xidsOf(tables.userChanges)).toEqual(['300']);
+  });
+
+  it('chooses each step horizon by the rules, capped at xmin and never below the recorded one', () => {
+    const old = (xid: string) => ({ xid, young: false });
+    const young = (xid: string) => ({ xid, young: true });
+    expect(
+      stepHorizon({
+        rows: [old('1'), old('2'), old('3')],
+        rowsPerStep: 2,
+        xmin: '99',
+        existing: null,
+      }),
+    ).toEqual({ horizon: '3', done: false });
+    expect(
+      stepHorizon({
+        rows: [old('1'), young('2'), old('3')],
+        rowsPerStep: 2,
+        xmin: '99',
+        existing: null,
+      }),
+    ).toEqual({ horizon: '2', done: true });
+    expect(
+      stepHorizon({ rows: [old('1'), old('2')], rowsPerStep: 2, xmin: '99', existing: null }),
+    ).toEqual({
+      horizon: '3',
+      done: true,
+    });
+    expect(
+      stepHorizon({
+        rows: [old('5'), old('5'), old('5')],
+        rowsPerStep: 2,
+        xmin: '99',
+        existing: null,
+      }),
+    ).toEqual({ horizon: '6', done: false });
+    expect(
+      stepHorizon({
+        rows: [old('1'), old('2'), old('90')],
+        rowsPerStep: 2,
+        xmin: '50',
+        existing: null,
+      }),
+    ).toEqual({ horizon: '50', done: true });
+    expect(
+      stepHorizon({ rows: [young('40')], rowsPerStep: 2, xmin: '99', existing: '60' }),
+    ).toEqual({
+      horizon: '60',
+      done: true,
+    });
+    expect(stepHorizon({ rows: [], rowsPerStep: 2, xmin: '99', existing: null })).toEqual({
+      horizon: null,
+      done: true,
+    });
+  });
+});
+
 describe('housekeeping step 3: provider_calls', () => {
-  it('purges calls older than 90 days only for the days the rollup already holds', async () => {
+  it('purges whole days older than 90 days only for the days a plausible rollup already holds', async () => {
     const tag = `hk-pc-${crypto.randomUUID()}`;
     await db().execute(sql`
       insert into provider_calls (id, provider, operation, trigger, result, request_id, created_at)
@@ -433,8 +630,8 @@ describe('housekeeping step 3: provider_calls', () => {
              (uuidv7(), 'open_meteo', 'forecast', 'cron', 'ok', ${tag}, now() - interval '101 days'),
              (uuidv7(), 'open_meteo', 'forecast', 'cron', 'ok', ${tag}, now())
     `);
-    // The rollup holds the older day of the two? No: a per-operation row for day -100 only; day
-    // -101 has nothing but the ProviderBudget object's own row, which is not a rollup.
+    // A per-operation rollup row for day -100 that matches its one call; day -101 has nothing but
+    // the ProviderBudget object's own row, which is not a rollup.
     await db().execute(sql`
       insert into provider_call_daily (day, provider, operation, result, calls)
       values (((now() - interval '100 days') at time zone 'UTC')::date, 'open_meteo', 'forecast', 'ok', 1),
@@ -451,7 +648,195 @@ describe('housekeeping step 3: provider_calls', () => {
     `);
     expect(left.map((row) => row.age)).toEqual([101, 0]);
     expect(Number(result.audits[0]?.['deleted'])).toBeGreaterThanOrEqual(1);
+    expect(Number(result.audits[0]?.['days_purged'])).toBeGreaterThanOrEqual(1);
     expect(Number(result.audits[0]?.['days_without_rollup'])).toBeGreaterThanOrEqual(1);
+  });
+
+  it('judges a rollup plausible only above zero and within the tolerance of the ledger', () => {
+    expect(ROLLUP_PLAUSIBILITY_TOLERANCE).toBe(0.2);
+    expect(isPlausibleRollup(25, 25)).toBe(true);
+    expect(isPlausibleRollup(20, 25)).toBe(true);
+    expect(isPlausibleRollup(30, 25)).toBe(true);
+    expect(isPlausibleRollup(19, 25)).toBe(false);
+    expect(isPlausibleRollup(31, 25)).toBe(false);
+    expect(isPlausibleRollup(0, 25)).toBe(false);
+    expect(isPlausibleRollup(3, 25)).toBe(false);
+    expect(isPlausibleRollup(5, 0)).toBe(false);
+    expect(isPlausibleRollup(Number.NaN, 25)).toBe(false);
+  });
+});
+
+describe('the rollup and the purge gate together (ruling AA13)', () => {
+  const ACCOUNT = 'fedcba9876543210fedcba9876543210';
+  const rollupEnv = () => envWith({ CF_ACCOUNT_ID: ACCOUNT, CF_API_TOKEN: 'test-token' });
+
+  /** The SQL API answering `row` for aerodatabox and nothing for the other providers. */
+  function sqlApiAnswering(row: Record<string, unknown>): typeof fetch {
+    const answer = (_input: RequestInfo | URL, init?: RequestInit) => {
+      const statement = typeof init?.body === 'string' ? init.body : '';
+      const data = statement.includes("index1 = 'aerodatabox'") ? [row] : [];
+      return Promise.resolve(Response.json({ meta: [], data, rows: data.length }));
+    };
+    return answer;
+  }
+
+  /** `count` aerodatabox calls at noon UTC `daysAgo` days back; returns the day. */
+  async function plantLedger(daysAgo: number, count: number): Promise<string> {
+    const [row] = await db().execute<{ day: string }>(sql`
+      select ((now() at time zone 'UTC')::date - ${daysAgo}::int)::text as day
+    `);
+    const day = row?.day ?? '';
+    await db().execute(sql`
+      insert into provider_calls (id, provider, operation, trigger, result, request_id, created_at)
+      select uuidv7(), 'aerodatabox', 'flight_status', 'cron', 'ok', ${`hk-gate-${day}`},
+             (${day}::date)::timestamp at time zone 'UTC' + interval '12 hours'
+      from generate_series(1, ${count}::int)
+    `);
+    return day;
+  }
+
+  const ledgerLeft = (day: string) =>
+    count(
+      sql`select count(*)::int as n from provider_calls where request_id = ${`hk-gate-${day}`}`,
+    );
+
+  const rollupOf = (day: string) =>
+    db().execute<{ operation: string; calls: number }>(sql`
+      select operation, calls from provider_call_daily
+      where day = ${day}::date and provider = 'aerodatabox' order by operation
+    `);
+
+  it.each([
+    ['null sums', 1_001, { calls: null, cost_units: null, cost_usd_micros: null }],
+    ['missing sums', 1_002, {}],
+    ['non-numeric sums', 1_003, { calls: '25.0x', cost_units: 'n/a', cost_usd_micros: '1' }],
+  ] as const)(
+    'never writes a zero row for %s: the message fails loudly and the ledger stays',
+    async (_label, daysAgo, sums) => {
+      const day = await plantLedger(daysAgo, 25);
+      const run = runId();
+
+      const rollup = await runStep(
+        message(AE_ROLLUP_STEP, run, { day }),
+        { fetch: sqlApiAnswering({ operation: 'flight_status', result: 'ok', ...sums }) },
+        rollupEnv(),
+      );
+
+      // Retried (and, past the retries, dead-lettered with the ops alert), never acknowledged.
+      expect(rollup.acked).toEqual([]);
+      expect(rollup.retried).toHaveLength(1);
+      expect(rollup.audits).toEqual([]);
+      expect(await rollupOf(day)).toEqual([]);
+
+      const purge = await runStep(message('provider_calls', runId()));
+      expect(await ledgerLeft(day)).toBe(25);
+      expect(Number(purge.audits[0]?.['days_without_rollup'])).toBeGreaterThanOrEqual(1);
+    },
+  );
+
+  it('keeps a day whose rollup is zero or implausibly low against the ledger, and logs it', async () => {
+    const low = await plantLedger(1_004, 25);
+    const zero = await plantLedger(1_005, 25);
+    await runStep(
+      message(AE_ROLLUP_STEP, runId(), { day: low }),
+      {
+        fetch: sqlApiAnswering({
+          operation: 'flight_status',
+          result: 'ok',
+          calls: '3',
+          cost_units: 6,
+          cost_usd_micros: 1_500,
+        }),
+      },
+      rollupEnv(),
+    );
+    await runStep(
+      message(AE_ROLLUP_STEP, runId(), { day: zero }),
+      {
+        fetch: sqlApiAnswering({
+          operation: 'flight_status',
+          result: 'ok',
+          calls: 0,
+          cost_units: 0,
+          cost_usd_micros: 0,
+        }),
+      },
+      rollupEnv(),
+    );
+    expect(await rollupOf(low)).toEqual([{ operation: 'flight_status', calls: 3 }]);
+    expect(await rollupOf(zero)).toEqual([{ operation: 'flight_status', calls: 0 }]);
+
+    const purge = await runStep(message('provider_calls', runId()));
+
+    expect(await ledgerLeft(low)).toBe(25);
+    expect(await ledgerLeft(zero)).toBe(25);
+    expect(Number(purge.audits[0]?.['days_without_plausible_rollup'])).toBeGreaterThanOrEqual(2);
+  });
+
+  it('purges a day whose sampled rollup lies within the tolerance, carrying the approval across a continuation', async () => {
+    const day = await plantLedger(1_010, 25);
+    await runStep(
+      message(AE_ROLLUP_STEP, runId(), { day }),
+      {
+        fetch: sqlApiAnswering({
+          operation: 'flight_status',
+          result: 'ok',
+          calls: '24',
+          cost_units: '48',
+          cost_usd_micros: '12000',
+        }),
+      },
+      rollupEnv(),
+    );
+    const run = runId();
+
+    // Ten rows per batch and no budget: the first message deletes one batch and hands the rest on.
+    const first = await runStep(message('provider_calls', run), {
+      deleteBatch: 10,
+      wallBudgetMs: 0,
+    });
+    expect(await ledgerLeft(day)).toBe(15);
+    expect(first.continued).toEqual([
+      expect.objectContaining({ step: 'provider_calls', cursor: `approved:${day}|aerodatabox` }),
+    ]);
+
+    // 15 left against a rollup of 24 is outside the band now; the approval carried in the
+    // cursor finishes the day instead of judging it again.
+    const second = await runStep(first.continued[0] ?? {}, { deleteBatch: 10 });
+    expect(await ledgerLeft(day)).toBe(0);
+    expect(second.audits.at(-1)).toMatchObject({ done: true });
+    expect(Number(second.audits.at(-1)?.['deleted'])).toBeGreaterThanOrEqual(15);
+    expect(Number(second.audits.at(-1)?.['days_purged'])).toBeGreaterThanOrEqual(1);
+  });
+
+  it('parses only numeric sums into rows (the pure half)', () => {
+    expect(
+      rollupRows([
+        {
+          operation: 'flight_status',
+          result: 'ok',
+          calls: '7',
+          cost_units: 14,
+          cost_usd_micros: '3500',
+        },
+        { operation: 'budget_daily', result: 'ok', calls: null },
+      ]),
+    ).toEqual({
+      rows: [
+        { operation: 'flight_status', result: 'ok', calls: 7, costUnits: 14, costUsdMicros: 3_500 },
+      ],
+      skipped: 1,
+    });
+    expect(() =>
+      rollupRows([
+        { operation: 'flight_status', result: 'ok', calls: '', cost_units: 1, cost_usd_micros: 1 },
+      ]),
+    ).toThrow(/non-numeric calls/);
+    expect(() =>
+      rollupRows([
+        { operation: 'flight_status', result: 'ok', calls: 1, cost_units: -5, cost_usd_micros: 1 },
+      ]),
+    ).toThrow(/non-numeric cost_units/);
   });
 });
 
@@ -767,20 +1152,35 @@ describe('housekeeping step 6: tracker subscribers', () => {
 });
 
 describe('housekeeping step 7: dlq_replay', () => {
-  it('replays dead-lettered persist messages older than an hour and deletes each once sent; parks a poison one', async () => {
+  it('replays the archives only the DLQ holds (resolver, budget) and deletes each once sent; keeps a tracker archive; parks a poison one', async () => {
     const bucket = env.PRIVATE_BUCKET;
     const record = (body: unknown) =>
       JSON.stringify({ queue: 'planeahead-persist-local', kind: 'persist', attempts: 6, body });
-    const replayable = {
+    const resolver = {
       kind: 'provider_call',
       origin: 'designator_resolver:AA1-2100-01-01@1',
       seq: 1,
       payload: { id: crypto.randomUUID() },
     };
+    const budget = {
+      kind: 'provider_call_daily',
+      origin: 'provider_budget:aerodatabox:2100-01-01@1',
+      seq: 4,
+      payload: { day: '2100-01-01' },
+    };
+    const tracker = {
+      kind: 'flight_instance',
+      origin: 'flight_tracker:AAL-1-2100-01-01-KJFK@1',
+      seq: 9,
+      payload: { version: 3 },
+    };
     const id = crypto.randomUUID();
-    await bucket.put(`dlq/persist/${id}-a.json`, record(replayable));
-    await bucket.put(`dlq/persist/${id}-b.json`, record({ ...replayable, replayCount: 3 }));
+    await bucket.put(`dlq/persist/${id}-a.json`, record(resolver));
+    await bucket.put(`dlq/persist/${id}-b.json`, record({ ...resolver, replayCount: 3 }));
     await bucket.put(`dlq/persist/${id}-c.json`, 'not json');
+    await bucket.put(`dlq/persist/${id}-d.json`, record(budget));
+    await bucket.put(`dlq/persist/${id}-e.json`, record(tracker));
+    await bucket.put(`dlq/persist/${id}-f.json`, record({ ...tracker, replayCount: 5 }));
     await bucket.put(`dlq/notify/${id}.json`, record({ kind: 'other' }));
     const persist = capturingQueue();
 
@@ -790,7 +1190,7 @@ describe('housekeeping step 7: dlq_replay', () => {
       bucket,
     });
     expect(early.audits[0]).toMatchObject({ replayed: 0, parked: 0 });
-    expect(Number(early.audits[0]?.['young'])).toBeGreaterThanOrEqual(3);
+    expect(Number(early.audits[0]?.['young'])).toBeGreaterThanOrEqual(6);
 
     const later = await runStep(message('dlq_replay', runId()), {
       persistSink: asQueue(persist),
@@ -798,19 +1198,48 @@ describe('housekeeping step 7: dlq_replay', () => {
       now: () => Date.now() + 2 * 60 * MINUTE,
     });
 
-    expect(later.audits[0]).toMatchObject({ replayed: 1, parked: 2, failed: 0, done: true });
-    expect(persist.sent).toEqual([{ ...replayable, replayCount: 1 }]);
+    expect(later.audits[0]).toMatchObject({
+      replayed: 2,
+      kept: 2,
+      parked: 2,
+      failed: 0,
+      done: true,
+    });
+    expect(persist.sent).toEqual([
+      { ...resolver, replayCount: 1 },
+      { ...budget, replayCount: 1 },
+    ]);
     expect(await bucket.get(`dlq/persist/${id}-a.json`)).toBeNull();
     expect(await bucket.get(`dlq/persist/${id}-b.json`)).toBeNull();
+    expect(await bucket.get(`dlq/persist/${id}-d.json`)).toBeNull();
     expect(await bucket.get(`dlq/persist-parked/${id}-b.json`)).not.toBeNull();
     expect(await bucket.get(`dlq/persist-parked/${id}-c.json`)).not.toBeNull();
+    // The tracker re-sends its own copy on its doubling spacing: its archives stay as the record,
+    // never replayed and never parked, however often the row dead-lettered.
+    expect(await bucket.get(`dlq/persist/${id}-e.json`)).not.toBeNull();
+    expect(await bucket.get(`dlq/persist/${id}-f.json`)).not.toBeNull();
+    expect(await bucket.get(`dlq/persist-parked/${id}-f.json`)).toBeNull();
     expect(await bucket.get(`dlq/notify/${id}.json`)).not.toBeNull();
+
+    // The next night: the tracker archives are still kept, nothing is sent again.
+    const again = await runStep(message('dlq_replay', runId()), {
+      persistSink: asQueue(persist),
+      bucket,
+      now: () => Date.now() + 26 * 60 * MINUTE,
+    });
+    expect(again.audits[0]).toMatchObject({ replayed: 0, kept: 2, parked: 0 });
+    expect(persist.sent).toHaveLength(2);
   });
 
   it('keeps the archive when the send fails, so the next night tries again', async () => {
     const bucket = env.PRIVATE_BUCKET;
     const key = `dlq/persist/${crypto.randomUUID()}.json`;
-    await bucket.put(key, JSON.stringify({ body: { kind: 'provider_call', seq: 1 } }));
+    await bucket.put(
+      key,
+      JSON.stringify({
+        body: { kind: 'provider_call', origin: 'designator_resolver:AA2-2100-01-01@1', seq: 1 },
+      }),
+    );
     const failing = { send: () => Promise.reject(new Error('queue down')) };
 
     const result = await runStep(message('dlq_replay', runId()), {
@@ -884,6 +1313,105 @@ describe('housekeeping step 9: kek_rewrap', () => {
     );
     const plain = await after.decrypt(user, 'accounts', 'refresh_token', user, sealed);
     expect(new TextDecoder().decode(plain)).toBe('secret value');
+  });
+
+  async function wrappedRow(user: string) {
+    const [row] = await db().execute<{ version: number; wrapped: string }>(sql`
+      select kek_version as version, encode(wrapped_dek, 'hex') as wrapped
+      from user_keys where user_id = ${user}::uuid
+    `);
+    return row;
+  }
+
+  it('proves the new wrap before writing it: a wrap that does not prove leaves the row untouched', async () => {
+    const v1 = testEnv.TOKEN_KEK_V1 ?? '';
+    const user = await insertUser();
+    await new Envelope(db(), createWorkersSecretKeyProvider({ TOKEN_KEK_V1: v1 })).dekFor(user);
+    const before = await wrappedRow(user);
+    const real = createWorkersSecretKeyProvider({ TOKEN_KEK_V1: v1 });
+    // A target KEK that can wrap but not unwrap: the proof (unwrap with the target) fails.
+    const wrapOnly = await crypto.subtle.importKey(
+      'raw',
+      crypto.getRandomValues(new Uint8Array(32)),
+      { name: 'AES-KW' },
+      false,
+      ['wrapKey'],
+    );
+    const keys: KeyProvider = {
+      currentVersion: 2,
+      getKek: (version) => (version === 2 ? Promise.resolve(wrapOnly) : real.getKek(version)),
+    };
+
+    await expect(new Envelope(db(), keys).rotateKek(user, 2)).rejects.toThrow();
+
+    expect(await wrappedRow(user)).toEqual(before);
+  });
+
+  it('loses to a concurrent rotation: the conditional UPDATE writes nothing over a newer wrap', async () => {
+    const v1 = testEnv.TOKEN_KEK_V1 ?? '';
+    const v2 = kek();
+    const v3 = kek();
+    const user = await insertUser();
+    const sealed = await new Envelope(
+      db(),
+      createWorkersSecretKeyProvider({ TOKEN_KEK_V1: v1 }),
+    ).encrypt(user, 'accounts', 'refresh_token', user, 'kept secret');
+    const racer = new Envelope(
+      db(),
+      createWorkersSecretKeyProvider({ TOKEN_KEK_V1: v1, TOKEN_KEK_V2: v2 }),
+    );
+    const base = createWorkersSecretKeyProvider({ TOKEN_KEK_V1: v1, TOKEN_KEK_V3: v3 });
+    let raced = false;
+    // The racer (a redelivered message, a second run) moves the row to V2 after this rotation
+    // read it at V1 and before it writes.
+    const keys: KeyProvider = {
+      currentVersion: 3,
+      getKek: async (version) => {
+        if (version === 3 && !raced) {
+          raced = true;
+          expect(await racer.rotateKek(user, 2)).toBe('rotated');
+        }
+        return base.getKek(version);
+      },
+    };
+
+    expect(await new Envelope(db(), keys).rotateKek(user, 3)).toBe('superseded');
+
+    expect((await wrappedRow(user))?.version).toBe(2);
+    const plain = await racer.decrypt(user, 'accounts', 'refresh_token', user, sealed);
+    expect(new TextDecoder().decode(plain)).toBe('kept secret');
+    // Replayed once the race is over: the row is simply rotated from V2 to V3.
+    const both = createWorkersSecretKeyProvider({
+      TOKEN_KEK_V1: v1,
+      TOKEN_KEK_V2: v2,
+      TOKEN_KEK_V3: v3,
+    });
+    expect(await new Envelope(db(), both).rotateKek(user, 3)).toBe('rotated');
+    expect(await new Envelope(db(), both).rotateKek(user, 3)).toBe('current');
+  });
+
+  it('fails loudly on a row under a KEK the Worker no longer holds, and leaves it for a person', async () => {
+    const user = await insertUser();
+    const junk = crypto.getRandomValues(new Uint8Array(40));
+    await db().execute(sql`
+      insert into user_keys (user_id, wrapped_dek, kek_version)
+      values (${user}::uuid, ${`\\x${[...junk].map((b) => b.toString(16).padStart(2, '0')).join('')}`}::bytea, 7)
+    `);
+    const before = await wrappedRow(user);
+    await expect(
+      new Envelope(db(), createWorkersSecretKeyProvider(readKekSecrets(testEnv))).rotateKek(
+        user,
+        1,
+      ),
+    ).rejects.toBeInstanceOf(UnknownKeyVersionError);
+
+    const result = await runStep(message('kek_rewrap', runId()), {
+      kekScope: eq(userKeys.userId, user),
+    });
+
+    expect(result.audits[0]).toMatchObject({ rewrapped: 0, superseded: 0, failed: 1, done: true });
+    expect(result.acked).toHaveLength(1);
+    expect(await wrappedRow(user)).toEqual(before);
   });
 
   it('is a no-op for a row already under the current KEK', async () => {

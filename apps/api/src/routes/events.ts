@@ -18,7 +18,8 @@
  * answer is 202 `{ accepted, dropped }`. Nothing is stored in Postgres.
  *
  * Abuse brakes, in order, before the body is read: the global per-IP `PUBLIC_RL`, then
- * `EVENTS_RL` (60 batches per 60 s) keyed by the client IP, never by the analytics id (a value
+ * `EVENTS_RL` (300 batches per 60 s, ruling AA4: carrier NAT puts many installs behind one
+ * address) keyed by the client IP, never by the analytics id (a value
  * the client chooses and rotates cannot key a brake, increment 5's rule), then a 256 KiB body
  * limit (413 `payload_too_large` with the envelope). Local dev and the test pool have no
  * `CF-Connecting-IP` unless a request sets it, and a request without one is not counted, like

@@ -21,6 +21,10 @@ Conventions: run wrangler from `apps/api` as `pnpm exec wrangler ...` (the pinne
       (`pnpm exec wrangler whoami`).
 - [ ] Neon project on Launch, PostgreSQL 18, `aws-us-east-1`, with branches `main` (production)
       and `staging` (step 7).
+- [ ] AeroDataBox **Growth** subscription ($99 a month, 400,000 units; the floor, not Starter:
+      Starter's 7-day caching term forbids the retention this system keeps,
+      docs/cost-estimate.md section 3). Its key is `AERODATABOX_API_KEY` (step 6), and
+      `ADB_PLAN=growth` must be set with it in both environments (step 6).
 
 ## 1. Cloudflare API tokens
 
@@ -140,22 +144,27 @@ on purpose.
       `pnpm exec wrangler secret bulk secrets.<env>.json --env <env>` from a file that is never
       committed and deleted afterwards):
 
-  | Secret                                                                     | Value                                                                                                                      |
-  | -------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------- |
-  | `SENTRY_DSN`                                                               | the Sentry project DSN (empty drops every event)                                                                           |
-  | `BETTER_AUTH_SECRET`                                                       | `openssl rand -base64 48`, different per environment                                                                       |
-  | `TOKEN_KEK_V1`                                                             | `openssl rand -base64 32` (standard padded base64, 32 bytes); different per environment; keep an offline copy              |
-  | `APPLE_SIWA_P8`, `APPLE_SIWA_KEY_ID`, `APPLE_SIWA_TEAM_ID`                 | the Sign in with Apple key (`.p8` PEM with newlines written as `\n`), its key id, the team id                              |
-  | `APPLE_BUNDLE_ID`                                                          | the primary app: `app.planeahead.mobile` (production), `app.planeahead.mobile.dev` (staging); it also signs the revocation |
-  | `GOOGLE_CLIENT_ID_WEB`, `GOOGLE_CLIENT_ID_IOS`, `GOOGLE_CLIENT_ID_ANDROID` | the three OAuth client ids of the Google Cloud project                                                                     |
-  | `RESEND_API_KEY`                                                           | the Resend key for the verified sending domain                                                                             |
-  | `AERODATABOX_API_KEY`, `AEROAPI_API_KEY`                                   | provider keys (AeroAPI unused while `AEROAPI_MODE` is `mock`; set a placeholder until step 13 decides)                     |
-  | `WEBHOOK_TOKEN_AERODATABOX`, `WEBHOOK_TOKEN_AEROAPI`                       | `openssl rand -base64 32 \| tr '+/' '-_' \| tr -d '='`, one per provider and environment                                   |
-  | `DELETED_SUBJECT_HMAC_KEY`, `IP_SALT_SECRET`                               | `openssl rand -base64 32` each, different per environment                                                                  |
-  | `CF_API_TOKEN` (optional)                                                  | the operational token of step 1                                                                                            |
+  | Secret                                                                     | Value                                                                                                                                                  |
+  | -------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------ |
+  | `SENTRY_DSN`                                                               | the Sentry project DSN (empty drops every event)                                                                                                       |
+  | `BETTER_AUTH_SECRET`                                                       | `openssl rand -base64 48`, different per environment                                                                                                   |
+  | `TOKEN_KEK_V1`                                                             | `openssl rand -base64 32` (standard padded base64, 32 bytes); different per environment; keep an offline copy                                          |
+  | `APPLE_SIWA_P8`, `APPLE_SIWA_KEY_ID`, `APPLE_SIWA_TEAM_ID`                 | the Sign in with Apple key created in step 12 (`.p8` PEM with newlines written as `\n`), its key id, the team id; the same values in both environments |
+  | `APPLE_BUNDLE_ID`                                                          | the primary app: `app.planeahead.mobile` (production), `app.planeahead.mobile.dev` (staging); it also signs the revocation                             |
+  | `GOOGLE_CLIENT_ID_WEB`, `GOOGLE_CLIENT_ID_IOS`, `GOOGLE_CLIENT_ID_ANDROID` | the three OAuth client ids of the Google Cloud project                                                                                                 |
+  | `RESEND_API_KEY`                                                           | the Resend key for the verified sending domain                                                                                                         |
+  | `AERODATABOX_API_KEY`, `AEROAPI_API_KEY`                                   | provider keys (AeroAPI unused while `AEROAPI_MODE` is `mock`; set a placeholder until step 13 decides)                                                 |
+  | `WEBHOOK_TOKEN_AERODATABOX`, `WEBHOOK_TOKEN_AEROAPI`                       | `openssl rand -base64 32 \| tr '+/' '-_' \| tr -d '='`, one per provider and environment                                                               |
+  | `DELETED_SUBJECT_HMAC_KEY`, `IP_SALT_SECRET`                               | `openssl rand -base64 32` each, different per environment                                                                                              |
+  | `CF_API_TOKEN` (optional)                                                  | the operational token of step 1                                                                                                                        |
 
+- [ ] `ADB_PLAN=growth` in BOTH environments (`pnpm exec wrangler secret put ADB_PLAN --env <env>`,
+      value `growth`, or a `vars` entry), for the Growth plan of step 0. Required, not optional:
+      an unset or unknown value means Starter, whose quota the ProviderBudget spreads as a daily
+      cap of 40,000 / 30 = 1,333 units, about 8 flights a day in mock mode, a tenth of what Growth
+      pays for, after which the kill switch trips.
 - [ ] Optional settings, only where a non-default is wanted (`wrangler secret put` or a `vars`
-      entry): `AEROAPI_MODE` (`mock` default), `ADB_PLAN` (`starter` default; `growth` once bought),
+      entry): `AEROAPI_MODE` (`mock` default),
       `ADB_ALERTS_ENABLED`, `REVENUECAT_DELETE_ENABLED`, `APPLE_BUNDLE_IDS` (defaults to the
       environment's variants: production and preview against production, development against
       staging), `APPLE_TEAM_ID`, `APP_BUNDLE_IDS` and `ANDROID_SHA256_FINGERPRINTS` (step 11).
@@ -173,10 +182,19 @@ on purpose.
   ALTER ROLE planeahead_app SET TimeZone = 'UTC';
   ALTER ROLE planeahead_app SET statement_timeout = '10s';
   ALTER ROLE planeahead_app SET idle_in_transaction_session_timeout = '30s';
+  GRANT pg_read_all_stats TO planeahead_app;
   ```
 
+  The 10 s `statement_timeout` is why every housekeeping purge is paged: the sync purge moves its
+  horizon at most 10,000 rows per queue message (migration 0005's `xid` btree serves it) and every
+  other purge deletes in batches of 5,000, so no statement of the nightly run comes near it.
+  `pg_read_all_stats` lets the admin page's watermark lag see every backend in
+  `pg_stat_activity`; without it the page shows "partial: the role lacks pg_read_all_stats" and
+  the lag can read low.
+
   Then reconnect as `planeahead_app` and check `SHOW TimeZone; SHOW statement_timeout;
-SHOW idle_in_transaction_session_timeout;`. The idle timeout is what bounds the sync watermark
+SHOW idle_in_transaction_session_timeout;` and
+  `SELECT pg_has_role(current_user, 'pg_read_all_stats', 'member');` (true). The idle timeout is what bounds the sync watermark
   lag the admin page shows: one session idle inside a writing transaction freezes `GET /v1/sync`
   for every user.
 
@@ -213,7 +231,10 @@ SHOW idle_in_transaction_session_timeout;`. The idle timeout is what bounds the 
       `v*` tag with `deploy <tag>` typed into `confirm`. With Pro: add yourself as a required
       reviewer, then, if the tag run itself should deploy after approval, drop the
       `github.event_name == 'workflow_dispatch'` and `inputs.confirm` clauses from the deploy
-      job's `if` (keep the tag clause).
+      job's `if` (keep the tag clause), and in the same change update the "deploys only from a
+      manual run on a tag with the tag typed back, after the verify job" case of
+      `tools/workflows/deploy-production.test.js`, which asserts both clauses and otherwise fails
+      the tools suite (docs/open-decisions.md, the production approval gate).
 
 ## 10. First staging deploy
 
@@ -245,6 +266,18 @@ SHOW idle_in_transaction_session_timeout;`. The idle timeout is what bounds the 
 - [ ] App IDs for the three variants (`app.planeahead.mobile`, `.preview`, `.dev`) with Sign in
       with Apple, Associated Domains, **Push Notifications**, and the App Groups capability with
       `group.<bundle id>` (ADR 0005).
+- [ ] Sign in with Apple grouping, BEFORE any user signs in: on `app.planeahead.mobile` enable
+      Sign in with Apple as **Enable as a primary App ID**; on `app.planeahead.mobile.preview` and
+      `app.planeahead.mobile.dev` choose **Group with an existing primary App ID** and pick
+      `app.planeahead.mobile`. Why: the API signs the client secret and exchanges the code with the
+      identity token's own audience as `client_id` (`APPLE_BUNDLE_IDS`), which Apple accepts from
+      one key only for App IDs grouped under that key's primary; ungrouped variants would also give
+      one Apple user a different `sub` per variant, and regrouping after users exist is the
+      expensive direction.
+- [ ] The Sign in with Apple key: Certificates, Identifiers and Profiles > Keys > + > enable
+      **Sign in with Apple** > Configure > primary App ID `app.planeahead.mobile` > Save and
+      download the `.p8` (once only). Its contents, its key id and the team id become
+      `APPLE_SIWA_P8`, `APPLE_SIWA_KEY_ID` and `APPLE_SIWA_TEAM_ID` in BOTH environments (step 6).
 - [ ] App IDs for the widget extension of each variant (`<bundle id>.widgets`) and the watch
       extensions (`<bundle id>.watchkitapp` and `<bundle id>.watchkitapp.widget`), each with the
       **App Groups** capability and the variant's group (ADR 0008).
@@ -280,7 +313,26 @@ SHOW idle_in_transaction_session_timeout;`. The idle timeout is what bounds the 
       machine): `gh workflow run native-smoke.yml` then `gh run watch`. The iOS gate leg and the
       Android job must pass; the Xcode 27 leg may fail without failing the run.
 
-## 16. First production deploy
+## 16. Support inbox
+
+The public deletion page (`/account/delete`) names `SUPPORT_EMAIL` (`support@planeahead.app` in
+every environment's `vars`) and promises a reply before anything is deleted; Google Play checks
+that the page works, so the inbox must exist before the listing names the page.
+
+- [ ] Create the mailbox, or route it: Cloudflare dashboard > the `planeahead.app` zone > Email >
+      Email Routing > enable, then Routing rules > Create address `support@planeahead.app` >
+      Send to the owner's verified destination address.
+- [ ] Send a test message to `support@planeahead.app` from an outside address and confirm it
+      arrives; reply from it once, so the From address the replies use is proven too.
+- [ ] The procedure for a request that arrives there: reply to the account's own address and wait
+      for its confirmation; find the user id (for an Apple or Google account, by the address the
+      request came from, in `users`); then the admin page's **Operator account deletion**
+      (`https://api.planeahead.app/admin/accounts/delete`, behind Access, step 14): look the id
+      up, type it again, delete. It runs the same deletion as the app and writes one audit row
+      naming you. Reply that it is done. Never delete with SQL: that skips the tracker
+      unsubscribes, the Apple revocation, the `deleted_subjects` hashes and the session tombstones.
+
+## 17. First production deploy
 
 - [ ] Steps 2 to 7 done for production, `wrangler.jsonc` merged with the production ids.
 - [ ] `git tag v0.0.1 && git push origin v0.0.1`: **Deploy production** runs `verify` only (the
@@ -292,6 +344,6 @@ production`, smoke `https://api.planeahead.app/health` against the build.
       previous build must work against the newer schema (expand and contract, docs/schema-review.md
       section 12); gradual deployments and `versions` rollbacks are not available to a Worker that
       declares `exports`.
-- [ ] Google Play's Data safety form: the account-deletion URL is
-      `https://api.planeahead.app/account/delete` (the support inbox on it is the `SUPPORT_EMAIL`
-      var).
+- [ ] Google Play's Data safety form (depends on step 16: the inbox exists and received its test
+      message): the account-deletion URL is `https://api.planeahead.app/account/delete` (the
+      support inbox on it is the `SUPPORT_EMAIL` var).

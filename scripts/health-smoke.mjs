@@ -24,8 +24,12 @@ import { fileURLToPath, pathToFileURL } from 'node:url';
 
 const repoRoot = dirname(dirname(fileURLToPath(import.meta.url)));
 
-/** The classes `/health` reports, by file. */
-const DO_FILES = {
+/**
+ * The classes `/health` reports, by file. Must name exactly the keys of `DO_SCHEMA_VERSIONS` in
+ * apps/api/src/routes/health.ts (tools/workflows/deploy-production.test.js compares them), or a
+ * class added there would never be checked after a deploy.
+ */
+export const DO_FILES = {
   FlightTracker: 'flight-tracker.ts',
   DesignatorResolver: 'designator-resolver.ts',
   AirportState: 'airport-state.ts',

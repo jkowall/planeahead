@@ -268,6 +268,19 @@ export const DELETION_SURVIVORS = [
   'deleted_subjects',
 ] as const;
 
+/**
+ * Who asked for a deletion other than the user themself: an operator through Cloudflare Access
+ * (the admin page's one write action, increment 12 ruling AA9). The deletion is otherwise the
+ * same; only its audit row names the operator instead of the user.
+ */
+export interface DeletionActor {
+  readonly type: 'admin';
+  /** The Access assertion's `email` claim. */
+  readonly email: string | null;
+  /** The Access assertion's `sub`. */
+  readonly subject: string;
+}
+
 export interface DeletionDeps {
   readonly env: Env;
   readonly db: Db;
@@ -278,6 +291,8 @@ export interface DeletionDeps {
   readonly waitUntil: (promise: Promise<unknown>) => void;
   readonly requestId: string;
   readonly fetch?: typeof fetch | undefined;
+  /** Absent for the user's own `POST /v1/me/delete`. */
+  readonly actor?: DeletionActor | undefined;
 }
 
 export interface DeletionReport {
@@ -538,8 +553,8 @@ export async function deleteAccount(
       }
       await tx.insert(auditLog).values({
         subjectId: userId,
-        actorType: 'user',
-        actorId: userId,
+        actorType: deps.actor?.type ?? 'user',
+        actorId: deps.actor === undefined ? userId : null,
         action: 'account.deleted',
         targetType: 'user',
         targetId: userId,
@@ -553,6 +568,9 @@ export async function deleteAccount(
           revenuecat: revenueCat,
           deleted_subjects: subjectRows.length + rcRows.length,
           transaction_retries: retries,
+          ...(deps.actor === undefined
+            ? {}
+            : { operator_email: deps.actor.email, operator_subject: deps.actor.subject }),
         },
       });
       await tx.delete(users).where(eq(users.id, userId));

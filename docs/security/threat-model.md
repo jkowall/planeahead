@@ -207,17 +207,20 @@ Threats considered:
   deleted account's session (`tombstone:session:{HMAC}` in `CACHE`, the keyed hash
   `deleted_subjects` stores): the deletion writes one for every session it removes, after its
   transaction commits and before it answers, the housekeeping re-writes any that is missing, and
-  the auth middleware looks it up whenever a request resolved while presenting the cache cookie,
-  answering 401 `account_deleted`. A mutating request never uses the cache. When the tombstone
+  the auth middleware looks it up for EVERY request that resolved its session through the
+  cacheable read, whatever the cache cookie is called (Better Auth also reads it in chunks,
+  `session_data.0`, `.1`, ...; review ruling AA14: one KV read per cacheable GET), answering 401
+  `account_deleted`. A mutating request never uses the cache, and neither does
+  `GET /v1/flights/search` (ruling AA11): it takes creation caps and may spend a provider call
+  through the DesignatorResolver, so it reads the session row like a write. When the tombstone
   cannot be checked (no `DELETED_SUBJECT_HMAC_KEY`, or the KV read fails) the request reads the
   row. Accepted residuals, both bounded: a session revoked WITHOUT an account deletion (this
-  merge's revocation, a sign-out on another device) can still READ for up to 300 s from a cached
-  cookie; and KV's propagation (a write is visible in its own location at once, elsewhere within
-  about 60 s, and a location that read the key recently may serve its cached miss for up to 60 s)
-  lets a deleted account's other device read, or run `GET /v1/flights/search` (which can write a
-  counter under the dead user id; the nightly counter repair removes it), for up to about a minute
-  after the deletion. `auth-anonymous.test.ts`, `session-tombstone.test.ts` and
-  `me.delete.test.ts` pin the behaviour.
+  merge's revocation, a sign-out on another device) can still use the read-only paths for up to
+  300 s from a cached cookie (never a write, never the search); and KV's propagation (a write is
+  visible in its own location at once, elsewhere within about 60 s, and a location that read the
+  key recently may serve its cached miss for up to 60 s) lets a deleted account's other device use
+  the read-only paths for up to about a minute after the deletion. `auth-anonymous.test.ts`,
+  `session-tombstone.test.ts` and `me.delete.test.ts` pin the behaviour.
 - **The `?cookie=` redirect.** The Expo server plugin's after-hook appends the raw `Set-Cookie`
   value as a `cookie` query parameter to any non-http redirect it trusts, which would put the
   session cookie into a URL (logs, referrers, the OS's URL history). PlaneAhead makes the branch
@@ -445,20 +448,25 @@ logs keep request URLs.
 
 The first-party analytics endpoint is anonymous by design (ADR 0005): the app sends its
 install-scoped analytics id, never a session cookie or the install id, so no event can be joined
-to an account on the server. What bounds it: `PUBLIC_RL` per IP, then `EVENTS_RL` (60 batches per
-60 s) keyed by the client IP, never by the analytics id (a value the client chooses and rotates
-cannot key a brake, increment 5's rule); a 256 KiB body limit (413); a strict envelope (a UUID
+to an account on the server. What bounds it: `PUBLIC_RL` per IP, then `EVENTS_RL` (300 batches
+per 60 s, ruling AA4) keyed by the client IP, never by the analytics id (a value the client chooses
+and rotates cannot key a brake, increment 5's rule); a 256 KiB body limit (413); a strict envelope (a UUID
 analytics id, 1 to 100 events) and per-event validation (a name from `PRODUCT_EVENT_NAMES`, an ISO
 time, a flat props bag of at most 16 keys and 1 KiB). Nothing is written to Postgres, only
 Analytics Engine points through the invocation's 200-point budget. Accepted: a forger can write
 plausible events under any analytics id (analytics integrity, not security; no decision reads
 them), and a future client could put personal data in the props bag (the schema allows only
 snake_case keys and short scalars; review what the app sends before adding an event name).
+Residual of keying by IP: carrier-grade NAT puts many installs behind one address, which is why the
+limit is 300 batches a minute and not 60; one abusive install behind a shared address can still
+spend that address's allowance and drop the others' events for the rest of the minute (analytics
+loss only, nothing the app depends on).
 
 ### 3.3 The admin page behind Cloudflare Access (increment 12)
 
-`GET /admin` (and every path below it) is read-only, server-rendered HTML with no script under a
-CSP of `default-src 'none'` plus one hashed stylesheet, `no-store`, `frame-ancestors 'none'`.
+`GET /admin` (and every path below it) is read-only except one action (below), server-rendered
+HTML with no script under a CSP of `default-src 'none'` plus one hashed stylesheet, `no-store`,
+`frame-ancestors 'none'`.
 Cloudflare Access sits in front of the path, and the Worker validates the
 `Cf-Access-Jwt-Assertion` itself (`src/middleware/access.ts`), because a request can reach the
 Worker without passing Access (a misconfigured policy, a route added later, the workers.dev host):
@@ -472,13 +480,26 @@ the Access application) the page answers 403 to everyone. What the page shows is
 (call counts per flight key and per provider, never a user), and the Cloudflare API token behind
 two of its sections is read-only and optional.
 
+The one write action (review ruling AA9) is the operator account deletion for a request that
+reached the support inbox: `GET /admin/accounts/delete?user_id=` shows the account's status and
+creation date (no email), and `POST /admin/accounts/delete` with the id typed a second time runs
+the same `deleteAccount` as `POST /v1/me/delete` (trackers, the Apple revocation, the one
+transaction, the `deleted_subjects` hashes, the KV tombstones), whose one audit row carries actor
+`admin` and the Access assertion's email and subject. Its CSRF defence: the POST must carry an
+`Origin` equal to `API_PUBLIC_URL`'s origin (a cross-site form still carries the Access cookie, so
+Access alone is not enough), no cookie of the API authorises it, and a confirmation that does not
+match the id changes nothing. Only that page's CSP allows `form-action 'self'`. The social
+engineering risk of an emailed request stays a procedure (section 3.4).
+
 ### 3.4 The public account-deletion page (increment 12)
 
 `GET /account/delete` is static: no session, no script, no form, the same strict CSP, cached for
-an hour. It names the in-app path and a support inbox (`SUPPORT_EMAIL`); the out-of-app process it
-describes (a reply to the account's address before anything is deleted) is a person following a
-procedure, because a request by email is also the obvious social-engineering path to deleting
-someone else's account.
+an hour. It names the in-app path and a support inbox (`SUPPORT_EMAIL`, created and tested by the
+runbook before the Play listing); the out-of-app process it describes (a reply to the account's
+address before anything is deleted) is a person following a procedure, because a request by email
+is also the obvious social-engineering path to deleting someone else's account. The operator
+carries it out with the admin page's deletion action (section 3.3), never with SQL, so the
+trackers, the Apple revocation, the hashes and the tombstones happen as they do in the app.
 
 ## 4. Encryption and tokens, in one view
 
@@ -532,9 +553,14 @@ tombstones; then an unsubscribe of any subscription that committed while the del
   (increment 8, ruling O13).
 - **The counter repair never races a request.** A counter is repaired only when it and the user's
   subscriptions have been quiet for 10 minutes, and the UPDATE re-checks the value it read.
-- **The dead-letter replay cannot loop.** A persist message is replayed at most three times
-  (`replayCount` on the body); after that it is parked under `dlq/persist-parked/` with an error
-  log, and the lifecycle rule expires `dlq/` after 30 days.
+- **The dead-letter replay cannot loop.** Only the archives whose sender keeps no copy (the
+  DesignatorResolver, the ProviderBudget) are replayed, at most three times each (`replayCount` on
+  the body); after that one is parked under `dlq/persist-parked/` with an error log. A
+  FlightTracker's archive is never replayed (the tracker re-sends its own copy, so a replay would
+  multiply a poison row's dead-letterings), and the lifecycle rule expires `dlq/` after 30 days.
+- **The ledger is never purged against a bad rollup.** A rollup sum that is not a number fails the
+  message loudly instead of becoming a 0 row, and a day of `provider_calls` is deleted only when
+  its rollup is above zero and within 20 percent of the day's `count(*)` (ruling AA13).
 - **The Cloudflare API token** the Worker may hold (`CF_API_TOKEN`) is scoped to Account Analytics
   Read and Queues Read: it can read call counts and queue depths, nothing else. The deploy token
   lives only in GitHub environment secrets, with the scopes docs/runbooks/first-deploy.md lists.
@@ -575,7 +601,11 @@ Rotation is a re-wrap: each user's DEK is re-wrapped under the new KEK and no ci
    wrapped under V2 at once. V1 stays configured, so every existing value still decrypts.
 3. Wait for the next 03:00 UTC run: the `kek_rewrap` step re-wraps every `user_keys` row whose
    `kek_version` is not the current one, 100 per message with continuations, one audit row per
-   message (`housekeeping.kek_rewrap` with `rewrapped` and `failed`).
+   message (`housekeeping.kek_rewrap` with `rewrapped`, `superseded` and `failed`). Each new wrap
+   is proven before it is written (unwrapped under the new KEK back to the same DEK, byte for
+   byte; a failure leaves the row untouched and counts as failed), and the UPDATE is conditional
+   on the `kek_version` it read, so a redelivered message or a concurrent run can never overwrite
+   a newer wrap (`superseded`).
 4. Check: `select kek_version, count(*) from user_keys group by 1` shows only 2, and the admin
    page's last `housekeeping.kek_rewrap` rows show `failed: 0`. A failed row is logged with its
    user id (`kek_rewrap_failed`): a row wrapped under a version the Worker no longer holds, which a
@@ -619,6 +649,7 @@ root restarts the anonymous per-IP caps.
   `crypto.getRandomValues` call succeeded in the pool during this increment), so a regression of
   that kind passes CI and fails on deploy. The staging smoke test is the backstop; an ESLint rule
   is still a candidate (not built in increment 12).
-- The residual windows of the re-enabled cookie cache (section 1.5): tombstoning revoked sessions
-  too, not only deleted accounts' (`docs/open-decisions.md`).
+- The residual windows of the re-enabled cookie cache (section 1.5): a revoked session keeps the
+  read-only paths for up to 300 s; tombstoning revoked sessions too, not only deleted accounts',
+  would close it (`docs/open-decisions.md`).
 - Share-link and MCP threats (Phases 5 and 6), App Attest and Play Integrity (columns reserved).

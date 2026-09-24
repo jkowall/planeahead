@@ -1,7 +1,7 @@
 /**
  * `POST /v1/events` (increment 12, ruling W9): anonymous, install-scoped, no cookie, the batch
  * shape the increment 9 mobile client already sends, one `PRODUCT_EVENTS` point per accepted
- * event, 202, and `EVENTS_RL` per client IP.
+ * event, 202, and `EVENTS_RL` per client IP (300 batches per 60 s, ruling AA4).
  */
 
 import { createExecutionContext, waitOnExecutionContext } from 'cloudflare:test';
@@ -10,6 +10,7 @@ import { describe, expect, it } from 'vitest';
 import { PRODUCT_EVENTS_MAX_BODY_BYTES } from '@planeahead/shared';
 import { createApp } from '../../src/app';
 import { createV1Routes } from '../../src/routes/v1';
+import wranglerConfig from '../../wrangler.jsonc?raw';
 import { API_ORIGIN, testEnv, uniqueIp } from './helpers/auth';
 
 const ANALYTICS_ID = crypto.randomUUID();
@@ -102,16 +103,76 @@ describe('POST /v1/events', () => {
     expect((await huge.json<{ error: string }>()).error).toBe('payload_too_large');
   });
 
-  it('brakes a client IP on EVENTS_RL (60 batches per 60 s) with 429', async () => {
+  it('declares EVENTS_RL as 300 batches per 60 s in every environment (ruling AA4)', () => {
+    expect(eventsRlLimits()).toEqual([
+      { limit: 300, period: 60 },
+      { limit: 300, period: 60 },
+      { limit: 300, period: 60 },
+    ]);
+  });
+
+  it('brakes a client IP on EVENTS_RL past its configured limit with 429, keyed by the IP only', async () => {
+    // The live binding cannot be driven past 300 from one address: the global PUBLIC_RL (120 per
+    // 10 s per IP) refuses first. So the chain's PUBLIC_RL is stubbed open and EVENTS_RL is a
+    // counter with the configured limit, keyed exactly as the route keys it.
+    const [configured] = eventsRlLimits();
+    const limit = configured?.limit ?? 0;
+    const counts = new Map<string, number>();
+    const keys = new Set<string>();
+    const eventsLimiter = () => ({
+      limit: ({ key }: { key: string }) => {
+        keys.add(key);
+        const next = (counts.get(key) ?? 0) + 1;
+        counts.set(key, next);
+        return Promise.resolve({ success: next <= limit });
+      },
+    });
+    const dataset = { writeDataPoint: () => undefined } as unknown as AnalyticsEngineDataset;
+    const app = createApp({ limiter: () => ({ limit: () => Promise.resolve({ success: true }) }) });
+    app.route('/v1', createV1Routes({ events: { dataset, limiter: eventsLimiter } }));
+    const send = async (ip: string) => {
+      const ctx = createExecutionContext();
+      const response = await app.fetch(
+        new Request(`${API_ORIGIN}/v1/events`, {
+          method: 'POST',
+          headers: { 'content-type': 'application/json', 'cf-connecting-ip': ip },
+          body: mobileBatch([{ name: 'app_open', at: new Date().toISOString() }]),
+        }),
+        testEnv,
+        ctx,
+      );
+      await waitOnExecutionContext(ctx);
+      return response;
+    };
     const ip = uniqueIp();
-    const body = mobileBatch([{ name: 'app_open', at: new Date().toISOString() }]);
     const statuses: number[] = [];
-    for (let i = 0; i < 75; i += 1) {
-      statuses.push((await post(body, ip)).status);
+    for (let i = 0; i < limit + 1; i += 1) {
+      statuses.push((await send(ip)).status);
     }
-    expect(statuses.filter((status) => status === 202).length).toBeLessThanOrEqual(60);
-    expect(statuses).toContain(429);
+
+    expect(statuses.slice(0, limit).every((status) => status === 202)).toBe(true);
+    const refused = await send(ip);
+    expect(statuses.at(-1)).toBe(429);
+    expect(refused.status).toBe(429);
+    expect((await refused.json<{ limiter: string }>()).limiter).toBe('EVENTS_RL');
+    expect([...keys]).toEqual([`events:ip:${ip}`]);
     // Another address is not braked by the first one's count.
-    expect((await post(body, uniqueIp())).status).toBe(202);
+    expect((await send(uniqueIp())).status).toBe(202);
+  });
+
+  it('is braked by the live EVENTS_RL binding in the real Worker', async () => {
+    // One request through the deployed chain: the binding is wired and lets a single batch in.
+    expect(
+      (await post(mobileBatch([{ name: 'app_open', at: new Date().toISOString() }]))).status,
+    ).toBe(202);
   });
 });
+
+/** The `EVENTS_RL` entries of wrangler.jsonc, in order: local, staging, production. */
+function eventsRlLimits(): { limit: number; period: number }[] {
+  return [
+    ...wranglerConfig.matchAll(
+      /"name": "EVENTS_RL", "namespace_id": "\d+", "simple": \{ "limit": (\d+), "period": (\d+) \}/g,
+    ),
+  ].map((match) => ({ limit: Number(match[1]), period: Number(match[2]) }));
+}

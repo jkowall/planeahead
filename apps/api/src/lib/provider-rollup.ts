@@ -17,17 +17,59 @@
  * name, a returned one that did would be skipped, and every per-operation sum (here and on the
  * admin page) excludes them with `BUDGET_DAILY_OPERATION_PATTERN`; the admin page shows them as the
  * object's own daily total. `provider_calls` stays the exact 90-day ledger; this is the durable
- * series past it (housekeeping step 3 purges a day of `provider_calls` only once its rollup row
- * exists).
+ * series past it (housekeeping step 3 purges a day of `provider_calls` only once its rollup rows
+ * exist AND are plausible against the ledger: `isPlausibleRollup`, ruling AA13).
+ *
+ * A sum the SQL API answers that is not a number (null, a missing key, `'n/a'`) is never read as
+ * 0: `rollupRows` throws `RollupSumError`, the message is retried and then dead-lettered with the
+ * ops alert, and no row is written for that day. A zero row would have told step 3 that nothing
+ * was called, and step 3 would have deleted the only exact copy of the day's calls.
  */
 
 import { sql } from 'drizzle-orm';
 import { CALL_RESULTS, PROVIDERS, type Db } from '@planeahead/db';
 import type { EnvironmentName } from '@planeahead/shared';
-import { analyticsSql, numeric, sqlLiteral, type CloudflareApiAccess } from './cloudflare-api';
+import {
+  analyticsSql,
+  sqlLiteral,
+  strictNumeric,
+  type CloudflareApiAccess,
+} from './cloudflare-api';
 
 /** `LIKE` pattern of the ProviderBudget object's own rows, excluded from per-operation sums. */
 export const BUDGET_DAILY_OPERATION_PATTERN = 'budget_daily%';
+
+/**
+ * How far a day's rolled-up calls may sit from the ledger's `count(*)` and still count as the
+ * same day (ruling AA13). Analytics Engine sums are sampled estimates (`_sample_interval`), so an
+ * exact match is not expected; a rollup outside this band is a wrong answer, not sampling noise.
+ */
+export const ROLLUP_PLAUSIBILITY_TOLERANCE = 0.2;
+
+/**
+ * Whether a day's non-budget rollup (`rolledUpCalls`, the sum of `provider_call_daily.calls`)
+ * vouches for the `ledgerCalls` rows `provider_calls` holds for the same (day, provider): more than
+ * zero, and within `ROLLUP_PLAUSIBILITY_TOLERANCE` of the ledger. Housekeeping step 3 deletes a
+ * day's ledger only when this holds.
+ */
+export function isPlausibleRollup(rolledUpCalls: number, ledgerCalls: number): boolean {
+  if (!(rolledUpCalls > 0) || !(ledgerCalls > 0)) {
+    return false;
+  }
+  return Math.abs(rolledUpCalls - ledgerCalls) <= ROLLUP_PLAUSIBILITY_TOLERANCE * ledgerCalls;
+}
+
+/** A sum the SQL API answered that is not a number: the message fails loudly, writing nothing. */
+export class RollupSumError extends Error {
+  override readonly name = 'RollupSumError';
+
+  constructor(
+    readonly operation: string,
+    readonly field: string,
+  ) {
+    super(`the Analytics Engine SQL API answered a non-numeric ${field} for ${operation}`);
+  }
+}
 
 /** How many past UTC days each nightly run rolls up (late points land in the second pass). */
 export const ROLLUP_DAYS_BACK = 2;
@@ -110,7 +152,19 @@ export interface RollupRow {
 const RESULTS: ReadonlySet<string> = new Set(CALL_RESULTS);
 const OPERATION_SHAPE = /^[a-z][a-z0-9_]{0,63}$/;
 
-/** Turns SQL API rows into rows the table accepts; the rest are counted as skipped. */
+function sumOf(entry: Record<string, unknown>, operation: string, field: string): number {
+  const value = strictNumeric(entry[field]);
+  if (value === null || value < 0) {
+    throw new RollupSumError(operation, field);
+  }
+  return Math.round(value);
+}
+
+/**
+ * Turns SQL API rows into rows the table accepts; a row whose operation or result the table cannot
+ * hold (or the ProviderBudget's own `budget_daily`) is counted as skipped. A row it can hold whose
+ * sums are not numbers throws `RollupSumError` (never a 0 row).
+ */
 export function rollupRows(data: readonly Record<string, unknown>[]): {
   rows: RollupRow[];
   skipped: number;
@@ -131,9 +185,9 @@ export function rollupRows(data: readonly Record<string, unknown>[]): {
     rows.push({
       operation,
       result,
-      calls: Math.round(numeric(entry['calls'])),
-      costUnits: Math.round(numeric(entry['cost_units'])),
-      costUsdMicros: Math.round(numeric(entry['cost_usd_micros'])),
+      calls: sumOf(entry, operation, 'calls'),
+      costUnits: sumOf(entry, operation, 'cost_units'),
+      costUsdMicros: sumOf(entry, operation, 'cost_usd_micros'),
     });
   }
   return { rows, skipped };
@@ -146,7 +200,10 @@ export interface ProviderDayRollup {
   readonly skipped: number;
 }
 
-/** Rolls up one provider for one day: one SQL API call, one upsert per (operation, result). */
+/**
+ * Rolls up one provider for one day: one SQL API call, one upsert per (operation, result). Every
+ * row is parsed before the first upsert, so a `RollupSumError` writes nothing for the day.
+ */
 export async function rollupProviderDay(
   db: Db,
   access: CloudflareApiAccess,

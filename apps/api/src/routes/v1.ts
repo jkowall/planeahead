@@ -3,7 +3,10 @@
  * account, flight, sync, events and webhook routes. The provider receivers are anonymous (the
  * limiter skips them) and authenticate by path token; `POST /v1/events` (increment 12) is
  * anonymous by design and brakes on `EVENTS_RL` per client IP. Increment 12 also retired the 501
- * stub that reserved `/v1/events`: every `/v1` path is now real or an ordinary 404.
+ * stub that reserved `/v1/events`. Two `/v1` paths still answer 501 on purpose, reserved for
+ * Phase 1 (src/routes/webhooks.ts): `POST /v1/webhooks/apple` (Sign in with Apple server-to-server
+ * notifications) and `POST /v1/webhooks/revenuecat`; every other `/v1` path is real or an
+ * ordinary 404.
  *
  * `principalLimiter` is mounted HERE, behind the auth middleware, and not in the global chain:
  * in the global rate-limit slot `c.var.user` is unset (ruling E6), so the limiter would skip

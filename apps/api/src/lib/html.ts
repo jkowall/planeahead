@@ -3,8 +3,9 @@
  * admin page (`/admin`, behind Cloudflare Access) and the public account-deletion page
  * (`/account/delete`). No client framework and no script at all: every page is one document with
  * one inline `<style>` element, allowed by its SHA-256 in a strict Content Security Policy
- * (`default-src 'none'`, no script source, no framing, no form target, no base URI), so an
- * injected tag could neither run nor load anything. Every interpolated value goes through `esc`.
+ * (`default-src 'none'`, no script source, no framing, no base URI, and no form target except
+ * `'self'` on the admin page's account-deletion forms), so an injected tag could neither run nor
+ * load anything. Every interpolated value goes through `esc`.
  */
 
 /** Escapes text for an HTML text node or a double-quoted attribute. */
@@ -42,14 +43,21 @@ async function sha256Base64(text: string): Promise<string> {
   return btoa(binary);
 }
 
-/** The CSP for a page whose only active content is the given stylesheet. */
-export async function contentSecurityPolicy(style: string): Promise<string> {
+/**
+ * The CSP for a page whose only active content is the given stylesheet. `formAction` is `'none'`
+ * unless the page carries a form, which may then submit to its own origin only (the admin page's
+ * account deletion, ruling AA9).
+ */
+export async function contentSecurityPolicy(
+  style: string,
+  formAction: "'none'" | "'self'" = "'none'",
+): Promise<string> {
   return [
     "default-src 'none'",
     `style-src 'sha256-${await sha256Base64(style)}'`,
     "img-src 'none'",
     "base-uri 'none'",
-    "form-action 'none'",
+    `form-action ${formAction}`,
     "frame-ancestors 'none'",
   ].join('; ');
 }
@@ -60,6 +68,10 @@ export interface HtmlPage {
   readonly body: string;
   /** `Cache-Control`; `no-store` unless the page is public and static. */
   readonly cacheControl: string;
+  /** The HTTP status; 200 unless given. */
+  readonly status?: number | undefined;
+  /** `'self'` for a page with a form; `'none'` otherwise. */
+  readonly formAction?: "'none'" | "'self'" | undefined;
 }
 
 /** The document and its headers. */
@@ -79,10 +91,10 @@ ${page.body}
 </html>
 `;
   return new Response(html, {
-    status: 200,
+    status: page.status ?? 200,
     headers: {
       'content-type': 'text/html; charset=utf-8',
-      'content-security-policy': await contentSecurityPolicy(page.style),
+      'content-security-policy': await contentSecurityPolicy(page.style, page.formAction),
       'cache-control': page.cacheControl,
       'x-content-type-options': 'nosniff',
       'referrer-policy': 'no-referrer',

@@ -15,6 +15,8 @@ name: Deploy staging
 #     fails with `Queue "<name>" does not exist`; it does not create them.
 #   - The KV namespaces, R2 buckets and the Hyperdrive config created, and their real ids written
 #     into wrangler.jsonc in place of the placeholders.
+#   - The Neon `staging` branch's direct connection string as the environment secret
+#     NEON_STAGING_DIRECT_URL: without it the job fails before deploying (increment 12).
 #   - Worker secrets set out of band with `wrangler secret put --env staging`. This workflow
 #     passes an EMPTY `secrets` input on purpose: wrangler-action's `secrets` runs
 #     `wrangler secret bulk`, which rewrites every secret and creates a new version on every run.
@@ -123,15 +125,17 @@ jobs:
         run: pnpm --filter @planeahead/api exec wrangler deploy --dry-run --env staging
 
       # Migrations run against the Neon DIRECT endpoint, never through Hyperdrive and never
-      # through the -pooler host; packages/db asserts both. Missing secret is a warning, not a
-      # failure: the Worker deploy is still useful before the Neon project exists.
+      # through the -pooler host; packages/db asserts both. A missing secret FAILS, as in
+      # production (increment 12, ruling AA10): the runbook creates the Neon project before the
+      # first staging deploy, and the /health smoke compares a build constant, never the database,
+      # so a deploy over an unmigrated schema would otherwise pass it.
       - name: Migrate the staging database
         env:
           DATABASE_URL: ${{ secrets.NEON_STAGING_DIRECT_URL }}
         run: |
           if [ -z "${DATABASE_URL}" ]; then
-            echo "::warning title=Migrations skipped::NEON_STAGING_DIRECT_URL is not set; the staging schema was not touched"
-            exit 0
+            echo "::error title=Migrations not run::NEON_STAGING_DIRECT_URL is not set; nothing was deployed"
+            exit 1
           fi
           pnpm --filter @planeahead/db run db:migrate
 

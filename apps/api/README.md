@@ -21,7 +21,8 @@ free-tier caps in `usage_counters`, the `/v1` idempotency instance, synchronous 
 [docs/increments/08-flight-routes-and-sync.md](../../docs/increments/08-flight-routes-and-sync.md).
 Increment 12 adds the operational surface: the nightly housekeeping queue and its steps, the
 Analytics Engine rollup, the FlightTracker's `listSubscribers` RPC, the admin page at `/admin`
-behind Cloudflare Access, the public account-deletion page at `/account/delete`,
+behind Cloudflare Access (read-only except the operator account deletion at
+`/admin/accounts/delete`), the public account-deletion page at `/account/delete`,
 `POST /v1/events`, the KV session tombstones that let GETs use Better Auth's cookie cache again,
 the `account_deleted` mapping of a user foreign-key violation, a list of Apple bundle ids, and
 the production deploy workflow; the whole system is described in
@@ -278,7 +279,10 @@ command in order, is [docs/runbooks/first-deploy.md](../../docs/runbooks/first-d
 
 The housekeeping consumer (`max_batch_size` 1, `max_concurrency` 1) runs each message within a
 30 s wall budget, enqueues a continuation when a step has more to do, and writes one `audit_log`
-row (`housekeeping.{step}`) per message; `/admin` shows the last ones.
+row (`housekeeping.{step}`) per message; `/admin` shows the last ones. The steps are independent
+and order-insensitive (Queues delivers in best-effort order), and each is paged so no statement
+nears the app role's 10 s `statement_timeout`: the sync purge moves its horizon 10,000 rows per
+message (migration 0005's `xid` btree), the other purges delete in batches of 5,000.
 
 ### Deploy checklist
 

@@ -149,7 +149,8 @@
         "dead_letter_queue": "planeahead-reconcile-dlq-local",
       },
       // Housekeeping (increment 12): one message per step or page, one at a time, so the nightly
-      // steps run in the order the cron sent them and never hold more than one Neon connection.
+      // steps never hold more than one Neon connection. Delivery order is best effort: the steps
+      // are independent and order-insensitive (src/queues/housekeeping.ts), nothing chains.
       {
         "queue": "planeahead-housekeeping-local",
         "max_batch_size": 1,
@@ -178,11 +179,13 @@
   // Rate limit namespace ids are account-wide counters: two Workers that name the same id share
   // the same budget. Staging traffic must never spend production's allowance, so every
   // environment gets its own block of ids (1001-1003 staging, 2001-2003 production, 3001-3003
-  // local). `period` is hard enumerated to 10 or 60 seconds by the platform.
+  // local). `period` is hard enumerated to 10 or 60 seconds by the platform. EVENTS_RL is 300
+  // batches per 60 s per client IP in every environment (ruling AA4): carrier NAT puts many
+  // installs behind one address, and a batch is one write of a few Analytics Engine points.
   "ratelimits": [
     { "name": "PUBLIC_RL", "namespace_id": "3001", "simple": { "limit": 120, "period": 10 } },
     { "name": "USER_RL", "namespace_id": "3002", "simple": { "limit": 600, "period": 60 } },
-    { "name": "EVENTS_RL", "namespace_id": "3003", "simple": { "limit": 60, "period": 60 } },
+    { "name": "EVENTS_RL", "namespace_id": "3003", "simple": { "limit": 300, "period": 60 } },
   ],
 
   "env": {
@@ -297,7 +300,8 @@
             "dead_letter_queue": "planeahead-reconcile-dlq-staging",
           },
           // Housekeeping (increment 12): one message per step or page, one at a time, so the nightly
-          // steps run in the order the cron sent them and never hold more than one Neon connection.
+          // steps never hold more than one Neon connection. Delivery order is best effort: the steps
+          // are independent and order-insensitive (src/queues/housekeeping.ts), nothing chains.
           {
             "queue": "planeahead-housekeeping-staging",
             "max_batch_size": 1,
@@ -326,7 +330,7 @@
       "ratelimits": [
         { "name": "PUBLIC_RL", "namespace_id": "1001", "simple": { "limit": 120, "period": 10 } },
         { "name": "USER_RL", "namespace_id": "1002", "simple": { "limit": 600, "period": 60 } },
-        { "name": "EVENTS_RL", "namespace_id": "1003", "simple": { "limit": 60, "period": 60 } },
+        { "name": "EVENTS_RL", "namespace_id": "1003", "simple": { "limit": 300, "period": 60 } },
       ],
     },
 
@@ -441,7 +445,8 @@
             "dead_letter_queue": "planeahead-reconcile-dlq",
           },
           // Housekeeping (increment 12): one message per step or page, one at a time, so the nightly
-          // steps run in the order the cron sent them and never hold more than one Neon connection.
+          // steps never hold more than one Neon connection. Delivery order is best effort: the steps
+          // are independent and order-insensitive (src/queues/housekeeping.ts), nothing chains.
           {
             "queue": "planeahead-housekeeping",
             "max_batch_size": 1,
@@ -470,7 +475,7 @@
       "ratelimits": [
         { "name": "PUBLIC_RL", "namespace_id": "2001", "simple": { "limit": 120, "period": 10 } },
         { "name": "USER_RL", "namespace_id": "2002", "simple": { "limit": 600, "period": 60 } },
-        { "name": "EVENTS_RL", "namespace_id": "2003", "simple": { "limit": 60, "period": 60 } },
+        { "name": "EVENTS_RL", "namespace_id": "2003", "simple": { "limit": 300, "period": 60 } },
       ],
     },
   },

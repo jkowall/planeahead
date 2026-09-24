@@ -138,7 +138,8 @@ jobs:
 
       # Migrations before the deploy (forward only; the new Worker expects the new schema), against
       # the Neon DIRECT endpoint, never Hyperdrive and never the -pooler host (packages/db asserts
-      # both). Unlike staging, a missing secret FAILS: production never runs code ahead of its schema.
+      # both). A missing secret FAILS, as in staging: production never runs code ahead of its
+      # schema.
       - name: Migrate the production database
         env:
           DATABASE_URL: ${{ secrets.NEON_PRODUCTION_DIRECT_URL }}

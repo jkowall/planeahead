@@ -18,7 +18,7 @@ import { mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'nod
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
-import { compareHealth, expectedHealth } from '../../scripts/health-smoke.mjs';
+import { DO_FILES, compareHealth, expectedHealth } from '../../scripts/health-smoke.mjs';
 
 const repoRoot = join(import.meta.dirname, '..', '..');
 const workflowsDir = join(repoRoot, '.github', 'workflows');
@@ -86,7 +86,7 @@ describe('deploy-production.yml', () => {
     expect(deploy).toContain("wranglerVersion: '4.135.0'");
     expect(deploy).toContain('command: deploy --env production');
     expect(deploy).toContain("secrets: ''");
-    // A missing migration URL fails the deploy (staging only warns).
+    // A missing migration URL fails the deploy.
     expect(deploy).toMatch(/NEON_PRODUCTION_DIRECT_URL is not set[^\n]*\n\s+exit 1/);
     // Gradual deployments are unsupported with `exports`: the versions path never comes back.
     expect(text).not.toMatch(/versions (upload|deploy)/);
@@ -103,6 +103,11 @@ describe('deploy-production.yml', () => {
     expect(action).toBeGreaterThan(migrate);
     expect(smoke).toBeGreaterThan(action);
     expect(staging).toContain('command: deploy --env staging');
+    // A missing migration URL fails the staging deploy too (ruling AA10): never a warning and a
+    // deploy over an unmigrated schema.
+    expect(staging).toMatch(/NEON_STAGING_DIRECT_URL is not set[^\n]*\n\s+exit 1/);
+    expect(staging).not.toMatch(/Migrations skipped/);
+    expect(staging).not.toMatch(/exit 0/);
   });
 });
 
@@ -118,6 +123,20 @@ describe('scripts/health-smoke.mjs', () => {
       'ProviderBudget',
       'UserInbox',
     ]);
+  });
+
+  it('checks exactly the classes /health reports: DO_FILES names every DO_SCHEMA_VERSIONS key', () => {
+    const health = readFileSync(
+      join(repoRoot, 'apps', 'api', 'src', 'routes', 'health.ts'),
+      'utf8',
+    );
+    const block = /export const DO_SCHEMA_VERSIONS = Object\.freeze\(\{([^}]*)\}\)/.exec(
+      health,
+    )?.[1];
+    expect(block, 'DO_SCHEMA_VERSIONS not found in health.ts').toBeDefined();
+    const keys = [...(block ?? '').matchAll(/^\s*([A-Za-z]+):/gm)].map((match) => match[1]);
+    expect(keys.length).toBeGreaterThan(0);
+    expect([...keys].sort()).toEqual(Object.keys(DO_FILES).sort());
   });
 
   it('passes a /health body that is this build and names every mismatch otherwise', () => {
