@@ -110,7 +110,9 @@ them by the pair `(xid, seq)` strictly below `pg_snapshot_xmin(pg_current_snapsh
      (docs/schema-review.md section 6) bumps the epoch after any restore;
    - it names an xid the cluster has not assigned (`> pg_snapshot_xmax`, a replaced database);
    - its xid is below the purge horizon H. Rows are kept `SYNC_RETENTION_DAYS` (30). The
-     increment 12 purge picks ONE H below the watermark, deletes `where xid < H` from BOTH change
+     nightly purge (built in increment 12, `src/lib/sync-purge.ts`: H is the smallest xid younger
+     than the window across both tables, capped at `pg_snapshot_xmin`, never lowered) picks ONE H
+     below the watermark, deletes `where xid < H` from BOTH change
      tables and records H in the one-row `sync_horizon` table (migration 0003, null until the first
      purge), all in one transaction; the route answers 410 exactly when `cursor.xid < H`, reading H
      AFTER the page so a purge that committed before the page's statement is always seen. That is

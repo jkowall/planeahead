@@ -4,7 +4,8 @@
  * like a hit, an existing tracker is adopted without a call when the origin is known, the object
  * deletes itself 24 hours after resolving (never before every provider call record was sent),
  * an unconfigured provider is a zero-cost error record, and the "generating too much load"
- * error gets one jittered retry before an `overloaded` answer.
+ * error gets one jittered retry before an `overloaded` answer. A search's call records carry the
+ * resolved flight key, and a failed resolution's carry none (increment 12).
  */
 
 import { listDurableObjectIds, runInDurableObject } from 'cloudflare:test';
@@ -64,11 +65,15 @@ describe('DesignatorResolver', () => {
     expect(health.phase).toBe('scheduled');
     expect(health.version).toBe(1);
     expect(await tracker.alarmAt()).toBe(clock + HOUR_MS);
-    // The resolver's own call record went to the persist queue with no flight key.
+    // The resolver's own call record went to the persist queue AFTER resolution, stamped with
+    // the resolved flight key (increment 12), so provider_calls attributes the search to its
+    // flight; the tracker's own ledger is untouched by it (one call, the seed's status).
     const records = ofKind(resolver.outbox.sent, 'provider_call');
     expect(records).toHaveLength(1);
     expect(records[0]?.payload.trigger).toBe('user_search');
+    expect(records[0]?.payload.flightKey).toBe(flight.flightKey);
     expect(records[0]?.origin).toMatch(/^designator_resolver:/);
+    expect((await tracker.stub.getCostLedger()).calls).toBe(0);
     // A later search is answered from the stored resolution.
     const again = await resolver.stub.resolve(request);
     expect(again.cached).toBe(true);
@@ -178,6 +183,12 @@ describe('DesignatorResolver', () => {
       'not_found',
       'not_found',
       'not_found',
+    ]);
+    // A failed resolution still records every attempt, without a key (increment 12).
+    expect(ofKind(resolver.outbox.sent, 'provider_call').map((m) => m.payload.flightKey)).toEqual([
+      undefined,
+      undefined,
+      undefined,
     ]);
   });
 
@@ -486,6 +497,7 @@ describe('DesignatorResolver', () => {
         trigger: 'user_search',
       });
       expect(record.payload.error).toMatch(/^config:AERODATABOX_API_KEY/);
+      expect(record.payload.flightKey).toBeUndefined();
     }
     expect(alerts).toEqual(['provider_config_error']);
   });

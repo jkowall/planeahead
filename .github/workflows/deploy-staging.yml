@@ -10,7 +10,8 @@ name: Deploy staging
 #     Edit, Account Queues Edit, Hyperdrive Edit, Account Settings Read and, for the custom
 #     domain, Zone Workers Routes Write on planeahead.app. The "Edit Cloudflare Workers" template
 #     does NOT include Account Queues Edit and the deploy fails without it.
-#   - The four queues and their dead letter queues created with `wrangler queues create`. Deploy
+#   - Every queue and its dead letter queue created with `wrangler queues create` (six of each
+#     since increment 12 added `housekeeping`; docs/runbooks/first-deploy.md lists them). Deploy
 #     fails with `Queue "<name>" does not exist`; it does not create them.
 #   - The KV namespaces, R2 buckets and the Hyperdrive config created, and their real ids written
 #     into wrangler.jsonc in place of the placeholders.
@@ -34,6 +35,7 @@ on:
       - 'packages/db/**'
       - 'packages/shared/**'
       - 'scripts/gen-migration-hash.mjs'
+      - 'scripts/health-smoke.mjs'
       - 'pnpm-lock.yaml'
       - 'pnpm-workspace.yaml'
       - '.github/workflows/deploy-staging.yml'
@@ -147,18 +149,8 @@ jobs:
 
       # The dry run in ci.yml only parses the config and bundles; it cannot tell whether the KV,
       # R2, queue and Hyperdrive ids exist. This is the step that actually proves the Worker is
-      # alive with its bindings attached.
+      # alive with its bindings attached, and (increment 12) that it is THIS build: /health must
+      # report this commit's migration hash and Durable Object schema versions, the same check
+      # deploy-production.yml makes (scripts/health-smoke.mjs).
       - name: Smoke test /health
-        run: |
-          for attempt in 1 2 3 4 5; do
-            code=$(curl --silent --show-error --max-time 20 --output /tmp/health.json --write-out '%{http_code}' https://api-staging.planeahead.app/health || true)
-            if [ "${code}" = "200" ]; then
-              cat /tmp/health.json
-              echo
-              exit 0
-            fi
-            echo "attempt ${attempt}: /health returned ${code}"
-            sleep 10
-          done
-          echo "::error title=Smoke test failed::api-staging.planeahead.app/health never returned 200"
-          exit 1
+        run: node scripts/health-smoke.mjs https://api-staging.planeahead.app staging

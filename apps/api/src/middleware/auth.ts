@@ -40,15 +40,22 @@
  * instead of `unauthenticated` (sign in again). One indexed read, only on the rare request that
  * presents a dead cookie.
  *
- * Every `/v1` request (and any other mutating one) skips Better Auth's 300 s cookie cache (ruling
- * O5): the signed `session_data` cookie would otherwise keep a deleted account's other device
- * acting for up to five minutes, and "acting" includes GETs that write (`GET /v1/flights/search`
- * takes the creation caps and may seed a tracker under the deleted user id) and GETs that must
- * say `account_deleted` (`GET /v1/sync` would answer an empty page and a fresh cursor, and the
- * device would never wipe). The cost is one indexed `sessions` read per `/v1` request, accepted in
- * Phase 0; the increment 12 alternative (a KV tombstone per deleted session hash, checked only
- * when the cache cookie is present) is recorded in the threat model. `/api/auth/*` is untouched:
- * Better Auth's own `get-session` keeps its cache.
+ * The cookie cache (increment 12, ruling W2 step 8, replacing increment 8's ruling O5). Every
+ * MUTATING request skips Better Auth's 300 s cookie cache and reads the `sessions` row, so a write
+ * never acts for a revoked or deleted session. GET and HEAD may be answered from the signed
+ * `session_data` cookie again (increment 8 had disabled that for every `/v1` request, at one
+ * indexed read each): when such a request resolves while presenting the cache cookie, its session
+ * token's keyed hash is looked up as a KV tombstone (src/lib/session-tombstone.ts), which the
+ * account deletion writes for every session it removes, and a hit answers 401 `account_deleted`.
+ * So a deleted account's other device is still told `account_deleted` on its next GET (and
+ * `GET /v1/flights/search`, which takes caps and may seed a tracker, cannot write under a deleted
+ * user id) without a database read per GET. When the tombstone cannot be checked (no
+ * `DELETED_SUBJECT_HMAC_KEY`, or the KV read fails) the request reads the row as before. What the
+ * cache still allows, and the threat model records: a session revoked WITHOUT an account deletion
+ * (sign-out elsewhere, the anonymous merge's revocation) can read, never write, until its cache
+ * cookie expires (at most 300 s); and KV's propagation (about 60 s) bounds how soon another
+ * location sees a new tombstone. `/api/auth/*` is untouched: Better Auth's own `get-session`
+ * keeps its cache.
  */
 
 import { and, eq, gt, sql } from 'drizzle-orm';
@@ -60,25 +67,39 @@ import { authRuntime } from '../auth/runtime';
 import type { AuthScope, AuthenticatedUser } from '../auth/user';
 import type { AppBindings } from '../env';
 import { MIN_SECRET_LENGTH, deletedSubjectHash } from '../lib/hmac';
+import { lookupSessionTombstone } from '../lib/session-tombstone';
 import { errorFields } from '../observability/log';
 
 export { AUTH_PATH_PREFIX };
 /** Both cookie names Better Auth can use carry this suffix (`__Secure-` prefixed over https). */
 const SESSION_COOKIE_MARKER = 'session_token';
+/** Better Auth's cookie cache (`session_data`, `__Secure-` prefixed over https). */
+const CACHE_COOKIE_MARKER = 'session_data=';
 
-const MUTATING_METHODS: ReadonlySet<string> = new Set(['POST', 'PUT', 'PATCH', 'DELETE']);
+/** The methods that may be answered from the cookie cache (increment 12); everything else reads. */
+const CACHEABLE_METHODS: ReadonlySet<string> = new Set(['GET', 'HEAD']);
 
-const V1_PATH = '/v1';
-
-/** Whether this request must read the session row itself rather than the cookie cache. */
-export function bypassesCookieCache(method: string, path: string): boolean {
-  return MUTATING_METHODS.has(method) || path === V1_PATH || path.startsWith(`${V1_PATH}/`);
+/**
+ * Whether this request must read the session row itself rather than the cookie cache: every
+ * method but GET and HEAD. The path no longer matters (increment 8 bypassed the cache for every
+ * `/v1` request; increment 12 replaced that with the tombstone check below). `path` is kept in the
+ * signature for the callers and tests that pass it.
+ */
+export function bypassesCookieCache(method: string, path?: string): boolean {
+  void path;
+  return !CACHEABLE_METHODS.has(method);
 }
 
 /** Whether the request presents anything that could resolve to a session. */
 export function presentsSession(headers: Headers): boolean {
   const cookie = headers.get('cookie');
   return cookie !== null && cookie.includes(SESSION_COOKIE_MARKER);
+}
+
+/** Whether the request presents Better Auth's cookie cache, so a session may not have been read. */
+export function presentsCookieCache(headers: Headers): boolean {
+  const cookie = headers.get('cookie');
+  return cookie !== null && cookie.includes(CACHE_COOKIE_MARKER);
 }
 
 /**
@@ -137,6 +158,29 @@ async function presentedSessionWasDeleted(c: Context<AppBindings>): Promise<bool
   }
 }
 
+/**
+ * The tombstone check for a session that may have come from the cookie cache: `present` means the
+ * account was deleted, `absent` that the cached session stands, `unknown` that the check could not
+ * be made (no HMAC key, no token, a KV failure) and the row must be read instead.
+ */
+async function cachedSessionTombstone(
+  c: Context<AppBindings>,
+): Promise<'present' | 'absent' | 'unknown'> {
+  const key = c.env.DELETED_SUBJECT_HMAC_KEY;
+  const token = sessionTokenFromCookie(c.req.header('cookie') ?? null);
+  if (key === undefined || key.length < MIN_SECRET_LENGTH || token === null) {
+    return 'unknown';
+  }
+  const hash = await deletedSubjectHash(key, 'session', token);
+  return lookupSessionTombstone(c.env.CACHE, hash, authRuntime(c).log);
+}
+
+/** Whether the tombstone check is possible at all; without it the cache is never used. */
+function tombstonesCheckable(c: Context<AppBindings>): boolean {
+  const key = c.env.DELETED_SUBJECT_HMAC_KEY;
+  return key !== undefined && key.length >= MIN_SECRET_LENGTH;
+}
+
 export function authMiddleware(): MiddlewareHandler<AppBindings> {
   return createMiddleware<AppBindings>(async (c, next) => {
     c.set('user', null);
@@ -147,12 +191,29 @@ export function authMiddleware(): MiddlewareHandler<AppBindings> {
     }
 
     const runtime = authRuntime(c);
-    const session = await runtime.auth.api.getSession({
-      headers: c.req.raw.headers,
-      query: bypassesCookieCache(c.req.method, path)
-        ? { disableRefresh: true, disableCookieCache: true }
-        : { disableRefresh: true },
-    });
+    const readRow = (): ReturnType<typeof runtime.auth.api.getSession> =>
+      runtime.auth.api.getSession({
+        headers: c.req.raw.headers,
+        query: { disableRefresh: true, disableCookieCache: true },
+      });
+    const cacheable = !bypassesCookieCache(c.req.method, path) && tombstonesCheckable(c);
+    let session = cacheable
+      ? await runtime.auth.api.getSession({
+          headers: c.req.raw.headers,
+          query: { disableRefresh: true },
+        })
+      : await readRow();
+    if (session !== null && cacheable && presentsCookieCache(c.req.raw.headers)) {
+      const tombstone = await cachedSessionTombstone(c);
+      if (tombstone === 'present') {
+        c.set('accountDeleted', true);
+        await next();
+        return;
+      }
+      if (tombstone === 'unknown') {
+        session = await readRow();
+      }
+    }
     if (session === null) {
       if (await presentedSessionWasDeleted(c)) {
         c.set('accountDeleted', true);

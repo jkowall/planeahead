@@ -5,15 +5,17 @@
  * wrangler.jsonc, and that file is committed so CI and editors agree without running wrangler.
  * Regenerate it with `pnpm --filter @planeahead/api run cf-typegen` after any binding change.
  *
- * Secrets are declared here rather than generated. `wrangler types` reads `.dev.vars` for secret
- * names, `.dev.vars` is gitignored, and a generated type that depends on an untracked file drifts
- * between a developer's machine and CI. Every secret is optional in the type: a Worker that is
- * missing one must fail with its own message, not with a type error that never runs.
+ * Secrets are declared here as well as generated. `wrangler types` reads the `secrets.required`
+ * blocks since increment 8 (and `.dev.vars`, which is gitignored), and the committed file was
+ * regenerated in increment 12 with them; this interface stays the documented source, and every
+ * secret is optional in it: a Worker that is missing one must fail with its own message, not with
+ * a type error that never runs.
  */
 
 import type { EnvironmentName } from '@planeahead/shared';
 import type { AuthRuntime } from './auth/runtime';
 import type { AuthenticatedUser } from './auth/user';
+import type { AccessIdentity } from './middleware/access';
 import type { IdempotencyContext } from './middleware/idempotency';
 
 /**
@@ -96,6 +98,17 @@ export interface WorkerSecrets {
   readonly IP_SALT_SECRET?: string;
 
   /**
+   * Cloudflare API token for the operational surface (increment 12), OPTIONAL: Account > Account
+   * Analytics > Read (the Analytics Engine SQL API: the nightly provider-call rollup and the admin
+   * page's figures for today) and Account > Queues > Read (the admin page's queue depths), with
+   * `CF_ACCOUNT_ID` (a var). Unset means the rollup records a skipped run and the admin page shows
+   * those figures as unavailable; nothing else depends on it, so it is not in
+   * `WORKER_SECRET_NAMES` (which wrangler requires before a first deploy) but in
+   * `OPTIONAL_SECRET_NAMES`.
+   */
+  readonly CF_API_TOKEN?: string;
+
+  /**
    * Test seams. Unset in every deployed environment, where the code falls back to the real
    * hosts; the Workers suite points them at `test/fake-providers.ts`.
    */
@@ -131,6 +144,14 @@ export const WORKER_SECRET_NAMES = [
   'WEBHOOK_TOKEN_AEROAPI',
   'DELETED_SUBJECT_HMAC_KEY',
   'IP_SALT_SECRET',
+] as const satisfies readonly (keyof WorkerSecrets)[];
+
+/**
+ * Secrets the Worker reads when present and does without otherwise (increment 12). Listed in
+ * `.dev.vars.example` like the required ones; never in `secrets.required`.
+ */
+export const OPTIONAL_SECRET_NAMES = [
+  'CF_API_TOKEN',
 ] as const satisfies readonly (keyof WorkerSecrets)[];
 
 /** Bindings that redirect an external endpoint at a test double. Never set in a deployment. */
@@ -177,6 +198,13 @@ export interface WorkerSettings {
    * subscription.
    */
   readonly REVENUECAT_DELETE_ENABLED?: string;
+  /**
+   * The bundle ids a native Apple identity token may name as `aud`, comma separated (increment
+   * 12). Unset means the environment's variants as the association files name them
+   * (`BUNDLE_IDS_BY_ENVIRONMENT`: production and preview against production, the development
+   * build against staging), plus `APPLE_BUNDLE_ID`.
+   */
+  readonly APPLE_BUNDLE_IDS?: string;
 }
 
 export const WORKER_SETTING_NAMES = [
@@ -184,6 +212,7 @@ export const WORKER_SETTING_NAMES = [
   'ADB_PLAN',
   'ADB_ALERTS_ENABLED',
   'REVENUECAT_DELETE_ENABLED',
+  'APPLE_BUNDLE_IDS',
 ] as const satisfies readonly (keyof WorkerSettings)[];
 
 export type Env = Cloudflare.Env & WorkerSecrets & WorkerSettings;
@@ -215,6 +244,11 @@ export interface Variables {
    * store, which `idempotencyGate()` reserves against once the route has validated the body.
    */
   idempotency: IdempotencyContext | undefined;
+  /**
+   * Set by the Cloudflare Access middleware on `/admin` (increment 12) once the
+   * `Cf-Access-Jwt-Assertion` verified: the Access subject and email. Unset everywhere else.
+   */
+  accessIdentity: AccessIdentity | undefined;
 }
 
 /**

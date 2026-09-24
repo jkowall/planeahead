@@ -1,0 +1,167 @@
+name: Deploy production
+
+# Production (planeahead-api-production at api.planeahead.app) deploys from a release tag, and only
+# after a person confirms it.
+#
+# The gate. A GitHub environment with required reviewers is the natural approval step, but on a
+# private repository it needs GitHub Pro (or a paid organisation plan), which this repository does
+# not have yet; without it `environment: production` records the deployment and blocks nothing. So
+# until then the gate is a typed confirmation on a manual run:
+#
+#   1. Push a tag `v*` (for example v0.0.1). That run VERIFIES the tag: the migration hash, the
+#      checks, the Worker suite and the production dry run. It never deploys.
+#   2. Run this workflow by hand ("Run workflow") on that TAG, typing `deploy <tag>` (for example
+#      `deploy v0.0.1`) into `confirm`. That run verifies again, then migrates the production Neon
+#      database, deploys, and smokes /health. Any other ref or text skips the deploy job.
+#
+# Once the repository has GitHub Pro: add required reviewers to the `production` environment
+# (Settings > Environments) and the tag run can deploy on approval; the runbook
+# (docs/runbooks/first-deploy.md) says which condition below to relax.
+#
+# The deploy token (CLOUDFLARE_API_TOKEN, this repository's `production` environment secret) needs
+# Workers Scripts Edit, Workers KV Storage Edit, Workers R2 Storage Edit, Account Queues Edit,
+# Hyperdrive Edit, Account Settings Read, and Zone Workers Routes Write for planeahead.app (the
+# custom domain). Plain `wrangler deploy` only: gradual deployments (`versions upload` /
+# `versions deploy`) are not supported for a Worker that declares `exports`, and PlaneAhead carries
+# five Durable Object classes for good, so that path is removed for good. Worker secrets are set
+# out of band with `wrangler secret put --env production`; the `secrets` input below stays EMPTY
+# (it would run `wrangler secret bulk`, rewriting every secret on every deploy).
+
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+    inputs:
+      confirm:
+        description: 'Type "deploy <tag>" (for example "deploy v0.0.1") to deploy the selected tag'
+        required: true
+        type: string
+
+concurrency:
+  group: deploy-production
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    services:
+      postgres:
+        image: postgres:18
+        env:
+          POSTGRES_USER: planeahead
+          POSTGRES_PASSWORD: planeahead
+          POSTGRES_DB: planeahead_admin
+          TZ: UTC
+          PGTZ: UTC
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+    env:
+      TEST_DATABASE_URL: postgres://planeahead:planeahead@localhost:5432/planeahead_admin
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: pnpm/action-setup@v4
+
+      - uses: actions/setup-node@v6
+        with:
+          node-version-file: .node-version
+          cache: pnpm
+
+      - run: pnpm install --frozen-lockfile
+
+      # First after install, for the reason deploy-staging.yml gives: the api scripts regenerate
+      # the constant, and a check after them compares the file they just wrote.
+      - name: Check the generated migration hash is current
+        run: node scripts/gen-migration-hash.mjs --check
+
+      - name: Typecheck and lint
+        run: pnpm turbo run typecheck lint
+
+      - name: Test the Worker
+        shell: bash
+        run: |
+          pnpm turbo run test --filter=@planeahead/api 2>&1 | tee test-workers.log
+          grep -q 'database source: shell' test-workers.log || {
+            echo '::error title=Wrong database::the Workers suite did not use the postgres:18 service container (TEST_DATABASE_URL did not reach vitest)'
+            exit 1
+          }
+
+      - name: Validate the Worker config and bundle
+        run: pnpm --filter @planeahead/api exec wrangler deploy --dry-run --env production
+
+      - name: Say what deploys this tag
+        if: github.event_name == 'push'
+        run: |
+          {
+            echo "### ${GITHUB_REF_NAME} verified"
+            echo
+            echo "Nothing was deployed. To deploy it, run **Deploy production** by hand on the tag"
+            echo "\`${GITHUB_REF_NAME}\` with confirm set to \`deploy ${GITHUB_REF_NAME}\`."
+          } >> "${GITHUB_STEP_SUMMARY}"
+
+  deploy:
+    needs: verify
+    # The gate (see the header): a manual run, on a v* tag, with the tag typed back.
+    if: >-
+      github.event_name == 'workflow_dispatch' &&
+      startsWith(github.ref, 'refs/tags/v') &&
+      inputs.confirm == format('deploy {0}', github.ref_name)
+    runs-on: ubuntu-latest
+    environment:
+      name: production
+      url: https://api.planeahead.app/health
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: pnpm/action-setup@v4
+
+      - uses: actions/setup-node@v6
+        with:
+          node-version-file: .node-version
+          cache: pnpm
+
+      - run: pnpm install --frozen-lockfile
+
+      # Again first: the deployed Worker reports this constant, and the smoke compares it.
+      - name: Check the generated migration hash is current
+        run: node scripts/gen-migration-hash.mjs --check
+
+      # Migrations before the deploy (forward only; the new Worker expects the new schema), against
+      # the Neon DIRECT endpoint, never Hyperdrive and never the -pooler host (packages/db asserts
+      # both). Unlike staging, a missing secret FAILS: production never runs code ahead of its schema.
+      - name: Migrate the production database
+        env:
+          DATABASE_URL: ${{ secrets.NEON_PRODUCTION_DIRECT_URL }}
+        run: |
+          if [ -z "${DATABASE_URL}" ]; then
+            echo "::error title=Migrations not run::NEON_PRODUCTION_DIRECT_URL is not set; nothing was deployed"
+            exit 1
+          fi
+          pnpm --filter @planeahead/db run db:migrate
+
+      - name: Deploy the Worker
+        uses: cloudflare/wrangler-action@v4
+        with:
+          apiToken: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          accountId: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          wranglerVersion: '4.135.0'
+          workingDirectory: apps/api
+          packageManager: pnpm
+          command: deploy --env production
+          # Deliberately empty. See the note at the top of this file.
+          secrets: ''
+
+      # /health must answer with THIS build's migration hash and Durable Object schema versions,
+      # not merely 200 (a failed upload leaves the previous version serving a healthy 200).
+      - name: Smoke test /health
+        run: node scripts/health-smoke.mjs https://api.planeahead.app production

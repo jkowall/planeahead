@@ -24,7 +24,9 @@
  *      for 31 days so another device is told `account_deleted`), the `audit_log` row, and finally
  *      `delete from users`. The sessions are among the rows deleted, which revokes them. A
  *      deadlock or serialization failure runs the whole transaction again (below).
- *   5. AFTER the commit, unsubscribe every subscription step 4 deleted that step 2 did not
+ *   5. AFTER the commit, write a KV tombstone per removed session (increment 12: the auth
+ *      middleware answers a cookie-cached GET of a deleted account's session from it), then
+ *      unsubscribe every subscription step 4 deleted that step 2 did not
  *      (ruling O14): a mutating request of another device still authenticates until step 4
  *      commits, so a subscribe can commit between the read and the delete; step 4's
  *      `delete ... returning` names it, and it is undone here, best effort like step 2.
@@ -101,6 +103,7 @@ import { errorFields, type Logger } from '../observability/log';
 import { callWithDeadline } from './deadline';
 import { deletedSubjectHash, requireSecret, type DeletedSubjectKind } from './hmac';
 import { pgCode } from './pg-error';
+import { writeSessionTombstones } from './session-tombstone';
 import { unsubscribeTracker, type TrackerFor } from './trackers';
 
 /** Step 4 runs at most this many times (module comment: why step 4 retries). */
@@ -288,6 +291,8 @@ export interface DeletionReport {
   readonly apple: AppleRevokeOutcome;
   readonly revenueCat: RevenueCatDeletion;
   readonly deletedSubjects: number;
+  /** KV session tombstones written after the commit (increment 12); failures are redone nightly. */
+  readonly sessionTombstones: number;
 }
 
 interface AccountRead {
@@ -559,6 +564,24 @@ export async function deleteAccount(
     return null;
   }
 
+  // Increment 12: one KV tombstone per session this deletion removed, written after the commit
+  // (never before: a tombstone for a deletion that rolled back would wipe a live account's store)
+  // and before the route answers, so another device whose GET the 300 s cookie cache would answer
+  // is told `account_deleted` (src/lib/session-tombstone.ts). A failed write is logged; the
+  // housekeeping cron re-writes every tombstone missing for an unexpired `deleted_subjects` row.
+  const tombstoneNow = Date.now();
+  const tombstones = await writeSessionTombstones(
+    deps.env.CACHE,
+    subjectRows
+      .filter((row) => row.providerSubjectHash.startsWith('session:'))
+      .map((row) => ({
+        hash: row.providerSubjectHash,
+        expiresAtMs: tombstoneNow + DELETED_SESSION_RETENTION_DAYS * 86_400_000,
+      })),
+    tombstoneNow,
+    deps.log,
+  );
+
   // Step 5: a live subscription that committed after step 1 (another device's subscribe while
   // this deletion ran) still sits in its tracker; step 4 named it.
   const late = deletedSubscriptions.filter((row) => row.live && !unsubscribed.has(row.id));
@@ -582,5 +605,6 @@ export async function deleteAccount(
     apple,
     revenueCat,
     deletedSubjects: subjectRows.length + rcRows.length,
+    sessionTombstones: tombstones.written,
   };
 }

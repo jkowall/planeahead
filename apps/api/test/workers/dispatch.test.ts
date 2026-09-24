@@ -31,6 +31,31 @@ function capture(): { lines: LogLine[]; log: ReturnType<typeof createLogger> } {
   return { lines, log: createLogger({}, (line) => lines.push(line)) };
 }
 
+/**
+ * The Worker's env with capturing queue producers: the daily cron plans onto the housekeeping
+ * queue, and a real send would hand the whole shared test database to the housekeeping consumer
+ * running in the pool (crons.test.ts drives the steps with their test seams instead).
+ */
+function envWithCapturedQueues(): { env: typeof env; sent: unknown[] } {
+  const sent: unknown[] = [];
+  const sink = {
+    send: (body: unknown) => {
+      sent.push(body);
+      return Promise.resolve();
+    },
+    sendBatch: (messages: Iterable<MessageSendRequest<unknown>>) => {
+      for (const message of messages) {
+        sent.push(message.body);
+      }
+      return Promise.resolve();
+    },
+  };
+  return {
+    env: { ...env, HOUSEKEEPING_QUEUE: sink, RECONCILE_QUEUE: sink } as unknown as typeof env,
+    sent,
+  };
+}
+
 async function runQueue(queueName: string, bodies: readonly unknown[]) {
   const batch = createMessageBatch(
     queueName,
@@ -56,6 +81,9 @@ describe('parseQueueName', () => {
     ['planeahead-persist-dlq-staging', 'persist', true],
     ['planeahead-provider-events-dlq-production', 'provider-events', true],
     ['planeahead-reconcile-dlq', 'reconcile', true],
+    ['planeahead-housekeeping-local', 'housekeeping', false],
+    ['planeahead-housekeeping', 'housekeeping', false],
+    ['planeahead-housekeeping-dlq-staging', 'housekeeping', true],
     ['something-else', 'unknown', false],
   ])('routes %s', (queueName, kind, deadLetter) => {
     expect(parseQueueName(queueName)).toEqual({ kind, deadLetter });
@@ -147,14 +175,15 @@ describe('consumeBatch', () => {
 
 describe('runCron()', () => {
   it.each([
-    [RECONCILE_CRON, 'cron_reconcile'],
-    [HOUSEKEEPING_CRON, 'cron_housekeeping'],
-  ])('routes %s', async (cron, event) => {
+    [RECONCILE_CRON, ['cron_reconcile']],
+    [HOUSEKEEPING_CRON, ['cron_housekeeping_planned', 'cron_ae_rollup_planned']],
+  ])('routes %s', async (cron, events) => {
     const { lines, log } = capture();
+    const captured = envWithCapturedQueues();
 
-    await runCron(cron, { env, ctx: createExecutionContext(), log });
+    await runCron(cron, { env: captured.env, ctx: createExecutionContext(), log });
 
-    expect(lines.map((line) => line.event)).toEqual([event]);
+    expect(lines.map((line) => line.event)).toEqual(events);
   });
 
   it('logs rather than throws for an expression nothing handles', async () => {
@@ -238,9 +267,12 @@ describe('scheduled()', () => {
       noRetry: () => undefined,
     } as unknown as ScheduledController;
 
-    const returned = scheduled(controller, env, createExecutionContext());
+    const captured = envWithCapturedQueues();
+    const returned = scheduled(controller, captured.env, createExecutionContext());
 
     expect(returned).toBeInstanceOf(Promise);
     await expect(returned).resolves.toBeUndefined();
+    // Planned, not done: nine housekeeping steps and two rollup days, nothing run inline.
+    expect(captured.sent).toHaveLength(11);
   });
 });

@@ -46,27 +46,28 @@ function postInit(key?: string, installId: string | null = 'chain-install-0001')
 }
 
 describe('the deployed chain answers the shape it documents', () => {
-  it('answers 501, not 500, for a mutating request carrying an Idempotency-Key', async () => {
+  it('answers 400, not 500, for an anonymous mutating request carrying an Idempotency-Key', async () => {
     // The regression: a keyed POST is the request shape the mobile outbox retries aggressively.
-    // Increment 8 took `/v1/flights`; `/v1/events` is the stub that still answers.
+    // `/v1/events` (increment 12, formerly the 501 stub) is anonymous, so the keyed request passes
+    // the chain and the /v1 idempotency instance and reaches the route's own validator, which
+    // refuses this body with the envelope.
     const response = await exports.default.fetch(
       'https://api.planeahead.test/v1/events',
       postInit('chain-key-00000001'),
     );
-    const body = await response.json<{ error: string; increment: string }>();
+    const body = await response.json<{ error: string }>();
 
-    expect(response.status).toBe(501);
-    expect(body.error).toBe('not_implemented');
-    expect(body.increment).toContain('/v1/events');
+    expect(response.status).toBe(400);
+    expect(body.error).toBe('validation_failed');
   });
 
-  it('answers the same 501 without the header, so the header is not what routes', async () => {
+  it('answers the same 400 without the header, so the header is not what routes', async () => {
     const response = await exports.default.fetch(
       'https://api.planeahead.test/v1/events',
       postInit(),
     );
 
-    expect(response.status).toBe(501);
+    expect(response.status).toBe(400);
   });
 
   it('answers 401, not 500, for a keyed POST /v1/flights without a session', async () => {

@@ -82,15 +82,51 @@ export interface AppleIdentityClaims {
   readonly expiresAt: number;
   /** `jti` when Apple sets one (it does not today). */
   readonly jti: string | null;
+  /**
+   * The token's `aud`: which of the accepted bundle ids the app that signed in carries. The code
+   * exchange must name the same `client_id` (increment 12).
+   */
+  readonly audience: string;
 }
 
 export interface AppleVerifyOptions {
   readonly getKey: JWTVerifyGetKey;
-  /** The iOS bundle id. */
-  readonly audience: string;
+  /**
+   * The accepted bundle ids (increment 12: a list, `appleBundleIds`, so the preview variant signs
+   * in against production and the development variant against staging). A single id is accepted
+   * too.
+   */
+  readonly audience: string | readonly string[];
   /** The nonce the app generated; the token must carry its lowercase SHA-256 hex. */
   readonly rawNonce: string;
   readonly currentDate?: Date;
+}
+
+const BUNDLE_ID_SHAPE = /^[A-Za-z][A-Za-z0-9-]*(\.[A-Za-z][A-Za-z0-9-]*)+$/;
+
+/**
+ * The bundle ids a native Apple identity token may name as `aud` (increment 12, increment 9's
+ * open question): `APPLE_BUNDLE_IDS`, a comma-separated var, else the environment's variants as
+ * the association files name them (`BUNDLE_IDS_BY_ENVIRONMENT`: production and preview against
+ * production, the development build against staging), plus `APPLE_BUNDLE_ID` (the primary app,
+ * which also signs the revocation) so a deployment that sets only the secret keeps working.
+ * Malformed entries are dropped. The order is the list's, the primary last when it was not in it.
+ */
+export function appleBundleIds(
+  listVar: string | undefined,
+  defaults: readonly string[],
+  primary: string | undefined,
+): string[] {
+  const listed =
+    listVar === undefined || listVar.trim() === ''
+      ? [...defaults]
+      : listVar
+          .split(',')
+          .map((entry) => entry.trim())
+          .filter((entry) => BUNDLE_ID_SHAPE.test(entry));
+  const primaryId = primary?.trim() ?? '';
+  const all = primaryId === '' ? listed : [...listed, primaryId];
+  return [...new Set(all)];
 }
 
 export function appleJwks(url: string = APPLE_JWKS_DEFAULT_URL): JWTVerifyGetKey {
@@ -111,7 +147,7 @@ export async function verifyAppleIdentityToken(
     const verified = await jwtVerify(token, options.getKey, {
       algorithms: ['RS256'],
       issuer: APPLE_ISSUER,
-      audience: options.audience,
+      audience: typeof options.audience === 'string' ? options.audience : [...options.audience],
       maxTokenAge: APPLE_MAX_TOKEN_AGE,
       ...(options.currentDate === undefined ? {} : { currentDate: options.currentDate }),
     });
@@ -141,9 +177,19 @@ export async function verifyAppleIdentityToken(
   if (expiresAt === null) {
     throw new AppleTokenError('invalid_token', 'the identity token has no exp');
   }
+  const accepted = typeof options.audience === 'string' ? [options.audience] : options.audience;
+  const audiences = Array.isArray(payload.aud) ? payload.aud : [payload.aud];
+  const audience = audiences.find(
+    (value): value is string => typeof value === 'string' && accepted.includes(value),
+  );
+  if (audience === undefined) {
+    // jose already refused a token naming none of them; kept so the type is a string.
+    throw new AppleTokenError('invalid_token', 'the identity token names no accepted bundle id');
+  }
   const rawEmail = payload['email'];
   const email = typeof rawEmail === 'string' && rawEmail !== '' ? rawEmail.toLowerCase() : null;
   return {
+    audience,
     sub,
     email,
     emailVerified: parseBoolClaim(payload['email_verified']),

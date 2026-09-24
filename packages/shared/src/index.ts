@@ -14,6 +14,7 @@ export * from './cadence';
 export * from './carriers';
 export * from './cost';
 export * from './errors';
+export * from './events';
 export * from './flight-key';
 export * from './flight-status';
 export * from './ids';

@@ -30,10 +30,12 @@
  *      so this one call is never repeated by the tracker's first alarm. Seed is idempotent.
  *
  * The provider call records leave through this object's own outbox to the `persist` queue (ADR
- * 0007: never Postgres). The expiry alarm sends whatever is still unsent and `deleteAll()`s ONLY
- * when nothing is left unsent (ruling L2): while rows remain it re-arms hourly, bounded by
- * nothing but the rows going, and raises the ops alert once after the sixth failed attempt. A
- * send that fails at resolve time arms an earlier retry than the 24 h expiry.
+ * 0007: never Postgres), appended after resolution and stamped with the resolved flight key
+ * (increment 12), so a search's spend is attributed to its flight; a search that resolves nothing
+ * records its calls without one. The expiry alarm sends whatever is still unsent and
+ * `deleteAll()`s ONLY when nothing is left unsent (ruling L2): while rows remain it re-arms
+ * hourly, bounded by nothing but the rows going, and raises the ops alert once after the sixth
+ * failed attempt. A send that fails at resolve time arms an earlier retry than the 24 h expiry.
  *
  * The Worker-side half (`resolveDesignator`, KV in front of the object and the retry on the
  * account-level "generating too much load" error) is `src/search/resolve.ts`.
@@ -398,6 +400,14 @@ export class DesignatorResolver extends DurableObject<Env> {
 
     const key = canonicalizeFromProvider(chosen);
     const status: FlightStatus = { ...chosen, key };
+    // Increment 12 (increment 10's open question): the search's call records are appended to the
+    // outbox only now, after resolution, so once the key is known they carry it and
+    // `provider_calls.flight_key` attributes the search spend to its flight (the admin page's
+    // per-flight view needs no join by request id). Every attempt of this search is stamped,
+    // the plus-or-minus-one-day misses included: they were spent resolving this flight. A search
+    // that resolves nothing (the branch above) records its calls without a key. The records are
+    // cost attribution only; no per-flight budget reads them (the tracker's ledger is its own).
+    records = records.map((record) => ({ ...record, flightKey: key }));
 
     if (flightIsOver(CADENCE_A2, status, after)) {
       // Ruling L9: the cadence has nothing left to schedule, whatever the status says, so a

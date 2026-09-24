@@ -81,13 +81,13 @@ describe('GET /health', () => {
     expect(id).toMatch(/^[0-9a-f-]{36}$/);
   });
 
-  it('answers a not-implemented stub for a route a later increment owns', async () => {
+  it('has no not-implemented stub left under /v1 (increment 12 took POST /v1/events)', async () => {
+    // GET is not a route; POST is the real endpoint (events.test.ts).
     const response = await exports.default.fetch('https://api.planeahead.test/v1/events');
-    const body = await response.json<{ error: string; increment: string }>();
+    const body = await response.json<{ error: string }>();
 
-    expect(response.status).toBe(501);
-    expect(body.error).toBe('not_implemented');
-    expect(body.increment).toContain('/v1/events');
+    expect(response.status).toBe(404);
+    expect(body.error).toBe('not_found');
   });
 
   it('answers 404 with a request id for an unknown path', async () => {

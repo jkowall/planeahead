@@ -133,7 +133,9 @@ We will make the alarm handler idempotent per cadence slot with these mechanisms
    object stays alive while rows remain, and the R2 copy under `dlq/persist/` remains the
    durable record. Accepted Phase 0 residual: the DesignatorResolver's cost records are deleted
    on send, not on confirmation, so after a dead-lettering they exist only in R2; the increment
-   12 housekeeping replay of `dlq/persist/` objects is the planned closer. The `IN (...)` lists
+   12 housekeeping replay of `dlq/persist/` objects closes it (every archive older than an hour
+   is sent back to the persist queue and deleted once sent; a message replayed three times is
+   parked under `dlq/persist-parked/`, `src/lib/dlq-replay.ts`). The `IN (...)` lists
    of the confirmation delete and of the sent-marking update run in chunks of `SQL_BIND_CHUNK`
    (90) through one shared helper, inside one transaction, because Durable Object SQLite binds
    at most 100 parameters per statement; the DesignatorResolver's flush uses the same helper (a

@@ -28,11 +28,14 @@
  * `app.onError()` would replace the wrapper and silently stop reporting handled route errors.
  */
 
+import { eq } from 'drizzle-orm';
 import { Hono } from 'hono';
 import type { CloudflareOptions } from '@sentry/cloudflare';
+import { users } from '@planeahead/db';
 import type { Context, MiddlewareHandler } from 'hono';
 import { HTTPException } from 'hono/http-exception';
 import type { AppBindings } from './env';
+import { pgCode } from './lib/pg-error';
 import { authMiddleware } from './middleware/auth';
 import { corsMiddleware } from './middleware/cors';
 import { type IdempotencyStore, idempotency } from './middleware/idempotency';
@@ -105,16 +108,39 @@ export type MiddlewareName = (typeof MIDDLEWARE_ORDER)[number];
  * the request id. Outside `/v1` (Better Auth's mount throws its own) the exception's response is
  * kept as Hono would answer it.
  *
+ * One database error is not unhandled (increment 12, increment 8's final re-review nit): SQLSTATE
+ * 23503 on a foreign key to `users` (`*_user_id_fkey`, or Drizzle's `*_user_id_users_id_fk`, the
+ * names this schema actually carries) raised for a request whose principal no longer has a `users`
+ * row is an account deleted while the request was in flight (the session resolved before the
+ * deletion committed; the idempotency lease insert is the first write most `/v1` requests make).
+ * The handler re-reads `users` for the principal and answers 401 `account_deleted`, the same
+ * answer the next request gets, so the client wipes its store instead of retrying a 500. A 23503
+ * for a principal whose row still exists (a bug, or another table's key) stays a 500.
+ *
  * Everything else really is unhandled, so it is logged with the request id and answered with a
  * body that carries the same id back to the caller.
  */
-export function handleError(error: Error, c: Context<AppBindings>): Response {
+export async function handleError(error: Error, c: Context<AppBindings>): Promise<Response> {
   if (error instanceof HTTPException) {
     const path = new URL(c.req.url).pathname;
     if (path === '/v1' || path.startsWith('/v1/')) {
       return httpExceptionEnvelope(error, c);
     }
     return error.getResponse();
+  }
+  if (isUserForeignKeyViolation(error) && (await principalWasDeleted(c))) {
+    createLogger({ request_id: c.var.requestId ?? 'unknown' }).info(
+      'account_deleted_during_request',
+      { path: new URL(c.req.url).pathname, method: c.req.method },
+    );
+    return c.json(
+      {
+        error: 'account_deleted',
+        message: 'this account was deleted; clear the data stored on this device',
+        requestId: c.var.requestId ?? 'unknown',
+      },
+      401,
+    );
   }
   const requestIdValue = c.var.requestId ?? 'unknown';
   createLogger({ request_id: requestIdValue }).error('unhandled_error', {
@@ -123,6 +149,39 @@ export function handleError(error: Error, c: Context<AppBindings>): Response {
     ...errorFields(error),
   });
   return c.json({ error: 'internal_error', requestId: requestIdValue }, 500);
+}
+
+/** A foreign key from a user-owned table to `users`, in either naming this schema uses. */
+const USER_FOREIGN_KEY = /_user_id_(fkey|users_id_fk)$/;
+
+/** SQLSTATE 23503 (foreign_key_violation) on a `*_user_id` foreign key to `users`. */
+export function isUserForeignKeyViolation(error: unknown): boolean {
+  const { code, constraint } = pgCode(error);
+  return code === '23503' && constraint !== undefined && USER_FOREIGN_KEY.test(constraint);
+}
+
+/**
+ * Whether the request's principal has no `users` row any more, read on the request's own
+ * database handle (the auth runtime that resolved the session). False without a principal, and
+ * false when the read itself fails: the mapping is a courtesy to the client, never a guess.
+ */
+async function principalWasDeleted(c: Context<AppBindings>): Promise<boolean> {
+  const user = c.var.user ?? null;
+  const runtime = c.var.authRuntime ?? null;
+  if (user === null || runtime === null) {
+    return false;
+  }
+  try {
+    const rows = await runtime.db
+      .select({ id: users.id })
+      .from(users)
+      .where(eq(users.id, user.id))
+      .limit(1);
+    return rows.length === 0;
+  } catch (error) {
+    runtime.log.warn('account_deleted_reread_failed', errorFields(error));
+    return false;
+  }
 }
 
 /** The envelope for an `HTTPException` thrown under `/v1`, keeping its status. */

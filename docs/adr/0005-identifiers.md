@@ -73,8 +73,9 @@ We will use the identifiers below and treat the first three rows as permanent.
    therefore linked to the account server-side, by design, and is never used for analytics.
 4. **Analytics id.** Random and separate from the install id, sent only to `POST /v1/events`,
    with no session cookie and no `X-Install-Id` on that request, so the analytics store can never
-   join an event to a person. `POST /v1/events` is the API's 501 stub until increment 12, which
-   the orchestrator assigned it to; the client turns itself off on a 501. No App Tracking
+   join an event to a person. `POST /v1/events` was the API's 501 stub until increment 12 built
+   it (anonymous, `EVENTS_RL` per client IP, the batch shape this client sends, one Analytics
+   Engine point per accepted event, 202); the client still turns itself off on a 501. No App Tracking
    Transparency prompt: first-party analytics to our own endpoint is not tracking under Apple's
    definition.
 5. **App Privacy answers** (the App Store label, and the privacy manifest `app.config.ts` writes,
@@ -108,8 +109,11 @@ We will use the identifiers below and treat the first three rows as permanent.
 - The API verifies Apple identity tokens against ONE `APPLE_BUNDLE_ID` per environment
   (increment 5). Staging's Apple sign-in belongs to the development build (fix-round ruling S3):
   staging's `APPLE_BUNDLE_ID` is `app.planeahead.mobile.dev`. Production's is
-  `app.planeahead.mobile`, so the preview build cannot sign in with Apple until increment 12
-  makes the variable a list (recorded there by the orchestrator); its other sign-in paths work.
+  `app.planeahead.mobile`. Increment 12 made the accepted audience a list (`APPLE_BUNDLE_IDS`,
+  defaulting to the variants the association files name for the environment, plus
+  `APPLE_BUNDLE_ID`), so the preview build signs in with Apple against production and the code is
+  exchanged for the bundle id the token names; the deletion's revocation still names
+  `APPLE_BUNDLE_ID` (docs/open-decisions.md).
 - Reversibility: low for the bundle ids and the link path, high for the two random ids (a new
   scheme only needs a new kv key).
 

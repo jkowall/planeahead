@@ -1,7 +1,9 @@
 /**
  * The `/v1` surface: the per-principal rate limiter, then the `/v1` idempotency instance, then the
- * account, flight, sync and webhook routes, then the stub for what no increment has taken yet.
- * The provider receivers are anonymous (the limiter skips them) and authenticate by path token.
+ * account, flight, sync, events and webhook routes. The provider receivers are anonymous (the
+ * limiter skips them) and authenticate by path token; `POST /v1/events` (increment 12) is
+ * anonymous by design and brakes on `EVENTS_RL` per client IP. Increment 12 also retired the 501
+ * stub that reserved `/v1/events`: every `/v1` path is now real or an ordinary 404.
  *
  * `principalLimiter` is mounted HERE, behind the auth middleware, and not in the global chain:
  * in the global rate-limit slot `c.var.user` is unset (ruling E6), so the limiter would skip
@@ -14,8 +16,8 @@
  * validator, because the request hash covers the validated body.
  *
  * `createV1Routes` exists for tests that inject a slow tracker or a failing transaction into the
- * flight routes, or a purge horizon into the sync route; the Worker mounts `v1Routes`, built with
- * no options.
+ * flight routes, a purge horizon into the sync route, or a dataset into the events route; the
+ * Worker mounts `v1Routes`, built with no options.
  */
 
 import { Hono } from 'hono';
@@ -23,15 +25,16 @@ import type { AppBindings } from '../env';
 import { idempotency } from '../middleware/idempotency';
 import { principalLimiter } from '../middleware/rate-limit';
 import { devicesRoutes } from './devices';
+import { createEventsRoutes, type EventsRoutesOptions } from './events';
 import { createFlightRoutes, type FlightRoutesOptions } from './flights';
 import { meRoutes } from './me';
-import { v1Stub } from './not-implemented';
 import { createSyncRoutes, type SyncRoutesOptions } from './sync';
 import { webhookRoutes } from './webhooks';
 
 export interface V1RoutesOptions {
   readonly flights?: FlightRoutesOptions;
   readonly sync?: SyncRoutesOptions;
+  readonly events?: EventsRoutesOptions;
 }
 
 export function createV1Routes(options: V1RoutesOptions = {}) {
@@ -42,8 +45,8 @@ export function createV1Routes(options: V1RoutesOptions = {}) {
     .route('/flights', createFlightRoutes(options.flights))
     .route('/me', meRoutes)
     .route('/sync', createSyncRoutes(options.sync))
-    .route('/webhooks', webhookRoutes)
-    .route('/', v1Stub);
+    .route('/events', createEventsRoutes(options.events))
+    .route('/webhooks', webhookRoutes);
 }
 
 export const v1Routes = createV1Routes();

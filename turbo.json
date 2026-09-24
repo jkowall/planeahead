@@ -65,14 +65,18 @@
     },
     "//#test:tools": {
       // The ESLint rule tests, the workflow tests (the migration-hash order, every workflow's job
-      // keys, the native-smoke shape) and the mobile migrations guard's test. The workflow files
-      // and the scripts are read by those tests, so they are inputs too or a change would
-      // cache-hit against a stale pass.
+      // keys, the native-smoke shape, the production deploy's shape and its /health smoke) and the
+      // mobile migrations guard's test. The workflow files and the scripts are read by those
+      // tests, so they are inputs too or a change would cache-hit against a stale pass; the smoke
+      // script's test reads the generated hash and the Durable Object classes.
       "inputs": [
         "tools/**",
         ".github/workflows/**",
         "scripts/mobile-migrations-guard.mjs",
-        "scripts/native-smoke.sh"
+        "scripts/native-smoke.sh",
+        "scripts/health-smoke.mjs",
+        "apps/api/src/generated/migration-hash.ts",
+        "apps/api/src/do/*.ts"
       ]
     },
     "//#format:check": {

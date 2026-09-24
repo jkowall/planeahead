@@ -153,6 +153,15 @@ import {
   type ValidationIssue,
   type TrackerPhase,
   type UnsubscribeRequestV1,
+  type ListSubscribersRequestV1,
+  type ListSubscribersResponseV1,
+  type TrackerSubscriberV1,
+  type ProductEventName,
+  type ProductEventPoint,
+  type ProductEventProps,
+  type ProductEventV1,
+  type ProductEventsAcceptedV1,
+  type ProductEventsBatchV1,
   type Uuidv7Generator,
   type WindowCallCount,
 } from '../src/index';
@@ -305,6 +314,16 @@ interface TypeSurface {
   trackerHealthPhase: TrackerHealthPhase;
   unsubscribeResponseV1: UnsubscribeResponseV1;
   providerEventV1: ProviderEventV1;
+  listSubscribersRequestV1: ListSubscribersRequestV1;
+  listSubscribersResponseV1: ListSubscribersResponseV1;
+  trackerSubscriberV1: TrackerSubscriberV1;
+  // events (increment 12)
+  productEventName: ProductEventName;
+  productEventPoint: ProductEventPoint;
+  productEventProps: ProductEventProps;
+  productEventV1: ProductEventV1;
+  productEventsAcceptedV1: ProductEventsAcceptedV1;
+  productEventsBatchV1: ProductEventsBatchV1;
   // status-derivation
   adbStatus: AdbStatus;
   adbMovement: AdbMovement;

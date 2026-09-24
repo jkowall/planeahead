@@ -13,9 +13,10 @@
  * number and date"); nothing asserted the second account or the `provider_calls` row, hence this
  * file.
  *
- * The resolver's `user_search` record carries no flight key (the key is only known from the
- * answer; increment 7), so the row is found by the request id the first subscribe carried, and
- * the owner's staging query in docs/increments/10-verification.md filters the same way.
+ * The resolver's `user_search` record is appended after resolution and carries the resolved
+ * flight key (increment 12; increment 7 wrote it before the key was known, with a NULL key). The
+ * row is still found by the request id the first subscribe carried, as the owner's staging query in
+ * docs/increments/10-verification.md does, and the test asserts the key it now carries.
  */
 
 import { sql } from 'drizzle-orm';
@@ -109,7 +110,7 @@ describe('one provider call for a flight added by two accounts', () => {
         result: 'ok',
         cost_units: 2,
         request_id: firstRequest,
-        flight_key: null,
+        flight_key: flight.flightKey,
       },
     ]);
     // The second account's subscribe was answered from the resolution and the seeded tracker.
