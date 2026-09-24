@@ -13,8 +13,8 @@
  * And the mobile pins (increment 9, docs/increments/09-11-mobile.facts.md "Pins"), each chosen
  * because the failure it prevents is silent until a device build or a test run:
  *   - more than one version of react, react-native, expo or a native module Expo's manifest pins
- *     (reanimated, worklets, gesture-handler): two copies mean two renderers or a native build
- *     that links the wrong one
+ *     (reanimated, worklets, gesture-handler, and from increment 11 expo-widgets and @expo/ui):
+ *     two copies mean two renderers or a native build that links the wrong one
  *   - expo not on the SDK 57 line, or jest-expo not on the same major as expo
  *   - @react-native/jest-preset not exactly the react-native version (jest-expo peers on it)
  *   - jest not on 29 (jest-expo 57 is Jest 29 throughout; Jest 30 is unverified with it)
@@ -28,7 +28,11 @@
  *     build unchecked otherwise (increment 9 review, expo-correctness-3)
  *   - the facts sheet's exact mobile pins, which Expo's manifest does not cover:
  *     react-native-nitro-google-signin 2.3.0, react-native-nitro-modules 0.37.1,
- *     @maplibre/maplibre-react-native 11.4.0, jest 29.7.0, and @sentry/react-native ~7.11.0
+ *     @maplibre/maplibre-react-native 11.4.0, jest 29.7.0, and @sentry/react-native ~7.11.0;
+ *     and increment 11's (ADR 0008): expo-widgets 57.0.20 exactly (tighter than the manifest's
+ *     ~57.0.20: its config plugin writes the widget target, the Podfile target and the literal
+ *     `aps-environment` withApsEnvironment overrides) and @bacons/apple-targets 5.0.0, the
+ *     version the coexistence spike proved next to expo-widgets
  *   The CI test-mobile job also runs `expo install --check`, Expo's own view of the same manifest.
  *
  * The wrangler assertion is a PAIR check, not a frozen constant. @cloudflare/vitest-plugin
@@ -220,6 +224,9 @@ if (resolved.has('expo')) {
     'react-native-reanimated',
     'react-native-worklets',
     'react-native-gesture-handler',
+    // Increment 11: the widget extension's runtime bundle and the app must agree on one copy.
+    'expo-widgets',
+    '@expo/ui',
   ]) {
     const versions = versionsOf(name);
     if (versions.length > 1) {
@@ -364,6 +371,9 @@ const MOBILE_EXACT_PINS = {
   '@maplibre/maplibre-react-native': '11.4.0',
   jest: '29.7.0',
   '@sentry/react-native': '~7.11.0',
+  // Increment 11 (ADR 0008).
+  'expo-widgets': '57.0.20',
+  '@bacons/apple-targets': '5.0.0',
 };
 
 const mobileVersions = lockfile === null ? new Map() : importerVersions(lockfile, 'apps/mobile');
