@@ -46,7 +46,7 @@ units, $0.04 at the Growth unit price, and the binding constraint is the plan's 
 | --------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------- |
 | Durable Object rows written | **1,203 measured** (the lifecycle test's line `[lifecycle] polls=74 alarms=74 rows_written_lifetime=1203 ... per_alarm_avg=16.3`: the schema DDL, 13 per unchanged alarm, 16.3 per alarm on average with seed, subscriptions, confirmations, finish and deletion) | 50M included, then $1.00 per million                                                    |
 | Durable Object requests     | about 160 to 200 (74 alarms, 1 to 4 pre-48 h alarms, about 74 confirmations, subscriptions and refreshes, 2 finish alarms)                                                                                                                                        | 1M included, then $0.15 per million                                                     |
-| Durable Object duration     | 3.8 to 9.7 GB-s (78 alarms at 128 MB and 400 to 1,000 ms billable each, assumed; facts section 5)                                                                                                                                                                 | 400,000 GB-s included, then $12.50 per MILLION GB-s, **rounded up to the next million** |
+| Durable Object duration     | 3.9 to 9.75 GB-s (78 alarms at 128 MB, 0.125 GB, and 400 to 1,000 ms billable each, assumed; facts section 5)                                                                                                                                                     | 400,000 GB-s included, then $12.50 per MILLION GB-s, **rounded up to the next million** |
 | Queue operations            | about 500 (150 to 200 persist messages, three operations each)                                                                                                                                                                                                    | 1M included, then $0.40 per million                                                     |
 | KV writes                   | about 80 (debounced snapshots, search cache)                                                                                                                                                                                                                      | 1M included, then $5.00 per million                                                     |
 | Analytics Engine points     | about 78 (one per stored provider call)                                                                                                                                                                                                                           | 10M included, then $0.25 per million                                                    |
@@ -56,8 +56,9 @@ Rows written are the Durable Object bill: about **$0.0012 per flight** marginal 
 allowance, against about $0.00003 for its requests. **The duration rounding cliff:** billable
 duration rounds up to the next million GB-s before the rate applies, so the first GB-s over the
 400,000 allowance costs a whole $12.50. The 100k-flight scenario is under the cliff only at the
-400 ms end of the range: about 384,000 GB-s there, 4% under it, but about 975,000 GB-s at 1,000 ms,
-past it (the "$85 past the cliff" figure below). Any growth past the allowance adds $12.50 at once,
+400 ms end of the range: about 390,000 GB-s there (100,000 flights at 3.9 GB-s), 2.5 percent under
+the 400,000 allowance, but about 975,000 GB-s at 1,000 ms, past it (the "$85 past the cliff"
+figure below). Any growth past the allowance adds $12.50 at once,
 then nothing until the next million. The duration figure rests on an assumed alarm wall clock that
 nobody has measured against a real provider (open decisions).
 

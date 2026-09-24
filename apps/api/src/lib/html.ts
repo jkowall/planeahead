@@ -6,7 +6,18 @@
  * (`default-src 'none'`, no script source, no framing, no base URI, and no form target except
  * `'self'` on the admin page's account-deletion forms), so an injected tag could neither run nor
  * load anything. Every interpolated value goes through `esc`.
+ *
+ * The referrer policy is `no-referrer` unless the page says otherwise, in the header and in the
+ * document's `<meta name="referrer">` (the meta wins in a browser, so the two always agree). A page
+ * that carries a form to its own origin needs `same-origin`: under `no-referrer` a browser sends
+ * `Origin: null` on the form's POST (the Fetch standard's "append a request Origin header"), and a
+ * route that requires the page's own origin then refuses the page's own button, which is what the
+ * first landing page of increment 5 ran into (docs/build-log.md). Under `same-origin` the POST
+ * carries the real origin, and a cross-site form still sends `null` or its own origin.
  */
+
+/** The referrer policies a page may declare: `no-referrer` unless it carries a same-origin form. */
+export type ReferrerPolicy = 'no-referrer' | 'same-origin';
 
 /** Escapes text for an HTML text node or a double-quoted attribute. */
 export function esc(value: string | number | boolean | null | undefined): string {
@@ -72,16 +83,22 @@ export interface HtmlPage {
   readonly status?: number | undefined;
   /** `'self'` for a page with a form; `'none'` otherwise. */
   readonly formAction?: "'none'" | "'self'" | undefined;
+  /**
+   * `same-origin` for a page whose form posts to this origin, so the browser sends the real
+   * `Origin` on the POST; `no-referrer` (the default) everywhere else.
+   */
+  readonly referrerPolicy?: ReferrerPolicy | undefined;
 }
 
 /** The document and its headers. */
 export async function renderPage(page: HtmlPage): Promise<Response> {
+  const referrerPolicy: ReferrerPolicy = page.referrerPolicy ?? 'no-referrer';
   const html = `<!doctype html>
 <html lang="en">
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<meta name="referrer" content="no-referrer">
+<meta name="referrer" content="${referrerPolicy}">
 <title>${esc(page.title)}</title>
 <style>${page.style}</style>
 </head>
@@ -97,7 +114,7 @@ ${page.body}
       'content-security-policy': await contentSecurityPolicy(page.style, page.formAction),
       'cache-control': page.cacheControl,
       'x-content-type-options': 'nosniff',
-      'referrer-policy': 'no-referrer',
+      'referrer-policy': referrerPolicy,
       'x-frame-options': 'DENY',
     },
   });

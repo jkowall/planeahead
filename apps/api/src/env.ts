@@ -240,6 +240,13 @@ export interface Variables {
    */
   accountDeleted: boolean | undefined;
   /**
+   * Set by the auth middleware when the session it resolved was read from the `sessions` row (a
+   * mutating request, the search's canonical path, or a cached cookie the tombstone check could
+   * not vouch for), so `requireFreshSession()` need not read it again. Unset when the session came
+   * from the cookie cache or none was resolved.
+   */
+  sessionFromRow: boolean | undefined;
+  /**
    * Set by the `/v1` idempotency instance for a keyed mutating request: the key, its scope and its
    * store, which `idempotencyGate()` reserves against once the route has validated the body.
    */

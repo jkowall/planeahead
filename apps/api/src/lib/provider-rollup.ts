@@ -24,6 +24,12 @@
  * 0: `rollupRows` throws `RollupSumError`, the message is retried and then dead-lettered with the
  * ops alert, and no row is written for that day. A zero row would have told step 3 that nothing
  * was called, and step 3 would have deleted the only exact copy of the day's calls.
+ *
+ * Beside the sums, every row records the ledger's own `count(*)` of `provider_calls` for that
+ * (day, provider) at the time of the rollup (`ledger_calls`, ruling AB3): the fixed figure step 3
+ * judges the rollup against ninety days later. Judging against the live count would let a purge
+ * that deleted part of a day and was then retried find the day implausible and strand the rest of
+ * it for good (re-review finding rr-ops-3).
  */
 
 import { sql } from 'drizzle-orm';
@@ -198,11 +204,28 @@ export interface ProviderDayRollup {
   readonly rows: number;
   readonly calls: number;
   readonly skipped: number;
+  /** The ledger's `count(*)` for the day, recorded on every row written. */
+  readonly ledgerCalls: number;
+}
+
+/** `count(*)` of `provider_calls` for one provider on one UTC day. */
+export async function ledgerCallCount(
+  db: Pick<Db, 'execute'>,
+  pair: { readonly provider: string; readonly day: string },
+): Promise<number> {
+  const [row] = await db.execute<{ n: number }>(sql`
+    select count(*)::int as n from provider_calls
+    where provider = ${pair.provider}
+      and created_at >= (${pair.day}::date)::timestamp at time zone 'UTC'
+      and created_at < (${pair.day}::date + 1)::timestamp at time zone 'UTC'
+  `);
+  return row?.n ?? 0;
 }
 
 /**
- * Rolls up one provider for one day: one SQL API call, one upsert per (operation, result). Every
- * row is parsed before the first upsert, so a `RollupSumError` writes nothing for the day.
+ * Rolls up one provider for one day: one SQL API call, one count of the ledger, one upsert per
+ * (operation, result) carrying the sums and that count. Every row is parsed before the count and
+ * the first upsert, so a `RollupSumError` writes nothing for the day.
  */
 export async function rollupProviderDay(
   db: Db,
@@ -216,16 +239,18 @@ export async function rollupProviderDay(
     input.environment,
   );
   const { rows, skipped } = rollupRows(await analyticsSql(access, statement));
+  const ledgerCalls = await ledgerCallCount(db, input);
   for (const row of rows) {
     await db.execute(sql`
       insert into provider_call_daily
-        (day, provider, operation, result, calls, cost_units, cost_usd_micros)
+        (day, provider, operation, result, calls, cost_units, cost_usd_micros, ledger_calls)
       values (${input.day}::date, ${input.provider}, ${row.operation}, ${row.result},
-              ${row.calls}, ${row.costUnits}, ${row.costUsdMicros})
+              ${row.calls}, ${row.costUnits}, ${row.costUsdMicros}, ${ledgerCalls})
       on conflict (day, provider, operation, result) do update
         set calls = excluded.calls,
             cost_units = excluded.cost_units,
-            cost_usd_micros = excluded.cost_usd_micros
+            cost_usd_micros = excluded.cost_usd_micros,
+            ledger_calls = excluded.ledger_calls
     `);
   }
   return {
@@ -233,6 +258,7 @@ export async function rollupProviderDay(
     rows: rows.length,
     calls: rows.reduce((sum, row) => sum + row.calls, 0),
     skipped,
+    ledgerCalls,
   };
 }
 

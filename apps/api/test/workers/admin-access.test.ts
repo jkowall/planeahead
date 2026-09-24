@@ -193,6 +193,17 @@ async function expectForbidden(response: Response): Promise<void> {
   expect(response.headers.get('cache-control')).toBe('no-store');
 }
 
+/**
+ * The `Origin` a browser sends on a same-origin form POST from a page served with the given
+ * `Referrer-Policy` (the Fetch standard's "append a request Origin header" step): `null` under
+ * `no-referrer`, the page's own origin under every other policy. The deletion POSTs below carry
+ * this instead of a hand-set constant, so a page whose policy makes a real browser send `null`
+ * fails here the way it failed the operator (re-review finding rr-ops-1).
+ */
+function originImpliedBy(page: Response, pageUrl: string): string {
+  return page.headers.get('referrer-policy') === 'no-referrer' ? 'null' : new URL(pageUrl).origin;
+}
+
 describe('/admin in the deployed Worker', () => {
   it('answers 403 with no body while Access is not configured, assertion or not', async () => {
     const key = await signingKey('k1');
@@ -294,6 +305,9 @@ describe('the page', () => {
     expect(response.status).toBe(200);
     expect(response.headers.get('content-type')).toBe('text/html; charset=utf-8');
     expect(response.headers.get('cache-control')).toBe('no-store');
+    // Every admin page but the account pages keeps `no-referrer` (ruling AB1).
+    expect(response.headers.get('referrer-policy')).toBe('no-referrer');
+    expect(html).toContain('<meta name="referrer" content="no-referrer">');
     const csp = response.headers.get('content-security-policy') ?? '';
     expect(csp).toContain("default-src 'none'");
     expect(csp).not.toContain('script-src');
@@ -397,9 +411,8 @@ describe('operator account deletion (ruling AA9)', () => {
     const empty = await getAdmin(fake, token, { path: ADMIN_ACCOUNT_DELETE_PATH });
     expect(empty.status).toBe(200);
     expect(await empty.text()).toContain('<form method="get"');
-    const lookup = await getAdmin(fake, token, {
-      path: `${ADMIN_ACCOUNT_DELETE_PATH}?user_id=${session.userId}`,
-    });
+    const lookupPath = `${ADMIN_ACCOUNT_DELETE_PATH}?user_id=${session.userId}`;
+    const lookup = await getAdmin(fake, token, { path: lookupPath });
     const page = await lookup.text();
     expect(lookup.status).toBe(200);
     expect(page).toContain(`<td>${session.userId}</td><td>active</td>`);
@@ -407,26 +420,35 @@ describe('operator account deletion (ruling AA9)', () => {
     expect(page).not.toMatch(/<script/i);
     expect(lookup.headers.get('content-security-policy')).toContain("form-action 'self'");
     expect(lookup.headers.get('cache-control')).toBe('no-store');
+    // The page must let the browser send its origin on the form's POST: under `no-referrer`
+    // Chromium sends `Origin: null` and the route refuses the page's own button (rr-ops-1). The
+    // header and the document's meta agree, and every POST below carries the origin the served
+    // policy implies rather than a constant, so a regression to `no-referrer` fails the deletion.
+    expect(lookup.headers.get('referrer-policy')).not.toBe('no-referrer');
+    expect(lookup.headers.get('referrer-policy')).toBe('same-origin');
+    expect(page).toContain('<meta name="referrer" content="same-origin">');
+    const origin = originImpliedBy(lookup, `${API_ORIGIN}${lookupPath}`);
 
     // A confirmation that does not match changes nothing.
     const wrong = await getAdmin(fake, token, {
       method: 'POST',
       path: ADMIN_ACCOUNT_DELETE_PATH,
-      origin: API_ORIGIN,
+      origin,
       form: { user_id: session.userId, confirm_user_id: crypto.randomUUID() },
     });
     expect(wrong.status).toBe(400);
     expect(await wrong.text()).toContain('Nothing was deleted');
-    // Nor does a POST from another origin, or one without an Origin, or one without Access.
+    // Nor does a POST from another origin, one whose Origin is `null` (a cross-site form, or a
+    // page under `no-referrer`), one without an Origin, or one without Access.
     const confirmed = { user_id: session.userId, confirm_user_id: session.userId.toUpperCase() };
-    for (const origin of ['https://evil.test', undefined]) {
+    for (const sent of ['https://evil.test', 'null', undefined]) {
       const refused = await getAdmin(fake, token, {
         method: 'POST',
         path: ADMIN_ACCOUNT_DELETE_PATH,
         form: confirmed,
-        ...(origin === undefined ? {} : { origin }),
+        ...(sent === undefined ? {} : { origin: sent }),
       });
-      expect(refused.status, String(origin)).toBe(403);
+      expect(refused.status, String(sent)).toBe(403);
       expect(await refused.text()).toBe('');
     }
     expect(
@@ -434,7 +456,7 @@ describe('operator account deletion (ruling AA9)', () => {
         await getAdmin(fake, null, {
           method: 'POST',
           path: ADMIN_ACCOUNT_DELETE_PATH,
-          origin: API_ORIGIN,
+          origin,
           form: confirmed,
         })
       ).status,
@@ -446,7 +468,7 @@ describe('operator account deletion (ruling AA9)', () => {
     const deleted = await getAdmin(fake, token, {
       method: 'POST',
       path: ADMIN_ACCOUNT_DELETE_PATH,
-      origin: API_ORIGIN,
+      origin,
       form: confirmed,
     });
 
@@ -489,11 +511,12 @@ describe('operator account deletion (ruling AA9)', () => {
     expect(other.status).toBe(401);
     expect((await other.json<{ error: string }>()).error).toBe('account_deleted');
 
-    // A second confirmation finds nothing to delete.
+    // A second confirmation finds nothing to delete; the result page keeps the same policy.
+    expect(deleted.headers.get('referrer-policy')).toBe('same-origin');
     const again = await getAdmin(fake, token, {
       method: 'POST',
       path: ADMIN_ACCOUNT_DELETE_PATH,
-      origin: API_ORIGIN,
+      origin,
       form: confirmed,
     });
     expect(again.status).toBe(404);

@@ -27,8 +27,10 @@
  *      role's 10 s `statement_timeout` (src/lib/sync-purge.ts; ADR 0012 item 6; ruling AA15).
  *   3. `provider_calls`: whole UTC days older than 90 days, per provider, only when the day's
  *      per-operation `provider_call_daily` rows (the rollup) sum to more than 0 and lie within
- *      20 percent of the day's `count(*)` (ruling AA13), so no call leaves the exact ledger before
- *      a plausible durable series holds it; the other days are kept and counted.
+ *      20 percent of the day's `count(*)` as the rollup RECORDED it in `ledger_calls` (rulings
+ *      AA13 and AB3), so no call leaves the exact ledger before a plausible durable series holds
+ *      it and a partly purged day is never judged by its shrunken count; the other days are kept
+ *      and counted.
  *   4. `retention`: `notifications` over 90 days, `data_export_jobs` over 7, expired
  *      `deleted_subjects`, `rate_limits` rows idle past the longest limiter window, expired
  *      `verifications`; and the Phase 0 tables the schema review gives a retention that have a
@@ -235,27 +237,44 @@ async function stepSyncPurge(ctx: StepContext): Promise<StepOutcome> {
 interface LedgerDay {
   readonly day: string;
   readonly provider: string;
+  /** The ledger's `count(*)` now. */
   readonly ledger: number;
+  /** The sum of the day's non-budget rollup rows; null when there are none. */
   readonly rolledUp: number | null;
+  /** The ledger's `count(*)` as the rollup recorded it (`ledger_calls`); null before the column. */
+  readonly recorded: number | null;
 }
 
 /**
- * Step 3's cursor: `approved:{day}|{provider}` resumes the deletion of a pair already judged
- * plausible (its `count(*)` has shrunk since, so it is not judged again), `after:{day}|{provider}`
- * resumes with the pairs after it.
+ * Step 3's cursor: `from:{day}|{provider}` resumes AT a pair whose deletion the budget cut short
+ * (judged again on resume, against the same recorded count, so with the same verdict),
+ * `after:{day}|{provider}` resumes with the pairs after a finished one.
  */
 function parseLedgerCursor(
   cursor: string | null,
-): { readonly mode: 'approved' | 'after'; readonly day: string; readonly provider: string } | null {
+): { readonly mode: 'from' | 'after'; readonly day: string; readonly provider: string } | null {
   const match =
-    cursor === null ? null : /^(approved|after):(\d{4}-\d{2}-\d{2})\|([a-z0-9_]+)$/.exec(cursor);
+    cursor === null ? null : /^(from|after):(\d{4}-\d{2}-\d{2})\|([a-z0-9_]+)$/.exec(cursor);
   const mode = match?.[1];
   const day = match?.[2];
   const provider = match?.[3];
-  if ((mode !== 'approved' && mode !== 'after') || day === undefined || provider === undefined) {
+  if ((mode !== 'from' && mode !== 'after') || day === undefined || provider === undefined) {
     return null;
   }
   return { mode, day, provider };
+}
+
+/**
+ * Writes the live `count(*)` into a day's rollup rows that predate `ledger_calls`, before the
+ * first delete, so that every later judgement of the day (a retry, a continuation) reads the
+ * same figure.
+ */
+async function recordLedgerCount(db: Db, pair: LedgerDay): Promise<void> {
+  await db.execute(sql`
+    update provider_call_daily set ledger_calls = ${pair.ledger}
+    where day = ${pair.day}::date and provider = ${pair.provider}
+      and operation not like ${BUDGET_DAILY_OPERATION_PATTERN} and ledger_calls is null
+  `);
 }
 
 async function deleteLedgerDay(ctx: StepContext, pair: { day: string; provider: string }) {
@@ -274,11 +293,19 @@ async function deleteLedgerDay(ctx: StepContext, pair: { day: string; provider: 
  * Step 3 (ruling AA13, amending spec 12's one precondition): `provider_calls` is the only exact
  * copy of the provider ledger, so a whole UTC day older than `RETENTION.providerCallsDays` is
  * deleted per provider only when that day's non-budget `provider_call_daily` rows exist, sum to
- * more than 0 and lie within `ROLLUP_PLAUSIBILITY_TOLERANCE` of the day's `count(*)`
- * (`isPlausibleRollup`; Analytics Engine sums are sampled estimates). Any other day is kept and
- * counted (`days_without_rollup`: no row; `days_without_plausible_rollup`: a zero or out-of-band
- * row, each logged with both figures). Whole days only, so a day is never judged after part of it
- * went; a pair judged plausible carries its approval in the continuation's cursor.
+ * more than 0 and lie within `ROLLUP_PLAUSIBILITY_TOLERANCE` of the ledger's `count(*)`
+ * (`isPlausibleRollup`; Analytics Engine sums are sampled estimates).
+ *
+ * The count it is judged against is the one the rollup RECORDED in `ledger_calls` when it ran
+ * (ruling AB3), never the live count once a recorded one exists: a message that deleted part of a
+ * day and failed before its continuation was sent (a queue send error, an eviction) is redelivered
+ * with its old cursor and judges the day again, and the recorded count gives it the same verdict,
+ * where the live count, shrunk by the partial delete, failed the band and stranded the rest of the
+ * day for good (re-review finding rr-ops-3). A rollup row older than the column (`ledger_calls`
+ * null) is judged against the live count once, and that count is written into its rows before the
+ * first delete, so the verdict is durable from then on too. Any other day is kept and counted
+ * (`days_without_rollup`: no row; `days_without_plausible_rollup`: a zero or out-of-band row, each
+ * logged with all three figures).
  */
 async function stepProviderCalls(ctx: StepContext): Promise<StepOutcome> {
   const resume = parseLedgerCursor(ctx.cursor);
@@ -288,23 +315,18 @@ async function stepProviderCalls(ctx: StepContext): Promise<StepOutcome> {
     days_without_rollup: 0,
     days_without_plausible_rollup: 0,
   };
-  if (resume?.mode === 'approved') {
-    const result = await deleteLedgerDay(ctx, resume);
-    counts.deleted += result.deleted;
-    if (!result.done) {
-      return { counts, next: `approved:${resume.day}|${resume.provider}` };
-    }
-    counts.days_purged += 1;
-  }
-  const after =
+  const where =
     resume === null
       ? sql`true`
-      : sql`(l.day, l.provider) > (${resume.day}::date, ${resume.provider}::text)`;
+      : resume.mode === 'from'
+        ? sql`(l.day, l.provider) >= (${resume.day}::date, ${resume.provider}::text)`
+        : sql`(l.day, l.provider) > (${resume.day}::date, ${resume.provider}::text)`;
   const pairs = await ctx.db.execute<{
     day: string;
     provider: string;
     ledger: number;
     rolled_up: string | null;
+    recorded: number | null;
   }>(sql`
     with ledger as (
       select (created_at at time zone 'UTC')::date as day, provider, count(*)::int as ledger
@@ -314,12 +336,15 @@ async function stepProviderCalls(ctx: StepContext): Promise<StepOutcome> {
           at time zone 'UTC'
       group by 1, 2
     )
-    select l.day::text as day, l.provider, l.ledger,
-      (select sum(d.calls)::text from provider_call_daily d
-       where d.day = l.day and d.provider = l.provider
-         and d.operation not like ${BUDGET_DAILY_OPERATION_PATTERN}) as rolled_up
+    select l.day::text as day, l.provider, l.ledger, r.rolled_up, r.recorded
     from ledger l
-    where ${after}
+    left join lateral (
+      select sum(d.calls)::text as rolled_up, max(d.ledger_calls)::int as recorded
+      from provider_call_daily d
+      where d.day = l.day and d.provider = l.provider
+        and d.operation not like ${BUDGET_DAILY_OPERATION_PATTERN}
+    ) r on true
+    where ${where}
     order by l.day, l.provider
   `);
   const days: LedgerDay[] = pairs.map((row) => ({
@@ -327,23 +352,28 @@ async function stepProviderCalls(ctx: StepContext): Promise<StepOutcome> {
     provider: row.provider,
     ledger: row.ledger,
     rolledUp: row.rolled_up === null ? null : Number(row.rolled_up),
+    recorded: row.recorded,
   }));
   for (const [index, pair] of days.entries()) {
     if (pair.rolledUp === null) {
       counts.days_without_rollup += 1;
-    } else if (!isPlausibleRollup(pair.rolledUp, pair.ledger)) {
+    } else if (!isPlausibleRollup(pair.rolledUp, pair.recorded ?? pair.ledger)) {
       counts.days_without_plausible_rollup += 1;
       ctx.log.warn('provider_calls_rollup_implausible', {
         day: pair.day,
         provider: pair.provider,
         rolled_up_calls: pair.rolledUp,
+        recorded_ledger_calls: pair.recorded,
         ledger_calls: pair.ledger,
       });
     } else {
+      if (pair.recorded === null) {
+        await recordLedgerCount(ctx.db, pair);
+      }
       const result = await deleteLedgerDay(ctx, pair);
       counts.deleted += result.deleted;
       if (!result.done) {
-        return { counts, next: `approved:${pair.day}|${pair.provider}` };
+        return { counts, next: `from:${pair.day}|${pair.provider}` };
       }
       counts.days_purged += 1;
     }
@@ -620,13 +650,21 @@ async function stepAeRollup(ctx: StepContext): Promise<StepOutcome> {
     return { counts: { day, skipped: 'cloudflare_api_not_configured' }, next: null };
   }
   const environment = environmentName(ctx.env);
-  const providers: Record<string, { rows: number; calls: number; skipped: number }> = {};
+  const providers: Record<
+    string,
+    { rows: number; calls: number; skipped: number; ledger_calls: number }
+  > = {};
   let rows = 0;
   for (const provider of ROLLUP_PROVIDERS) {
     const rolled = await rollupProviderDay(ctx.db, access, { provider, day, environment });
     rows += rolled.rows;
     if (rolled.rows > 0 || rolled.skipped > 0) {
-      providers[provider] = { rows: rolled.rows, calls: rolled.calls, skipped: rolled.skipped };
+      providers[provider] = {
+        rows: rolled.rows,
+        calls: rolled.calls,
+        skipped: rolled.skipped,
+        ledger_calls: rolled.ledgerCalls,
+      };
     }
   }
   return { counts: { day, rows, providers }, next: null };

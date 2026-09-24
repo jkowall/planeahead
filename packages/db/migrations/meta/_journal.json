@@ -43,6 +43,13 @@
       "when": 1790221826269,
       "tag": "0005_sync_purge_indexes",
       "breakpoints": true
+    },
+    {
+      "idx": 6,
+      "version": "7",
+      "when": 1790224849026,
+      "tag": "0006_ledger_calls",
+      "breakpoints": true
     }
   ]
 }

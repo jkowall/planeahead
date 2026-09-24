@@ -560,7 +560,10 @@ tombstones; then an unsubscribe of any subscription that committed while the del
   multiply a poison row's dead-letterings), and the lifecycle rule expires `dlq/` after 30 days.
 - **The ledger is never purged against a bad rollup.** A rollup sum that is not a number fails the
   message loudly instead of becoming a 0 row, and a day of `provider_calls` is deleted only when
-  its rollup is above zero and within 20 percent of the day's `count(*)` (ruling AA13).
+  its rollup is above zero and within 20 percent of the day's `count(*)` as the rollup itself
+  recorded it (`ledger_calls`, rulings AA13 and AB3), never the live count once one is recorded,
+  so a purge that deleted part of a day and was retried judges the day by the same figure and
+  cannot strand the rest of it.
 - **The Cloudflare API token** the Worker may hold (`CF_API_TOKEN`) is scoped to Account Analytics
   Read and Queues Read: it can read call counts and queue depths, nothing else. The deploy token
   lives only in GitHub environment secrets, with the scopes docs/runbooks/first-deploy.md lists.

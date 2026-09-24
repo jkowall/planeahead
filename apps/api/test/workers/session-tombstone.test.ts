@@ -7,14 +7,17 @@
  * cache cookie is called (the chunked `session_data.0` too, ruling AA14) or whether one was sent,
  * the auth middleware looks the session token's keyed hash up as a KV tombstone, which the account
  * deletion writes for every session it removes, and a hit answers 401 `account_deleted`. A write
- * never uses the cache, and neither does `GET /v1/flights/search` (ruling AA11). The second device
- * of a deleted account (me.delete.test.ts, increment 8) is the end-to-end case; this file pins the
- * mechanism.
+ * never uses the cache, and neither does `GET /v1/flights/search` (ruling AA11), whatever spelling
+ * of the path reached it: the middleware matches Hono's decoded path and the route reads the row
+ * itself through `requireFreshSession()` (ruling AB2). The second device of a deleted account
+ * (me.delete.test.ts, increment 8) is the end-to-end case; this file pins the mechanism.
  */
 
+import { createExecutionContext, waitOnExecutionContext } from 'cloudflare:test';
 import { env } from 'cloudflare:workers';
 import { sql } from 'drizzle-orm';
-import { describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it } from 'vitest';
+import { createApp } from '../../src/app';
 import { deletedSubjectHash } from '../../src/lib/hmac';
 import {
   sessionTombstoneKey,
@@ -22,10 +25,18 @@ import {
   writeSessionTombstones,
   KV_MIN_TTL_SECONDS,
 } from '../../src/lib/session-tombstone';
-import { bypassesCookieCache, sessionTokenFromCookie } from '../../src/middleware/auth';
+import {
+  bypassesCookieCache,
+  requireFreshSession,
+  requireUser,
+  sessionTokenFromCookie,
+} from '../../src/middleware/auth';
 import { createLogger } from '../../src/observability/log';
 import { jsonRequest, sessionTokenOnly, signInAnonymously, testEnv, worker } from './helpers/auth';
-import { db, seededFlightFor } from './helpers/routes';
+import { adbCalls, adbOk, drainTouched, scriptAdb, track } from './helpers/flights';
+import { db, nearUniqueFlight, openTodaysBudget } from './helpers/routes';
+
+afterEach(drainTouched);
 
 const quietLog = createLogger({}, () => undefined);
 
@@ -86,9 +97,15 @@ describe('the cookie cache for GETs, checked against the KV tombstone', () => {
     expect(response.status).toBe(200);
   });
 
-  it('reads the row for a revoked session on the search path, where the cache still answers a read-only GET', async () => {
+  it('reads the row for a revoked session on the search path, however it is spelled, where the cache still answers a read-only GET', async () => {
     const session = await signInAnonymously();
     expect(session.cookie).toContain('session_data=');
+    // A flight the fake gateway would answer, so a search that got through would spend the call
+    // the counter below must not see.
+    await openTodaysBudget();
+    const flight = nearUniqueFlight();
+    await scriptAdb(flight, [adbOk(flight, { phase: 'expected' })]);
+    track(testEnv.DESIGNATOR_RESOLVER.getByName(`${flight.designator}-${flight.dateLocal}`));
     // Revoked without an account deletion (a sign-out elsewhere, the merge's revocation): the row
     // is gone, no tombstone is written.
     await db().execute(sql`delete from sessions where user_id = ${session.userId}::uuid`);
@@ -99,22 +116,59 @@ describe('the cookie cache for GETs, checked against the KV tombstone', () => {
     );
     expect(me.status).toBe(200);
 
-    // The search takes caps and may spend a provider call: it reads the row and refuses.
-    const flight = seededFlightFor();
-    const search = await worker(
-      jsonRequest(
-        `/v1/flights/search?number=${flight.designator}&date=${flight.dateLocal}`,
-        'GET',
-        undefined,
-        { ip: session.ip, cookie: session.cookie },
-      ),
-    );
-    expect(search.status).toBe(401);
-    expect((await search.json<{ error: string }>()).error).toBe('unauthenticated');
-    const [counters] = await db().execute<{ n: number }>(sql`
-      select count(*)::int as n from usage_counters where subject = ${session.userId}
-    `);
-    expect(counters?.n).toBe(0);
+    // The search takes caps and may spend a provider call: it reads the row and refuses, for the
+    // literal path and for a percent-encoded spelling of it, which Hono routes to the same
+    // handler and which once slipped past a check on the raw pathname (re-review finding
+    // rr-ops-2): no provider call, no counter row, either way.
+    for (const path of ['/v1/flights/search', '/v1/flights/%73earch']) {
+      const search = await worker(
+        jsonRequest(
+          `${path}?number=${flight.designator}&date=${flight.dateLocal}`,
+          'GET',
+          undefined,
+          {
+            ip: session.ip,
+            cookie: session.cookie,
+          },
+        ),
+      );
+      expect(search.status, path).toBe(401);
+      expect((await search.json<{ error: string }>()).error).toBe('unauthenticated');
+      expect(await adbCalls(flight), path).toBe(0);
+      const [counters] = await db().execute<{ n: number }>(sql`
+        select count(*)::int as n from usage_counters where subject = ${session.userId}
+      `);
+      expect(counters?.n, path).toBe(0);
+    }
+  });
+
+  it('requireFreshSession reads the row itself on a path the middleware answers from the cache', async () => {
+    // The guarantee lives on the route, not on a path string (ruling AB2): a route that carries
+    // the middleware refuses a revoked session from the cache cookie where its sibling without it
+    // still answers, on a path `bypassesCookieCache` treats as read-only.
+    const app = createApp();
+    app.get('/v1/fresh-probe', requireUser(), requireFreshSession(), (c) => c.json({ ok: true }));
+    app.get('/v1/cached-probe', requireUser(), (c) => c.json({ ok: true }));
+    const session = await signInAnonymously();
+    const call = async (path: string): Promise<Response> => {
+      const ctx = createExecutionContext();
+      const response = await app.fetch(
+        jsonRequest(path, 'GET', undefined, { ip: session.ip, cookie: session.cookie }),
+        testEnv,
+        ctx,
+      );
+      await waitOnExecutionContext(ctx);
+      return response;
+    };
+    expect((await call('/v1/fresh-probe')).status).toBe(200);
+    expect((await call('/v1/cached-probe')).status).toBe(200);
+
+    await db().execute(sql`delete from sessions where user_id = ${session.userId}::uuid`);
+
+    expect((await call('/v1/cached-probe')).status).toBe(200);
+    const fresh = await call('/v1/fresh-probe');
+    expect(fresh.status).toBe(401);
+    expect((await fresh.json<{ error: string }>()).error).toBe('unauthenticated');
   });
 
   it('never lets a mutating request or the search use the cache, and lets other GETs and HEADs use it', () => {

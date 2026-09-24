@@ -258,8 +258,11 @@ subscriber reconciliation (and the deletion of anonymous users a merge marked `d
 `dlq/persist/` replay of the resolver's and the budget object's archives; the KV session
 tombstones; and the KEK re-wrap (each new wrap proven before it is written, the UPDATE conditional
 on the version read). The rollup queries the Analytics Engine SQL API per provider per day with
-`SUM(_sample_interval)` and replaces the per-operation `provider_call_daily` rows; a sum that is
-not a number fails the message (retried, then dead-lettered with the ops alert), never a 0 row.
+`SUM(_sample_interval)` and replaces the per-operation `provider_call_daily` rows, recording beside
+the sums the day's `count(*)` of `provider_calls` as it found it (`ledger_calls`), the fixed figure
+the ledger purge judges the rollup against ninety days later, so a purge that deleted part of a
+day and was retried cannot find the day implausible by its own shrunken count; a sum that is not
+a number fails the message (retried, then dead-lettered with the ops alert), never a 0 row.
 
 ## 8. Observability
 

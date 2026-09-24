@@ -650,6 +650,14 @@ describe('housekeeping step 3: provider_calls', () => {
     expect(Number(result.audits[0]?.['deleted'])).toBeGreaterThanOrEqual(1);
     expect(Number(result.audits[0]?.['days_purged'])).toBeGreaterThanOrEqual(1);
     expect(Number(result.audits[0]?.['days_without_rollup'])).toBeGreaterThanOrEqual(1);
+    // A rollup row older than `ledger_calls` was judged against the live count once, and the
+    // purge recorded that count on it before its first delete (ruling AB3).
+    const [rollup] = await db().execute<{ ledger_calls: number | null }>(sql`
+      select ledger_calls from provider_call_daily
+      where day = ((now() - interval '100 days') at time zone 'UTC')::date
+        and provider = 'open_meteo' and operation = 'forecast'
+    `);
+    expect(rollup?.ledger_calls).toBe(1);
   });
 
   it('judges a rollup plausible only above zero and within the tolerance of the ledger', () => {
@@ -701,8 +709,8 @@ describe('the rollup and the purge gate together (ruling AA13)', () => {
     );
 
   const rollupOf = (day: string) =>
-    db().execute<{ operation: string; calls: number }>(sql`
-      select operation, calls from provider_call_daily
+    db().execute<{ operation: string; calls: number; ledger_calls: number | null }>(sql`
+      select operation, calls, ledger_calls from provider_call_daily
       where day = ${day}::date and provider = 'aerodatabox' order by operation
     `);
 
@@ -763,8 +771,13 @@ describe('the rollup and the purge gate together (ruling AA13)', () => {
       },
       rollupEnv(),
     );
-    expect(await rollupOf(low)).toEqual([{ operation: 'flight_status', calls: 3 }]);
-    expect(await rollupOf(zero)).toEqual([{ operation: 'flight_status', calls: 0 }]);
+    // The rollup recorded the ledger's count beside its sums (ruling AB3).
+    expect(await rollupOf(low)).toEqual([
+      { operation: 'flight_status', calls: 3, ledger_calls: 25 },
+    ]);
+    expect(await rollupOf(zero)).toEqual([
+      { operation: 'flight_status', calls: 0, ledger_calls: 25 },
+    ]);
 
     const purge = await runStep(message('provider_calls', runId()));
 
@@ -773,7 +786,7 @@ describe('the rollup and the purge gate together (ruling AA13)', () => {
     expect(Number(purge.audits[0]?.['days_without_plausible_rollup'])).toBeGreaterThanOrEqual(2);
   });
 
-  it('purges a day whose sampled rollup lies within the tolerance, carrying the approval across a continuation', async () => {
+  it('purges a day whose sampled rollup lies within the tolerance across a continuation, judged again against the recorded count', async () => {
     const day = await plantLedger(1_010, 25);
     await runStep(
       message(AE_ROLLUP_STEP, runId(), { day }),
@@ -797,17 +810,80 @@ describe('the rollup and the purge gate together (ruling AA13)', () => {
     });
     expect(await ledgerLeft(day)).toBe(15);
     expect(first.continued).toEqual([
-      expect.objectContaining({ step: 'provider_calls', cursor: `approved:${day}|aerodatabox` }),
+      expect.objectContaining({ step: 'provider_calls', cursor: `from:${day}|aerodatabox` }),
     ]);
 
-    // 15 left against a rollup of 24 is outside the band now; the approval carried in the
-    // cursor finishes the day instead of judging it again.
+    // 15 left against a rollup of 24 is outside the band now; the continuation judges the day
+    // again, against the 25 the rollup recorded, and finishes it.
     const second = await runStep(first.continued[0] ?? {}, { deleteBatch: 10 });
     expect(await ledgerLeft(day)).toBe(0);
     expect(second.audits.at(-1)).toMatchObject({ done: true });
     expect(Number(second.audits.at(-1)?.['deleted'])).toBeGreaterThanOrEqual(15);
     expect(Number(second.audits.at(-1)?.['days_purged'])).toBeGreaterThanOrEqual(1);
   });
+
+  it.each([
+    ['recorded by the rollup', 1_020, true],
+    ['older than the column, recorded by the purge itself', 1_021, false],
+  ] as const)(
+    'purges the whole day on a retry after the continuation send failed past a partial delete, the count %s',
+    async (_label, daysAgo, viaRollup) => {
+      // The re-review's reproduction (rr-ops-3): 100 rows, a rollup of 100, 30 rows per batch, a
+      // continuation send that throws once. Before ruling AB3 the retried message judged the day
+      // by its live count of 70, found 100 implausible and kept the rest for good.
+      const day = await plantLedger(daysAgo, 100);
+      if (viaRollup) {
+        await runStep(
+          message(AE_ROLLUP_STEP, runId(), { day }),
+          {
+            fetch: sqlApiAnswering({
+              operation: 'flight_status',
+              result: 'ok',
+              calls: '100',
+              cost_units: '200',
+              cost_usd_micros: '50000',
+            }),
+          },
+          rollupEnv(),
+        );
+      } else {
+        await db().execute(sql`
+          insert into provider_call_daily (day, provider, operation, result, calls)
+          values (${day}::date, 'aerodatabox', 'flight_status', 'ok', 100)
+          on conflict (day, provider, operation, result) do update
+            set calls = excluded.calls, ledger_calls = null
+        `);
+      }
+      expect(await rollupOf(day)).toEqual([
+        { operation: 'flight_status', calls: 100, ledger_calls: viaRollup ? 100 : null },
+      ]);
+      const run = runId();
+      const failing = { send: () => Promise.reject(new Error('transient queue send failure')) };
+
+      // One batch, the audit row, then the send throws: the queue redelivers the message as it
+      // was, with its original cursor, not the continuation it never managed to send.
+      const first = await runStep(message('provider_calls', run), {
+        deleteBatch: 30,
+        wallBudgetMs: 0,
+        sink: failing as unknown as Queue,
+      });
+      expect(first.retried).toHaveLength(1);
+      expect(first.acked).toEqual([]);
+      expect(await ledgerLeft(day)).toBe(70);
+      // Whichever way the count got there, it is on the rollup row before the first delete.
+      expect(await rollupOf(day)).toEqual([
+        { operation: 'flight_status', calls: 100, ledger_calls: 100 },
+      ]);
+
+      // The redelivery: 70 left against a rollup of 100 is outside the band, but the day is
+      // judged against the recorded 100 and purged to the end.
+      const retry = await runStep(message('provider_calls', run), { deleteBatch: 30 });
+      expect(retry.acked).toHaveLength(1);
+      expect(await ledgerLeft(day)).toBe(0);
+      expect(retry.audits.at(-1)).toMatchObject({ done: true });
+      expect(Number(retry.audits.at(-1)?.['days_purged'])).toBeGreaterThanOrEqual(1);
+    },
+  );
 
   it('parses only numeric sums into rows (the pure half)', () => {
     expect(
@@ -1485,15 +1561,28 @@ describe('the Analytics Engine rollup (ae_rollup)', () => {
     expect(adb).toContain('FROM planeahead_provider_calls_local');
     expect(adb).toContain("blob5 = 'test'");
     expect(adb).toContain(`toDateTime('${day} 00:00:00')`);
-    expect(result.audits[0]).toMatchObject({ day, rows: 1 });
+    // The ledger holds nothing for a day in 2001, and the rollup records that count (0) on its
+    // own row; the ProviderBudget's row never carries one (ruling AB3).
+    expect(result.audits[0]).toMatchObject({
+      day,
+      rows: 1,
+      providers: { aerodatabox: { rows: 1, calls: 10, skipped: 2, ledger_calls: 0 } },
+    });
     const rows = () =>
-      db().execute<{ operation: string; result: string; calls: number; cost_units: string }>(sql`
-        select operation, result, calls, cost_units::text as cost_units from provider_call_daily
+      db().execute<{
+        operation: string;
+        result: string;
+        calls: number;
+        cost_units: string;
+        ledger_calls: number | null;
+      }>(sql`
+        select operation, result, calls, cost_units::text as cost_units, ledger_calls
+        from provider_call_daily
         where day = ${day}::date and provider = 'aerodatabox' order by operation
       `);
     expect(await rows()).toEqual([
-      { operation: 'budget_daily', result: 'ok', calls: 7, cost_units: '14' },
-      { operation: 'flight_status', result: 'ok', calls: 10, cost_units: '20' },
+      { operation: 'budget_daily', result: 'ok', calls: 7, cost_units: '14', ledger_calls: null },
+      { operation: 'flight_status', result: 'ok', calls: 10, cost_units: '20', ledger_calls: 0 },
     ]);
 
     // A second run replaces, never adds (at-least-once delivery and the nightly two-day pass).
@@ -1504,6 +1593,7 @@ describe('the Analytics Engine rollup (ae_rollup)', () => {
       result: 'ok',
       calls: 12,
       cost_units: '24',
+      ledger_calls: 0,
     });
   });
 

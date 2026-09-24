@@ -31,8 +31,12 @@
  * `deleted_subjects` rows and the KV session tombstones), and its one `audit_log` row names the
  * operator (actor `admin`, the Access assertion's email and subject) and the user id. Same origin
  * only: the POST must carry an `Origin` equal to `API_PUBLIC_URL`'s (no cookie authorises it; the
- * Access assertion does, and a cross-site form would still carry the Access cookie). A
- * confirmation that does not match changes nothing.
+ * Access assertion does, and a cross-site form would still carry the Access cookie). For the
+ * browser to send that origin, the lookup and result pages alone are served with
+ * `Referrer-Policy: same-origin` (`accountPage`); under the `no-referrer` every other admin page
+ * keeps, a browser sends `Origin: null` on the page's own form POST and the check would refuse the
+ * page's own button (re-review finding rr-ops-1). A confirmation that does not match changes
+ * nothing.
  */
 
 import { sql } from 'drizzle-orm';
@@ -369,6 +373,8 @@ ${body}`,
     cacheControl: 'no-store',
     status: options.status,
     formAction: options.form === true ? "'self'" : "'none'",
+    // The one policy under which the browser sends this origin on the form's POST (rr-ops-1).
+    referrerPolicy: 'same-origin',
   });
 }
 
