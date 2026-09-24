@@ -2,7 +2,9 @@
  * The Live Activity token listeners (increment 11, ruling V5, ADR 0008): the push-to-start
  * token is posted to `POST /v1/devices` under `apns_live_activity_push_to_start` through the
  * increment 9 devices module (install id, APNs environment from the signing, no outbox);
- * per-activity update tokens are logged without their value and discarded.
+ * per-activity update tokens are logged without their value and discarded. A 200 that skipped
+ * the token (`pushTokenSkipped`) is logged and reported as such, never as registered (review
+ * ruling Z4).
  */
 
 import { renderHook } from '@testing-library/react-native';
@@ -46,14 +48,18 @@ jest.mock('expo-widgets', () => ({
 const PUSH_TO_START_TOKEN = 'a1'.repeat(80);
 const ACTIVITY_TOKEN = 'b2'.repeat(80);
 
-function recordingApi(status = 200) {
+function recordingApi(status = 200, response: Record<string, unknown> = {}) {
   const bodies: Record<string, unknown>[] = [];
   const api = {
     v1: {
       devices: {
         $post: ({ json }: { json: Record<string, unknown> }) => {
           bodies.push(json);
-          return Promise.resolve({ ok: status < 300, status, json: () => Promise.resolve({}) });
+          return Promise.resolve({
+            ok: status < 300,
+            status,
+            json: () => Promise.resolve(response),
+          });
         },
       },
     },
@@ -109,8 +115,15 @@ describe('startLiveActivityTokenListeners', () => {
       const { api, bodies } = recordingApi();
       const { source, state } = fakeSource();
       const log = jest.fn();
+      const warn = jest.fn();
       const onError = jest.fn();
-      startLiveActivityTokenListeners({ source, api: () => Promise.resolve(api), log, onError });
+      startLiveActivityTokenListeners({
+        source,
+        api: () => Promise.resolve(api),
+        log,
+        warn,
+        onError,
+      });
 
       state.pushToStart[0]?.({ activityPushToStartToken: PUSH_TO_START_TOKEN });
       await flush();
@@ -129,8 +142,42 @@ describe('startLiveActivityTokenListeners', () => {
         'live_activity_push_to_start_token_registered',
       ]);
       expect(JSON.stringify(log.mock.calls)).not.toContain(PUSH_TO_START_TOKEN);
+      expect(warn).not.toHaveBeenCalled();
     },
   );
+
+  it('logs and reports a 200 that skipped the token, never as registered', async () => {
+    const { api, bodies } = recordingApi(200, {
+      device: { id: 'device-1', installId: 'install-test-0001', platform: 'ios' },
+      pushToken: null,
+      pushTokenSkipped: 'owned_by_another_user',
+    });
+    const { source, state } = fakeSource();
+    const log = jest.fn();
+    const warn = jest.fn();
+    const onError = jest.fn();
+    startLiveActivityTokenListeners({
+      source,
+      api: () => Promise.resolve(api),
+      log,
+      warn,
+      onError,
+    });
+
+    state.pushToStart[0]?.({ activityPushToStartToken: PUSH_TO_START_TOKEN });
+    await flush();
+
+    expect(bodies).toHaveLength(1);
+    const expected = { reason: 'owned_by_another_user', length: PUSH_TO_START_TOKEN.length };
+    expect(log.mock.calls).toEqual([
+      ['live_activity_push_to_start_token_received', { length: PUSH_TO_START_TOKEN.length }],
+      ['live_activity_push_to_start_token_skipped', expected],
+    ]);
+    expect(warn).toHaveBeenCalledTimes(1);
+    expect(warn).toHaveBeenCalledWith('live_activity_push_to_start_token_skipped', expected);
+    expect(onError).not.toHaveBeenCalled();
+    expect(JSON.stringify([log.mock.calls, warn.mock.calls])).not.toContain(PUSH_TO_START_TOKEN);
+  });
 
   it('posts each new push-to-start token the system hands out', async () => {
     const { api, bodies } = recordingApi();
@@ -139,6 +186,7 @@ describe('startLiveActivityTokenListeners', () => {
       source,
       api: () => Promise.resolve(api),
       log: jest.fn(),
+      warn: jest.fn(),
       onError: jest.fn(),
     });
 
@@ -157,6 +205,7 @@ describe('startLiveActivityTokenListeners', () => {
       source,
       api: () => Promise.resolve(api),
       log,
+      warn: jest.fn(),
       onError: jest.fn(),
     });
 
@@ -178,6 +227,7 @@ describe('startLiveActivityTokenListeners', () => {
       source,
       api: () => Promise.resolve(api),
       log: jest.fn(),
+      warn: jest.fn(),
       onError,
     });
 
@@ -200,6 +250,7 @@ describe('startLiveActivityTokenListeners', () => {
       },
       api: () => Promise.resolve(recordingApi().api),
       log: jest.fn(),
+      warn: jest.fn(),
       onError,
     });
 

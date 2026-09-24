@@ -53,12 +53,14 @@ export const notificationPreferences = pgTable(
 
 /**
  * `apns_live_activity_push_to_start` (increment 11, migration 0004) is the ActivityKit
- * push-to-start token the app registers through `POST /v1/devices`: one per installation,
- * rotating rarely, so it fits this table's `(kind, token)` model. Per-activity update tokens do
- * NOT: they are N per device and rotate during an activity, and land in `live_activities` in
- * Phase 1. `apns_live_activity_start` is increment 3's name for the same idea, which no client
- * ever sent; ruling V5 added the new kind rather than renaming, so it stays accepted until a
- * later migration retires it (ADR 0008, open decisions).
+ * push-to-start token the app registers through `POST /v1/devices`. It rotates rarely, so it
+ * fits this table's `(kind, token)` model: one row per `(kind, token)`, and a rotated token is a
+ * new row next to the earlier ones, the newest of a device being the current one (which rows a
+ * sign-out or a rotation should invalidate is an open Phase 1 decision, ADR 0008). Per-activity
+ * update tokens do NOT fit: they are N per device and rotate during an activity, and land in
+ * `live_activities` in Phase 1. `apns_live_activity_start` is increment 3's name for the same
+ * idea, which no client ever sent; ruling V5 added the new kind rather than renaming, so it stays
+ * accepted until a later migration retires it (ADR 0008, open decisions).
  */
 export const PUSH_TOKEN_KINDS = [
   'apns',

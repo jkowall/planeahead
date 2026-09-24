@@ -44,7 +44,9 @@ For a compile without signing, as the spikes did:
 module too; pass `-Dorg.gradle.jvmargs=-Xmx4g` on a cold build, where the template's 2 GB ran
 D8 out of heap). The nightly's steps run the same way from the root:
 `scripts/native-smoke.sh ios-prebuild` (then `ios-build`, `ios-archive`, `ios-launch`, and the
-four `android-*` steps); it prebuilds the production variant. Android needs
+four `android-*` steps); it prebuilds the production variant, builds the Android release APK
+next to the debug one and launches the release APK, the one that runs the app's JavaScript
+(docs/increments/11-verification.md has the exact commands). Android needs
 `ANDROID_HOME` and `ANDROID_SDK_ROOT` (`~/Library/Android/sdk` on this machine) exported in the
 shell running the build. Set `SENTRY_DISABLE_AUTO_UPLOAD=true` for local builds without a Sentry
 token.
@@ -169,15 +171,23 @@ Before the first device build that signs in (copied into the build log by the or
   updates and push-to-start tokens use APNs; Live Activities themselves need no capability, only
   `NSSupportsLiveActivities`, which the config sets); set `ios.appleTeamId` (or the team EAS signs
   with) before the first device build, which @bacons/apple-targets warns about; and let EAS
-  create the provisioning profiles for the three extension targets it lists.
+  create the provisioning profiles for the three extension targets it lists. The watch app
+  carries the variant's icon (generated from `assets/icon-*.png` on every prebuild), which App
+  Store Connect requires of every app bundle; nothing to upload separately. The first device
+  build of each variant should still go through TestFlight before a store submission: no
+  device-signed archive of the watch shells has been processed by App Store Connect yet.
 - Nightly native-smoke (`.github/workflows/native-smoke.yml`): GitHub-hosted runners only, never
   EAS. The gate leg needs a `macos-26` image with Xcode 26.6 installed (the EAS SDK 57 image's
   Xcode) and at least one iPhone simulator runtime; the Xcode 27 leg runs with
   `continue-on-error` and reports "Xcode missing" until an image carries Xcode 27 (switch its
-  `runs-on` when GitHub publishes one). The Android leg needs `ubuntu-24.04` with KVM and
-  downloads an API 36 `google_apis` x86_64 image. No secrets are used. macOS minutes are billed
-  at a multiple of Linux minutes on a private repository: two iOS legs of 30 to 60 minutes each
-  per night is the budget to approve, or trim the Xcode 27 leg to `workflow_dispatch`.
+  `runs-on` when GitHub publishes one). The Android leg needs `ubuntu-24.04` with KVM and the
+  preinstalled Android SDK (its build-tools' `aapt2` checks the manifest and the permissions),
+  downloads an API 36 `google_apis` x86_64 image, and builds the release APK as well as the
+  debug one (about ten more minutes). No secrets are used. macOS minutes are billed at a
+  multiple of Linux minutes on a private repository: two iOS legs of 30 to 60 minutes each per
+  night is the budget to approve, or trim the Xcode 27 leg to `workflow_dispatch`. A new Android
+  permission from a dependency fails the Android leg until it is blocked in `app.config.ts` or
+  added to the expected list in `scripts/native-smoke.sh` on purpose.
 - Expo: an account on the Starter plan, `eas init` in `apps/mobile` (its project id becomes the
   `EAS_PROJECT_ID` variable in all three EAS environments and the GitHub variable
   `EAS_PROJECT_ID`), the EAS environment variables above, and a robot token as the GitHub secret
@@ -192,6 +202,8 @@ app.config.ts                variants, entitlements, links, privacy manifest, pl
 react-native.config.js       keeps @maplibre/maplibre-react-native unlinked until the maps increment
 plugins/withApsEnvironment.ts  the last plugin: aps-environment from APNS_ENVIRONMENT (ADR 0008)
 plugins/withWearApp.ts       adds the Wear OS module (wear/) to the Gradle build, versions pinned
+plugins/withExpoWidgetsBuild.ts  the widget extension's Release settings; expo-widgets unlinked
+                             on Android while its Android widgets are off
 widgets/                     expo-widgets layouts: placeholder.tsx (the one widgets[] entry),
                              live-activity.tsx (createLiveActivity), content-state.ts ({ name, props })
 src/lib/live-activity/tokens.ts  push-to-start token to POST /v1/devices; per-activity tokens logged
@@ -206,7 +218,8 @@ src/app/(app)/               behind a session: home (index), add (the add-flight
 src/app/dev/seeded-home.tsx  development builds only: seeds demo flights, shows the home screen
 src/app/auth/magic-link.tsx  the universal-link target; verifies in the app
 src/app/+native-intent.tsx   records every delivered URL (src/lib/delivered-url.ts) for that screen
-fingerprint.config.js        keeps the Google services file out of the runtime version
+fingerprint.config.js        keeps the Google services file and the generated watch icon out of the
+                             runtime version, adds targets/ and wear/ to it
 src/lib/auth-client.ts       Better Auth Expo client over SecureStore
 src/lib/native-signin/       Apple and Google native sign-in bodies and nonces
 src/lib/api-client.ts        the typed /v1 client (pre-compiled Client from @planeahead/api/client)

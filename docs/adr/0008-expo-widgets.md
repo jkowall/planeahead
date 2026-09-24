@@ -5,6 +5,8 @@
 - Deciders: @jkowall
 - Supersedes: none
 - Superseded by: none
+- Amended: 2026-09-23, by the increment's review round (rulings Z1 to Z11; what ran is in
+  `docs/increments/11-verification.md`)
 
 ## Context
 
@@ -59,6 +61,23 @@ GitHub runners by building, installing and launching both apps.
    `frequentUpdates` off. Both layouts register themselves with the App Group when the app
    imports `widgets/` on launch (src/lib/live-activity/tokens.ts), which a push-started activity
    needs before it can render. No hand-written SwiftUI: the layouts are JavaScript.
+
+   One generator defect is corrected rather than patched in the package
+   (`plugins/withExpoWidgetsBuild.ts`, listed right after `expo-widgets`; review ruling Z11).
+   expo-widgets 57.0.20 writes the same build settings into both configurations of
+   `ExpoWidgetsTarget`, `SWIFT_OPTIMIZATION_LEVEL = "-Onone"` included
+   (`plugin/build/ios/xcode/addXCConfigurationList.js`), and Xcode then turns on the debug dylib
+   for the Release configuration too: a Release product carried the extension as a 40 KB stub
+   plus `ExpoWidgetsTarget.debug.dylib` (8 MB) and `__preview.dylib`, unoptimised, in a WidgetKit
+   extension that runs under a tight memory limit. The plugin sets `-O` and
+   `ENABLE_DEBUG_DYLIB = NO` on that Release configuration. Like `withApsEnvironment` it is a
+   base mod that runs the rest of the `xcodeproj` chain first and edits on the way out, so it
+   edits the project after expo-widgets created the target; apple-targets' own mod rewrites the
+   project later and keeps build settings. `xcodebuild -showBuildSettings` confirms the values
+   after every nightly prebuild, and the nightly fails on any `*.debug.dylib` or
+   `__preview.dylib` in the Release app. Upstream generator behaviour under the exact pin: an
+   expo-widgets bump re-checks it.
+
 2. **Layout rules, tested in the extension's own terms.** babel-preset-expo turns each
    `'widget'` function into a string; the extension evaluates it in a JavaScriptCore context
    whose only globals are `@expo/ui/swift-ui`, its modifiers and a JSX runtime.
@@ -77,12 +96,20 @@ GitHub runners by building, installing and launching both apps.
    extension and both watch shells carry exactly the app's group; the nightly asserts the same on
    the files a real prebuild writes.
 4. **Tokens: push-to-start registered, per-activity logged and discarded.** The push-to-start
-   token is one per installation and rotates rarely, so it is a `push_tokens` row of the new kind
-   `apns_live_activity_push_to_start` (migration 0004 widens the check constraint; the one API
-   change of this increment). src/lib/live-activity/tokens.ts posts it through increment 9's
+   token belongs to an installation and rotates rarely, so it is a `push_tokens` row of the new
+   kind `apns_live_activity_push_to_start` (migration 0004 widens the check constraint; the one
+   API change of this increment). What the table stores is one row per `(kind, token)`: a
+   rotated token is a new row next to the earlier ones, and the newest row of a device is its
+   current token; sign-out and rotation leave rows behind, which gates the Phase 1 sender (open
+   decision 7). src/lib/live-activity/tokens.ts posts it through increment 9's
    devices module (`POST /v1/devices`, the install id in the body and in `X-Install-Id`, the APNs
    environment from the signing, a direct call, not the outbox) for the session user, again for
-   each new user and each new token. Per-activity update tokens are N per device and rotate
+   each new user and each new token. A 200 with `pushTokenSkipped` (the token's row belongs to
+   another user's device from another installation, the API's anti-hijack outcome) is not a
+   success: `registerDevice` returns `{ registered: false, reason }`, and the app logs
+   `live_activity_push_to_start_token_skipped` with the reason and the token's length and sends
+   a Sentry warning, so Phase 1 can size how often a device cannot be push-started (ruling Z4).
+   Per-activity update tokens are N per device and rotate
    during an activity with a server obligation to invalidate the old one; Phase 0 logs that one
    arrived (the activity id, never the token) and discards it. They belong to `live_activities`
    (keyed by activity id) in Phase 1. Increment 3's `apns_live_activity_start` kind stays
@@ -90,18 +117,47 @@ GitHub runners by building, installing and launching both apps.
 5. **Content state.** The activity's props are the shared `LiveActivityContentStateV1` itself,
    extended with the three fields the Lock Screen and the Dynamic Island print and the schema
    lacked: `designator`, `originIata`, `destinationIata`, optional like every field added to a
-   loose schema later. Progress stays `progressPercent` (0 to 100, as `FlightStatus` has it; the
+   loose schema later. `gate` and `terminal` are the origin's (the departure pair), and the
+   review added the arrival pair, `destinationGate` and `destinationTerminal`, optional too; the
+   layout prints the destination gate right after the arrival time and nowhere when it is
+   absent (ruling Z7). Every field is bounded (`LIVE_ACTIVITY_FIELD_MAX_LENGTH`: gate 16,
+   terminal 32, baggage claim 32, and, because their grammars alone allow any length, the flight
+   key 32 and each instant 30), set before anything produces the state because tightening later
+   needs a `V2` schema (ruling Z2). Parsing stays loose; the encoder,
+   `encodeContentState(state, attributes)`, keeps only the schema's own fields, validates every
+   bound and throws `ContentStateTooLargeError` when static plus dynamic data would reach 4 KB. Progress stays `progressPercent` (0 to 100, as `FlightStatus` has it; the
    layout divides by 100), because retyping a field needs a new versioned schema. On the wire
    expo-widgets stores `{ name, props }` with the state JSON-encoded into the `props` STRING, and
    its one attributes type, `LiveActivityAttributes`, holds only `{ url }`; a Phase 1 push names
-   that attributes type and carries `encodeContentState(state)` (widgets/content-state.ts).
+   that attributes type and carries `encodeContentState(state, attributes)`
+   (widgets/content-state.ts).
 6. **watchOS shells ship.** `@bacons/apple-targets` 5.0.0 (exact), listed after expo-widgets, with
    `targets/watch` (a watchOS 11 app, `<bundle id>.watchkitapp`) and `targets/watch-widget` (a
    watch-face complication embedded in it, `<bundle id>.watchkitapp.widget`), both on the app's
    App Group. The two targets need two small SwiftUI files (an `App` and a `Widget` that print
    the name), the only hand-written Swift in the repository, which the target type requires.
+   The watch app carries the variant's app icon (`icon` in `targets/watch/expo-target.config.js`,
+   ruling Z10): App Store Connect wants an app icon catalog in every app bundle, and without it
+   apple-targets wrote none (no `Assets.car`, no `CFBundleIconName`). apple-targets generates that
+   catalog into `targets/watch/Assets.xcassets` on every prebuild; it is gitignored and left out
+   of the fingerprint. The complication needs no icon. The runtime fingerprint hashes `targets/`
+   and `wear/` as extra sources (`fingerprint.config.js`, ruling Z9): @expo/fingerprint finds
+   the config and the plugins but not the Swift and Kotlin they point at, so a change to the
+   watch's Swift alone kept the runtime version.
 7. **Android.** No hand-written Glance widget: expo-widgets' Android widgets stay behind
-   `PLANEAHEAD_ANDROID_WIDGETS=1` (off by default) until SDK 58 supports them.
+   `PLANEAHEAD_ANDROID_WIDGETS=1` (off by default) until SDK 58 supports them. While the flag is
+   off, expo-widgets is also excluded from Android autolinking (ruling Z3): its Android module,
+   autolinked whatever `enableAndroid` said, brought `androidx.glance` 1.2.0-rc01 (a release
+   candidate) and through it `androidx.work` 2.7.1, which merged `FOREGROUND_SERVICE`,
+   WorkManager's startup initializer (its database opened on every launch), its foreground and
+   job services and Glance's receivers into the production manifest. The app's JavaScript needs
+   no native module on Android (expo-widgets resolves `build/ExpoWidgets.js` there, a pure stub).
+   The exclusion keys off the same flag: `plugins/withExpoWidgetsBuild.ts` writes
+   `expoAutolinking.exclude = ['expo-widgets']` before `useExpoModules()` in settings.gradle
+   when `enableAndroid` is off, which the Gradle projects and the generated package list both
+   honour, so the trial needs no hand edit and its builds get the rc Glance back. The nightly
+   asserts that the merged manifests carry no WorkManager or Glance component and that the
+   release APK declares exactly an expected list of permissions (`aapt2 dump permissions`).
    `modules/android-surfaces` is a local Expo module with one Kotlin class,
    `OngoingNotificationModule`, exposing one no-op method (`update`) and the Live Updates
    builder behind an API-level guard, never called in Phase 0; it declares no permission.
@@ -131,9 +187,15 @@ GitHub runners by building, installing and launching both apps.
    the generated entitlements and `xcodebuild -list`, builds Release for an iPhone simulator
    with `-destination` only, asserts the app holds the widget extension with its runtime bundle
    and the watch shells built for watchOS, installs, launches and fails unless the process is
-   alive after 45 s. The ubuntu job prebuilds, runs `assembleDebug` for every ABI with a 4 GB
-   Gradle heap, asserts the Wear APK, the stub module's class and the Tile service, and launches
-   on an API 36 emulator the same way.
+   alive after 45 s; the review added the widget extension's Release settings after prebuild and,
+   in the app, the watch app's icon catalog and the absence of any debug dylib. The ubuntu job
+   prebuilds, runs `assembleDebug` (the compile the spec names) and `assembleRelease` for every
+   ABI with a 4 GB Gradle heap, asserts the Wear APK, the stub module's class, the Tile service,
+   the release APK's embedded `index.android.bundle`, the merged manifests and the permissions,
+   and launches the RELEASE APK on an API 36 emulator (ruling Z5): the debug APK embeds no
+   JavaScript (it is the dev launcher), so launching it proved only the native shell. The launch
+   fails on a dead process or on a `FATAL EXCEPTION` naming the app or a `ReactNativeJS` error in
+   logcat within the grace period.
 
 ## Spike results (2026-09-23, this machine)
 
@@ -208,8 +270,8 @@ targetSdk 36, feature `android.hardware.type.watch`.
 failed in D8 with `OutOfMemoryError` under the template's `-Xmx2048m`; the same build passed
 when re-run, and the nightly runs Gradle with 4 GB. The widget was not rendered (the AVD's adb
 authorisation is the owner's to accept). Note that expo-widgets' Android module (with
-`androidx.glance` 1.2.0-rc01) is autolinked into every Android build whatever the flag says; the
-flag only adds the receiver.
+`androidx.glance` 1.2.0-rc01) was autolinked into every Android build whatever the flag said; the
+flag only added the receiver. The review round excluded it while the flag is off (decision 7).
 
 ### Observed: `aps-environment` through the plugin chain
 
@@ -233,12 +295,18 @@ reachable from this machine; `__tests__/live-activity-tokens.test.ts` covers it.
 
 ### Content state size
 
-The worst case in `__tests__/content-state-size.test.ts` (every field, the longest flight key,
-generous strings, millisecond instants, a long float): 533 bytes as JSON, 627 bytes as the stored
-`{ name, props }`, 66 bytes of attributes, **693 bytes** of the 4096 budget; the Phase 1
-push-to-start payload with an alert fits too.
+As built, the "worst case" in `__tests__/content-state-size.test.ts` was a hand-picked fixture
+(693 bytes), while the schema admitted unbounded free text and kept unknown keys: the review
+parsed a 5.8 KB state (ruling Z2). Since the review every field is bounded and the worst case is
+the schema's own: each field at its bound, each free-text field filled with a control character,
+whose double JSON encoding costs 7 bytes (`\\u0001`), the most of any of the 65,536 UTF-16 code
+units (the test proves it; a double quote costs 4), instants at nanosecond precision, the
+longest number JSON prints between 0 and 100. It comes to 1,355 bytes as JSON, 1,593 bytes as the
+stored `{ name, props }`, 66 bytes of attributes: **1,659 bytes** of the 4,096 budget (the
+review's quote-heavy shape, 1,251). The Phase 1 push-to-start payload carrying it with an alert
+is 1,935 bytes.
 
-## Verification on the final tree (2026-09-23, this machine)
+## Verification on the build's tree (2026-09-23, this machine)
 
 `scripts/native-smoke.sh`, all eight steps, exactly as the nightly runs them (production variant,
 `APNS_ENVIRONMENT=production`), with Xcode 27.0 standing in for the 26.6 gate leg:
@@ -259,7 +327,36 @@ push-to-start payload with an alert fits too.
   `android-launch`: the Wear module included and no widget receiver; **BUILD SUCCESSFUL**; the
   app APK carries `OngoingNotificationModule` and the Wear APK `NextFlightTileService`; on the
   `Pixel_10_Pro_Fold_-_EMU` AVD (Android 37, arm64), which accepted adb this time, the debug
-  build (the dev launcher) was alive 45 s after launch with no fatal in logcat.
+  build (the dev launcher) was alive 45 s after launch with no fatal in logcat. That launch ran
+  no JavaScript: the debug APK embeds none. The review round replaced it (below).
+
+## Verification after the review round (2026-09-23, this machine)
+
+The same eight steps on the review round's tree, production variant, Xcode 27.0 again standing
+in for the 26.6 gate leg; commands and full results in `docs/increments/11-verification.md`.
+
+- `ios-prebuild`: as before, plus `ExpoWidgetsTarget` Release at `-O` with
+  `ENABLE_DEBUG_DYLIB = NO` (`xcodebuild -showBuildSettings`; Debug unchanged) and the watch
+  target with `ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon`.
+- `ios-build`: **BUILD SUCCEEDED**, 1 min 56 s from empty derived data.
+- `ios-archive`: as before, plus the watch app's `Assets.car` and its `CFBundleIconName`
+  (`AppIcon`, under `CFBundleIcons.CFBundlePrimaryIcon`, where the iOS app records its own), and
+  no debug dylib: the extension is one optimised 7.98 MB binary where it was a 40 KB stub plus an
+  8 MB `ExpoWidgetsTarget.debug.dylib` and `__preview.dylib`. Both new checks fail when their
+  condition is planted.
+- `ios-launch`: alive after 45 s on the sign-in screen, both layouts in the App Group.
+- `android-prebuild`: `expoAutolinking.exclude = ['expo-widgets']` in settings.gradle; with
+  `PLANEAHEAD_ANDROID_WIDGETS=1` the line is absent and the widget receiver present.
+- `android-build`: `assembleDebug assembleRelease` (arm64-v8a), **BUILD SUCCESSFUL** in
+  2 min 16 s.
+- `android-archive`: the release APK embeds `index.android.bundle`; no WorkManager or Glance
+  component in either manifest; the release APK's 26 permissions are exactly the expected list,
+  every one from increment 9's dependencies or the template, none `FOREGROUND_SERVICE`.
+- `android-launch`, now the RELEASE APK: on the same AVD, alive 45 s after launch with no
+  `FATAL EXCEPTION` for the app and no `ReactNativeJS` error; logcat shows
+  `ReactNativeJS: Running "main"` and the screen the sign-in screen, which the `(app)` layout
+  redirects to after importing the token listeners and `widgets/`, so those imports ran on
+  Android.
 
 ## Open Phase 1 decisions
 
@@ -269,14 +366,34 @@ push-to-start payload with an alert fits too.
    phase (departure, cruise, arrival), each its own activity. Both need the push-to-start token
    this increment registers; the second needs `live_activities` to track a chain per flight.
 2. **Per-activity tokens:** the `live_activities` writes, the invalidation of a rotated token,
-   and whether the app or the push-to-start path creates the row.
+   and whether the app or the push-to-start path creates the row. The Phase 0 listeners attach
+   only to the activities alive when they start (on mount and for each new user); an activity
+   push-started while the app runs gets none until the next start (ruling Z6). Phase 1 re-runs
+   `getInstances()` when the app becomes active and after any start, attaching listeners to new
+   activity ids only.
 3. **`frequentUpdates`** and the push budget at the tracker's cadence (Apple publishes no number).
 4. **Privacy manifests for the extensions:** Apple wants one per executable using a
    required-reason API; Expo writes only the app's (facts section 2 open question).
-5. **Android:** adopt expo-widgets' Android widgets with SDK 58 or unlink its Android module;
-   Live Updates need compileSdk 36.1 (or androidx.core's call), the `POST_PROMOTED_NOTIFICATIONS`
-   permission and a notification channel.
+5. **Android:** adopt expo-widgets' Android widgets with SDK 58, whose Glance is 1.2.0-rc01 (a
+   release candidate) under 57.0.20 and brings WorkManager 2.7.1 with `FOREGROUND_SERVICE`; the
+   module stays unlinked until then (decision 7), and adopting it means adding that permission
+   to the nightly's expected list and checking the privacy answers. Live Updates need compileSdk
+   36.1 (or androidx.core's call), the `POST_PROMOTED_NOTIFICATIONS` permission and a
+   notification channel.
 6. **Retire `apns_live_activity_start`**, which nothing sends, in a later migration.
+7. **The push-to-start token's lifecycle, a gate on the Phase 1 push-to-start sender** (ruling
+   Z1). Nothing sends a push in Phase 0, so neither gap harms anyone yet; both must be closed
+   before the sender ships.
+   - (a) Sign-out leaves the token bound to the old account. `forgetAccount` signs out, the app
+     returns to the sign-in group without a new session, and nothing re-posts or invalidates the
+     token (Better Auth's sign-out request carries no `X-Install-Id`, so the server cannot tell
+     which device left). A handed-down phone would be push-started with the previous owner's
+     flight. The fix: an invalidate-by-install-id call from `forgetAccount` before `signOut`, or
+     `X-Install-Id` on the auth client's sign-out so the server invalidates that device's rows.
+   - (b) Rotation leaves every earlier token a live row: `push_tokens` is unique on
+     `(kind, token)` only, so a sender that fans out to every live row could start duplicate
+     activities. The fix: invalidate the other rows of the same `device_id` and kind on
+     registration, or have the sender use only the newest row per device.
 
 ## Consequences
 
@@ -284,8 +401,11 @@ push-to-start payload with an alert fits too.
   fighting generated projects; a nightly that launches the apps catches the dyld class of failure
   a compile misses; the APNs environment of every token follows the signing.
 - Harder: two pbxproj writers, one of them an alpha, touch every iOS prebuild, and a version bump
-  of either is a new spike; the widget build relies on pnpm's default hidden hoisting; three
-  more bundle ids per variant to register with Apple; the nightly costs macOS runner minutes.
+  of either is a new spike; the widget build relies on pnpm's default hidden hoisting; two
+  corrections to expo-widgets' generated output (`plugins/withExpoWidgetsBuild.ts`) to re-check
+  on every bump; three more bundle ids per variant to register with Apple; a list of expected
+  Android permissions to keep in step with the dependencies; the nightly costs macOS runner
+  minutes and a release Android build.
 - Reversibility: high for the Android stub, the Wear module and the watch shells (delete the
   directory and the plugin entry); medium for expo-widgets (the layouts are JavaScript, but the
   bundle ids and App Groups the extension uses are permanent once shipped).

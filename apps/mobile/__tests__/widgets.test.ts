@@ -23,7 +23,11 @@ import {
   PLACEHOLDER_WIDGET_NAME,
   PlaceholderWidget,
 } from '../widgets';
-import { MINIMAL_CONTENT_STATE, WORST_CASE_CONTENT_STATE } from './support/live-activity-fixtures';
+import {
+  FULL_CONTENT_STATE,
+  MINIMAL_CONTENT_STATE,
+  WORST_CASE_CONTENT_STATE,
+} from './support/live-activity-fixtures';
 
 jest.mock('expo-widgets', () => ({
   createWidget: (name: string, layout: unknown) => ({ name, layout }),
@@ -172,6 +176,19 @@ describe('expo-widgets configuration', () => {
         .enableAndroid,
     ).toBe(true);
   });
+
+  it('unlinks expo-widgets on Android by the same flag that turns its widgets on (ruling Z3)', () => {
+    for (const flag of [undefined, '1']) {
+      const config = configFor(
+        'production',
+        flag === undefined ? {} : { PLANEAHEAD_ANDROID_WIDGETS: flag },
+      );
+      const build = (config.plugins ?? []).find(
+        (plugin) => Array.isArray(plugin) && plugin[0] === './plugins/withExpoWidgetsBuild.ts',
+      ) as [string, { enableAndroid: boolean }] | undefined;
+      expect(build?.[1]).toEqual({ enableAndroid: widgetsPluginProps(config).enableAndroid });
+    }
+  });
 });
 
 describe('widget layouts in the extension runtime', () => {
@@ -200,6 +217,7 @@ describe('widget layouts in the extension runtime', () => {
 
   it.each([
     ['a worst-case flight', WORST_CASE_CONTENT_STATE, false],
+    ['a full flight', FULL_CONTENT_STATE, false],
     ['a minimal flight', MINIMAL_CONTENT_STATE, false],
     ['a stale activity', MINIMAL_CONTENT_STATE, true],
   ])('renders every Live Activity region for %s', (_label, state, isStale) => {
@@ -224,11 +242,47 @@ describe('widget layouts in the extension runtime', () => {
   });
 
   it('prints the route and gate of a full state', () => {
-    const layout = evaluate(flightActivity)(WORST_CASE_CONTENT_STATE, {
+    const layout = evaluate(flightActivity)(FULL_CONTENT_STATE, {
       colorScheme: 'light',
     }) as Record<string, unknown>;
     const banner = texts(layout['banner']).join(' ');
     expect(banner).toContain('JFK to SIN');
-    expect(banner).toContain('Gate GATE-B22A-EAST01');
+    expect(banner).toContain('Gate B22A');
+    expect(banner).toContain('Terminal 8');
+  });
+
+  /** The children of the expanded bottom region's time row. */
+  function timeRow(state: object): Element[] {
+    const layout = evaluate(flightActivity)(state, { colorScheme: 'light' }) as Record<
+      string,
+      Element
+    >;
+    const rows = layout['expandedBottom']?.props['children'] as Element[];
+    const row = rows.find((child) => child.type === 'HStack');
+    return (row?.props['children'] ?? []) as Element[];
+  }
+
+  /** What is printed right after the time `which` (0: departure, 1: arrival). */
+  function besideTime(row: Element[], which: 0 | 1): unknown {
+    const times = row
+      .map((child, index) => ('date' in child.props ? index : -1))
+      .filter((index) => index >= 0);
+    const index = times[which];
+    expect(index).toBeDefined();
+    return row[(index ?? 0) + 1]?.props['children'];
+  }
+
+  it('prints the origin gate beside the departure and the destination gate beside the arrival', () => {
+    const row = timeRow(FULL_CONTENT_STATE);
+    expect(besideTime(row, 0)).toBe('Gate B22A');
+    expect(besideTime(row, 1)).toBe('Gate C3');
+  });
+
+  it('prints no gate beside the arrival time when the destination gate is unknown (ruling Z7)', () => {
+    const originOnly = { ...FULL_CONTENT_STATE, destinationGate: undefined };
+    const row = timeRow(originOnly);
+    expect(besideTime(row, 0)).toBe('Gate B22A');
+    expect(besideTime(row, 1)).toBe('');
+    expect(texts(row).filter((text) => text !== '')).toEqual(['Gate B22A']);
   });
 });

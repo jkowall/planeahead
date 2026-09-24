@@ -207,8 +207,10 @@ describe('app.config.ts', () => {
       'react-native-nitro-google-signin',
       '@sentry/react-native/expo',
       'expo-notifications',
-      // Increment 11 (ADR 0008): the widget extension, the watchOS shells, the Wear OS module.
+      // Increment 11 (ADR 0008): the widget extension (and its build corrections), the watchOS
+      // shells, the Wear OS module.
       'expo-widgets',
+      './plugins/withExpoWidgetsBuild.ts',
       '@bacons/apple-targets',
       './plugins/withWearApp.ts',
       './plugins/withApsEnvironment.ts',
@@ -260,12 +262,61 @@ describe('app.config.ts', () => {
       expect(isIgnoredPath(kept, onBuilder)).toBe(false);
     }
     // Under `eas update` the variable is unset: the static entries alone, and the same list the
-    // config exports for this process.
+    // config exports for this process (after the generated watch icon catalog, below).
     expect(googleServicesIgnorePaths({})).toEqual([
       '**/google-services*.json',
       '**/GoogleService-Info*.plist',
     ]);
-    expect(ignorePaths).toEqual(googleServicesIgnorePaths(process.env));
+    expect(ignorePaths).toEqual([
+      'targets/*/Assets.xcassets/**/*',
+      ...googleServicesIgnorePaths(process.env),
+    ]);
+  });
+
+  it('hashes the watchOS shells and the Wear OS module into the runtime fingerprint (ruling Z9)', () => {
+    const { extraSources, ignorePaths } = require(
+      path.resolve(APP_ROOT, 'fingerprint.config.js'),
+    ) as {
+      extraSources: { type: string; filePath: string; reasons: string[] }[];
+      ignorePaths: string[];
+    };
+    // Hand-written native code that only a config plugin points at: @expo/fingerprint does not
+    // find it on its own, so a Swift or Kotlin change would otherwise keep the runtime version.
+    expect(extraSources.map(({ type, filePath }) => ({ type, filePath }))).toEqual([
+      { type: 'dir', filePath: 'targets' },
+      { type: 'dir', filePath: 'wear' },
+    ]);
+    for (const source of extraSources) {
+      expect(source.reasons.length).toBeGreaterThan(0);
+      expect(fs.realpathSync(path.resolve(APP_ROOT, source.filePath))).toBeTruthy();
+    }
+    const { isIgnoredPath } = jest.requireActual<{
+      isIgnoredPath(filePath: string, ignorePaths: string[]): boolean;
+    }>(
+      path.resolve(
+        fs.realpathSync(path.dirname(require.resolve('expo/fingerprint'))),
+        '..',
+        '@expo',
+        'fingerprint',
+        'build',
+        'utils',
+        'Path.js',
+      ),
+    );
+    for (const source of [
+      'targets/watch/PlaneAheadWatchApp.swift',
+      'targets/watch/Info.plist',
+      'targets/watch-widget/PlaneAheadWatchWidget.swift',
+      'wear/src/main/java/app/planeahead/wear/MainActivity.kt',
+      'wear/src/main/AndroidManifest.xml',
+    ]) {
+      expect(isIgnoredPath(source, ignorePaths)).toBe(false);
+    }
+    // The icon catalog apple-targets writes into targets/watch on every prebuild exists on a
+    // builder and never under `eas update`: hashing it would split the runtime version.
+    expect(
+      isIgnoredPath('targets/watch/Assets.xcassets/AppIcon.appiconset/Contents.json', ignorePaths),
+    ).toBe(true);
   });
 
   it('adds the Firebase config for FCM only when GOOGLE_SERVICES_JSON names one', () => {

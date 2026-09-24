@@ -82,7 +82,7 @@ jobs:
         run: scripts/native-smoke.sh ios-prebuild
       - name: Build for the iPhone simulator
         run: scripts/native-smoke.sh ios-build
-      - name: Assert the widget extension and the watch shells are in the app
+      - name: Assert the widget extension, the watch shells and their icon, no debug dylib
         run: scripts/native-smoke.sh ios-archive
       - name: Install, launch, and assert the app is still alive
         run: scripts/native-smoke.sh ios-launch
@@ -110,9 +110,10 @@ jobs:
       # Every ABI a store build carries (ADR 0001); the emulator below runs the x86_64 one.
       - name: Prebuild and assert the Wear module is included
         run: scripts/native-smoke.sh android-prebuild
-      - name: Build the app and the Wear module (assembleDebug)
+      # assembleDebug is the compile; assembleRelease embeds the JavaScript the launch runs.
+      - name: Build the app and the Wear module (assembleDebug, assembleRelease)
         run: scripts/native-smoke.sh android-build
-      - name: Assert the APKs, the ongoing-notification stub and the Tile
+      - name: Assert the APKs, the stub, the Tile, the bundle, the manifest and its permissions
         run: scripts/native-smoke.sh android-archive
 
       - name: Enable KVM for the emulator
@@ -120,8 +121,9 @@ jobs:
           echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' | sudo tee /etc/udev/rules.d/99-kvm4all.rules
           sudo udevadm control --reload-rules
           sudo udevadm trigger --name-match=kvm
-      # API 36 is the app's compileSdk and targetSdk (Expo SDK 57, ADR 0008 spike 3).
-      - name: Install, launch, and assert the app is still alive
+      # API 36 is the app's compileSdk and targetSdk (Expo SDK 57, ADR 0008 spike 3). The release
+      # APK, so the app's JavaScript runs: a dead process or a JS fatal in logcat fails the step.
+      - name: Install the release build, launch, and assert it is alive with no JS fatal
         uses: reactivecircus/android-emulator-runner@v2
         with:
           api-level: 36

@@ -40,6 +40,7 @@
 
 import type { ConfigContext, ExpoConfig } from 'expo/config';
 import type { ApsEnvironmentProps } from './plugins/withApsEnvironment';
+import type { ExpoWidgetsBuildProps } from './plugins/withExpoWidgetsBuild';
 
 export const APP_VARIANTS = ['production', 'preview', 'development'] as const;
 export type AppVariant = (typeof APP_VARIANTS)[number];
@@ -183,6 +184,9 @@ export default ({ config }: ConfigContext): ExpoConfig => {
   const easProjectId = env('EAS_PROJECT_ID');
   const sentryOrganization = env('SENTRY_ORG');
   const sentryProject = env('SENTRY_PROJECT');
+  // expo-widgets' Android widgets: a trial flag, off in every EAS profile (ADR 0008). While it is
+  // off, plugins/withExpoWidgetsBuild.ts also keeps the package out of Android autolinking.
+  const androidWidgets = env('PLANEAHEAD_ANDROID_WIDGETS') === '1';
   // An FCM device token needs the Firebase config even in a development build (spike 3, ADR
   // 0001): expo-notifications asks FirebaseMessaging for it, which has no default app without
   // google-services.json. A path, set as an EAS file variable per variant; unset, the token read
@@ -200,8 +204,10 @@ export default ({ config }: ConfigContext): ExpoConfig => {
     orientation: 'portrait',
     icon: identity.icon,
     userInterfaceStyle: 'automatic',
-    // The fingerprint policy notices every native change, including the four native surface
-    // families increment 11 adds, so an update never reaches a build it cannot run on.
+    // The fingerprint policy notices native changes, so an update never reaches a build it cannot
+    // run on. It finds the config, the plugins and the autolinked modules itself; the watchOS
+    // shells' sources (targets/) and the Wear OS module's (wear/), which only a plugin points
+    // at, are added as extra sources by fingerprint.config.js (increment 11 review, ruling Z9).
     runtimeVersion: { policy: 'fingerprint' },
     ...(easProjectId === undefined
       ? {}
@@ -361,7 +367,7 @@ export default ({ config }: ConfigContext): ExpoConfig => {
           bundleIdentifier: widgetsBundleIdentifier(identity.bundleIdentifier),
           groupIdentifier: appGroup,
           enablePushNotifications: true,
-          enableAndroid: env('PLANEAHEAD_ANDROID_WIDGETS') === '1',
+          enableAndroid: androidWidgets,
           widgets: [
             {
               name: PLACEHOLDER_WIDGET.name,
@@ -371,6 +377,13 @@ export default ({ config }: ConfigContext): ExpoConfig => {
             },
           ],
         },
+      ],
+      // Corrections to what expo-widgets generates (ADR 0008, review rulings Z11 and Z3): the
+      // extension's Release build settings (optimised, no debug dylib), and the package kept out
+      // of Android autolinking while `enableAndroid` is off (no Glance, no WorkManager).
+      [
+        './plugins/withExpoWidgetsBuild.ts',
+        { enableAndroid: androidWidgets } satisfies ExpoWidgetsBuildProps,
       ],
       // The watchOS shells (targets/watch, targets/watch-widget), kept after the coexistence
       // spike passed on Xcode 27 (ADR 0008). Its pbxproj parser rewrites the project expo-widgets

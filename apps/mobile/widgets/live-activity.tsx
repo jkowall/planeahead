@@ -15,6 +15,11 @@
  * Comments stay out of the body: the directive turns it into a string stored in the App Group,
  * comments included. Without a marketing designator the flight key names the flight
  * (`AAL-100-2026-09-19-KJFK` reads `AAL 100`, and its origin `KJFK`).
+ *
+ * `gate` and `terminal` are the origin's (the departure pair, ruling Z7), printed on the gate row
+ * and next to the departure side. The destination gate, when a producer has one, is printed right
+ * after the arrival time, and nowhere when it is absent, so no row ever shows a departure gate
+ * beside an arrival time. `destinationTerminal` is carried for Phase 1 and not printed yet.
  */
 
 import { HStack, Image, ProgressView, Spacer, Text, VStack } from '@expo/ui/swift-ui';
@@ -35,6 +40,7 @@ function FlightActivityLayout(
   const departs = new Date(props.actualOut ?? props.estimatedOut ?? props.scheduledOut);
   const arrives = new Date(props.estimatedIn ?? props.scheduledIn);
   const gate = props.gate === undefined ? 'Gate -' : `Gate ${props.gate}`;
+  const arrivalGate = props.destinationGate === undefined ? '' : `Gate ${props.destinationGate}`;
   const terminal = props.terminal === undefined ? '' : `Terminal ${props.terminal}`;
   const baggage = props.baggageClaim === undefined ? '' : `Bags ${props.baggageClaim}`;
   const progress = props.progressPercent === undefined ? null : props.progressPercent / 100;
@@ -54,6 +60,7 @@ function FlightActivityLayout(
           <Text date={departs} dateStyle="time" modifiers={[monospacedDigit()]} />
           <Text> - </Text>
           <Text date={arrives} dateStyle="time" modifiers={[monospacedDigit()]} />
+          <Text modifiers={[font({ textStyle: 'caption' })]}>{arrivalGate}</Text>
         </HStack>
         <ProgressView value={progress} />
         <HStack>
@@ -81,9 +88,11 @@ function FlightActivityLayout(
       <VStack>
         <ProgressView value={progress} />
         <HStack>
+          <Text date={departs} dateStyle="time" modifiers={[monospacedDigit()]} />
           <Text modifiers={[font({ textStyle: 'caption' })]}>{gate}</Text>
           <Spacer />
           <Text date={arrives} dateStyle="time" modifiers={[monospacedDigit()]} />
+          <Text modifiers={[font({ textStyle: 'caption' })]}>{arrivalGate}</Text>
         </HStack>
       </VStack>
     ),

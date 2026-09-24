@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import {
+  LIVE_ACTIVITY_FIELD_MAX_LENGTH as MAX,
   LIVE_ACTIVITY_PAYLOAD_LIMIT_BYTES,
   LiveActivityContentStateV1,
 } from '../src/live-activity';
@@ -65,21 +66,89 @@ describe('LiveActivityContentStateV1', () => {
     );
   });
 
-  it('stays well inside the ActivityKit payload limit even with every field set', () => {
+  it('bounds every free-text field, so the schema has a worst case with a size (ruling Z2)', () => {
+    const atBound = {
+      ...MINIMAL,
+      gate: 'G'.repeat(MAX.gate),
+      terminal: 'T'.repeat(MAX.terminal),
+      destinationGate: 'G'.repeat(MAX.gate),
+      destinationTerminal: 'T'.repeat(MAX.terminal),
+      baggageClaim: 'B'.repeat(MAX.baggageClaim),
+    };
+    expect(LiveActivityContentStateV1.safeParse(atBound).success).toBe(true);
+    expect([MAX.gate, MAX.terminal, MAX.baggageClaim]).toEqual([16, 32, 32]);
+    for (const [field, max] of [
+      ['gate', MAX.gate],
+      ['terminal', MAX.terminal],
+      ['destinationGate', MAX.gate],
+      ['destinationTerminal', MAX.terminal],
+      ['baggageClaim', MAX.baggageClaim],
+    ] as const) {
+      expect(
+        LiveActivityContentStateV1.safeParse({ ...atBound, [field]: 'x'.repeat(max + 1) }).success,
+        field,
+      ).toBe(false);
+    }
+  });
+
+  it('bounds the flight key and the instants, whose grammars alone allow any length', () => {
+    const longestKey = 'AAL-9999A-2026-12-31-KJFK-L99999';
+    expect(longestKey).toHaveLength(MAX.flightKey);
+    expect(
+      LiveActivityContentStateV1.safeParse({ ...MINIMAL, flightKey: longestKey }).success,
+    ).toBe(true);
+    expect(
+      LiveActivityContentStateV1.safeParse({ ...MINIMAL, flightKey: `${longestKey}9` }).success,
+    ).toBe(false);
+    const nanos = '2026-12-31T23:59:59.999999999Z';
+    expect(nanos).toHaveLength(MAX.instant);
+    expect(LiveActivityContentStateV1.safeParse({ ...MINIMAL, updatedAt: nanos }).success).toBe(
+      true,
+    );
+    expect(
+      LiveActivityContentStateV1.safeParse({
+        ...MINIMAL,
+        updatedAt: '2026-12-31T23:59:59.9999999999Z',
+      }).success,
+    ).toBe(false);
+  });
+
+  it('carries the destination gate and terminal next to the origin pair, both optional', () => {
+    const parsed = LiveActivityContentStateV1.parse({
+      ...MINIMAL,
+      gate: 'B22',
+      terminal: '8',
+      destinationGate: 'C3',
+      destinationTerminal: '5',
+    });
+    expect([parsed.gate, parsed.terminal]).toEqual(['B22', '8']);
+    expect([parsed.destinationGate, parsed.destinationTerminal]).toEqual(['C3', '5']);
+    // Backward compatible: a state without the arrival pair still parses.
+    expect(LiveActivityContentStateV1.parse(MINIMAL).destinationGate).toBeUndefined();
+  });
+
+  it("stays loose: a newer producer's extra key parses (the encoder strips it)", () => {
+    const parsed = LiveActivityContentStateV1.parse({ ...MINIMAL, providerRefs: { aeroapi: 'x' } });
+    expect(parsed).toHaveProperty('providerRefs');
+  });
+
+  it('stays well inside the ActivityKit payload limit with every field at its bound', () => {
     const full = LiveActivityContentStateV1.parse({
       ...MINIMAL,
-      flightKey: 'AAL-1000A-2026-09-19-KJFK-L12',
+      flightKey: 'AAL-9999A-2026-12-31-KJFK-L99999',
       designator: 'AAL1000A',
       originIata: 'JFK',
       destinationIata: 'LHR',
       status: 'en_route',
-      gate: 'X'.repeat(16),
-      terminal: 'T'.repeat(32),
-      estimatedOut: '2026-09-20T04:05:00.000Z',
-      actualOut: '2026-09-20T04:07:00.000Z',
-      estimatedIn: '2026-09-20T10:58:00.000Z',
+      gate: 'X'.repeat(MAX.gate),
+      terminal: 'T'.repeat(MAX.terminal),
+      destinationGate: 'Y'.repeat(MAX.gate),
+      destinationTerminal: 'U'.repeat(MAX.terminal),
+      estimatedOut: '2026-09-20T04:05:00.000000000Z',
+      actualOut: '2026-09-20T04:07:00.000000000Z',
+      estimatedIn: '2026-09-20T10:58:00.000000000Z',
       progressPercent: 57.5,
-      baggageClaim: 'B'.repeat(32),
+      baggageClaim: 'B'.repeat(MAX.baggageClaim),
     });
     const bytes = new TextEncoder().encode(JSON.stringify(full)).length;
     expect(LIVE_ACTIVITY_PAYLOAD_LIMIT_BYTES).toBe(4_096);

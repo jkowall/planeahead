@@ -34,4 +34,6 @@ increment 3; 0004 in increment 4; 0010 (provider identity) in increment 6, which
 0011 (alarm idempotency) in increment 7, which also amended 0007 with its third reason; 0012 (sync
 cursor) in increment 8; 0001 (Expo) and 0005 (identifiers) in increment 9; 0008 (expo-widgets,
 the watchOS shells, the Android stubs and the nightly native smoke, with the increment's spike
-results) in increment 11, which the Phase 0 plan had reserved its number for.
+results) in increment 11, which the Phase 0 plan had reserved its number for, amended by the
+increment's review round (the content-state bounds, the Android autolinking exclusion, the watch
+icon, the extension's Release settings and the token lifecycle gate on the Phase 1 sender).

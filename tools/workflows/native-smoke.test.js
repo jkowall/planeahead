@@ -11,6 +11,7 @@
  * and a job is a key at two spaces of indentation under `jobs:`.
  */
 
+import { spawnSync } from 'node:child_process';
 import { readdirSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
@@ -130,5 +131,88 @@ describe('native-smoke.yml', () => {
   it('builds the watch shells for watchOS: the script never forces the iOS SDK', () => {
     expect(script).not.toMatch(/^\s*[^#\n]*-sdk iphonesimulator/m);
     expect(script).toMatch(/-destination "platform=iOS Simulator,id=\$simulator"/);
+  });
+
+  it('asserts the widget extension build settings, the watch icon and no debug dylib (Z10, Z11)', () => {
+    expect(script).toMatch(
+      /-showBuildSettings -project "ios\/\$PROJECT\.xcodeproj" \\\n\s+-target ExpoWidgetsTarget -configuration Release/,
+    );
+    expect(script).toMatch(/SWIFT_OPTIMIZATION_LEVEL <<<"\$settings"\)" -O$/m);
+    expect(script).toMatch(/ENABLE_DEBUG_DYLIB <<<"\$settings"\)" NO$/m);
+    expect(script).toContain(
+      ':CFBundleIcons:CFBundlePrimaryIcon:CFBundleIconName)" \\\n      AppIcon',
+    );
+    expect(script).toContain('[ -f "$watch/Assets.car" ]');
+    expect(script).toContain("-name '*.debug.dylib' -o -name '__preview.dylib'");
+  });
+
+  it('builds the release APK too and launches it, not the dev launcher (ruling Z5)', () => {
+    expect(script).toMatch(/\.\/gradlew assembleDebug assembleRelease /);
+    expect(script).toContain("grep -qx 'assets/index.android.bundle'");
+    const launch = script.slice(script.indexOf('android_launch() {'));
+    expect(launch).toMatch(/adb install -r "\$APK_RELEASE"/);
+    expect(launch).not.toMatch(/app-debug\.apk|\$APK_DEBUG/);
+    expect(launch).toContain('| logcat_errors)');
+  });
+});
+
+describe('native-smoke.sh classifiers', () => {
+  const scriptPath = join(repoRoot, 'scripts', 'native-smoke.sh');
+  const script = readFileSync(scriptPath, 'utf8');
+
+  function run(step, input) {
+    const result = spawnSync('bash', [scriptPath, step], { input, encoding: 'utf8' });
+    return { status: result.status, stdout: result.stdout };
+  }
+
+  it('fails the launch on a fatal in the app process or a ReactNativeJS error, not elsewhere', () => {
+    const logcat = [
+      'E/AndroidRuntime( 123): FATAL EXCEPTION: main',
+      'E/AndroidRuntime( 123): Process: com.android.systemui, PID: 123',
+      'E/AndroidRuntime( 124): FATAL EXCEPTION: main',
+      'E/AndroidRuntime( 124): Process: app.planeahead.mobile.preview, PID: 124',
+      'E/AndroidRuntime( 456): FATAL EXCEPTION: mqt_v_js',
+      'E/AndroidRuntime( 456): Process: app.planeahead.mobile, PID: 456',
+      'E/AndroidRuntime( 456): com.facebook.react.common.JavascriptException: boom',
+      'E/ReactNativeJS( 456): TypeError: undefined is not a function',
+      '',
+    ].join('\n');
+    expect(run('logcat-errors', logcat).stdout.trim().split('\n')).toEqual([
+      'E/AndroidRuntime( 456): FATAL EXCEPTION: mqt_v_js',
+      'E/AndroidRuntime( 456): Process: app.planeahead.mobile, PID: 456',
+      'E/ReactNativeJS( 456): TypeError: undefined is not a function',
+    ]);
+    const quiet =
+      'E/AndroidRuntime( 123): FATAL EXCEPTION: main\nE/AndroidRuntime( 123): Process: com.android.phone, PID: 123\n';
+    expect(run('logcat-errors', quiet).stdout).toBe('');
+  });
+
+  it('holds the release APK to exactly the expected permissions (rulings Z3, Z11)', () => {
+    const list = /^EXPECTED_ANDROID_PERMISSIONS=\(\n((?: {2}.+\n)+)\)$/m.exec(script)?.[1] ?? '';
+    const expected = list
+      .trim()
+      .split('\n')
+      .filter((line) => !line.trim().startsWith('#'))
+      .map((line) =>
+        line
+          .trim()
+          .replace(/^"\$BUNDLE_ID/, 'app.planeahead.mobile')
+          .replace(/"$/, ''),
+      );
+    expect(expected).toContain('android.permission.INTERNET');
+    expect(expected).toContain('app.planeahead.mobile.DYNAMIC_RECEIVER_NOT_EXPORTED_PERMISSION');
+    expect(expected).not.toContain('android.permission.FOREGROUND_SERVICE');
+    const dump = (names) =>
+      [
+        "package: name='app.planeahead.mobile'",
+        ...names.map((name) => `uses-permission: name='${name}'`),
+      ].join('\n') + '\n';
+    // `permissions-differ` succeeds (exit 0) only when the lists differ.
+    expect(run('permissions-differ', dump([...expected].reverse())).status).toBe(1);
+    expect(
+      run('permissions-differ', dump([...expected, 'android.permission.FOREGROUND_SERVICE']))
+        .status,
+    ).toBe(0);
+    expect(run('permissions-differ', dump(expected.slice(1))).status).toBe(0);
   });
 });

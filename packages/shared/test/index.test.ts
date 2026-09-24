@@ -151,6 +151,7 @@ const EXPECTED_EXPORTS = [
   'uuidv7',
   'uuidv7Timestamp',
   // live-activity
+  'LIVE_ACTIVITY_FIELD_MAX_LENGTH',
   'LIVE_ACTIVITY_PAYLOAD_LIMIT_BYTES',
   'LiveActivityContentStateV1',
   // operator
