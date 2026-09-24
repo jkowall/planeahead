@@ -136,6 +136,18 @@ catalog:
   zustand: ~5.0.15
   # Dependency only in Phase 0 (New Architecture only, outside Expo's manifest).
   '@maplibre/maplibre-react-native': 11.4.0
+  # Native surfaces (increment 11, ADR 0008). expo-widgets is EXACT (the facts sheet's pin inside
+  # the manifest's ~57.0.20): its config plugin writes the widget extension, the Podfile target
+  # and the literal `aps-environment` that plugins/withApsEnvironment.ts overrides, so a patch
+  # release can change the generated project. @expo/ui is its dependency, declared because the
+  # widget components in apps/mobile/widgets import their SwiftUI primitives from it.
+  expo-widgets: 57.0.20
+  '@expo/ui': ~57.0.19
+  # The watchOS shells (apps/mobile/targets), exact: the coexistence spike proved THIS version
+  # next to expo-widgets in one prebuild on Xcode 27 (ADR 0008). It depends on
+  # @expo/prebuild-config ~55 (a second, SDK 55 copy of @expo/config-plugins in the tree) and on
+  # the alpha @bacons/xcode pbxproj parser, so a bump is a new spike, never a Renovate merge.
+  '@bacons/apple-targets': 5.0.0
   '@types/react': ~19.2.2
   babel-preset-expo: ~57.0.12
   # Inlines the drizzle-kit `.sql` migration files into migrations.js at Babel time, so Metro

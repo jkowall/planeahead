@@ -2,6 +2,20 @@
 // fingerprint runtime version: the EAS builder, `eas update` (through `expo-updates
 // runtimeversion:resolve`) and a local `pnpm exec expo-updates runtimeversion:resolve`.
 //
+// Two jobs: add the native sources @expo/fingerprint does not find on its own, and leave out the
+// files a build has and an update does not.
+//
+// Extra sources (increment 11 review, ruling Z9). The fingerprint hashes the app config, the
+// plugins it names and the autolinked modules' native directories, but not two directories of
+// hand-written native code the config plugins only point at: targets/ (the watchOS shells'
+// Swift and Info.plist files, which @bacons/apple-targets compiles) and wear/ (the Wear OS
+// module's Kotlin and resources, which plugins/withWearApp.ts compiles). Without them a change
+// to the watch complication's Swift reader kept the runtime version, so an update published with
+// a matching JavaScript change would reach older builds whose Swift expects the old format.
+// Inside targets/, the asset catalog apple-targets generates on every prebuild from the variant's
+// icon (targets/watch/Assets.xcassets, gitignored) is left out: it exists on a builder after
+// prebuild but never under `eas update`, and the icon it comes from is already in the config.
+//
 // Why: the runtime version is the fingerprint of the resolved app config, the external files it
 // names included, and `eas update --environment <env>` can read only the EAS variables with Plain
 // text or Sensitive visibility: never a FILE variable, never a Secret. `GOOGLE_SERVICES_JSON` is a
@@ -39,7 +53,22 @@ function googleServicesIgnorePaths(env, projectRoot = __dirname) {
   return [...CONVENTIONAL_NAMES, ...named];
 }
 
+/** Hand-written native sources outside the plugins' own files, hashed as whole directories. */
+const NATIVE_SOURCE_DIRS = [
+  { dir: 'targets', reason: 'watchOS shells (@bacons/apple-targets): Swift, Info.plist, configs' },
+  { dir: 'wear', reason: 'Wear OS module (plugins/withWearApp.ts): Kotlin, manifest, resources' },
+];
+
+/** What apple-targets generates inside targets/ on every prebuild (the watch app's icon). */
+const GENERATED_TARGET_FILES = ['targets/*/Assets.xcassets/**/*'];
+
 module.exports = {
-  ignorePaths: googleServicesIgnorePaths(process.env),
+  extraSources: NATIVE_SOURCE_DIRS.map(({ dir, reason }) => ({
+    type: 'dir',
+    filePath: dir,
+    reasons: [reason],
+  })),
+  ignorePaths: [...GENERATED_TARGET_FILES, ...googleServicesIgnorePaths(process.env)],
   googleServicesIgnorePaths,
+  GENERATED_TARGET_FILES,
 };

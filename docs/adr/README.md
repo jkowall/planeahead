@@ -23,6 +23,7 @@ else belongs in a code comment.
 | [0005](0005-identifiers.md)        | App identifiers, links, the install and analytics ids  | Accepted |
 | [0006](0006-uuidv7.md)             | UUIDv7 primary keys generated in `@planeahead/shared`  | Accepted |
 | [0007](0007-do-postgres-free.md)   | Durable Objects never open Postgres                    | Accepted |
+| [0008](0008-expo-widgets.md)       | Native surfaces: expo-widgets, watch shells, nightly   | Accepted |
 | [0009](0009-postgres-js-driver.md) | postgres.js as the single Postgres driver              | Accepted |
 | [0010](0010-provider-identity.md)  | Provider identity: operator resolution and merge path  | Accepted |
 | [0011](0011-alarm-idempotency.md)  | Alarm idempotency: attempt row, retry ladder, outbox   | Accepted |
@@ -31,6 +32,8 @@ else belongs in a code comment.
 0003 (flight key) and 0006 (uuidv7) were written in increment 2; 0002, 0007 and 0009 in
 increment 3; 0004 in increment 4; 0010 (provider identity) in increment 6, which also amended 0003;
 0011 (alarm idempotency) in increment 7, which also amended 0007 with its third reason; 0012 (sync
-cursor) in increment 8; 0001 (Expo) and 0005 (identifiers) in increment 9. The Phase 0 plan lists
-one ADR still due: 0008 expo-widgets (increment 11). Its rationale is already written up in
-[docs/plans/phase0-plan.md](../plans/phase0-plan.md) section 3.
+cursor) in increment 8; 0001 (Expo) and 0005 (identifiers) in increment 9; 0008 (expo-widgets,
+the watchOS shells, the Android stubs and the nightly native smoke, with the increment's spike
+results) in increment 11, which the Phase 0 plan had reserved its number for, amended by the
+increment's review round (the content-state bounds, the Android autolinking exclusion, the watch
+icon, the extension's Release settings and the token lifecycle gate on the Phase 1 sender).

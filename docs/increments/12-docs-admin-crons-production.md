@@ -1,6 +1,6 @@
 # Increment 12: docs, admin page, crons, production deploy
 
-Status: spec (2026-09-20). Builder: Opus 5. Reviewers: Opus 5 (operations correctness) plus orchestrator read. Branch `inc12-ops` based on `inc11-native-shells`.
+Status: spec (2026-09-20). Builder: Opus 5. Reviewers: Opus 5 (operations correctness) plus orchestrator read. Branch `inc12-ops` based on `main` (increments 2 to 11 merged).
 
 Read `docs/increments/04-api-bootstrap.facts.md` (deploy mechanics), `06-07-providers-and-trackers.facts.md` sections 4 and 5 (queues, Analytics Engine, Durable Object cost), and `08-flight-routes-and-sync.facts.md` sections 1 and 3 (sync retention, deletion disclosure) first.
 
@@ -31,7 +31,7 @@ Acceptance: the FlightTracker lifecycle test imports its constants from the same
 - `docs/architecture.md`: components, request paths, the DO lifecycle diagram (text), the outbox and persist path, the sync feed and watermark rule, the environments; keeps the generated cadence block.
 - `docs/cost-estimate.md`: the plan's section 9 recomputed with the increment 2 constants (A2 74 polls, 122 PE, $0.61 list; AeroDataBox weekly pre-48h) and the Durable Object cost from the facts (about $0.001 per flight, rows written dominant, the 400,000 GB-s rounding cliff), AeroAPI's $100 Standard minimum, AeroDataBox Growth as the plan floor.
 - `docs/security/threat-model.md` completed: auth (both encryption schemes, the proxy route block, the non-atomic refresh-token write), share links and MCP (documented only), webhook path tokens, KEK rotation runbook, the deletion disclosure.
-- `docs/open-decisions.md`: every plan section 19 item with its current answer and the new ones the facts sheets raised (Durable Object jurisdiction, Live Activity 8-hour limit, ADB alert coordinator, rate-limit customStorage, Play organisation account, Sentry `dataCollection` migration).
+- `docs/open-decisions.md`: every plan section 19 item with its current answer and the new ones the facts sheets raised (Durable Object jurisdiction, Live Activity 8-hour limit, ADB alert coordinator, rate-limit customStorage, Play organisation account, Sentry `dataCollection` migration, and ADR 0008's open Phase 1 decisions from increment 11: the push-to-start token lifecycle on sign-out and rotation, `live_activities` writes and invalidation, `frequentUpdates` and the push budget, privacy manifests for the widget and watch extensions, whether to keep expo-widgets' Android module unlinked, retiring the unused `apns_live_activity_start` kind, and the runner label for the Xcode 27 nightly leg).
 
 ## Files
 

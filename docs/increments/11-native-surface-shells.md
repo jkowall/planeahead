@@ -1,6 +1,6 @@
 # Increment 11: native surface shells and nightly smoke
 
-Status: spec (2026-09-20). Builder: Opus 5. Reviewers: Opus 5 (build-system correctness) plus orchestrator read. Branch `inc11-native-shells` based on `inc10-home-add-detail`.
+Status: complete (2026-09-23) on branch `inc11-native-shells`, PR merged into main. Outcome, spike results, rulings and deviations are in `docs/build-log.md`, ADR 0008 and `docs/increments/11-verification.md`; where the text below disagrees with the review rulings recorded there (the entitlements plugin as a post-order base mod because config-plugins runs the last-listed mod first, the watch shells shipping after the coexistence spike passed on Xcode 27, expo-widgets excluded from Android autolinking while the widget flag is off, the Android launch gate on a release APK with an embedded bundle, bounded free-text fields in the content state), the build log wins. The Xcode 26.6 leg and the workflow on GitHub runners are unproven until the owner dispatches `native-smoke.yml`. Builder: Opus 5. Reviewers: two Opus 5 lenses (build-system correctness; contracts and safety of the shells) plus orchestrator read. Branch `inc11-native-shells` based on `main`.
 
 Read `docs/increments/09-11-mobile.facts.md` section 5 first. It reshapes this increment: expo-widgets already covers Android widgets behind a flag and SDK 58 promotes it, apple-targets is on an alpha pbxproj parser with open watch defects, and expo-widgets hard-codes a sandbox `aps-environment`.
 

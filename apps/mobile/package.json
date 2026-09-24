@@ -14,9 +14,11 @@
     "db:generate": "drizzle-kit generate"
   },
   "dependencies": {
+    "@bacons/apple-targets": "catalog:",
     "@better-auth/expo": "catalog:",
     "@expo/log-box": "catalog:",
     "@expo/metro-runtime": "catalog:",
+    "@expo/ui": "catalog:",
     "@maplibre/maplibre-react-native": "catalog:",
     "@planeahead/api": "workspace:*",
     "@planeahead/shared": "workspace:*",
@@ -41,6 +43,7 @@
     "expo-system-ui": "catalog:",
     "expo-updates": "catalog:",
     "expo-web-browser": "catalog:",
+    "expo-widgets": "catalog:",
     "hono": "catalog:",
     "react": "catalog:",
     "react-dom": "catalog:",

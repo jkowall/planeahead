@@ -64,10 +64,16 @@
       "inputs": ["eslint.config.js", "scripts/**", "tools/**"]
     },
     "//#test:tools": {
-      // The ESLint rule tests, the workflow-order test and the mobile migrations guard's test.
-      // The workflow files and the guard script are read by those tests, so they are inputs too
-      // or a change would cache-hit against a stale pass.
-      "inputs": ["tools/**", ".github/workflows/**", "scripts/mobile-migrations-guard.mjs"]
+      // The ESLint rule tests, the workflow tests (the migration-hash order, every workflow's job
+      // keys, the native-smoke shape) and the mobile migrations guard's test. The workflow files
+      // and the scripts are read by those tests, so they are inputs too or a change would
+      // cache-hit against a stale pass.
+      "inputs": [
+        "tools/**",
+        ".github/workflows/**",
+        "scripts/mobile-migrations-guard.mjs",
+        "scripts/native-smoke.sh"
+      ]
     },
     "//#format:check": {
       "cache": false

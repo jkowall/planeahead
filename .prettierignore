@@ -16,6 +16,9 @@ apps/api/worker-configuration.d.ts
 apps/mobile/ios/
 apps/mobile/android/
 apps/mobile/dist/
+apps/mobile/modules/*/android/build/
+apps/mobile/targets/*/Assets.xcassets/
+.native-smoke/
 
 # drizzle-kit's generated mobile migrations: written byte for byte by `pnpm db:generate`, held
 # unchanged once committed by scripts/mobile-migrations-guard.mjs, never reformatted

@@ -5,7 +5,15 @@
     "typecheck": {
       // `^typecheck` (inherited) builds @planeahead/api first: its `tsc -b` emits the client
       // declaration (apps/api/dist/src/client.d.ts) this package type-checks against.
-      "inputs": ["src/**", "__tests__/**", "plugins/**", "*.ts", "tsconfig.json", "package.json"],
+      "inputs": [
+        "src/**",
+        "__tests__/**",
+        "plugins/**",
+        "widgets/**",
+        "*.ts",
+        "tsconfig.json",
+        "package.json"
+      ],
       "outputs": []
     },
     "lint": {
@@ -13,6 +21,8 @@
         "src/**",
         "__tests__/**",
         "plugins/**",
+        "widgets/**",
+        "targets/*/expo-target.config.js",
         "*.ts",
         "*.js",
         "tsconfig.json",
@@ -21,18 +31,35 @@
     },
     "test": {
       // app-config.test.ts also reads eas.json, react-native.config.js and the preview update
-      // workflow, whose inputs must stay equal to the preview build profile's.
+      // workflow, whose inputs must stay equal to the preview build profile's. Increment 11:
+      // entitlements.test.ts evaluates the whole plugin chain (the target configs and every
+      // plugin's package included), widgets.test.ts compiles widgets/, and the house-style test
+      // reads the native sources, the ADRs, the workflows and the smoke script. The review round:
+      // app-config.test.ts reads fingerprint.config.js (its extra sources and ignore paths).
       "inputs": [
         "src/**",
         "__tests__/**",
         "plugins/**",
+        "widgets/**",
+        "targets/**",
+        "modules/*/expo-module.config.json",
+        "modules/*/android/src/**",
+        "modules/*/android/build.gradle",
+        "wear/**",
         "*.ts",
         "jest.config.js",
         "babel.config.js",
         "react-native.config.js",
+        "fingerprint.config.js",
         "eas.json",
         "package.json",
-        "../../.github/workflows/mobile-preview.yml"
+        "../../.github/workflows/mobile-preview.yml",
+        "../../.github/workflows/native-smoke.yml",
+        "../../scripts/native-smoke.sh",
+        "../../docs/adr/**",
+        "../../docs/increments/11-verification.md",
+        "../../packages/db/migrations/*.sql",
+        "../../pnpm-lock.yaml"
       ],
       "outputs": []
     }

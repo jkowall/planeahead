@@ -20,6 +20,7 @@ export default tseslint.config(
       // them byte for byte, scripts/mobile-migrations-guard.mjs).
       'apps/mobile/ios/**',
       'apps/mobile/android/**',
+      'apps/mobile/modules/*/android/build/**',
       'apps/mobile/.expo/**',
       'apps/mobile/dist/**',
       'apps/mobile/src/lib/db/migrations/**',
@@ -75,7 +76,9 @@ export default tseslint.config(
     rules: { '@typescript-eslint/unbound-method': 'off' },
   },
   {
-    files: ['apps/mobile/*.js'],
+    // CommonJS config files the Expo toolchain loads with require(): the app's own and the
+    // @bacons/apple-targets target configs (increment 11).
+    files: ['apps/mobile/*.js', 'apps/mobile/targets/*/expo-target.config.js'],
     languageOptions: { sourceType: 'commonjs', globals: globals.node },
   },
   {

@@ -1,0 +1,133 @@
+name: Native smoke
+
+# Nightly proof that the generated native projects still build AND launch with every native
+# surface present (increment 11, ADR 0008): the expo-widgets extension (the placeholder widget
+# and the Live Activity layout), the watchOS shells from @bacons/apple-targets, the Android
+# ongoing-notification stub and the Wear OS module. Launching is the point: a dyld failure (a
+# framework embedded in the wrong bundle) builds clean and dies at launch, so every leg installs
+# the app on a simulator or an emulator and fails unless the process is alive after a grace
+# period. Every step is scripts/native-smoke.sh, which runs the same way on a Mac.
+#
+# iOS runs twice: on Xcode 26.6, which mirrors the EAS SDK 57 build image
+# (macos-tahoe-26.5-xcode-26.6), as the leg that must pass; and on Xcode 27 with continue-on-error,
+# the toolchain the project is developed on and the one an SDK 57 defect (expo/expo#47537) is
+# open against. Android runs on ubuntu with JDK 17, as the EAS SDK 57 Android image
+# (ubuntu-26.04-jdk-17-ndk-r27b-sdk-57) does.
+#
+# Never on EAS: the Starter plan's credit does not cover a nightly iOS build (facts section 2).
+# No secrets: the builds are unsigned simulator and debug builds of the production variant.
+
+on:
+  schedule:
+    # 06:17 UTC, after the day's merges; off the hour, when scheduled runs queue longest.
+    - cron: '17 6 * * *'
+  workflow_dispatch:
+
+concurrency:
+  group: native-smoke-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+env:
+  EXPO_NO_GIT_STATUS: '1'
+  EXPO_NO_TELEMETRY: '1'
+  SENTRY_DISABLE_AUTO_UPLOAD: 'true'
+  LANG: en_US.UTF-8
+  LC_ALL: en_US.UTF-8
+
+jobs:
+  ios:
+    name: iOS (Xcode ${{ matrix.xcode }})
+    runs-on: macos-26
+    timeout-minutes: 120
+    # The Xcode 27 leg reports without failing the run; the 26.6 leg is the gate.
+    continue-on-error: ${{ matrix.xcode == '27' }}
+    strategy:
+      fail-fast: false
+      matrix:
+        xcode: ['26.6', '27']
+    env:
+      SMOKE_DERIVED_DATA: ${{ github.workspace }}/.native-smoke/ios
+      SMOKE_GRACE_SECONDS: '45'
+    steps:
+      - uses: actions/checkout@v5
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v6
+        with:
+          node-version-file: .node-version
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+
+      # The image carries several Xcodes side by side (/Applications/Xcode_<version>.app); pick
+      # the newest build of the requested version and fail loudly when the image has none.
+      - name: Select Xcode ${{ matrix.xcode }}
+        env:
+          XCODE_VERSION: ${{ matrix.xcode }}
+        run: |
+          candidates=$(find /Applications -maxdepth 1 -name "Xcode_${XCODE_VERSION}*.app" | sort -V)
+          if [ -z "$candidates" ]; then
+            echo "::error title=Xcode missing::no Xcode ${XCODE_VERSION} on this image"
+            find /Applications -maxdepth 1 -name 'Xcode*.app'
+            exit 1
+          fi
+          selected=$(echo "$candidates" | tail -1)
+          sudo xcode-select --switch "$selected/Contents/Developer"
+          xcodebuild -version
+          xcodebuild -version | head -1 | grep -q "^Xcode ${XCODE_VERSION}"
+          xcrun simctl list runtimes
+
+      - name: Prebuild and assert the generated entitlements and targets
+        run: scripts/native-smoke.sh ios-prebuild
+      - name: Build for the iPhone simulator
+        run: scripts/native-smoke.sh ios-build
+      - name: Assert the widget extension, the watch shells and their icon, no debug dylib
+        run: scripts/native-smoke.sh ios-archive
+      - name: Install, launch, and assert the app is still alive
+        run: scripts/native-smoke.sh ios-launch
+
+  android:
+    name: Android (JDK 17, emulator)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 120
+    env:
+      SMOKE_GRACE_SECONDS: '45'
+    steps:
+      - uses: actions/checkout@v5
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v6
+        with:
+          node-version-file: .node-version
+          cache: pnpm
+      - uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: '17'
+          cache: gradle
+      - run: pnpm install --frozen-lockfile
+
+      # Every ABI a store build carries (ADR 0001); the emulator below runs the x86_64 one.
+      - name: Prebuild and assert the Wear module is included
+        run: scripts/native-smoke.sh android-prebuild
+      # assembleDebug is the compile; assembleRelease embeds the JavaScript the launch runs.
+      - name: Build the app and the Wear module (assembleDebug, assembleRelease)
+        run: scripts/native-smoke.sh android-build
+      - name: Assert the APKs, the stub, the Tile, the bundle, the manifest and its permissions
+        run: scripts/native-smoke.sh android-archive
+
+      - name: Enable KVM for the emulator
+        run: |
+          echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' | sudo tee /etc/udev/rules.d/99-kvm4all.rules
+          sudo udevadm control --reload-rules
+          sudo udevadm trigger --name-match=kvm
+      # API 36 is the app's compileSdk and targetSdk (Expo SDK 57, ADR 0008 spike 3). The release
+      # APK, so the app's JavaScript runs: a dead process or a JS fatal in logcat fails the step.
+      - name: Install the release build, launch, and assert it is alive with no JS fatal
+        uses: reactivecircus/android-emulator-runner@v2
+        with:
+          api-level: 36
+          target: google_apis
+          arch: x86_64
+          disable-animations: true
+          script: scripts/native-smoke.sh android-launch
