@@ -1,0 +1,6 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+  <string name="app_name">PlaneAhead</string>
+  <string name="tile_label">Next flight</string>
+  <string name="no_flight">No flight yet</string>
+</resources>

@@ -1,6 +1,7 @@
 import { Redirect, Stack } from 'expo-router';
 import { Loading } from '../../components/ui';
 import { authClient } from '../../lib/auth-client';
+import { useLiveActivityTokens } from '../../lib/live-activity/tokens';
 import { useBootstrap, useSessionWork } from '../../lib/session';
 
 /**
@@ -12,6 +13,8 @@ export default function AppLayout() {
   const { data: session, isPending } = authClient.useSession();
   const anonymousPending = useBootstrap((state) => state.anonymousPending);
   useSessionWork(session?.user.id ?? null);
+  // Increment 11: the Live Activity push-to-start token, registered per user (iOS only).
+  useLiveActivityTokens(session?.user.id ?? null);
 
   if (session === null && (isPending || anonymousPending)) {
     return <Loading label="Loading" />;

@@ -1,0 +1,41 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  The Wear OS shell (increment 11, ADR 0008): one Compose activity and one Tile, compiled into the
+  Gradle build by plugins/withWearApp.ts. It shares the phone app's package name (the plugin sets
+  applicationId), which is what pairs a watch app with its phone app.
+-->
+<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+
+  <uses-feature android:name="android.hardware.type.watch" />
+
+  <application
+    android:allowBackup="false"
+    android:icon="@android:drawable/sym_def_app_icon"
+    android:label="@string/app_name"
+    android:theme="@android:style/Theme.DeviceDefault">
+
+    <!-- Not standalone: the watch app needs the phone app (Phase 2 adds the Data Layer). -->
+    <meta-data
+      android:name="com.google.android.wearable.standalone"
+      android:value="false" />
+
+    <activity
+      android:name=".MainActivity"
+      android:exported="true">
+      <intent-filter>
+        <action android:name="android.intent.action.MAIN" />
+        <category android:name="android.intent.category.LAUNCHER" />
+      </intent-filter>
+    </activity>
+
+    <service
+      android:name=".NextFlightTileService"
+      android:exported="true"
+      android:label="@string/tile_label"
+      android:permission="com.google.android.wearable.permission.BIND_TILE_PROVIDER">
+      <intent-filter>
+        <action android:name="androidx.wear.tiles.action.BIND_TILE_PROVIDER" />
+      </intent-filter>
+    </service>
+  </application>
+</manifest>

@@ -1,0 +1,24 @@
+// The ongoing-notification stub (increment 11, ADR 0008): a local Expo module that compiles and
+// posts nothing. It builds against the app's compileSdk (Expo SDK 57: 36).
+plugins {
+  id 'com.android.library'
+  id 'expo-module-gradle-plugin'
+}
+
+group = 'app.planeahead'
+version = '0.0.0'
+
+android {
+  namespace 'app.planeahead.surfaces'
+  defaultConfig {
+    versionCode 1
+    versionName '0.0.0'
+  }
+}
+
+dependencies {
+  // The first androidx.core with NotificationCompat.Builder#setRequestPromotedOngoing (1.16.0
+  // has none); it compiles against API 36, where the platform Notification.Builder method does
+  // not exist yet (it arrives with API 36.1). ADR 0008, spike 3.
+  implementation 'androidx.core:core:1.17.0'
+}

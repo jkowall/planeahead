@@ -1,3 +1,5 @@
+// The watch-face complication shell (increment 11, ADR 0008): a static entry that prints the name.
+// Phase 2 gives it the next flight.
 import SwiftUI
 import WidgetKit
 

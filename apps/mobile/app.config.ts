@@ -11,10 +11,11 @@
  * the build environment, with placeholders that keep `expo prebuild` and a local compile working
  * before the owner has created them (apps/mobile/README.md, owner tasks).
  *
- * Plugin order is load bearing (docs/increments/09-mobile-scaffold.md): `ios.entitlements` is
- * applied before every plugin, `expo-notifications` then writes `aps-environment` from its `mode`,
- * and increment 11's expo-widgets writes the literal `development` again, which is why the local
- * `withApsEnvironment` plugin is reserved as the LAST entry.
+ * Plugin order is load bearing (docs/increments/09-mobile-scaffold.md, ADR 0008):
+ * `ios.entitlements` is applied before every plugin, `expo-notifications` then writes
+ * `aps-environment` from its `mode`, and expo-widgets writes the literal `development` again,
+ * which is why the local `withApsEnvironment` plugin is the LAST entry and runs its entitlements
+ * mod after all others.
  *
  * Which API each variant talks to, and which host's universal links it claims (ruling S2, ADR
  * 0005): each host is claimed by exactly one kind of build, so a link opens a predictable app.
@@ -105,6 +106,27 @@ export const BLOCKED_ANDROID_PERMISSIONS = [
  * store release (docs/build-log.md, increment 5 ruling G3 moved it here from /api/auth).
  */
 export const MAGIC_LINK_PATH = '/auth/magic-link';
+
+/**
+ * The one `widgets[]` entry (ADR 0008). `name` is also `createWidget`'s first argument in
+ * widgets/placeholder.tsx, which this file cannot import (the config loader would evaluate the
+ * widget's native bindings); __tests__/widgets.test.ts holds the two equal.
+ */
+export const PLACEHOLDER_WIDGET = {
+  name: 'PlaneAheadPlaceholder',
+  displayName: 'PlaneAhead',
+  description: 'Your next flight at a glance.',
+  supportedFamilies: ['systemSmall', 'systemMedium'],
+} as const;
+
+/**
+ * The widget extension's bundle identifier: the app's plus `.widgets`, explicit rather than
+ * expo-widgets' `.ExpoWidgetsTarget` fallback, because it is permanent once a build ships (ADR
+ * 0005's rule) and the owner registers it with Apple next to the app's (README, owner tasks).
+ */
+export function widgetsBundleIdentifier(appBundleIdentifier: string): string {
+  return `${appBundleIdentifier}.widgets`;
+}
 
 /** Google's iOS URL scheme is the iOS client id reversed; the plugin refuses anything else. */
 const PLACEHOLDER_GOOGLE_IOS_CLIENT_ID = '000000000000-placeholder.apps.googleusercontent.com';
@@ -325,10 +347,42 @@ export default ({ config }: ConfigContext): ExpoConfig => {
         },
       ],
       ['expo-notifications', { mode: apsEnvironment }],
-      // Reserved last (increment 11 makes it real): it will force `aps-environment` after
-      // expo-widgets writes its literal `development`. Named by path with its extension: Expo's
-      // plugin resolver transpiles a TypeScript plugin file, while an `import` from this config
-      // file is not followed by the config loader.
+      // The widget extension (ADR 0008): ONE `widgets[]` entry, the placeholder home-screen widget
+      // (widgets/placeholder.tsx). The flight Live Activity is created with `createLiveActivity`
+      // (widgets/live-activity.tsx) and must not be listed: an entry without families generates
+      // an invalid target. The App Group is the one `ios.entitlements` declares above, so the app
+      // and the extension share storage and the owner registers one group per variant.
+      // `enablePushNotifications` turns on the push-to-start and per-activity token observers
+      // (src/lib/live-activity/tokens.ts); it also writes `aps-environment: development`, which
+      // withApsEnvironment overrides. Android widgets stay behind a flag (ADR 0008).
+      [
+        'expo-widgets',
+        {
+          bundleIdentifier: widgetsBundleIdentifier(identity.bundleIdentifier),
+          groupIdentifier: appGroup,
+          enablePushNotifications: true,
+          enableAndroid: env('PLANEAHEAD_ANDROID_WIDGETS') === '1',
+          widgets: [
+            {
+              name: PLACEHOLDER_WIDGET.name,
+              displayName: PLACEHOLDER_WIDGET.displayName,
+              description: PLACEHOLDER_WIDGET.description,
+              supportedFamilies: [...PLACEHOLDER_WIDGET.supportedFamilies],
+            },
+          ],
+        },
+      ],
+      // The watchOS shells (targets/watch, targets/watch-widget), kept after the coexistence
+      // spike passed on Xcode 27 (ADR 0008). Its pbxproj parser rewrites the project expo-widgets
+      // wrote; the spike found the result independent of the order of the two entries.
+      '@bacons/apple-targets',
+      // The Wear OS module (compile only, ADR 0008).
+      './plugins/withWearApp.ts',
+      // LAST, and it must stay last (ADR 0008): it registers the entitlements mod that runs after
+      // every other one and writes `aps-environment` from the EAS profile, over the literal
+      // `development` expo-widgets writes. Named by path with its extension: Expo's plugin
+      // resolver transpiles a TypeScript plugin file, while an `import` from this config file is
+      // not followed by the config loader.
       ['./plugins/withApsEnvironment.ts', { apsEnvironment } satisfies ApsEnvironmentProps],
     ],
     experiments: {

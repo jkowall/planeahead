@@ -13,9 +13,22 @@ import { runtimeConfig } from './config';
 import { installId } from './identity';
 import type { PushTokenKind } from './push';
 
+/**
+ * The ActivityKit push-to-start token's kind (increment 11, ADR 0008): one per installation,
+ * registered by src/lib/live-activity/tokens.ts. Per-activity update tokens are never sent here.
+ */
+export const LIVE_ACTIVITY_PUSH_TO_START_KIND = 'apns_live_activity_push_to_start';
+
+export type DeviceTokenKind = PushTokenKind | typeof LIVE_ACTIVITY_PUSH_TO_START_KIND;
+
 export interface PushRegistration {
-  readonly kind: PushTokenKind;
+  readonly kind: DeviceTokenKind;
   readonly token: string;
+}
+
+/** Tokens minted by APNs, whose environment follows the build's `aps-environment`. */
+function isApnsKind(kind: DeviceTokenKind): boolean {
+  return kind === 'apns' || kind === LIVE_ACTIVITY_PUSH_TO_START_KIND;
 }
 
 function text(value: string | null | undefined, max: number): string | undefined {
@@ -43,10 +56,11 @@ export async function registerDevice(api: ApiClient, push?: PushRegistration): P
       ...(locale === undefined ? {} : { locale }),
       ...(timezone === undefined ? {} : { timezone }),
       ...(push === undefined ? {} : { pushTokenKind: push.kind, pushToken: push.token }),
-      // APNs only, from the build's `aps-environment` entitlement, which follows its signing:
-      // development builds register with the sandbox, ad hoc preview and store builds with
-      // production (app.config.ts). FCM has no environment.
-      ...(push?.kind === 'apns'
+      // APNs tokens only (the device token and the Live Activity push-to-start token), from the
+      // build's `aps-environment` entitlement, which follows its signing: development builds
+      // register with the sandbox, ad hoc preview and store builds with production
+      // (app.config.ts, plugins/withApsEnvironment.ts). FCM has no environment.
+      ...(push !== undefined && isApnsKind(push.kind)
         ? {
             pushEnvironment:
               runtimeConfig().apnsEnvironment === 'production' ? 'production' : 'sandbox',

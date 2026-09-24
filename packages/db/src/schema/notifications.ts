@@ -51,7 +51,22 @@ export const notificationPreferences = pgTable(
   ],
 );
 
-export const PUSH_TOKEN_KINDS = ['apns', 'fcm', 'apns_live_activity_start', 'expo'] as const;
+/**
+ * `apns_live_activity_push_to_start` (increment 11, migration 0004) is the ActivityKit
+ * push-to-start token the app registers through `POST /v1/devices`: one per installation,
+ * rotating rarely, so it fits this table's `(kind, token)` model. Per-activity update tokens do
+ * NOT: they are N per device and rotate during an activity, and land in `live_activities` in
+ * Phase 1. `apns_live_activity_start` is increment 3's name for the same idea, which no client
+ * ever sent; ruling V5 added the new kind rather than renaming, so it stays accepted until a
+ * later migration retires it (ADR 0008, open decisions).
+ */
+export const PUSH_TOKEN_KINDS = [
+  'apns',
+  'fcm',
+  'apns_live_activity_start',
+  'expo',
+  'apns_live_activity_push_to_start',
+] as const;
 export const PUSH_ENVIRONMENTS = ['sandbox', 'production'] as const;
 
 export const pushTokens = pgTable(

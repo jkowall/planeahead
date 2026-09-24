@@ -34,6 +34,31 @@ describe('LiveActivityContentStateV1', () => {
     );
   });
 
+  it('carries the designator and the two IATA codes the Lock Screen and Dynamic Island print', () => {
+    const parsed = LiveActivityContentStateV1.parse({
+      ...MINIMAL,
+      designator: 'AA100',
+      originIata: 'JFK',
+      destinationIata: 'LHR',
+    });
+    expect([parsed.designator, parsed.originIata, parsed.destinationIata]).toEqual([
+      'AA100',
+      'JFK',
+      'LHR',
+    ]);
+    // Optional, like every field added to a loose schema later: an older state still parses.
+    expect(LiveActivityContentStateV1.parse(MINIMAL).designator).toBeUndefined();
+    expect(LiveActivityContentStateV1.safeParse({ ...MINIMAL, originIata: 'KJFK' }).success).toBe(
+      false,
+    );
+    expect(LiveActivityContentStateV1.safeParse({ ...MINIMAL, designator: 'A' }).success).toBe(
+      false,
+    );
+    expect(
+      LiveActivityContentStateV1.safeParse({ ...MINIMAL, designator: 'AAL1000AB' }).success,
+    ).toBe(false);
+  });
+
   it('degrades a status it does not know to unknown, like every other status on the wire', () => {
     expect(LiveActivityContentStateV1.parse({ ...MINIMAL, status: 'delayed' }).status).toBe(
       'unknown',
@@ -44,6 +69,9 @@ describe('LiveActivityContentStateV1', () => {
     const full = LiveActivityContentStateV1.parse({
       ...MINIMAL,
       flightKey: 'AAL-1000A-2026-09-19-KJFK-L12',
+      designator: 'AAL1000A',
+      originIata: 'JFK',
+      destinationIata: 'LHR',
       status: 'en_route',
       gate: 'X'.repeat(16),
       terminal: 'T'.repeat(32),

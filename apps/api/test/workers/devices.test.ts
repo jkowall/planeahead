@@ -117,6 +117,47 @@ describe('POST /v1/devices', () => {
     expect(rows[0]?.invalidatedAt).toBeNull();
   });
 
+  it('stores a Live Activity push-to-start token under its own kind, next to the device token (increment 11)', async () => {
+    const session = await signInAnonymously();
+    const installId = uniqueInstallId('push-to-start');
+    const deviceToken = `apns-${crypto.randomUUID()}`;
+    const pushToStartToken = `p2s-${crypto.randomUUID()}`;
+
+    const device = await registerDevice(session, installId, {
+      pushTokenKind: 'apns',
+      pushToken: deviceToken,
+      pushEnvironment: 'production',
+    });
+    const pushToStart = await registerDevice(session, installId, {
+      pushTokenKind: 'apns_live_activity_push_to_start',
+      pushToken: pushToStartToken,
+      pushEnvironment: 'production',
+    });
+    const pushToStartBody = await pushToStart.json<DeviceBody>();
+    const again = await registerDevice(session, installId, {
+      pushTokenKind: 'apns_live_activity_push_to_start',
+      pushToken: pushToStartToken,
+      pushEnvironment: 'production',
+    });
+    const againBody = await again.json<DeviceBody>();
+
+    expect(device.status).toBe(200);
+    expect(pushToStart.status).toBe(200);
+    expect(pushToStartBody.pushToken?.kind).toBe('apns_live_activity_push_to_start');
+    expect(againBody.pushToken?.id).toBe(pushToStartBody.pushToken?.id);
+    const rows = await withDb(testEnv, (db) =>
+      db
+        .select({ kind: pushTokens.kind, environment: pushTokens.environment })
+        .from(pushTokens)
+        .where(eq(pushTokens.deviceId, pushToStartBody.device?.id ?? '')),
+    );
+    expect(rows.map((row) => row.kind).sort()).toEqual([
+      'apns',
+      'apns_live_activity_push_to_start',
+    ]);
+    expect(rows.every((row) => row.environment === 'production')).toBe(true);
+  });
+
   it('rejects a body whose installId disagrees with X-Install-Id, an unknown platform, and a token without a kind', async () => {
     const session = await signInAnonymously();
     const installId = uniqueInstallId('validate');

@@ -1,12 +1,12 @@
 /**
  * app.config.ts (ruling P8, fix-round rulings S2 and S8): the three variants, the entitlements
  * with the APNs environment from the EAS profile, one universal-link host per variant, the
- * privacy manifest, the blocked Android permissions, the plugin order with the reserved
- * withApsEnvironment slot LAST and no MapLibre plugin, scene support in expo-build-properties,
- * the fingerprint runtime version and the React Compiler off. Also the files that must agree with
- * it: eas.json, the preview update workflow, react-native.config.js, fingerprint.config.js (the
- * Google services file stays out of the runtime version, re-review expo-correctness-1) and the
- * package scripts.
+ * privacy manifest, the blocked Android permissions, the plugin order with withApsEnvironment
+ * LAST (increment 11 made it real; __tests__/entitlements.test.ts evaluates it) and no MapLibre
+ * plugin, scene support in expo-build-properties, the fingerprint runtime version and the React
+ * Compiler off. Also the files that must agree with it: eas.json, the preview update workflow,
+ * react-native.config.js, fingerprint.config.js (the Google services file stays out of the
+ * runtime version, re-review expo-correctness-1) and the package scripts.
  */
 
 import type { ConfigContext, ExpoConfig } from 'expo/config';
@@ -207,6 +207,10 @@ describe('app.config.ts', () => {
       'react-native-nitro-google-signin',
       '@sentry/react-native/expo',
       'expo-notifications',
+      // Increment 11 (ADR 0008): the widget extension, the watchOS shells, the Wear OS module.
+      'expo-widgets',
+      '@bacons/apple-targets',
+      './plugins/withWearApp.ts',
       './plugins/withApsEnvironment.ts',
     ]);
     const buildProperties = config.plugins?.[1] as [string, { ios: Record<string, unknown> }];
