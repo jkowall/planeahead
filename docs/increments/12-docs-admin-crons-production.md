@@ -1,6 +1,6 @@
 # Increment 12: docs, admin page, crons, production deploy
 
-Status: spec (2026-09-20). Builder: Opus 5. Reviewers: Opus 5 (operations correctness) plus orchestrator read. Branch `inc12-ops` based on `main` (increments 2 to 11 merged).
+Status: complete (2026-09-23) on branch `inc12-ops`, PR merged into main; Phase 0's last increment. Outcome, rulings and deviations are in `docs/build-log.md` and `docs/increments/12-verification.md`; where the text below disagrees with the review rulings recorded there (the housekeeping steps as independent queue messages with a plausibility gate before the provider_calls purge, the sync purge paged by horizon steps with BRIN indexes in migration 0005, the DLQ replay limited to origins without another copy, the admin page's one write action for operator deletions, the typed confirmation as the production deploy gate until GitHub Pro exists), the build log wins. Nothing was deployed: everything deploy-shaped is proven by the dry runs, the Workers suite and the workflow checks, and the owner's first deploy follows `docs/runbooks/first-deploy.md`. Builder: Opus 5. Reviewers: two Opus 5 lenses (operations and data correctness; docs and deploy correctness) plus orchestrator read. Branch `inc12-ops` based on `main` (increments 2 to 11 merged).
 
 Read `docs/increments/04-api-bootstrap.facts.md` (deploy mechanics), `06-07-providers-and-trackers.facts.md` sections 4 and 5 (queues, Analytics Engine, Durable Object cost), and `08-flight-routes-and-sync.facts.md` sections 1 and 3 (sync retention, deletion disclosure) first.
 
