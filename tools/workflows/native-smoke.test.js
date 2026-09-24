@@ -162,7 +162,7 @@ describe('native-smoke.sh classifiers', () => {
 
   function run(step, input) {
     const result = spawnSync('bash', [scriptPath, step], { input, encoding: 'utf8' });
-    return { status: result.status, stdout: result.stdout };
+    return { status: result.status, stdout: result.stdout, stderr: result.stderr };
   }
 
   it('fails the launch on a fatal in the app process or a ReactNativeJS error, not elsewhere', () => {
@@ -214,5 +214,11 @@ describe('native-smoke.sh classifiers', () => {
         .status,
     ).toBe(0);
     expect(run('permissions-differ', dump(expected.slice(1))).status).toBe(0);
+    // A permission a dependency declares as <uses-permission-sdk-23> is as real as a plain one
+    // on every device the app supports (minSdk 24); aapt2 prints it on its own line.
+    const sdk23 =
+      dump(expected) + "uses-permission-sdk-23: name='android.permission.ACCESS_FINE_LOCATION'\n";
+    expect(run('permissions-differ', sdk23).status).toBe(0);
+    expect(run('permissions-differ', sdk23).stderr).toContain('ACCESS_FINE_LOCATION');
   });
 });

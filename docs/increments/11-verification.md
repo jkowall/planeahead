@@ -39,17 +39,21 @@ developer team, no provider keys, no deployed API.
 
 `@expo/fingerprint` 0.20.13, the copy expo-updates resolves, run on apps/mobile with the preview
 profile's environment (`APP_VARIANT=preview APNS_ENVIRONMENT=production`), before and after
-appending a comment to one file:
+appending a comment to one file. The absolute values are those of the committed tree at the fix
+commit `e12e62a` (the re-review re-ran the probe there; the fixer's earlier values were taken
+before its last edits under `targets/`); any later edit under `targets/` or `wear/` changes them,
+so what the table proves is the before-and-after relation, not the numbers:
 
 | Change | iOS hash | Android hash |
 | --- | --- | --- |
-| none | `6d78d3e6...` | `7189c1de...` |
-| a generated `targets/watch/Assets.xcassets/AppIcon.appiconset/Contents.json` | `6d78d3e6...` (ignored) | `7189c1de...` |
-| `// probe` appended to `targets/watch/PlaneAheadWatchApp.swift` | `71b7c311...` | `33116761...` |
-| `// probe` appended to `wear/src/main/java/app/planeahead/wear/MainActivity.kt` | `5c25f7fb...` | `05499192...` |
-| both reverted | `6d78d3e6...` | `7189c1de...` |
+| none | `0f3ef213...` | `a485fbe9...` |
+| a generated `targets/watch/Assets.xcassets` (empty, or with the icon set after a production prebuild and both builds) | `0f3ef213...` (ignored) | `a485fbe9...` |
+| a comment appended to `targets/watch-widget/Info.plist` | `523ac043...` | `c4fcac3b...` |
+| an edit to `wear/src/main/res/values/strings.xml` | `cf6bd48c...` | `a059ef07...` |
+| both reverted | `0f3ef213...` | `a485fbe9...` |
 
-Before the fix the review measured the same Swift and Kotlin edits leaving both hashes unchanged.
+Before the fix the review measured a Swift and a Kotlin edit leaving both hashes unchanged; the
+fixer's own probe of those two files moved them likewise.
 `targets/` and `wear/` are hashed as whole directories for both platforms, so an edit to either
 moves both runtime versions: one extra build at most, never an update reaching a build it cannot
 run on.

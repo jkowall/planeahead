@@ -328,10 +328,12 @@ android_archive() {
 }
 
 # `aapt2 dump permissions` output on stdin; prints a diff and succeeds when the declared
-# permissions are not exactly EXPECTED_ANDROID_PERMISSIONS.
+# permissions are not exactly EXPECTED_ANDROID_PERMISSIONS. Both forms count: aapt2 prints a
+# `<uses-permission-sdk-23>` on its own `uses-permission-sdk-23:` line, and with minSdk 24 such a
+# permission is as real as a plain one on every supported device (increment 11 re-review).
 permissions_differ() {
   local actual expected
-  actual="$(sed -n "s/^uses-permission: name='\([^']*\)'.*/\1/p" | LC_ALL=C sort -u)"
+  actual="$(sed -n "s/^uses-permission\(-sdk-23\)\{0,1\}: name='\([^']*\)'.*/\2/p" | LC_ALL=C sort -u)"
   expected="$(printf '%s\n' "${EXPECTED_ANDROID_PERMISSIONS[@]}" | LC_ALL=C sort -u)"
   [ "$actual" != "$expected" ] || return 1
   diff <(echo "$expected") <(echo "$actual") >&2 || true
