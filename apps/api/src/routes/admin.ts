@@ -1,8 +1,8 @@
 /**
  * `GET /admin`: the operator page (increment 12, ruling W5), behind Cloudflare Access
- * (src/middleware/access.ts) on every `/admin` path, read-only except ONE write action (below),
- * server-rendered HTML with no client framework and no script (src/lib/html.ts: a strict CSP,
- * `no-store`).
+ * (src/middleware/access.ts) on every `/admin` path, read-only except TWO write actions (the
+ * account deletion below and, from increment 14, the test push), server-rendered HTML with no
+ * client framework and no script (src/lib/html.ts: a strict CSP, `no-store`).
  *
  * One page, one section per question, each loaded on its own so a failing source shows as
  * unavailable instead of failing the page:
@@ -21,9 +21,12 @@
  *     roles' backends; the runbook grants it, ruling AA5);
  *   - the queue depths from the Cloudflare Queues API (unavailable without the token);
  *   - `sync_horizon` and `sync_epoch`;
- *   - the last housekeeping `audit_log` rows.
+ *   - the last housekeeping `audit_log` rows;
+ *   - (increment 14, ruling P9) the push transport: its configuration here, the `PushAuth`
+ *     objects' last mints, and the outcomes of the last 24 hours by reason (src/routes/admin-push.ts,
+ *     which also serves the second write action, "Send a test push", ruling P8).
  *
- * The one write action (ruling AA9): operator account deletion, for a request that reached the
+ * The first write action (ruling AA9): operator account deletion, for a request that reached the
  * support inbox the public `/account/delete` page names. `GET /admin/accounts/delete` takes a user
  * id and shows the account's status and creation date; its form posts the id again, typed a second
  * time, to `POST /admin/accounts/delete`, which runs `deleteAccount`, the very path
@@ -64,6 +67,13 @@ import {
 import { defaultTrackerFor, type TrackerFor } from '../lib/trackers';
 import { accessMiddleware, type AccessOptions } from '../middleware/access';
 import { createLogger, errorFields, type Logger } from '../observability/log';
+import {
+  pushTestPage,
+  pushTestResult,
+  pushTestSend,
+  pushTransportSection,
+  type AdminPushOptions,
+} from './admin-push';
 import { DO_SCHEMA_VERSIONS } from './health';
 
 const STYLE = `
@@ -71,6 +81,7 @@ const STYLE = `
 body { margin: 16px; }
 h1 { font-size: 20px; margin: 0 0 4px; }
 h2 { font-size: 16px; margin: 24px 0 8px; }
+h3 { font-size: 14px; margin: 16px 0 8px; }
 p.meta { color: #666; margin: 0 0 16px; }
 table { border-collapse: collapse; width: 100%; max-width: 1100px; }
 th, td { border-bottom: 1px solid #8884; padding: 4px 8px; text-align: left;
@@ -88,14 +99,22 @@ p.done { color: #070; }
 export function environmentQueueNames(environment: EnvironmentName): string[] {
   const suffix =
     environment === 'production' ? '' : environment === 'staging' ? '-staging' : '-local';
-  const kinds = ['persist', 'notify', 'provider-events', 'imports', 'reconcile', 'housekeeping'];
+  const kinds = [
+    'persist',
+    'notify',
+    'push',
+    'provider-events',
+    'imports',
+    'reconcile',
+    'housekeeping',
+  ];
   return kinds.flatMap((kind) => [
     `planeahead-${kind}${suffix}`,
     `planeahead-${kind}-dlq${suffix}`,
   ]);
 }
 
-export interface AdminRoutesOptions {
+export interface AdminRoutesOptions extends AdminPushOptions {
   readonly access?: AccessOptions | undefined;
   /** The Cloudflare API's fetch (Analytics Engine SQL, Queues). */
   readonly fetch?: typeof fetch | undefined;
@@ -365,7 +384,7 @@ async function accountPage(
     title: 'PlaneAhead admin: delete an account',
     style: STYLE,
     body: `<h1>Delete an account</h1>
-<p class="meta">The one write action on this page. Use it for a deletion request that reached the
+<p class="meta">A write action on this page. Use it for a deletion request that reached the
 support inbox and was confirmed from the account's own address (docs/runbooks/first-deploy.md);
 it runs the same deletion as the app's Delete account. <a href="/admin">Back to the operations
 page</a>.</p>
@@ -516,24 +535,29 @@ export function createAdminRoutes(options: AdminRoutesOptions = {}) {
   app.use('*', accessMiddleware(options.access));
   app.get('/accounts/delete', (c) => accountLookup(c, options));
   app.post('/accounts/delete', (c) => accountDeletion(c, options));
+  app.get('/push/test', (c) => pushTestPage(c, STYLE));
+  app.post('/push/test', (c) => pushTestSend(c, options, STYLE, apiOrigin(c.env)));
+  app.get('/push/test/result', (c) => pushTestResult(c, options, STYLE));
   app.get('/', async (c) => {
     const log = createLogger({ request_id: c.var.requestId, admin: true });
     const env = c.env;
     const db = (options.db ?? openDb)(env);
     const access = cloudflareApiAccess(env.CF_ACCOUNT_ID, env.CF_API_TOKEN, options.fetch ?? fetch);
-    const [flights, days, today, watermarkSection, queueSection, sync, audit] = await Promise.all([
-      section(log, 'per_flight', () => perFlight(db)),
-      section(log, 'per_provider_day', () => perProviderDay(db)),
-      section(log, 'today', () => todaySoFar(access, env)),
-      section(log, 'watermark', () => watermark(db)),
-      section(log, 'queues', () => queues(access, env)),
-      section(log, 'sync_state', () => syncState(db)),
-      section(log, 'housekeeping', () => housekeeping(db)),
-    ]);
+    const [flights, days, today, watermarkSection, queueSection, sync, audit, push] =
+      await Promise.all([
+        section(log, 'per_flight', () => perFlight(db)),
+        section(log, 'per_provider_day', () => perProviderDay(db)),
+        section(log, 'today', () => todaySoFar(access, env)),
+        section(log, 'watermark', () => watermark(db)),
+        section(log, 'queues', () => queues(access, env)),
+        section(log, 'sync_state', () => syncState(db)),
+        section(log, 'housekeeping', () => housekeeping(db)),
+        section(log, 'push', () => pushTransportSection(env, db, options)),
+      ]);
     const identity = c.var.accessIdentity;
     const body = [
       '<h1>PlaneAhead operations</h1>',
-      `<p class="meta">${esc(environmentName(env))}, read-only except the account deletion below. Signed in through Cloudflare Access as ${esc(
+      `<p class="meta">${esc(environmentName(env))}, read-only except the account deletion and the test push below. Signed in through Cloudflare Access as ${esc(
         identity?.email ?? identity?.subject ?? 'unknown',
       )}. Generated ${esc(new Date().toISOString())}.</p>`,
       sectionHtml('Provider calls per flight key (last 7 days, provider_calls)', flights),
@@ -550,9 +574,10 @@ export function createAdminRoutes(options: AdminRoutesOptions = {}) {
       sectionHtml('Queue depths (Cloudflare Queues API)', queueSection),
       sectionHtml('Sync horizon and epoch', sync),
       sectionHtml('Last housekeeping runs (audit_log)', audit),
+      sectionHtml('Push transport', push),
       sectionHtml('Operator account deletion', {
         ok: true,
-        html: `<p>For a deletion request that reached the support inbox: <a href="${ADMIN_ACCOUNT_DELETE_PATH}">look up the account and delete it</a> (the one write action).</p>`,
+        html: `<p>For a deletion request that reached the support inbox: <a href="${ADMIN_ACCOUNT_DELETE_PATH}">look up the account and delete it</a> (a write action).</p>`,
       }),
     ].join('\n');
     return renderPage({ title: 'PlaneAhead admin', style: STYLE, body, cacheControl: 'no-store' });

@@ -1,6 +1,8 @@
 # First deploy runbook
 
-Status: increment 12 (2026-09-23); the store steps (step 18) increment 13 (2026-09-30). Everything
+Status: increment 12 (2026-09-23); the store steps (step 18) increment 13 (2026-09-30); the push
+transport (the `push` queues in step 2, its secrets in step 6, step 19) increment 14
+(2026-09-30). Everything
 the owner does once, in order, before and during the first staging and production deploys and the
 first store builds, with the exact commands. Nothing here has been run: there
 is no Cloudflare account, Neon project, provider key or Apple and Google credential in the build
@@ -51,15 +53,15 @@ Conventions: run wrangler from `apps/api` as `pnpm exec wrangler ...` (the pinne
 
 ## 2. Queues and dead letter queues
 
-A deploy fails with `Queue "<name>" does not exist`; it never creates them. Six queues and six
-dead letter queues per environment (increment 12 added `housekeeping`). The dead letter queues
-keep messages 14 days (the maximum on Paid) so a missed alert still leaves time to look; their
-consumer archives every message to R2 anyway.
+A deploy fails with `Queue "<name>" does not exist`; it never creates them. Seven queues and
+seven dead letter queues per environment (increment 12 added `housekeeping`, increment 14 `push`).
+The dead letter queues keep messages 14 days (the maximum on Paid) so a missed alert still leaves
+time to look; their consumer archives every message to R2 anyway.
 
 - [ ] Staging:
 
   ```sh
-  for q in persist notify provider-events imports reconcile housekeeping; do
+  for q in persist notify push provider-events imports reconcile housekeeping; do
     pnpm exec wrangler queues create "planeahead-$q-staging"
     pnpm exec wrangler queues create "planeahead-$q-dlq-staging" --message-retention-period-secs 1209600
   done
@@ -67,6 +69,10 @@ consumer archives every message to R2 anyway.
 
 - [ ] Production: the same loop with the names `planeahead-$q` and `planeahead-$q-dlq` (no
       suffix).
+- [ ] An environment created before increment 14 needs only the two new ones:
+      `pnpm exec wrangler queues create planeahead-push-staging` and
+      `pnpm exec wrangler queues create planeahead-push-dlq-staging --message-retention-period-secs 1209600`
+      (and the same without `-staging` for production), before the first deploy of increment 14.
 - [ ] The consumers attach on the first deploy (wrangler.jsonc `queues.consumers`, one Worker per
       queue); `pnpm exec wrangler queues info planeahead-persist-staging` shows the consumer
       afterwards.
@@ -141,28 +147,30 @@ correctness requirement of the sync feed's no-cursor snapshot page, not a perfor
 ## 6. Worker secrets and settings
 
 `wrangler.jsonc` declares `secrets.required` per environment (the list is `WORKER_SECRET_NAMES`
-in `apps/api/src/env.ts`, kept equal by `secrets-in-logs.test.ts`), so wrangler refuses the first
-deploy while one is unset. Set them out of band; the deploy workflows pass an EMPTY `secrets` input
-on purpose.
+in `apps/api/src/env.ts`, and in production also `PUSH_SECRET_NAMES`; `secrets-in-logs.test.ts`
+keeps them equal), so wrangler refuses the first deploy while one is unset. Set them out of band;
+the deploy workflows pass an EMPTY `secrets` input on purpose.
 
 - [ ] For each environment, every name below with
       `pnpm exec wrangler secret put <NAME> --env <env>` (or once with
       `pnpm exec wrangler secret bulk secrets.<env>.json --env <env>` from a file that is never
       committed and deleted afterwards):
 
-  | Secret                                                                     | Value                                                                                                                                                  |
-  | -------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------ |
-  | `SENTRY_DSN`                                                               | the Sentry project DSN (empty drops every event)                                                                                                       |
-  | `BETTER_AUTH_SECRET`                                                       | `openssl rand -base64 48`, different per environment                                                                                                   |
-  | `TOKEN_KEK_V1`                                                             | `openssl rand -base64 32` (standard padded base64, 32 bytes); different per environment; keep an offline copy                                          |
-  | `APPLE_SIWA_P8`, `APPLE_SIWA_KEY_ID`, `APPLE_SIWA_TEAM_ID`                 | the Sign in with Apple key created in step 12 (`.p8` PEM with newlines written as `\n`), its key id, the team id; the same values in both environments |
-  | `APPLE_BUNDLE_ID`                                                          | the primary app: `app.planeahead.mobile` (production), `app.planeahead.mobile.dev` (staging); it also signs the revocation                             |
-  | `GOOGLE_CLIENT_ID_WEB`, `GOOGLE_CLIENT_ID_IOS`, `GOOGLE_CLIENT_ID_ANDROID` | the three OAuth client ids of the Google Cloud project                                                                                                 |
-  | `RESEND_API_KEY`                                                           | the Resend key for the verified sending domain                                                                                                         |
-  | `AERODATABOX_API_KEY`, `AEROAPI_API_KEY`                                   | provider keys (AeroAPI unused while `AEROAPI_MODE` is `mock`; set a placeholder until step 13 decides)                                                 |
-  | `WEBHOOK_TOKEN_AERODATABOX`, `WEBHOOK_TOKEN_AEROAPI`                       | `openssl rand -base64 32 \| tr '+/' '-_' \| tr -d '='`, one per provider and environment                                                               |
-  | `DELETED_SUBJECT_HMAC_KEY`, `IP_SALT_SECRET`                               | `openssl rand -base64 32` each, different per environment                                                                                              |
-  | `CF_API_TOKEN` (optional)                                                  | the operational token of step 1                                                                                                                        |
+  | Secret                                                                               | Value                                                                                                                                                     |
+  | ------------------------------------------------------------------------------------ | --------------------------------------------------------------------------------------------------------------------------------------------------------- |
+  | `SENTRY_DSN`                                                                         | the Sentry project DSN (empty drops every event)                                                                                                          |
+  | `BETTER_AUTH_SECRET`                                                                 | `openssl rand -base64 48`, different per environment                                                                                                      |
+  | `TOKEN_KEK_V1`                                                                       | `openssl rand -base64 32` (standard padded base64, 32 bytes); different per environment; keep an offline copy                                             |
+  | `APPLE_SIWA_P8`, `APPLE_SIWA_KEY_ID`, `APPLE_SIWA_TEAM_ID`                           | the Sign in with Apple key created in step 12 (`.p8` PEM with newlines written as `\n`), its key id, the team id; the same values in both environments    |
+  | `APPLE_BUNDLE_ID`                                                                    | the primary app: `app.planeahead.mobile` (production), `app.planeahead.mobile.dev` (staging); it also signs the revocation                                |
+  | `GOOGLE_CLIENT_ID_WEB`, `GOOGLE_CLIENT_ID_IOS`, `GOOGLE_CLIENT_ID_ANDROID`           | the three OAuth client ids of the Google Cloud project                                                                                                    |
+  | `RESEND_API_KEY`                                                                     | the Resend key for the verified sending domain                                                                                                            |
+  | `AERODATABOX_API_KEY`, `AEROAPI_API_KEY`                                             | provider keys (AeroAPI unused while `AEROAPI_MODE` is `mock`; set a placeholder until step 13 decides)                                                    |
+  | `WEBHOOK_TOKEN_AERODATABOX`, `WEBHOOK_TOKEN_AEROAPI`                                 | `openssl rand -base64 32 \| tr '+/' '-_' \| tr -d '='`, one per provider and environment                                                                  |
+  | `DELETED_SUBJECT_HMAC_KEY`, `IP_SALT_SECRET`                                         | `openssl rand -base64 32` each, different per environment                                                                                                 |
+  | `CF_API_TOKEN` (optional)                                                            | the operational token of step 1                                                                                                                           |
+  | `APNS_KEY_P8`, `APNS_KEY_ID`, `APNS_TEAM_ID` (production required, staging optional) | the APNs auth key of step 19 (`.p8` PEM with newlines written as `\n`), its key id, the team id: a Sandbox key on staging, a Production key on production |
+  | `FCM_SERVICE_ACCOUNT_JSON` (production required, staging optional)                   | the FCM sender's service-account JSON key file of step 19, whole: `pnpm exec wrangler secret put FCM_SERVICE_ACCOUNT_JSON --env <env> < key.json`         |
 
 - [ ] `ADB_PLAN=growth` in BOTH environments (`pnpm exec wrangler secret put ADB_PLAN --env <env>`,
       value `growth`, or a `vars` entry), for the Growth plan of step 0. Required, not optional:
@@ -173,7 +181,9 @@ on purpose.
       entry): `AEROAPI_MODE` (`mock` default),
       `ADB_ALERTS_ENABLED`, `REVENUECAT_DELETE_ENABLED`, `APPLE_BUNDLE_IDS` (defaults to the
       environment's variants: production and preview against production, development against
-      staging), `APPLE_TEAM_ID`, `APP_BUNDLE_IDS` and `ANDROID_SHA256_FINGERPRINTS` (step 11).
+      staging), `APPLE_TEAM_ID`, `APP_BUNDLE_IDS` and `ANDROID_SHA256_FINGERPRINTS` (step 11), and
+      in production only `PUSH_INJECT_ALLOWED_USER_IDS` (step 19: the user ids whose tokens the
+      admin page's test push may reach there, comma separated; unset refuses every token).
 - [ ] The vars in `wrangler.jsonc`: `CF_ACCOUNT_ID` (the account id of step 0) per environment,
       and `ACCESS_TEAM_DOMAIN` and `ACCESS_AUD` from step 14.
 
@@ -460,3 +470,33 @@ Privacy answers, Play's Data safety form, the content rating and the store listi
       internal tester installs it and the app opens on the sign-in screen; an Android tester opts
       in with the link and installs from Play. Record any App Store Connect email in
       docs/increments/13-verification.md (its unverified items).
+
+## 19. Push transport: keys and the staging send
+
+Increment 14. The API sends APNs directly and FCM through HTTP v1 from the `push` queue's
+consumer; nothing produces real push jobs until increment 15, so the first push is the admin
+page's test push. Staging deploys without any push secret (its consumer holds push jobs as
+`not_configured` and `/admin` says so); production requires them (step 6). The exact staging
+commands are in `docs/increments/14-verification.md`.
+
+- [ ] APNs keys (Certificates, Identifiers and Profiles > Keys > +, **Apple Push Notifications
+      service (APNs)**): one team-scoped key restricted to **Sandbox** for staging and one to
+      **Production** for production (Apple allows two per environment; keep one slot free for
+      rotation). Download each `.p8` once and note its key id and the team id; then step 6's
+      `APNS_KEY_P8`, `APNS_KEY_ID`, `APNS_TEAM_ID` per environment. Push Notifications is already
+      on the three App IDs (step 12).
+- [ ] Firebase: a project with the three Android apps (`app.planeahead.mobile`, `.preview`,
+      `.dev`), the FCM API (V1) enabled, and a dedicated service account holding only
+      `cloudmessaging.messages.create` (a custom role), with a JSON key (an organisation created
+      on or after 2024-05-03 blocks key creation until an admin exempts the project). The key is
+      step 6's `FCM_SERVICE_ACCOUNT_JSON`. The apps' `google-services.json` files are the client
+      half (apps/mobile/README.md).
+- [ ] Access for `/admin` (step 14) exists in the environment.
+- [ ] The staging send: a development build on the Simulator (Apple silicon, iOS 16+), signed in
+      (a guest is enough), registers its token with Settings > Notifications > Allow
+      notifications; `/admin/push/test` with that token, kind APNs and app id
+      `app.planeahead.mobile.dev`; the result page shows `sent` with an `apns-id` and the
+      Simulator shows the notification. Any other answer is a result too: record it in
+      `docs/increments/14-verification.md`.
+- [ ] Production, after the first TestFlight install (increment 16): `PUSH_INJECT_ALLOWED_USER_IDS`
+      set to your own user id, then the same test push to your iPhone's token.

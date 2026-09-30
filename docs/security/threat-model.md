@@ -352,6 +352,16 @@ caller who could register the device row under that install id anyway. The orpha
 user of the cross-device flow stays `active` with an empty device row until increment 8's
 housekeeping sweeps it. A silent-push possession challenge is the Phase 1 hardening item.
 
+Increment 14 (ruling P6) adds the token's lifecycle. A registration invalidates the device's other
+live rows of the same kind, so a rotated token stops receiving pushes; a skipped registration
+(`owned_by_another_user`) rotates nothing. `POST /v1/devices/current/invalidate` needs a session
+and invalidates only the rows on the CALLER's device row for the named installation: the install id
+is not a secret, so a caller who names another user's installation reaches nothing of theirs. The
+push path invalidates a token only on the provider answers ruling P5 lists, and an APNs answer only
+when it was about the row's own app id and environment, so a request that names a wrong topic
+cannot be used to kill someone else's registration. Device tokens never reach a log line: the
+`push` consumer logs push token ids and counts, and refuses an unreadable job without its body.
+
 ## 2. Envelope encryption
 
 Two independent key schemes exist on the `accounts` table and both are named here so a rotation
@@ -464,7 +474,7 @@ loss only, nothing the app depends on).
 
 ### 3.3 The admin page behind Cloudflare Access (increment 12)
 
-`GET /admin` (and every path below it) is read-only except one action (below), server-rendered
+`GET /admin` (and every path below it) is read-only except two actions (below), server-rendered
 HTML with no script under a CSP of `default-src 'none'` plus one hashed stylesheet, `no-store`,
 `frame-ancestors 'none'`.
 Cloudflare Access sits in front of the path, and the Worker validates the
@@ -480,7 +490,7 @@ the Access application) the page answers 403 to everyone. What the page shows is
 (call counts per flight key and per provider, never a user), and the Cloudflare API token behind
 two of its sections is read-only and optional.
 
-The one write action (review ruling AA9) is the operator account deletion for a request that
+The first write action (review ruling AA9) is the operator account deletion for a request that
 reached the support inbox: `GET /admin/accounts/delete?user_id=` shows the account's status and
 creation date (no email), and `POST /admin/accounts/delete` with the id typed a second time runs
 the same `deleteAccount` as `POST /v1/me/delete` (trackers, the Apple revocation, the one
@@ -490,6 +500,14 @@ transaction, the `deleted_subjects` hashes, the KV tombstones), whose one audit 
 Access alone is not enough), no cookie of the API authorises it, and a confirmation that does not
 match the id changes nothing. Only that page's CSP allows `form-action 'self'`. The social
 engineering risk of an emailed request stays a procedure (section 3.4).
+
+The second write action (increment 14, ruling P8) is "Send a test push": `POST /admin/push/test`
+with the same `Origin` rule and form-action allowance, which puts one test job for a REGISTERED
+token (by kind and token) on the push queue and writes an audit row naming the operator. In
+production it accepts only a token whose user id is in `PUSH_INJECT_ALLOWED_USER_IDS` (unset
+refuses every token), so an Access session cannot push to arbitrary users there. The page shows
+the push configuration by secret name only, the `PushAuth` objects' mint times and never a token,
+and every attempt's outcome counts.
 
 ### 3.4 The public account-deletion page (increment 12)
 

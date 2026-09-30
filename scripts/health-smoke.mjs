@@ -35,6 +35,7 @@ export const DO_FILES = {
   AirportState: 'airport-state.ts',
   UserInbox: 'user-inbox.ts',
   ProviderBudget: 'provider-budget.ts',
+  PushAuth: 'push-auth.ts',
 };
 
 /** What this commit's build reports on `/health`. */

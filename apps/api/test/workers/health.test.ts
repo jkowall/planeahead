@@ -38,7 +38,7 @@ describe('GET /health', () => {
     expect(body.migrationCount).toBe(MIGRATION_COUNT);
   });
 
-  it('reports the compiled-in schema version of all five Durable Object classes', async () => {
+  it('reports the compiled-in schema version of all six Durable Object classes', async () => {
     const { body } = await getHealth();
 
     // Named individually rather than compared against a snapshot: a class dropped from the
@@ -51,6 +51,8 @@ describe('GET /health', () => {
       UserInbox: 0,
       // Increment 6: the ledger, bucket, kill switch and outbox tables.
       ProviderBudget: 1,
+      // Increment 14: the push credentials.
+      PushAuth: 1,
     });
   });
 

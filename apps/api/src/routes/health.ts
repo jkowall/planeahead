@@ -12,7 +12,7 @@
  *
  * `doSchemaVersions` reports each class's compiled-in `static SCHEMA_VERSION`, which is what this
  * build expects. It deliberately does NOT read the applied version from a live object: that would
- * mean creating five Durable Objects on every health check, including on every deploy smoke test.
+ * mean creating six Durable Objects on every health check, including on every deploy smoke test.
  * The applied version is available per object through `ping()`.
  */
 
@@ -23,6 +23,7 @@ import { AirportState } from '../do/airport-state';
 import { DesignatorResolver } from '../do/designator-resolver';
 import { FlightTracker } from '../do/flight-tracker';
 import { ProviderBudget } from '../do/provider-budget';
+import { PushAuth } from '../do/push-auth';
 import { UserInbox } from '../do/user-inbox';
 
 export const DO_SCHEMA_VERSIONS = Object.freeze({
@@ -31,6 +32,7 @@ export const DO_SCHEMA_VERSIONS = Object.freeze({
   AirportState: AirportState.SCHEMA_VERSION,
   UserInbox: UserInbox.SCHEMA_VERSION,
   ProviderBudget: ProviderBudget.SCHEMA_VERSION,
+  PushAuth: PushAuth.SCHEMA_VERSION,
 });
 
 export const health = new Hono<AppBindings>().get('/health', (c) =>

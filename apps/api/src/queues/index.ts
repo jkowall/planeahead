@@ -17,7 +17,9 @@
  * dispatched to one handler that archives the raw message to R2, raises the ops alert and
  * acknowledges (src/queues/dlq.ts). Increment 12 adds the `housekeeping` queue (and its dead
  * letter queue), which the nightly cron fills with one message per step
- * (src/queues/housekeeping.ts).
+ * (src/queues/housekeeping.ts). Increment 14 adds the `push` queue (and its dead letter queue):
+ * the push transport's consumer, which sends through APNs and FCM and reports every outcome to
+ * `persist` (src/queues/push.ts).
  */
 
 import type { Env } from '../env';
@@ -27,11 +29,19 @@ import { handleHousekeepingBatch } from './housekeeping';
 import { handleImportsBatch } from './imports';
 import { handleNotifyBatch } from './notify';
 import { handlePersistBatch } from './persist';
+import { handlePushBatch } from './push';
 import { handleProviderEventsBatch } from './provider-events';
 import { handleReconcileBatch } from './reconcile';
 
 export type QueueKind =
-  'persist' | 'notify' | 'provider-events' | 'imports' | 'reconcile' | 'housekeeping' | 'unknown';
+  | 'persist'
+  | 'notify'
+  | 'push'
+  | 'provider-events'
+  | 'imports'
+  | 'reconcile'
+  | 'housekeeping'
+  | 'unknown';
 
 export interface QueueRoute {
   readonly kind: QueueKind;
@@ -50,6 +60,7 @@ const ENVIRONMENT_SUFFIXES = ['-local', '-staging', '-production'] as const;
 const KINDS: readonly QueueKind[] = [
   'persist',
   'notify',
+  'push',
   'provider-events',
   'imports',
   'reconcile',
@@ -105,6 +116,9 @@ export async function queue(
         return;
       case 'notify':
         await handleNotifyBatch(batch as MessageBatch<never>, context);
+        return;
+      case 'push':
+        await handlePushBatch(batch, context);
         return;
       case 'provider-events':
         await handleProviderEventsBatch(batch as MessageBatch<never>, context);

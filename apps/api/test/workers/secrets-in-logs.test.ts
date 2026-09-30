@@ -13,14 +13,39 @@
  *      token, the identity tokens, the authorization code, the session cookies).
  */
 
-import { createExecutionContext, waitOnExecutionContext } from 'cloudflare:test';
+import {
+  createExecutionContext,
+  createMessageBatch,
+  runInDurableObject,
+  waitOnExecutionContext,
+} from 'cloudflare:test';
 import { sql } from 'drizzle-orm';
 import { withDb } from '@planeahead/db';
+import { PushJobV1, type PushCredentialName } from '@planeahead/shared';
 import { describe, expect, it } from 'vitest';
 import { createApp } from '../../src/app';
 import { normalisePem } from '../../src/auth/apple-client-secret';
-import { OPTIONAL_SECRET_NAMES, TEST_SEAM_NAMES, WORKER_SECRET_NAMES } from '../../src/env';
+import type { PushAuth } from '../../src/do/push-auth';
+import {
+  OPTIONAL_SECRET_NAMES,
+  PUSH_SECRET_NAMES,
+  TEST_SEAM_NAMES,
+  WORKER_SECRET_NAMES,
+} from '../../src/env';
+import { createLogger } from '../../src/observability/log';
+import { durableCredentialSource } from '../../src/push/credentials';
+import { createApnsTransport, createFcmTransport } from '../../src/push/transport';
+import { handlePersistBatch } from '../../src/queues/persist';
+import { handlePushBatch } from '../../src/queues/push';
 import wranglerConfig from '../../wrangler.jsonc?raw';
+import {
+  apnsAnswer,
+  capturingQueue,
+  fakeFetch,
+  fcmError,
+  jobInput,
+  target,
+} from '../unit/helpers/push';
 import {
   API_ORIGIN,
   appleNativeSignIn,
@@ -39,6 +64,14 @@ import {
   worker,
 } from './helpers/auth';
 
+/** A PEM's base64 body without its armour, on one line. */
+function pemBody(pem: string): string {
+  return normalisePem(pem)
+    .split('\n')
+    .filter((line) => !line.startsWith('-----'))
+    .join('');
+}
+
 /** A value that would ride in a failed statement's bound parameters if anything let it. */
 const BODY_MARKER = `BODYMARKER_${crypto.randomUUID().replaceAll('-', '')}`;
 
@@ -47,7 +80,7 @@ const exampleKeys = new Set((testEnv.TEST_DEV_VARS_EXAMPLE_KEYS ?? '').split(','
 describe('.dev.vars.example and .dev.vars.test', () => {
   it('list every secret the Worker reads', () => {
     expect(exampleKeys.size).toBeGreaterThan(0);
-    for (const name of WORKER_SECRET_NAMES) {
+    for (const name of [...WORKER_SECRET_NAMES, ...PUSH_SECRET_NAMES]) {
       expect(exampleKeys, `${name} in .dev.vars.example`).toContain(name);
       // The value is a binding under test; `SENTRY_DSN` is deliberately empty.
       expect(typeof testEnv[name], `${name} in .dev.vars.test`).toBe('string');
@@ -61,7 +94,7 @@ describe('.dev.vars.example and .dev.vars.test', () => {
   });
 
   it('gives every secret used by a flow a non-empty dummy value', () => {
-    for (const name of WORKER_SECRET_NAMES) {
+    for (const name of [...WORKER_SECRET_NAMES, ...PUSH_SECRET_NAMES]) {
       if (name === 'SENTRY_DSN') {
         continue;
       }
@@ -80,7 +113,7 @@ function requiredSecretBlocks(text: string): string[][] {
   );
 }
 
-describe('wrangler.jsonc secrets.required (ruling O11)', () => {
+describe('wrangler.jsonc secrets.required (ruling O11; increment 14, ruling P7)', () => {
   it('declares every secret the Worker reads in staging and in production, and nothing else', () => {
     const blocks = requiredSecretBlocks(wranglerConfig);
     // Staging and production only: the top level is the local and test environment, which reads
@@ -92,12 +125,112 @@ describe('wrangler.jsonc secrets.required (ruling O11)', () => {
     expect(positions[0]).toBeGreaterThan(staging);
     expect(positions[0]).toBeLessThan(production);
     expect(positions[1]).toBeGreaterThan(production);
-    for (const block of blocks) {
-      // The block replaces .dev.vars inference, so it must be complete, in the same order.
-      expect(block).toEqual([...WORKER_SECRET_NAMES]);
-    }
+    // Each block replaces .dev.vars inference, so it must be complete, in the same order. The
+    // push credentials are required in production only: staging deploys before the Apple
+    // account exists, and its consumer holds push jobs as not_configured meanwhile.
+    expect(blocks[0]).toEqual([...WORKER_SECRET_NAMES]);
+    expect(blocks[1]).toEqual([...WORKER_SECRET_NAMES, ...PUSH_SECRET_NAMES]);
   });
 });
+
+/**
+ * The push transport's flows (increment 14): the three `PushAuth` objects mint for real (the APNs
+ * provider token from APNS_KEY_P8, the FCM access token through the object's fetch seam), and the
+ * push and persist consumers run a success and every failure path that logs, a refused provider
+ * token and a refused access token included. Returns the per-flow secrets for the search.
+ */
+async function pushFlows(): Promise<string[]> {
+  const secrets: string[] = [];
+  const oauth = fakeFetch((request) => {
+    secrets.push(new URLSearchParams(request.body).get('assertion') ?? '');
+    const accessToken = `ya29.${crypto.randomUUID().replaceAll('-', '')}`;
+    secrets.push(accessToken);
+    return Response.json({ access_token: accessToken, expires_in: 3600 });
+  });
+  for (const name of ['apns:sandbox', 'apns:production', 'fcm'] as PushCredentialName[]) {
+    await runInDurableObject(
+      testEnv.PUSH_AUTH.getByName(name, { locationHint: 'enam' }),
+      (instance: PushAuth, state) => {
+        state.storage.sql.exec('DELETE FROM credential');
+        instance.fetchImpl = oauth.fetch;
+        instance._setClock(null);
+      },
+    );
+  }
+  const network = fakeFetch((request) => {
+    secrets.push((request.headers['authorization'] ?? '').replace(/^bearer /i, ''));
+    const failing = request.body.includes('"title":"Refused"');
+    if (request.url.includes('push.apple.com')) {
+      return failing
+        ? apnsAnswer(403, { reason: 'ExpiredProviderToken' })
+        : apnsAnswer(410, { reason: 'Unregistered', timestamp: Date.now() });
+    }
+    return failing
+      ? fcmError(401, 'UNAUTHENTICATED')
+      : Response.json({ name: 'projects/x/messages/1' });
+  });
+  const credentials = durableCredentialSource(testEnv, { cache: new Map() });
+  const deviceTokens = [
+    [...crypto.getRandomValues(new Uint8Array(32))]
+      .map((b) => b.toString(16).padStart(2, '0'))
+      .join(''),
+    `fcm-secret-${crypto.randomUUID()}`,
+  ];
+  secrets.push(...deviceTokens);
+  const jobs = ['Delivered', 'Refused'].map((title) =>
+    PushJobV1.parse(
+      jobInput({
+        title,
+        expiresAt: new Date(Date.now() + 3_600_000).toISOString(),
+        targets: [
+          target({ token: deviceTokens[0] ?? '' }),
+          target({ kind: 'fcm', token: deviceTokens[1] ?? '', environment: 'production' }),
+        ],
+      }),
+    ),
+  );
+  const persist = capturingQueue();
+  const log = createLogger({});
+  await handlePushBatch(
+    createMessageBatch(
+      'planeahead-push-local',
+      jobs.map((body, index) => ({
+        id: `logs-${String(index)}`,
+        timestamp: new Date(),
+        attempts: 1,
+        body,
+      })),
+    ),
+    { env: testEnv, ctx: createExecutionContext(), log },
+    {
+      transports: {
+        apns: createApnsTransport({ fetch: network.fetch, credentials }),
+        fcm: createFcmTransport({
+          fetch: network.fetch,
+          credentials,
+          projectId: 'planeahead-test',
+        }),
+      },
+      pushQueue: capturingQueue().queue,
+      persistQueue: persist.queue,
+    },
+  );
+  await handlePersistBatch(
+    createMessageBatch(
+      'planeahead-persist-local',
+      persist.sent.map(({ body }, index) => ({
+        id: `logs-outcome-${String(index)}`,
+        timestamp: new Date(),
+        attempts: 1,
+        body,
+      })),
+    ),
+    { env: testEnv, ctx: createExecutionContext(), log },
+  );
+  expect(network.requests.length).toBe(4);
+  expect(oauth.requests.length).toBeGreaterThan(0);
+  return secrets.filter((secret) => secret !== '');
+}
 
 describe('no secret value reaches a log line', () => {
   it('across every flow, including the failure paths', async () => {
@@ -223,17 +356,30 @@ describe('no secret value reaches a log line', () => {
         ),
       );
       expect(nulUpdateUser.status).toBe(400);
+
+      // Increment 14: the push transport, every path that logs.
+      dynamicSecrets.push(...(await pushFlows()));
     });
 
-    // The suite produced log lines (otherwise this test proves nothing).
+    // The suite produced log lines (otherwise this test proves nothing), the push flows' among
+    // them: the consumer's, the persist consumer's and the PushAuth objects' own.
     expect(lines.length).toBeGreaterThan(10);
+    expect(logEvents(lines, 'push_job_done')).toHaveLength(2);
+    expect(logEvents(lines, 'push_outcome_recorded')).toHaveLength(2);
+    expect(logEvents(lines, 'push_auth_minted').length).toBeGreaterThanOrEqual(2);
+    expect(logEvents(lines, 'push_auth_token_expired').length).toBeGreaterThanOrEqual(2);
 
     const configured: [string, string][] = [];
-    for (const name of WORKER_SECRET_NAMES) {
+    for (const name of [...WORKER_SECRET_NAMES, ...PUSH_SECRET_NAMES]) {
       const value = testEnv[name];
       if (typeof value === 'string' && value !== '') {
         configured.push([name, value]);
-        if (name === 'APPLE_SIWA_P8') {
+        if (name === 'FCM_SERVICE_ACCOUNT_JSON') {
+          // The service account's private key, as JSON carries it and as the key's body.
+          const key = (JSON.parse(value) as { private_key: string }).private_key;
+          configured.push([`${name} (private_key body)`, pemBody(key)]);
+        }
+        if (name === 'APPLE_SIWA_P8' || name === 'APNS_KEY_P8') {
           // The key body without the PEM armour, in both newline encodings.
           const body = normalisePem(value)
             .split('\n')

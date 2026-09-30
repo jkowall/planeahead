@@ -336,7 +336,7 @@ describe('the page', () => {
     expect(html).toContain('sync_epoch');
     expect(html).toContain('housekeeping.sync_purge');
     expect(html).not.toContain('class="unavailable"');
-    // The suite's role is a superuser, so the watermark is complete; the one write action is a
+    // The suite's role is a superuser, so the watermark is complete; the deletion write action is a
     // link to its own page, and this page carries no form.
     expect(html).not.toContain(PARTIAL_STATS_NOTICE);
     expect(html).toContain(`href="${ADMIN_ACCOUNT_DELETE_PATH}"`);

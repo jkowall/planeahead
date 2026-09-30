@@ -270,7 +270,7 @@ export const DELETION_SURVIVORS = [
 
 /**
  * Who asked for a deletion other than the user themself: an operator through Cloudflare Access
- * (the admin page's one write action, increment 12 ruling AA9). The deletion is otherwise the
+ * (an admin page write action, increment 12 ruling AA9). The deletion is otherwise the
  * same; only its audit row names the operator instead of the user.
  */
 export interface DeletionActor {

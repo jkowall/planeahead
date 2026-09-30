@@ -121,6 +121,7 @@ describe('scripts/health-smoke.mjs', () => {
       'DesignatorResolver',
       'FlightTracker',
       'ProviderBudget',
+      'PushAuth',
       'UserInbox',
     ]);
   });
