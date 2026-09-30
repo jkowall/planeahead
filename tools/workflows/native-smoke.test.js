@@ -12,9 +12,18 @@
  */
 
 import { spawnSync } from 'node:child_process';
-import { mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import {
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  readdirSync,
+  readFileSync,
+  rmSync,
+  writeFileSync,
+} from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { crc32 } from 'node:zlib';
 import { afterAll, describe, expect, it } from 'vitest';
 
 const repoRoot = join(import.meta.dirname, '..', '..');
@@ -39,6 +48,11 @@ function jobKeys(text) {
     }
   }
   return keys;
+}
+
+/** The native-smoke.sh step each `run:` of a workflow's code (comments dropped) names, in order. */
+function workflowSteps(code) {
+  return [...code.matchAll(/scripts\/native-smoke\.sh ([a-z-]+)/g)].map((m) => m[1]);
 }
 
 /** The lines of one job's block, comments dropped. */
@@ -112,22 +126,35 @@ describe('native-smoke.yml', () => {
     expect(ios).toMatch(/xcode-select --switch/);
   });
 
-  it('prebuilds, builds, asserts the app contents and launches on both platforms', () => {
-    const steps = [...code.matchAll(/scripts\/native-smoke\.sh ([a-z-]+)/g)].map((m) => m[1]);
-    expect(steps).toEqual([
+  it('prebuilds, builds, asserts the app, launches, then archives for a device (ruling S4)', () => {
+    // Every one is dispatched by the script: the 'native-smoke.sh' tests below run each.
+    expect(workflowSteps(code)).toEqual([
       'ios-prebuild',
       'ios-build',
       'ios-archive',
       'ios-launch',
+      'ios-device-archive',
       'android-prebuild',
       'android-build',
       'android-archive',
       'disk-guard',
       'android-launch',
     ]);
-    for (const step of steps) {
-      expect(script).toContain(`  ${step}) `);
-    }
+  });
+
+  it('gates iOS on the Xcode of the EAS image eas.json pins for store builds (ruling S6)', () => {
+    const eas = JSON.parse(readFileSync(join(repoRoot, 'apps', 'mobile', 'eas.json'), 'utf8'));
+    const xcode = /-xcode-(\d+\.\d+)$/.exec(eas.build.base.ios.image)?.[1];
+    expect(xcode).toBe('26.6');
+    const ios = jobBlock(text, 'ios');
+    const matrix = /^ {8}xcode: \[(.+)\]$/m.exec(ios)?.[1] ?? '';
+    expect(matrix.split(', ')).toContain(`'${xcode}'`);
+    // The pinned Xcode is the leg that must pass: only another version may fail the run quietly.
+    const lenient = /^ {4}continue-on-error: \$\{\{ matrix\.xcode == '([\d.]+)' \}\}$/m.exec(
+      ios,
+    )?.[1];
+    expect(lenient).toBeDefined();
+    expect(lenient).not.toBe(xcode);
   });
 
   it('builds the watch shells for watchOS: the script never forces the iOS SDK', () => {
@@ -207,10 +234,14 @@ describe('native-smoke.sh classifiers', () => {
   const scriptPath = join(repoRoot, 'scripts', 'native-smoke.sh');
   const script = readFileSync(scriptPath, 'utf8');
 
-  function run(step, input) {
-    const result = spawnSync('bash', [scriptPath, step], { input, encoding: 'utf8' });
+  /** Runs the script with `args` (a step, or a step and its arguments) and `input` on stdin. */
+  function run(args, input) {
+    const argv = Array.isArray(args) ? args : [args];
+    const result = spawnSync('bash', [scriptPath, ...argv], { input, encoding: 'utf8' });
     return { status: result.status, stdout: result.stdout, stderr: result.stderr };
   }
+
+  const lines = (output) => output.split('\n').filter((line) => line !== '');
 
   const scratch = [];
 
@@ -357,5 +388,398 @@ describe('native-smoke.sh classifiers', () => {
       dump(expected) + "uses-permission-sdk-23: name='android.permission.ACCESS_FINE_LOCATION'\n";
     expect(run('permissions-differ', sdk23).status).toBe(0);
     expect(run('permissions-differ', sdk23).stderr).toContain('ACCESS_FINE_LOCATION');
+  });
+
+  /** A copy of the script in a scratch repository with an empty app, so no step reaches the real one. */
+  function scratchRepo() {
+    const root = mkdtempSync(join(tmpdir(), 'smoke-repo-'));
+    scratch.push(root);
+    mkdirSync(join(root, 'scripts'));
+    mkdirSync(join(root, 'apps', 'mobile', 'android'), { recursive: true });
+    const copy = join(root, 'scripts', 'native-smoke.sh');
+    writeFileSync(copy, script);
+    return { root, copy };
+  }
+
+  /** A directory of executable stubs, each `name: body` a shell script, to put first on PATH. */
+  function stubs(bodies) {
+    const dir = mkdtempSync(join(tmpdir(), 'smoke-bin-'));
+    scratch.push(dir);
+    for (const [name, body] of Object.entries(bodies)) {
+      writeFileSync(join(dir, name), `#!/bin/sh\n${body}\n`, { mode: 0o755 });
+    }
+    return dir;
+  }
+
+  it('runs every step the workflow names, and prints its usage for anything else', () => {
+    const workflow = readFileSync(join(workflowsDir, 'native-smoke.yml'), 'utf8');
+    const steps = workflowSteps(workflow);
+    expect(steps).toContain('ios-device-archive');
+    // Every tool a step starts with fails at once, so each step stops at its first command:
+    // anything but the usage's exit code 2 means the script dispatched the step.
+    const failing = stubs(
+      Object.fromEntries(
+        ['xcodebuild', 'xcrun', 'pnpm', 'adb', 'plutil', 'nm', 'vtool'].map((tool) => [
+          tool,
+          'exit 97',
+        ]),
+      ),
+    );
+    const { root, copy } = scratchRepo();
+    // Every path a step writes or removes points into the scratch repository, whatever the
+    // caller's environment says.
+    const env = {
+      PATH: `${failing}:${process.env.PATH ?? ''}`,
+      SMOKE_SIMULATOR: 'stub',
+      SMOKE_DERIVED_DATA: join(root, 'derived-data'),
+      SMOKE_ARCHIVE_PATH: join(root, 'PlaneAhead.xcarchive'),
+    };
+    for (const step of steps) {
+      const result = runWith([step], env, copy);
+      expect(result.status, step).not.toBe(2);
+      expect(result.status, step).not.toBe(0);
+      expect(result.stdout, step).not.toContain('Native smoke (increment 11');
+    }
+    const usage = runWith(['no-such-step'], {}, copy);
+    expect(usage.status).toBe(2);
+    for (const step of steps) {
+      expect(usage.stdout).toContain(`scripts/native-smoke.sh ${step}`);
+    }
+  });
+
+  it('archives an unsigned Release build for a generic iOS device, over any stale archive', () => {
+    const { root, copy } = scratchRepo();
+    const argsFile = join(root, 'xcodebuild-args');
+    const bin = stubs({
+      xcodebuild: `printf '%s\\n' "$@" > '${argsFile}'\nexit "\${STUB_EXIT:-0}"`,
+    });
+    const archive = join(root, 'out', 'PlaneAhead.xcarchive');
+    const derivedData = join(root, 'out', 'derived-data');
+    mkdirSync(join(archive, 'stale'), { recursive: true });
+    const env = {
+      PATH: `${bin}:${process.env.PATH ?? ''}`,
+      SMOKE_ARCHIVE_PATH: archive,
+      SMOKE_DERIVED_DATA: derivedData,
+      SMOKE_ARCHIVE_MIN_FREE_GB: '0',
+    };
+
+    // xcodebuild "succeeded" without writing an archive: the step refuses to pass.
+    const empty = runWith(['ios-device-archive'], env, copy);
+    expect(empty.status).toBe(1);
+    expect(empty.stderr).toContain('the archive holds no app');
+    expect(existsSync(archive)).toBe(false);
+    expect(readFileSync(argsFile, 'utf8').trim().split('\n')).toEqual([
+      'archive',
+      '-workspace',
+      'ios/PlaneAhead.xcworkspace',
+      '-scheme',
+      'PlaneAhead',
+      '-configuration',
+      'Release',
+      '-destination',
+      'generic/platform=iOS',
+      '-archivePath',
+      archive,
+      '-derivedDataPath',
+      derivedData,
+      'CODE_SIGNING_ALLOWED=NO',
+    ]);
+    // A failed archive keeps xcodebuild's exit code.
+    expect(runWith(['ios-device-archive'], { ...env, STUB_EXIT: '65' }, copy).status).toBe(65);
+
+    // Without the room it needs (5 GB by default), it stops before xcodebuild, with the reason.
+    rmSync(argsFile);
+    const { PATH: dfPath } = stubDf(GIB);
+    const cramped = runWith(
+      ['ios-device-archive'],
+      { ...env, PATH: `${bin}:${dfPath}`, SMOKE_ARCHIVE_MIN_FREE_GB: '' },
+      copy,
+    );
+    expect(cramped.status).toBe(1);
+    expect(cramped.stderr).toContain('only 1 GB free before the device archive');
+    expect(existsSync(argsFile)).toBe(false);
+  });
+
+  /** The categories Apple lists each symbol's API under (the page cited above the table). */
+  const REQUIRED_REASON_SYMBOLS = {
+    NSPrivacyAccessedAPICategoryFileTimestamp: [
+      '_stat',
+      '_stat64',
+      '_fstat',
+      '_fstat64',
+      '_lstat',
+      '_lstat64',
+      '_fstatat',
+      '_fstatat64',
+      '_getattrlistbulk',
+      '_NSFileCreationDate',
+      '_NSFileModificationDate',
+      '_NSURLContentModificationDateKey',
+      '_NSURLCreationDateKey',
+    ],
+    NSPrivacyAccessedAPICategorySystemBootTime: ['_mach_absolute_time'],
+    NSPrivacyAccessedAPICategoryDiskSpace: [
+      '_statfs',
+      '_statfs64',
+      '_statvfs',
+      '_fstatfs',
+      '_fstatfs64',
+      '_fstatvfs',
+      '_NSFileSystemFreeSize',
+      '_NSFileSystemSize',
+      '_NSURLVolumeAvailableCapacityKey',
+      '_NSURLVolumeAvailableCapacityForImportantUsageKey',
+      '_NSURLVolumeAvailableCapacityForOpportunisticUsageKey',
+      '_NSURLVolumeTotalCapacityKey',
+    ],
+    NSPrivacyAccessedAPICategoryUserDefaults: ['_OBJC_CLASS_$_NSUserDefaults'],
+  };
+  const BOTH = 'NSPrivacyAccessedAPICategoryFileTimestamp NSPrivacyAccessedAPICategoryDiskSpace';
+
+  it('maps each required-reason symbol to the categories Apple lists its API under (ruling S2)', () => {
+    const expected = [
+      ...Object.entries(REQUIRED_REASON_SYMBOLS).flatMap(([category, symbols]) =>
+        symbols.map((symbol) => `${symbol} ${category}`),
+      ),
+      // getattrlist and two relatives are in the file timestamp and the disk space lists.
+      ...['_getattrlist', '_fgetattrlist', '_getattrlistat'].map((symbol) => `${symbol} ${BOTH}`),
+    ];
+    const symbols = expected.map((line) => line.split(' ')[0]);
+    expect(lines(run('undeclared-reasons', `${symbols.join('\n')}\n`).stdout).sort()).toEqual(
+      expected.sort(),
+    );
+    // Declared, every one of them is covered.
+    const all = [...Object.keys(REQUIRED_REASON_SYMBOLS)];
+    expect(run(['undeclared-reasons', ...all], `${symbols.join('\n')}\n`).stdout).toBe('');
+  });
+
+  it('names what a manifest leaves undeclared, once, whatever else the executable references', () => {
+    // `nm -u` of a two-architecture executable: a header per slice, symbols repeated.
+    const nm = [
+      '',
+      '/Build/PlaneAhead.app/PlaneAhead (for architecture arm64_32):',
+      '_OBJC_CLASS_$_NSUserDefaults',
+      '_fstat$INODE64',
+      '_objc_msgSend',
+      '_status',
+      '_statx_np',
+      '_mach_continuous_time',
+      '_NSFileSize',
+      '_OBJC_CLASS_$_NSUserDefaultsController',
+      '',
+      '/Build/PlaneAhead.app/PlaneAhead (for architecture arm64):',
+      '_OBJC_CLASS_$_NSUserDefaults',
+      '_fstat',
+      '',
+    ].join('\n');
+    expect(lines(run('undeclared-reasons', nm).stdout)).toEqual([
+      '_OBJC_CLASS_$_NSUserDefaults NSPrivacyAccessedAPICategoryUserDefaults',
+      '_fstat NSPrivacyAccessedAPICategoryFileTimestamp',
+    ]);
+    expect(
+      lines(run(['undeclared-reasons', 'NSPrivacyAccessedAPICategoryUserDefaults'], nm).stdout),
+    ).toEqual(['_fstat NSPrivacyAccessedAPICategoryFileTimestamp']);
+    // The widget extension's case: UserDefaults referenced, UserDefaults declared.
+    expect(
+      run(
+        ['undeclared-reasons', 'NSPrivacyAccessedAPICategoryUserDefaults'],
+        '_OBJC_CLASS_$_NSUserDefaults\n_objc_msgSend\n',
+      ).stdout,
+    ).toBe('');
+    // Either list covers getattrlist; a declared category covers nothing outside it.
+    expect(
+      run(['undeclared-reasons', 'NSPrivacyAccessedAPICategoryDiskSpace'], '_getattrlist\n').stdout,
+    ).toBe('');
+    expect(
+      lines(
+        run(
+          ['undeclared-reasons', 'NSPrivacyAccessedAPICategoryFileTimestamp'],
+          '_getattrlist\n_statfs\n',
+        ).stdout,
+      ),
+    ).toEqual(['_statfs NSPrivacyAccessedAPICategoryDiskSpace']);
+    expect(run('undeclared-reasons', '').stdout).toBe('');
+    // An x86_64 slice names the 64-bit-inode variant, which is the same API.
+    expect(run('undeclared-reasons', '_stat$INODE64\n').stdout).toBe(
+      '_stat NSPrivacyAccessedAPICategoryFileTimestamp\n',
+    );
+  });
+
+  /** `llvm-readelf -lW` of a shared library whose LOAD segments have these alignments. */
+  function programHeaders(...aligns) {
+    return [
+      '',
+      'Elf file type is DYN (Shared object file)',
+      'Entry point 0x0',
+      'There are 9 program headers, starting at offset 64',
+      '',
+      'Program Headers:',
+      '  Type           Offset   VirtAddr           PhysAddr           FileSiz  MemSiz   Flg Align',
+      '  PHDR           0x000040 0x0000000000000040 0x0000000000000040 0x0001f8 0x0001f8 R   0x8',
+      ...aligns.map(
+        (align, index) =>
+          `  LOAD           0x0${index}0000 0x00000000000${index}0000 0x00000000000${index}0000 0x001000 0x001000 ${index === 0 ? 'R  ' : 'R E'} ${align}`,
+      ),
+      '  GNU_STACK      0x000000 0x0000000000000000 0x0000000000000000 0x000000 0x000000 RW  0x0',
+      '',
+    ].join('\n');
+  }
+
+  it('flags each LOAD segment aligned below 16 KB, and output that has none (ruling S5)', () => {
+    expect(run('elf-load-misaligned', programHeaders('0x4000', '0x4000')).stdout).toBe('');
+    expect(run('elf-load-misaligned', programHeaders('0x10000', '0x4000')).stdout).toBe('');
+    expect(
+      lines(run('elf-load-misaligned', programHeaders('0x4000', '0x1000', '0x2000')).stdout),
+    ).toEqual([
+      '  LOAD           0x010000 0x0000000000010000 0x0000000000010000 0x001000 0x001000 R E 0x1000',
+      '  LOAD           0x020000 0x0000000000020000 0x0000000000020000 0x001000 0x001000 R E 0x2000',
+    ]);
+    // An alignment that is not a hex number is not taken for a large one.
+    expect(
+      lines(run('elf-load-misaligned', programHeaders('0x4000', 'bogus')).stdout),
+    ).toHaveLength(1);
+    // Nothing readable is not a pass.
+    expect(
+      lines(run('elf-load-misaligned', 'llvm-readelf: error: not an ELF file\n').stdout),
+    ).toEqual(['no LOAD segment']);
+  });
+
+  /** A zip archive of stored (uncompressed) entries, which is what unzip needs to read an APK. */
+  function storedZip(entries) {
+    const locals = [];
+    const centrals = [];
+    let offset = 0;
+    for (const [name, text] of Object.entries(entries)) {
+      const nameBytes = Buffer.from(name);
+      const data = Buffer.from(text);
+      const checksum = crc32(data);
+      const local = Buffer.alloc(30);
+      local.writeUInt32LE(0x04034b50, 0);
+      local.writeUInt16LE(20, 4);
+      local.writeUInt32LE(checksum, 14);
+      local.writeUInt32LE(data.length, 18);
+      local.writeUInt32LE(data.length, 22);
+      local.writeUInt16LE(nameBytes.length, 26);
+      locals.push(local, nameBytes, data);
+      const central = Buffer.alloc(46);
+      central.writeUInt32LE(0x02014b50, 0);
+      central.writeUInt16LE(20, 4);
+      central.writeUInt16LE(20, 6);
+      central.writeUInt32LE(checksum, 16);
+      central.writeUInt32LE(data.length, 20);
+      central.writeUInt32LE(data.length, 24);
+      central.writeUInt16LE(nameBytes.length, 28);
+      central.writeUInt32LE(offset, 42);
+      centrals.push(central, nameBytes);
+      offset += local.length + nameBytes.length + data.length;
+    }
+    const directory = Buffer.concat(centrals);
+    const end = Buffer.alloc(22);
+    end.writeUInt32LE(0x06054b50, 0);
+    end.writeUInt16LE(Object.keys(entries).length, 8);
+    end.writeUInt16LE(Object.keys(entries).length, 10);
+    end.writeUInt32LE(directory.length, 12);
+    end.writeUInt32LE(offset, 16);
+    return Buffer.concat([...locals, directory, end]);
+  }
+
+  it('checks an APK for 16 KB pages: zipalign, then every 64-bit library (ruling S5)', () => {
+    const { root, copy } = scratchRepo();
+    // An SDK whose newest build-tools' zipalign records its arguments, an older one that must not
+    // be used, and an NDK whose llvm-readelf prints the "library", which holds its own headers.
+    const sdk = join(root, 'sdk');
+    const zipalignArgs = join(root, 'zipalign-args');
+    for (const [version, body] of [
+      ['35.0.0', 'exit 42'],
+      [
+        '36.1.0',
+        `printf '%s\\n' "$@" > '${zipalignArgs}'\necho 'Verification FAILED' \nexit "\${ZIPALIGN_EXIT:-0}"`,
+      ],
+    ]) {
+      mkdirSync(join(sdk, 'build-tools', version), { recursive: true });
+      writeFileSync(join(sdk, 'build-tools', version, 'zipalign'), `#!/bin/sh\n${body}\n`, {
+        mode: 0o755,
+      });
+    }
+    const readelf = join(
+      sdk,
+      'ndk',
+      '27.1.12297006',
+      'toolchains',
+      'llvm',
+      'prebuilt',
+      'linux-x86_64',
+      'bin',
+    );
+    mkdirSync(readelf, { recursive: true });
+    writeFileSync(
+      join(readelf, 'llvm-readelf'),
+      '#!/bin/sh\n[ "$1" = -lW ] || exit 3\ncase "$2" in *broken*) exit 1 ;; esac\ncat "$2"\n',
+      { mode: 0o755 },
+    );
+    const apk = (name, entries) => {
+      const file = join(root, `${name}.apk`);
+      writeFileSync(file, storedZip({ 'classes.dex': 'dex', ...entries }));
+      return file;
+    };
+    const check = (file, env = {}) =>
+      runWith(['page-alignment', file], { ANDROID_HOME: sdk, ...env }, copy);
+
+    const aligned = apk('aligned', {
+      'lib/x86_64/libhermes.so': programHeaders('0x4000', '0x4000'),
+      'lib/arm64-v8a/libhermes.so': programHeaders('0x10000'),
+      // 32-bit libraries are exempt, however they are aligned.
+      'lib/armeabi-v7a/libhermes.so': programHeaders('0x1000'),
+    });
+    const passed = check(aligned);
+    expect(passed.status).toBe(0);
+    expect(passed.stdout).toContain('all 2 64-bit libraries');
+    expect(readFileSync(zipalignArgs, 'utf8').trim().split('\n')).toEqual([
+      '-c',
+      '-P',
+      '16',
+      '-v',
+      '4',
+      aligned,
+    ]);
+
+    const zipFailed = check(aligned, { ZIPALIGN_EXIT: '1' });
+    expect(zipFailed.status).toBe(1);
+    expect(zipFailed.stderr).toContain('Verification FAILED');
+    expect(zipFailed.stderr).toContain('is not aligned for 16 KB pages');
+
+    const misaligned = check(
+      apk('misaligned', {
+        'lib/x86_64/libgood.so': programHeaders('0x4000'),
+        'lib/x86_64/libplanted.so': programHeaders('0x4000', '0x1000'),
+      }),
+    );
+    expect(misaligned.status).toBe(1);
+    expect(misaligned.stderr).toContain('lib/x86_64/libplanted.so:');
+    expect(misaligned.stderr).toMatch(
+      /aligned below 16 KB \(0x4000\): lib\/x86_64\/libplanted\.so$/m,
+    );
+    expect(misaligned.stderr).not.toContain('libgood.so');
+
+    for (const [name, entries, message] of [
+      [
+        'thirty-two',
+        { 'lib/armeabi-v7a/libold.so': programHeaders('0x1000') },
+        'carries no 64-bit native library',
+      ],
+      // A 64-bit library directory with no shared library in it has nothing aligned either.
+      ['nolibs', { 'lib/x86_64/gdb.setup': 'x' }, 'carries no 64-bit native library'],
+      ['javaonly', {}, 'unzip found no native library in'],
+      [
+        'unreadable',
+        { 'lib/arm64-v8a/libbroken.so': 'x' },
+        'llvm-readelf could not read lib/arm64-v8a/libbroken.so',
+      ],
+    ]) {
+      const result = check(apk(name, entries));
+      expect(result.status, name).toBe(1);
+      expect(result.stderr, name).toContain(message);
+    }
+    expect(check(join(root, 'missing.apk')).stderr).toContain("no APK at '");
   });
 });

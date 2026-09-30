@@ -5,6 +5,8 @@
 - Deciders: @jkowall
 - Supersedes: none
 - Superseded by: none
+- Amended: 2026-09-30, increment 13: the permanence of the bundle ids and package names is now
+  primary-sourced (context item 1)
 
 ## Context
 
@@ -13,10 +15,15 @@ change once anything ships, and two of them are privacy decisions, not naming on
 
 1. A bundle identifier (iOS) and a package name (Android) name the app in the App Store, in Play,
    in every credential (APNs keys, Sign in with Apple, Google OAuth clients, Play signing) and in
-   every association file. Treating them as immutable after the first store upload is the
-   conservative reading; no primary source found for this ADR states it outright
-   (`docs/increments/09-11-mobile.facts.md` section 2 marks it unverified), but App Store Connect
-   and Play Console offer no way to change them on an existing app record.
+   every association file. Both stores say they are permanent. App Store Connect, of an app
+   record's bundle ID: "You can't change this property after you upload a build"
+   ([App information](https://developer.apple.com/help/app-store-connect/reference/app-information/app-information));
+   Play: package names "are unique and permanent"
+   ([Create and set up your app](https://support.google.com/googleplay/android-developer/answer/9859152)),
+   and changing the application id makes a different app
+   ([Configure the app module](https://developer.android.com/build/configure-app-module)). Checked
+   2026-09-30 (`docs/research/phase1/R5-store-distribution.md` F5, G5); increment 9's facts
+   sheet had marked the point unverified.
 2. Each `APP_VARIANT` is a separate app on a device, so each needs its own App Group
    (`group.<bundle id>` is what expo-widgets defaults to in increment 11, and `@bacons/apple-targets`
    reads the entitlement at config time, so it is declared explicitly in `app.config.ts`).
@@ -130,6 +137,9 @@ We will use the identifiers below and treat the first three rows as permanent.
 ## References
 
 - `docs/increments/09-11-mobile.facts.md` sections 2 and 5
+- `docs/research/phase1/R5-store-distribution.md` F5 and G5
+- https://developer.apple.com/help/app-store-connect/reference/app-information/app-information
+- https://support.google.com/googleplay/android-developer/answer/9859152
 - https://developer.apple.com/app-store/app-privacy-details/
 - https://support.google.com/googleplay/android-developer/answer/10787469
 - https://docs.expo.dev/linking/ios-universal-links/

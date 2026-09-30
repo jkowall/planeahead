@@ -12,6 +12,7 @@
 import type { ConfigContext, ExpoConfig } from 'expo/config';
 import appConfig, {
   apnsEnvironment,
+  appleTeamId,
   appVariant,
   BLOCKED_ANDROID_PERMISSIONS,
   reversedClientId,
@@ -136,6 +137,75 @@ describe('app.config.ts', () => {
     );
   });
 
+  it('pins the EAS images and CocoaPods and holds the Sentry upload in every build profile', () => {
+    // As eas-cli resolves `extends` (packages/eas-json/src/build/resolver.ts, mergeProfiles):
+    // the later profile's keys win, and `env`, `android` and `ios` are merged a level down.
+    type Profile = Record<string, unknown> & {
+      extends?: string;
+      env?: Record<string, string>;
+      ios?: Record<string, unknown>;
+      android?: Record<string, unknown>;
+    };
+    const profiles = (
+      JSON.parse(fs.readFileSync(path.resolve(APP_ROOT, 'eas.json'), 'utf8')) as {
+        build: Record<string, Profile>;
+      }
+    ).build;
+    const merge = (base: Profile, update: Profile): Profile => ({
+      ...base,
+      ...update,
+      ...(base.env && update.env ? { env: { ...base.env, ...update.env } } : {}),
+      ...(base.ios && update.ios ? { ios: { ...base.ios, ...update.ios } } : {}),
+      ...(base.android && update.android
+        ? { android: { ...base.android, ...update.android } }
+        : {}),
+    });
+    const resolve = (name: string): Profile => {
+      const profile = profiles[name];
+      if (profile === undefined) {
+        throw new Error(`no build profile ${name}`);
+      }
+      return profile.extends === undefined ? profile : merge(resolve(profile.extends), profile);
+    };
+    for (const name of ['development', 'preview', 'production']) {
+      const profile = resolve(name);
+      // The SDK 57 images by full name, not the moving `sdk-57` or `latest` aliases, and the
+      // CocoaPods the native smoke and every spike used (R5 E3, E4, C3).
+      expect(profile.ios).toMatchObject({
+        image: 'macos-tahoe-26.5-xcode-26.6',
+        cocoapods: '1.17.0',
+      });
+      expect(profile.android).toMatchObject({ image: 'ubuntu-26.04-jdk-17-ndk-r27b-sdk-57' });
+      // The Sentry build phases fail a Release build whose upload fails, and no Sentry project
+      // exists yet (R5 L6, C11; runbook step 18 says when to drop it).
+      expect(profile.env).toMatchObject({ SENTRY_DISABLE_AUTO_UPLOAD: 'true' });
+    }
+    expect(resolve('development').ios).toMatchObject({ simulator: true });
+  });
+
+  it('submits production builds to the Play internal track and waits for the App Store id', () => {
+    const { submit } = JSON.parse(fs.readFileSync(path.resolve(APP_ROOT, 'eas.json'), 'utf8')) as {
+      submit: Record<string, { android?: Record<string, unknown>; ios?: Record<string, unknown> }>;
+    };
+    expect(submit['production']?.android).toEqual({
+      track: 'internal',
+      releaseStatus: 'completed',
+    });
+    // `ascAppId` is the App Store Connect record's Apple ID, which only exists once the owner
+    // creates the record (runbook step 18); a placeholder would send uploads to no app.
+    expect(submit['production']?.ios?.['ascAppId'] ?? null).toBeNull();
+  });
+
+  it('writes ios.appleTeamId from APPLE_TEAM_ID when it is set, and nothing when it is not', () => {
+    expect(configFor('production', { APPLE_TEAM_ID: 'ABCDE12345' }).ios?.appleTeamId).toBe(
+      'ABCDE12345',
+    );
+    expect(configFor('production', { APPLE_TEAM_ID: '' }).ios).not.toHaveProperty('appleTeamId');
+    expect(appleTeamId(undefined)).toBeUndefined();
+    expect(() => appleTeamId('abcde12345')).toThrow(/APPLE_TEAM_ID/);
+    expect(() => appleTeamId('ABCDE1234')).toThrow(/APPLE_TEAM_ID/);
+  });
+
   it('runs the development variant from the local package scripts', () => {
     const { scripts } = JSON.parse(
       fs.readFileSync(path.resolve(APP_ROOT, 'package.json'), 'utf8'),
@@ -211,6 +281,10 @@ describe('app.config.ts', () => {
       // shells, the Wear OS module.
       'expo-widgets',
       './plugins/withExpoWidgetsBuild.ts',
+      // Increment 13: the extensions' privacy manifests and versions, which edit apple-targets'
+      // own project mod and so must come before it (__tests__/store-bundles.test.ts).
+      './plugins/withExtensionPrivacyManifests.ts',
+      './plugins/withExtensionVersions.ts',
       '@bacons/apple-targets',
       './plugins/withWearApp.ts',
       './plugins/withApsEnvironment.ts',

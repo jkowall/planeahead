@@ -1,7 +1,8 @@
 # First deploy runbook
 
-Status: increment 12 (2026-09-23). Everything the owner does once, in order, before and during the
-first staging and production deploys, with the exact commands. Nothing here has been run: there
+Status: increment 12 (2026-09-23); the store steps (step 18) increment 13 (2026-09-30). Everything
+the owner does once, in order, before and during the first staging and production deploys and the
+first store builds, with the exact commands. Nothing here has been run: there
 is no Cloudflare account, Neon project, provider key or Apple and Google credential in the build
 environment, so every command below is the documented form (wrangler flags checked against
 `wrangler <command> --help` at 4.135.0; Neon and Apple steps against their docs). Tick each box
@@ -25,6 +26,11 @@ Conventions: run wrangler from `apps/api` as `pnpm exec wrangler ...` (the pinne
       Starter's 7-day caching term forbids the retention this system keeps,
       docs/cost-estimate.md section 3). Its key is `AERODATABOX_API_KEY` (step 6), and
       `ADB_PLAN=growth` must be set with it in both environments (step 6).
+- [ ] For the store builds (step 18), started now because of their lead times
+      (docs/plans/phase1-plan.md section 10): the Apple Developer Program membership and a Google
+      Play Console account, both as the organization that sells the app (D-U-N-S first), and an
+      Expo account on Starter with `eas init` run in `apps/mobile` (apps/mobile/README.md, owner
+      tasks).
 
 ## 1. Cloudflare API tokens
 
@@ -253,8 +259,10 @@ SHOW idle_in_transaction_session_timeout;` and
       `curl -s https://api-staging.planeahead.app/.well-known/apple-app-site-association` (the
       development build) and the production host (production and preview). Apple's CDN copy:
       `curl -s https://app-site-association.cdn-apple.com/a/v1/api.planeahead.app`.
-- [ ] `ANDROID_SHA256_FINGERPRINTS` per environment (`package=FP,FP;...`; Play's app signing key
-      AND the upload key from Play Console > Setup > App signing), then
+- [ ] `ANDROID_SHA256_FINGERPRINTS` per environment (`package=FP,FP;...`; every app signing key
+      Play shows for the package AND the upload key, from Play Console > Protected with Play > Play
+      Store distribution > Play app signing; a new app's hybrid signing shows three app signing
+      fingerprints, step 18), then
       `https://digitalassetlinks.googleapis.com/v1/statements:list?source.web.site=https://api.planeahead.app&relation=delegate_permission/common.handle_all_urls`
       lists the packages.
 - [ ] Sign in with Apple for Email Communication (Certificates, Identifiers and Profiles >
@@ -308,10 +316,14 @@ SHOW idle_in_transaction_session_timeout;` and
 
 - [ ] GitHub Actions minutes: GitHub Free includes 2,000 minutes a month, and a macOS minute is
       priced at about ten Linux minutes ($0.062 against $0.006), so `native-smoke.yml` runs weekly
-      (Mondays); its iOS legs take about 22 macOS minutes a run. In September 2026 six nightly runs
-      used the whole allowance and GitHub refused every job, PR checks included, until the month
-      reset. To run it nightly, add a payment method with a budget (Settings > Billing and
-      licensing) that covers about $1.50 a night, then change its cron to `'17 6 * * *'`.
+      (Mondays). Its iOS gate leg took about 22 macOS minutes a run; increment 13's unsigned device
+      archive adds about 16 (estimated; the first run after it measures it), so about 38, or $10
+      of the $12 GitHub Free's minutes are worth each month, before the Android leg and every pull
+      request's Linux checks. In September 2026 six nightly runs used the whole allowance and
+      GitHub refused every job, PR checks included, until the month reset. Add a payment method
+      with a budget (Settings > Billing and licensing) before the allowance runs short again: about
+      $5 a month over the free minutes keeps the weekly run and the pull request checks going with
+      margin; nightly costs about $2.50 a night, after which its cron can become `'17 6 * * *'`.
 - [ ] Prove the Android leg. The Xcode 26.6 gate leg passed on every scheduled run from
       2026-09-24 to 2026-09-29; the Android leg never has (it filled the runner's disk until the
       fix of 2026-09-30). Once Actions minutes are available, run
@@ -352,3 +364,99 @@ production`, smoke `https://api.planeahead.app/health` against the build.
 - [ ] Google Play's Data safety form (depends on step 16: the inbox exists and received its test
       message): the account-deletion URL is `https://api.planeahead.app/account/delete` (the
       support inbox on it is the `SUPPORT_EMAIL` var).
+
+## 18. Store builds: TestFlight and the Play internal track
+
+Increment 13. Testers get the `production` variant (`app.planeahead.mobile`), store signed, which
+talks to `api.planeahead.app`, so step 17 comes first; steps 11 and 12 too. Run every `eas`
+command from `apps/mobile` with the pinned CLI version or newer (`eas.json` `cli.version`). The
+repository already carries what the builds need and the weekly native smoke proves it: the pinned
+EAS images and CocoaPods, a privacy manifest in every bundle, the app's version in every embedded
+bundle, `ITSAppUsesNonExemptEncryption: false`, and the Sentry upload held off
+(docs/increments/13-verification.md). Not needed for internal testing: Beta App Review, the App
+Privacy answers, Play's Data safety form, the content rating and the store listing.
+
+- [ ] App Store Connect record (Account Holder, Admin or App Manager): Apps > + > New App, platform
+      iOS, name `PlaneAhead` (at most 30 characters, editable until the first App Review
+      submission), primary language, bundle ID `app.planeahead.mobile`, SKU `planeahead-ios`, user
+      access Full. The bundle ID and the SKU are permanent; of the bundle ID Apple says "You can't
+      change this property after you upload a build"
+      ([App information](https://developer.apple.com/help/app-store-connect/reference/app-information/app-information)).
+      Then copy the record's Apple ID (App Information > General, a number) into
+      `apps/mobile/eas.json` as `"submit": { "production": { "ios": { "ascAppId": "<Apple ID>" } } }`
+      next to the `android` entry, and commit it on a branch. This is the one manual edit the
+      submit profile waits for: without it `eas submit` signs in with an Apple ID and creates the
+      app interactively, which CI cannot answer. `__tests__/app-config.test.ts` asserts the id is
+      absent: change that assertion to the committed value in the same commit.
+- [ ] Internal TestFlight group: TestFlight > Internal Testing > + > `PlaneAhead internal`, with
+      **Enable automatic distribution**, so every processed build reaches it without a submit
+      step. Internal testers are App Store Connect users with a role (up to 100, invited in Users
+      and Access first); their builds need no review
+      ([TestFlight overview](https://developer.apple.com/help/app-store-connect/test-a-beta-version/testflight-overview)).
+- [ ] Team API key for `eas submit`: Users and Access > Integrations > App Store Connect API > Team
+      Keys > +, access Admin (Expo's guide asks for it; whether App Manager suffices is unverified,
+      R5 U7). The `.p8` downloads once: then `eas credentials --platform ios`, profile
+      `production`, App Store Connect API key, add it with its key ID and issuer ID, and delete
+      the local file.
+- [ ] Play Console app (Owner or Admin): Create app, name `PlaneAhead`, default language, App, Free,
+      the declarations and the Play App Signing terms. The package name comes with the first
+      upload and never changes: Play calls package names "unique and permanent"
+      ([Create and set up your app](https://support.google.com/googleplay/android-developer/answer/9859152)).
+      Then Test and release > Testing > Internal testing > Testers: an email list of the testers
+      (up to 100), and copy its opt-in link for them.
+- [ ] Play service account for `eas submit`: in the Google Cloud project of the OAuth clients,
+      enable the Google Play Android Developer API; IAM > Service accounts > create `eas-submit`,
+      Keys > Add key > JSON. In Play Console > Users and permissions > Invite new users, the
+      service account's email with, for PlaneAhead, the permissions to release to testing tracks
+      and to manage testing tracks and tester lists
+      ([Expo's guide](https://github.com/expo/fyi/blob/main/creating-google-service-account.md)).
+      Then `eas credentials --platform android`, profile `production`, Google Service Account,
+      upload the JSON key, and delete the local file.
+- [ ] First iOS production build, interactively on the Mac, logged in with the Apple ID:
+      `eas build --platform ios --profile production`, answering yes to the Apple account login
+      and to EAS managing the credentials. App Groups are registered only with an Apple ID session,
+      never with the API key ([iOS capabilities](https://docs.expo.dev/build-reference/ios-capabilities/)),
+      so this first run cannot come from CI. EAS registers the four App IDs step 12 lists when they
+      are missing (the app, `.widgets`, `.watchkitapp`, `.watchkitapp.widget`), syncs their
+      capabilities, and creates the distribution certificate and the four provisioning profiles.
+      It does not group Sign in with Apple (step 12 does, first).
+- [ ] First Android production build: `eas build --platform android --profile production`, letting
+      EAS generate the upload keystore. Keep a copy: `eas credentials --platform android`,
+      profile `production`, download the keystore, into the password manager.
+- [ ] Submit both: `eas submit --platform ios --profile production --latest`, then
+      `eas submit --platform android --profile production --latest`. The iOS build appears in
+      TestFlight after processing and automatic distribution hands it to the internal group. The
+      Android release goes to the internal track (`submit.production.android` in eas.json). If
+      Play refuses it with "Only releases with status draft may be created on draft app", the app
+      has never been published: download that build's `.aab` from its EAS build page, upload it by
+      hand in Internal testing > Create new release, roll it out, and use `eas submit` for every
+      later build.
+- [ ] Signing fingerprints, after the first Play upload: Protected with Play > Play Store
+      distribution > Play app signing. A new app gets hybrid signing, with three app signing keys
+      whose fingerprints must all be registered with every API provider
+      ([Play app signing](https://support.google.com/googleplay/android-developer/answer/9842756)),
+      plus the upload key. Put every SHA-256 into `ANDROID_SHA256_FINGERPRINTS` for
+      `app.planeahead.mobile` (step 11) and create a Google OAuth Android client for the package
+      with each SHA-1, so Google sign-in works whichever key signed the installed app. Hybrid
+      versus classic can change only until the first open testing or production release; the
+      plan took hybrid (docs/plans/phase1-plan.md section 13, decision 10).
+- [ ] Export compliance: `ITSAppUsesNonExemptEncryption: false` (app.config.ts) answers App Store
+      Connect's export compliance question for every build; without it each build waits in
+      Missing Compliance. It is your attestation that the app uses only encryption built into the
+      operating system (HTTPS, the Keychain through expo-secure-store, CommonCrypto through
+      expo-crypto), which Apple treats as exempt
+      ([Complying with encryption export regulations](https://developer.apple.com/documentation/security/complying-with-encryption-export-regulations)).
+      Confirm it now, and again before adding any library that brings its own cryptography.
+- [ ] Sentry: `apps/mobile/eas.json` sets `SENTRY_DISABLE_AUTO_UPLOAD=true` for every build profile,
+      because Sentry's Xcode and Gradle steps fail a Release build whose upload fails and no Sentry
+      project exists yet. Once `SENTRY_ORG`, `SENTRY_PROJECT` (Plain text) and `SENTRY_AUTH_TOKEN`
+      (Secret) are in the three EAS environments (apps/mobile/README.md, owner tasks), delete the
+      line from `build.base.env` and its assertion in `__tests__/app-config.test.ts` in one change;
+      the next production build's log shows the source maps and debug files uploaded.
+- [ ] Later builds run unattended once `ascAppId` is committed and both keys are stored:
+      `eas build --platform all --profile production --auto-submit`, from CI with `EXPO_TOKEN`.
+- [ ] Check: the build reaches Ready to Submit in TestFlight (distributable to internal testers)
+      with no email about a missing privacy manifest reason (ITMS-91053) or an invalid binary; an
+      internal tester installs it and the app opens on the sign-in screen; an Android tester opts
+      in with the link and installs from Play. Record any App Store Connect email in
+      docs/increments/13-verification.md (its unverified items).

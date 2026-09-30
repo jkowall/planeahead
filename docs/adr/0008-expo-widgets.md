@@ -7,7 +7,9 @@
 - Superseded by: none
 - Amended: 2026-09-23, by the increment's review round (rulings Z1 to Z11; what ran is in
   `docs/increments/11-verification.md`); 2026-09-30, the smoke runs weekly and its Android leg
-  builds `x86_64` only (item 8, ADR 0001, runbook step 15)
+  builds `x86_64` only (item 8, ADR 0001, runbook step 15); 2026-09-30, increment 13: the
+  extensions' privacy manifests and versions (item 9), the smoke's store checks and device
+  archive (item 8), open decision 4 closed (`docs/increments/13-verification.md`)
 
 ## Context
 
@@ -202,6 +204,32 @@ both apps.
    fails on a dead process or on a `FATAL EXCEPTION` naming the app or a `ReactNativeJS` error in
    logcat within the grace period.
 
+   Increment 13 added what the stores check. ios-archive fails unless every `.app` and `.appex`
+   in the app carries a `PrivacyInfo.xcprivacy` that declares each required-reason category its
+   executable's undefined symbols (`nm -u`) need, and the app's `CFBundleShortVersionString` and
+   `CFBundleVersion`; the symbol table is data in the script and a classifier the tools tests run.
+   A fifth iOS step, `ios-device-archive`, after the launch, archives Release for
+   `generic/platform=iOS` unsigned, which compiles the device SDKs (arm64, the watchOS device
+   slices) the simulator build never does, and applies the same checks to the archived app.
+   android-archive also runs `zipalign -c -P 16 -v 4` on the release APK and fails on any 64-bit
+   library with a LOAD segment aligned below 16 KB (the NDK's `llvm-readelf -l`).
+
+9. **What the store needs of the embedded bundles** (increment 13, rulings S1 and S3). Two
+   corrections, like item 1's, to what the generators write, both listed before
+   `@bacons/apple-targets` because both edit its own project mod (`xcodeProjectBeta2`), the
+   only place the watch targets exist, after it ran: `plugins/withExtensionPrivacyManifests.ts`
+   gives the widget extension and both watch shells their own privacy manifest (the extension
+   declares `NSPrivacyAccessedAPICategoryUserDefaults` with `1C8F.1`, the App Group reason, for
+   expo-widgets' `UserDefaults(suiteName:)`; the watch shells call no required-reason API and
+   declare none), and `plugins/withExtensionVersions.ts` gives every embedded target the app's
+   `MARKETING_VERSION` and `CURRENT_PROJECT_VERSION`. Before it, `pod install` gave the watch app
+   the phone app's aggregated manifest (React Native's privacy aggregation adds the app's file to
+   every application target without one) and the two extensions none. apple-targets 5.0.0
+   already set every target's marketing version to the app's at the end of its mod, so the
+   second plugin holds a rule that was true by a side effect. Both fail the prebuild when a target
+   they expect is missing or apple-targets' mod never ran; `__tests__/store-bundles.test.ts` runs
+   a real prebuild to prove it.
+
 ## Spike results (2026-09-23, this machine)
 
 Xcode 27.0 (27A266a), the iOS 26.5 runtime on an iPhone 17 Pro simulator, macOS 27.0,
@@ -377,8 +405,9 @@ in for the 26.6 gate leg; commands and full results in `docs/increments/11-verif
    `getInstances()` when the app becomes active and after any start, attaching listeners to new
    activity ids only.
 3. **`frequentUpdates`** and the push budget at the tracker's cadence (Apple publishes no number).
-4. **Privacy manifests for the extensions:** Apple wants one per executable using a
-   required-reason API; Expo writes only the app's (facts section 2 open question).
+4. **Privacy manifests for the extensions:** closed by increment 13 (item 9): each extension has
+   its own manifest, and the smoke fails any bundle whose executable references a required-reason
+   API its manifest does not declare.
 5. **Android:** adopt expo-widgets' Android widgets with SDK 58, whose Glance is 1.2.0-rc01 (a
    release candidate) under 57.0.20 and brings WorkManager 2.7.1 with `FOREGROUND_SERVICE`; the
    module stays unlinked until then (decision 7), and adopting it means adding that permission
@@ -410,7 +439,8 @@ in for the 26.6 gate leg; commands and full results in `docs/increments/11-verif
   corrections to expo-widgets' generated output (`plugins/withExpoWidgetsBuild.ts`) to re-check
   on every bump; three more bundle ids per variant to register with Apple; a list of expected
   Android permissions to keep in step with the dependencies; the smoke costs macOS runner
-  minutes (about 22 a run, weekly) and a release Android build.
+  minutes (about 22 a run, weekly, and about 16 more since increment 13's device archive) and a
+  release Android build.
 - Reversibility: high for the Android stub, the Wear module and the watch shells (delete the
   directory and the plugin entry); medium for expo-widgets (the layouts are JavaScript, but the
   bundle ids and App Groups the extension uses are permanent once shipped).

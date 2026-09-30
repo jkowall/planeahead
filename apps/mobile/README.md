@@ -150,16 +150,21 @@ Before the first device build that signs in (copied into the build log by the or
   the EAS file variable `GOOGLE_SERVICES_JSON` (the FCM token needs it, spike 3). The file never
   enters the runtime version (`fingerprint.config.js`), so the preview updates keep applying once
   it is set.
-- Google Play: register as an Organization (a personal account created after November 2023
-  faces a 12-tester, 14-day gate), then provide the Play upload and app signing SHA-256
-  fingerprints per package and set `ANDROID_SHA256_FINGERPRINTS` on the API
-  (`package=FP,FP;package=FP`; each host lists only its own packages, whatever else is set).
+- Google Play: register as an Organization (a personal account created after November 2023 must
+  run a 12-tester, 14-day closed test before production access; the internal track is open to
+  either), then provide the Play upload key's and every app signing key's SHA-256 fingerprint per
+  package (a new app's hybrid signing has three app signing keys, docs/runbooks/first-deploy.md
+  step 18) and set `ANDROID_SHA256_FINGERPRINTS` on the API (`package=FP,FP;package=FP`; each
+  host lists only its own packages, whatever else is set).
 - Sentry: a mobile project; `SENTRY_DSN`, `SENTRY_ORG`, `SENTRY_PROJECT` as EAS environment
   variables in `development`, `preview` and `production`, and `SENTRY_AUTH_TOKEN` as an EAS
-  Secret and a GitHub secret (source maps).
+  Secret and a GitHub secret (source maps). Until then eas.json sets `SENTRY_DISABLE_AUTO_UPLOAD`
+  for every build profile, because Sentry's build steps fail a Release build whose upload fails;
+  remove it when the variables exist (runbook step 18).
 - Visibility of every variable `app.config.ts` reads (`SENTRY_DSN`, `SENTRY_ORG`,
-  `SENTRY_PROJECT`, `GOOGLE_WEB_CLIENT_ID`, `GOOGLE_IOS_CLIENT_ID`, `EAS_PROJECT_ID`): **Plain
-  text or Sensitive, never Secret.** `eas update --environment` reads only those two visibilities,
+  `SENTRY_PROJECT`, `GOOGLE_WEB_CLIENT_ID`, `GOOGLE_IOS_CLIENT_ID`, `EAS_PROJECT_ID`, and
+  `APPLE_TEAM_ID` if it is set on EAS at all, in all three environments): **Plain text or
+  Sensitive, never Secret.** `eas update --environment` reads only those two visibilities,
   so a Secret would be missing from the update's config and the update would resolve a runtime
   version no build has, and silently never apply (Build environment above). Only
   `SENTRY_AUTH_TOKEN`, which the config never reads, is a Secret.
@@ -169,20 +174,25 @@ Before the first device build that signs in (copied into the build log by the or
   `<bundle id>.watchkitapp.widget` (the watchOS shells), each with the App Groups capability on
   the variant's group; enable Push Notifications on the three app App IDs (ActivityKit push
   updates and push-to-start tokens use APNs; Live Activities themselves need no capability, only
-  `NSSupportsLiveActivities`, which the config sets); set `ios.appleTeamId` (or the team EAS signs
-  with) before the first device build, which @bacons/apple-targets warns about; and let EAS
-  create the provisioning profiles for the three extension targets it lists. The watch app
+  `NSSupportsLiveActivities`, which the config sets); for a local device build, export
+  `APPLE_TEAM_ID` (the ten-character team id; app.config.ts writes it to `ios.appleTeamId`, which
+  @bacons/apple-targets warns about while it is missing), which EAS builds do not need because
+  each target is signed with its profile's team; and let EAS create the provisioning profiles for
+  the three extension targets it lists. The watch app
   carries the variant's icon (generated from `assets/icon-*.png` on every prebuild), which App
   Store Connect requires of every app bundle; nothing to upload separately. The first device
   build of each variant should still go through TestFlight before a store submission: no
   device-signed archive of the watch shells has been processed by App Store Connect yet.
 - Native smoke (`.github/workflows/native-smoke.yml`, weekly and on demand): GitHub-hosted
   runners only, never EAS. The gate leg needs a `macos-26` image with Xcode 26.6 installed (the
-  EAS SDK 57 image's Xcode) and at least one iPhone simulator runtime; the Xcode 27 leg runs with
+  Xcode of the EAS image eas.json pins) and at least one iPhone simulator runtime; since increment
+  13 it also archives the app unsigned for a device and fails any bundle without its privacy
+  manifest, with an undeclared required-reason API, or with a version other than the app's. The
+  Xcode 27 leg runs with
   `continue-on-error` and reports "Xcode missing" until an image carries Xcode 27 (switch its
   `runs-on` when GitHub publishes one). The Android leg needs `ubuntu-24.04` with KVM and the
-  preinstalled Android SDK (its build-tools' `aapt2` checks the manifest and the permissions),
-  builds `x86_64` only, downloads an API 36 `google_apis` x86_64 image, and builds the release APK
+  preinstalled Android SDK (its build-tools' `aapt2` checks the manifest and the permissions, its
+  `zipalign` and the NDK's `llvm-readelf` the alignment for 16 KB pages), builds `x86_64` only, downloads an API 36 `google_apis` x86_64 image, and builds the release APK
   as well as the debug one. No secrets are used. The minutes it costs and how to make it nightly
   are in `docs/runbooks/first-deploy.md` step 15. A new Android permission from a dependency fails
   the Android leg until it is blocked in `app.config.ts` or added to the expected list in
@@ -192,6 +202,12 @@ Before the first device build that signs in (copied into the build log by the or
   `EAS_PROJECT_ID`), the EAS environment variables above, and a robot token as the GitHub secret
   `EXPO_TOKEN` (mobile-preview.yml skips without it). Every pull request's update goes to the
   `preview` branch, which the preview builds' channel serves.
+- The store builds (increment 13): the App Store Connect record and its `ascAppId` in eas.json,
+  the internal TestFlight group, the App Store Connect API key and the Play service account key
+  stored in EAS, the Play app and its internal testers, the first interactive production build of
+  each platform, the submissions, the signing fingerprints and the export compliance attestation,
+  in the order of `docs/runbooks/first-deploy.md` step 18. eas.json pins the EAS build images
+  and CocoaPods; every SDK upgrade moves those pins with it.
 
 ## Layout
 
@@ -203,6 +219,9 @@ plugins/withApsEnvironment.ts  the last plugin: aps-environment from APNS_ENVIRO
 plugins/withWearApp.ts       adds the Wear OS module (wear/) to the Gradle build, versions pinned
 plugins/withExpoWidgetsBuild.ts  the widget extension's Release settings; expo-widgets unlinked
                              on Android while its Android widgets are off
+plugins/withExtensionPrivacyManifests.ts  a privacy manifest in the widget extension and each
+                             watch shell (before @bacons/apple-targets, whose project mod it edits)
+plugins/withExtensionVersions.ts  the app's version and build number in every embedded target
 widgets/                     expo-widgets layouts: placeholder.tsx (the one widgets[] entry),
                              live-activity.tsx (createLiveActivity), content-state.ts ({ name, props })
 src/lib/live-activity/tokens.ts  push-to-start token to POST /v1/devices; per-activity tokens logged

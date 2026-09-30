@@ -159,6 +159,25 @@ export function apnsEnvironment(value: string | undefined, onEasBuilder: boolean
   return value as ApnsEnvironment;
 }
 
+/**
+ * `APPLE_TEAM_ID` (increment 13, ruling S7): the ten-character team id, for `ios.appleTeamId`,
+ * which Expo, expo-widgets and @bacons/apple-targets write into every target's
+ * `DEVELOPMENT_TEAM` for a local device build (apple-targets warns while it is missing). Unset,
+ * nothing is written, as before; an EAS build signs each target with its provisioning profile's
+ * team either way (R5 C13). The value enters the runtime version like the rest of the config, so
+ * on EAS it is an environment variable of Plain text visibility in all three environments, or in
+ * none (README, owner tasks).
+ */
+export function appleTeamId(value: string | undefined): string | undefined {
+  if (value === undefined) {
+    return undefined;
+  }
+  if (!/^[A-Z0-9]{10}$/.test(value)) {
+    throw new Error(`APPLE_TEAM_ID must be the ten-character Apple team id; got "${value}"`);
+  }
+  return value;
+}
+
 export function reversedClientId(clientId: string): string {
   const suffix = '.apps.googleusercontent.com';
   if (!clientId.endsWith(suffix)) {
@@ -181,6 +200,7 @@ export default ({ config }: ConfigContext): ExpoConfig => {
   const appGroup = `group.${identity.bundleIdentifier}`;
   const apsEnvironment = apnsEnvironment(env('APNS_ENVIRONMENT'), env('EAS_BUILD') === 'true');
   const googleIosClientId = env('GOOGLE_IOS_CLIENT_ID') ?? PLACEHOLDER_GOOGLE_IOS_CLIENT_ID;
+  const teamId = appleTeamId(env('APPLE_TEAM_ID'));
   const easProjectId = env('EAS_PROJECT_ID');
   const sentryOrganization = env('SENTRY_ORG');
   const sentryProject = env('SENTRY_PROJECT');
@@ -214,6 +234,7 @@ export default ({ config }: ConfigContext): ExpoConfig => {
       : { updates: { url: `https://u.expo.dev/${easProjectId}` } }),
     ios: {
       bundleIdentifier: identity.bundleIdentifier,
+      ...(teamId === undefined ? {} : { appleTeamId: teamId }),
       supportsTablet: false,
       usesAppleSignIn: true,
       // One host per variant (see the file header).
@@ -230,7 +251,8 @@ export default ({ config }: ConfigContext): ExpoConfig => {
       },
       // Declared by hand: Expo writes only what is listed here, into the main app target, and
       // never scans node_modules (facts section 2). Pod manifests are aggregated separately by
-      // expo-build-properties' privacyManifestAggregationEnabled below.
+      // expo-build-properties' privacyManifestAggregationEnabled below. The widget extension and
+      // the watch shells get their own (plugins/withExtensionPrivacyManifests.ts).
       privacyManifests: {
         NSPrivacyTracking: false,
         NSPrivacyTrackingDomains: [],
@@ -385,6 +407,13 @@ export default ({ config }: ConfigContext): ExpoConfig => {
         './plugins/withExpoWidgetsBuild.ts',
         { enableAndroid: androidWidgets } satisfies ExpoWidgetsBuildProps,
       ],
+      // What the first store upload needs of the bundles the app embeds (increment 13, rulings S1
+      // and S3): a privacy manifest in the widget extension and each watch shell, and the app's
+      // version and build number in every one of them. Both edit @bacons/apple-targets' own
+      // project mod, after it created the watch targets, so both must stay BEFORE it:
+      // config-plugins refuses a mod added to that chain once apple-targets' provider is in place.
+      './plugins/withExtensionPrivacyManifests.ts',
+      './plugins/withExtensionVersions.ts',
       // The watchOS shells (targets/watch, targets/watch-widget), kept after the coexistence
       // spike passed on Xcode 27 (ADR 0008). Its pbxproj parser rewrites the project expo-widgets
       // wrote; the spike found the result independent of the order of the two entries.
