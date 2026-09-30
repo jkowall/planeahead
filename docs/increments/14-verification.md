@@ -228,7 +228,7 @@ retries and holds, the whole-message retry (`message.retry` after a failed re-en
 that threw) sends a job's already sent targets again, and ruling R1's check now runs on those
 deliveries too.
 
-Second skeptic (impact): @@SKEPTIC2@@
+Second skeptic (impact): minor at this commit, down from the reviewer's major, and not refuted. The mechanism is real, but the only producer is the admin test push (fixed text, a 10-minute window, allow-listed users in production); a hold needs push secrets that are absent or malformed, which production's required secrets make a staging case in practice; a retry needs a failed send for that token plus a sign-out inside a delay of 10 seconds to about 20 minutes; and what leaks is one alert's title and body on the same phone. It also found that the first attempt was unchecked too, which R1's per-batch read now covers, and that store-and-forward at APNs and FCM and an offline sign-out (the app's invalidate call and its retry on the next launch are increment 16's) leave windows no server-side check can close.
 
 ### By ruling
 
