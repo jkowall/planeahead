@@ -255,3 +255,23 @@ At first build:
 12. Run the first `eas build --profile production` for iOS interactively on the Mac with an Apple ID (App Groups need cookie auth, E9), and Android (EAS generates the upload keystore). Then run `eas submit` for each platform, or use `--auto-submit` once `ascAppId` and the key are in eas.json (C1).
 13. After the first Play upload: copy the app-signing fingerprints (three under hybrid signing) and the upload fingerprint into `ANDROID_SHA256_FINGERPRINTS` and the Google OAuth Android clients (C8). Decide hybrid versus classic before any open or production release (G15).
 14. Confirm the export-compliance attestation behind `ITSAppUsesNonExemptEncryption: false` (D12), and read the ITMS emails after the first upload (U3 to U5).
+
+## Errata (2026-09-30, increment 13's review)
+
+- **L4 and C4 are wrong on the short version.** @bacons/apple-targets 5.0.0 also runs
+  `syncMarketingVersions()`, which sets the app's version (0.1.0) on every target, so the watch
+  shells never carried 1.0 in practice. Increment 13 keeps its version plugin as a guard.
+- **L5 is incomplete on the build number.** EAS writes the remote build number into each target's
+  Info.plist, but the widget extension and both watch targets build with
+  `GENERATE_INFOPLIST_FILE = YES` and `CURRENT_PROJECT_VERSION = 1`, and the build settings win: a
+  measured build ignored an Info.plist `CFBundleVersion` of 7. Only the first EAS build (number 1)
+  matches by coincidence. EAS exports `EAS_BUILD_IOS_BUILD_NUMBER` and `EAS_BUILD_IOS_APP_VERSION`
+  to the whole build (eas-cli `packages/worker/src/env.ts`), which increment 13's plugin now reads.
+- **Missed: prebuilt frameworks without a manifest.** SDK 57 embeds `ExpoFileSystem.framework`
+  prebuilt without its privacy manifest, and Expo's own fix (expo/expo#50503, merged 2026-09-25,
+  shipped only in expo-file-system 58.0.2) says App Store Connect rejects such an upload with
+  ITMS-91053. Increment 13 builds it from source for SDK 57.
+- **U5 is closed for hermes.** Apple's list of commonly used SDKs names a different Hermes, per
+  Apple's statement relayed by the React Native team on 2024-04-09
+  (react-native-community/discussions-and-proposals#776); ITMS-91061 applies at upload, not only
+  at App Review.
