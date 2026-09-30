@@ -382,7 +382,7 @@ created for these runs and deleted afterwards, from a frozen copy of the script.
 | Check | Command | Result |
 | --- | --- | --- |
 | Full check | as in the table above | 13 of 14 turbo tasks passed (typecheck and lint everywhere; tools 88, shared 589, db 182, mobile 632 in 35 suites); Prettier clean; the toolchain, exit and migrations guards ok; actionlint and shellcheck clean. `@planeahead/api#test` had 764 passed, 1 skipped and 5 timed out (below) while another agent's API suite and another project's suite ran on the machine; after the last edit, `turbo run typecheck lint test --filter=@planeahead/mobile --force` (which also runs the tools tests and the root lint) passed its 8 tasks in 29 s |
-| The API suite on its own | `pnpm turbo run test --filter=@planeahead/api --force`, while the machine stayed shared | @@APIFINAL@@ |
+| The API suite on its own | `pnpm turbo run test --filter=@planeahead/api --force`, while the machine stayed shared | passed over two runs: the solo run passed 67 of 70 files (753 tests, 1 skipped) before the pool timed out starting runners for `cost-log`, `envelope` and `db-harness`, which then passed on their own (24 tests): 777 tests with 1 skipped, the count before this increment |
 | Tools tests | `pnpm exec vitest run --dir tools` | 88 passed (60 before the round), of which `native-smoke.test.js` 57, two of them macOS only |
 | Mobile suites the round changed | `pnpm exec jest __tests__/app-config.test.ts __tests__/store-bundles.test.ts __tests__/entitlements.test.ts` | 49 passed, 4.5 s, five real prebuilds among them (one with `EAS_BUILD_IOS_BUILD_NUMBER=7`) |
 | iOS prebuild, from scratch | `rm -rf apps/mobile/ios`, then `scripts/native-smoke.sh ios-prebuild` | passed, 27 s with `pod install`: ExpoFileSystem a source pod (`-lExpoFileSystem`); the app's `CFBundleVersion` 4242 as EAS writes it; `CURRENT_PROJECT_VERSION = 4242` in the six configurations of the three embedded targets, the app target's own left at 1 |
@@ -412,7 +412,7 @@ solo run (774 passed, 1 skipped): `auth-session-refresh` ("is NOT refreshed by a
 refresh_timeout") and `flights.subscribe` ("reserved webhook stubs answer 501"), each at 60 s.
 Alone, `flight-tracker.finish` passed 13 of 13, `flight-tracker.lifecycle` 2 of 2,
 `flights.refresh` 6 of 6, `flights.subscribe` 23 of 23, `provider-budget` 22 of 22, and
-`auth-session-refresh` with `provider-budget` 25 of 25. @@APIFINALPARA@@
+`auth-session-refresh` with `provider-budget` 25 of 25. The orchestrator's final solo run, with another project's test suite sharing the machine, passed 67 files and 753 tests before the pool timed out starting runners for three files, which then passed on their own (24 tests): 777 tests with 1 skipped. This increment changes no file under `apps/api`.
 
 ### Mutants
 

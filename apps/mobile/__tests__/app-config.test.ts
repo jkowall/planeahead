@@ -231,6 +231,20 @@ describe('app.config.ts', () => {
     expect(() => iosDevelopmentTeam('ABCDE1234')).toThrow(/IOS_DEVELOPMENT_TEAM/);
   });
 
+  it("keeps EAS's build number and version out of the fingerprinted config (ruling F6)", () => {
+    // plugins/withExtensionVersions.ts reads EAS_BUILD_IOS_* at prebuild; the config itself must
+    // not, because @expo/fingerprint hashes ios.buildNumber and version by default, so routing
+    // them through the config would give every EAS build a new runtime version.
+    const local = configFor('production');
+    const onEas = configFor('production', {
+      EAS_BUILD_IOS_BUILD_NUMBER: '7',
+      EAS_BUILD_IOS_APP_VERSION: '9.9.9',
+    });
+    expect(onEas.ios?.buildNumber).toBeUndefined();
+    expect(onEas.version).toBe(local.version);
+    expect(JSON.stringify(onEas)).toBe(JSON.stringify(local));
+  });
+
   it('refuses a preview or production build on EAS without the Google iOS client id (G5)', () => {
     for (const variant of ['production', 'preview']) {
       const profileEnv = easJson().build[variant]?.env ?? {};
