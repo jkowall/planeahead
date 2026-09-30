@@ -24,8 +24,10 @@
 #
 # Inputs (environment): SMOKE_DERIVED_DATA (Xcode's derived data, default apps/mobile/ios/build),
 # SMOKE_SIMULATOR (a simulator UDID; default: an iPhone on the newest iOS runtime),
-# SMOKE_GRACE_SECONDS (default 30), SMOKE_ANDROID_ABIS (default: every ABI a store build has),
-# SMOKE_GRADLE_JVMARGS (default -Xmx4g: the template's 2 GB ran D8 out of heap on a cold build),
+# SMOKE_GRACE_SECONDS (default 30), SMOKE_ANDROID_ABIS (default: every ABI a store build has; the
+# nightly builds x86_64 only, the emulator's), SMOKE_MIN_FREE_GB (default 15: the room the Android
+# build must have before it starts), SMOKE_GRADLE_JVMARGS (default -Xmx4g: the template's 2 GB ran
+# D8 out of heap on a cold build),
 # ANDROID_HOME (or ANDROID_SDK_ROOT; the android-archive step runs its build-tools' aapt2).
 set -euo pipefail
 
@@ -45,6 +47,7 @@ APP_GROUP="group.$BUNDLE_ID"
 PROJECT=PlaneAhead
 DERIVED_DATA="${SMOKE_DERIVED_DATA:-$APP_DIR/ios/build}"
 GRACE_SECONDS="${SMOKE_GRACE_SECONDS:-30}"
+MIN_FREE_GB="${SMOKE_MIN_FREE_GB:-15}"
 APP_PATH="$DERIVED_DATA/Build/Products/Release-iphonesimulator/$PROJECT.app"
 APK_DEBUG=android/app/build/outputs/apk/debug/app-debug.apk
 APK_RELEASE=android/app/build/outputs/apk/release/app-release.apk
@@ -269,16 +272,29 @@ android_prebuild() {
   echo "native-smoke: ok: Wear module included, no Android widget receiver"
 }
 
+# Whole gigabytes available on the filesystem that holds the current directory (POSIX df, so the
+# same on Linux and macOS).
+free_gb() {
+  df -Pk . | awk 'NR == 2 { printf "%d", $4 / 1048576 }'
+}
+
 android_build() {
   cd "$APP_DIR/android"
-  local abis=()
+  local abis=() room
   if [ -n "${SMOKE_ANDROID_ABIS:-}" ]; then
     abis=("-PreactNativeArchitectures=$SMOKE_ANDROID_ABIS")
   fi
+  # A build that fills the disk takes a hosted runner down with it, and the runner then uploads no
+  # log at all (every nightly from 2026-09-25 to 2026-09-29), so refuse to start without room.
+  room="$(free_gb)"
+  [ "$room" -ge "$MIN_FREE_GB" ] ||
+    fail "only ${room} GB free before the Android build, which needs about ${MIN_FREE_GB} GB (SMOKE_MIN_FREE_GB)"
+  echo "native-smoke: ${room} GB free before the Android build (ABIs: ${SMOKE_ANDROID_ABIS:-all})"
   # assembleDebug is the compile the spec names; assembleRelease embeds the JavaScript bundle the
   # launch step needs (review ruling Z5), signed with the template's debug keystore.
   ./gradlew assembleDebug assembleRelease --console=plain \
     "-Dorg.gradle.jvmargs=${SMOKE_GRADLE_JVMARGS:--Xmx4g -XX:MaxMetaspaceSize=1g}" ${abis[@]+"${abis[@]}"}
+  echo "native-smoke: $(free_gb) GB free after the Android build"
 }
 
 # The newest build-tools' aapt2 of the SDK the build used.

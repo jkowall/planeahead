@@ -22,6 +22,12 @@ on:
     # 06:17 UTC, after the day's merges; off the hour, when scheduled runs queue longest.
     - cron: '17 6 * * *'
   workflow_dispatch:
+    inputs:
+      platforms:
+        description: 'Legs to run (a scheduled run always runs every leg)'
+        type: choice
+        options: [all, ios, android]
+        default: all
 
 concurrency:
   group: native-smoke-${{ github.ref }}
@@ -40,6 +46,8 @@ env:
 jobs:
   ios:
     name: iOS (Xcode ${{ matrix.xcode }})
+    # A manual run can pick one platform; a scheduled run has no inputs and runs both.
+    if: inputs.platforms != 'android'
     runs-on: macos-26
     timeout-minutes: 120
     # The Xcode 27 leg reports without failing the run; the 26.6 leg is the gate.
@@ -52,16 +60,10 @@ jobs:
       SMOKE_DERIVED_DATA: ${{ github.workspace }}/.native-smoke/ios
       SMOKE_GRACE_SECONDS: '45'
     steps:
-      - uses: actions/checkout@v5
-      - uses: pnpm/action-setup@v4
-      - uses: actions/setup-node@v6
-        with:
-          node-version-file: .node-version
-          cache: pnpm
-      - run: pnpm install --frozen-lockfile
-
       # The image carries several Xcodes side by side (/Applications/Xcode_<version>.app); pick
-      # the newest build of the requested version and fail loudly when the image has none.
+      # the newest build of the requested version and fail loudly when the image has none. First,
+      # so a missing Xcode (every night the Xcode 27 leg ran on macos-26 so far) costs seconds of
+      # macOS time, not a checkout and an install.
       - name: Select Xcode ${{ matrix.xcode }}
         env:
           XCODE_VERSION: ${{ matrix.xcode }}
@@ -78,6 +80,14 @@ jobs:
           xcodebuild -version | head -1 | grep -q "^Xcode ${XCODE_VERSION}"
           xcrun simctl list runtimes
 
+      - uses: actions/checkout@v5
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v6
+        with:
+          node-version-file: .node-version
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+
       - name: Prebuild and assert the generated entitlements and targets
         run: scripts/native-smoke.sh ios-prebuild
       - name: Build for the iPhone simulator
@@ -89,11 +99,27 @@ jobs:
 
   android:
     name: Android (JDK 17, emulator)
+    if: inputs.platforms != 'ios'
     runs-on: ubuntu-24.04
     timeout-minutes: 120
     env:
       SMOKE_GRACE_SECONDS: '45'
+      # Only the ABI the emulator below runs. Every ABI, debug and release, filled the hosted
+      # runner's disk: from 2026-09-25 each nightly died inside the build with "No space left on
+      # device", and a runner that dies that way uploads no log (ADR 0001). Store builds on EAS
+      # compile every ABI.
+      SMOKE_ANDROID_ABIS: x86_64
     steps:
+      # The image ships toolchains this job never touches (.NET, Haskell, Swift, Boost, CodeQL,
+      # cached Docker images); the Android SDK, the JDKs and the tool cache the setup actions use
+      # stay. The build and the emulator need the room (the build refuses to start without it).
+      - name: Free disk space
+        run: |
+          df -h /
+          sudo rm -rf /usr/share/dotnet /usr/local/.ghcup /opt/ghc /usr/share/swift \
+            /usr/local/share/boost /opt/hostedtoolcache/CodeQL
+          sudo docker image prune --all --force >/dev/null 2>&1 || true
+          df -h /
       - uses: actions/checkout@v5
       - uses: pnpm/action-setup@v4
       - uses: actions/setup-node@v6
@@ -107,7 +133,6 @@ jobs:
           cache: gradle
       - run: pnpm install --frozen-lockfile
 
-      # Every ABI a store build carries (ADR 0001); the emulator below runs the x86_64 one.
       - name: Prebuild and assert the Wear module is included
         run: scripts/native-smoke.sh android-prebuild
       # assembleDebug is the compile; assembleRelease embeds the JavaScript the launch runs.

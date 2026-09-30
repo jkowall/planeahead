@@ -154,6 +154,50 @@ describe('native-smoke.yml', () => {
     expect(launch).not.toMatch(/app-debug\.apk|\$APK_DEBUG/);
     expect(launch).toContain('| logcat_errors)');
   });
+
+  it('lets a manual run pick one platform, while a scheduled run runs every leg', () => {
+    const on = /^on:\n((?: .*\n|\n)*?)(?=^\S)/m.exec(code)?.[1] ?? '';
+    expect(on).toMatch(/^ {6}platforms:\n(?: {8}.*\n)*? {8}options: \[all, ios, android\]\n/m);
+    expect(on).toMatch(/^ {8}default: all$/m);
+    // A scheduled run has no inputs, so `inputs.platforms` is empty and neither job is skipped.
+    expect(jobBlock(text, 'ios')).toMatch(/^ {4}if: inputs\.platforms != 'android'$/m);
+    expect(jobBlock(text, 'android')).toMatch(/^ {4}if: inputs\.platforms != 'ios'$/m);
+  });
+
+  it('selects Xcode before the checkout, so a missing Xcode fails in seconds', () => {
+    const ios = jobBlock(text, 'ios');
+    const select = ios.indexOf('- name: Select Xcode');
+    expect(select).toBeGreaterThan(-1);
+    expect(select).toBeLessThan(ios.indexOf('actions/checkout'));
+    expect(ios.slice(0, select)).not.toMatch(/^ {6}- /m);
+  });
+
+  it('builds only the ABI the Android emulator runs, after freeing disk, never the SDK', () => {
+    const android = jobBlock(text, 'android');
+    const abi = /^ {6}SMOKE_ANDROID_ABIS: (\S+)$/m.exec(android)?.[1];
+    expect(abi).toBe('x86_64');
+    expect(android).toMatch(new RegExp(`^ {10}arch: ${abi}$`, 'm'));
+    const free = android.indexOf('- name: Free disk space');
+    const checkout = android.indexOf('actions/checkout');
+    expect(free).toBeGreaterThan(-1);
+    expect(free).toBeLessThan(checkout);
+    const freeStep = android.slice(free, checkout);
+    expect(freeStep).toContain('sudo rm -rf');
+    // The Android SDK, the JDKs and the tool cache the setup actions install into all stay.
+    expect(freeStep).not.toMatch(/android|jvm|hostedtoolcache(?!\/CodeQL)/);
+  });
+
+  it('refuses to start the Android build without room, and reports the room left', () => {
+    const build = script.slice(
+      script.indexOf('android_build() {'),
+      script.indexOf('# The newest build-tools'),
+    );
+    const guard = build.indexOf('[ "$room" -ge "$MIN_FREE_GB" ]');
+    expect(guard).toBeGreaterThan(-1);
+    expect(guard).toBeLessThan(build.indexOf('./gradlew'));
+    expect(build).toContain('free after the Android build');
+    expect(script).toMatch(/^MIN_FREE_GB="\$\{SMOKE_MIN_FREE_GB:-\d+\}"$/m);
+  });
 });
 
 describe('native-smoke.sh classifiers', () => {
