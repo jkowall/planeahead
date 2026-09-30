@@ -1,6 +1,7 @@
 # PlaneAhead Phase 1 Plan: Core tracking
 
-Date: 2026-09-30. Status: proposed, waiting for the owner's go-ahead. Drafted by Opus 5.5 from five
+Date: 2026-09-30. Status: approved on 2026-09-30, with every recommendation in section 11 taken
+(section 13). Drafted by Opus 5.5 from five
 facts sheets verified against primary sources on 2026-09-30 (`docs/research/phase1/`), then
 red-teamed by Fable 5.1 (2 blockers, 9 majors, 13 minors, 6 nits, all applied below).
 
@@ -309,3 +310,23 @@ Opus 5.5 builds, reviews, verifies and fixes every increment; Fable 5.1 runs esc
 (pinned with `model: 'fable'`), decision 11's reviewer lens if approved, and red-teamed this plan.
 Documentation sweeps run at lower effort. Tokens per increment and model go into
 `docs/build-log.md` as in Phase 0.
+
+## 13. Decisions taken at approval (2026-09-30)
+
+The owner took the recommendation on all twelve decisions in section 11:
+
+1. **Provider path:** ask FlightAware now and keep Phase 0's split. If written permission has not
+   arrived four weeks after the letter is sent, Phase 1 ships on AeroDataBox only (cadence B) and
+   flips to the split when permission arrives.
+2. **Retention:** assume 24 hours and store only derived, normalised data from AeroAPI until
+   FlightAware answers.
+3. **Delay threshold:** 15 minutes, then every 15 more.
+4. **First gate assignment:** a setting, off by default.
+5. **Cancellation and diversion:** pushed in Phase 1, after confirmation.
+6. **Time-sensitive:** within an hour of departure, for any kind.
+7. **APNs 5xx:** wait Apple's 15 minutes and drop past the relevance window.
+8. **Transport fallback:** the Container relay first, then FCM for iOS, then Expo's push service.
+9. **TestFlight:** internal testers only in Phase 1.
+10. **Play signing:** the hybrid default, with all its fingerprints registered.
+11. **Fable in the build loop:** one Fable reviewer lens on increment 15; Opus builds.
+12. **Native smoke:** weekly.
