@@ -10,6 +10,7 @@
 #   scripts/native-smoke.sh android-build     gradle assembleDebug and assembleRelease
 #   scripts/native-smoke.sh android-archive   the APKs, the stub, the manifest and its permissions
 #   scripts/native-smoke.sh android-launch    install the release APK, launch, alive, no JS fatal
+#   scripts/native-smoke.sh disk-guard N WHAT  fail unless N GB are free (before the emulator)
 #
 # The PRODUCTION variant with the production EAS profile's APNS_ENVIRONMENT, so the entitlements
 # asserted are the ones a store build signs (ruling V3). Launching is the point: a dyld failure
@@ -25,9 +26,10 @@
 # Inputs (environment): SMOKE_DERIVED_DATA (Xcode's derived data, default apps/mobile/ios/build),
 # SMOKE_SIMULATOR (a simulator UDID; default: an iPhone on the newest iOS runtime),
 # SMOKE_GRACE_SECONDS (default 30), SMOKE_ANDROID_ABIS (default: every ABI a store build has; the
-# workflow builds x86_64 only, the emulator's), SMOKE_MIN_FREE_GB (default 15: the room the Android
-# build must have before it starts), SMOKE_GRADLE_JVMARGS (default -Xmx4g: the template's 2 GB ran
-# D8 out of heap on a cold build),
+# workflow builds x86_64 only, the emulator's), SMOKE_BUILD_MIN_FREE_GB (the room the Android build
+# must have before it starts; default 10 GB plus 5 per ABI, 0 skips the check for an incremental
+# rebuild), SMOKE_GRADLE_JVMARGS (default -Xmx4g: the template's 2 GB ran D8 out of heap on a cold
+# build),
 # ANDROID_HOME (or ANDROID_SDK_ROOT; the android-archive step runs its build-tools' aapt2).
 set -euo pipefail
 
@@ -47,7 +49,6 @@ APP_GROUP="group.$BUNDLE_ID"
 PROJECT=PlaneAhead
 DERIVED_DATA="${SMOKE_DERIVED_DATA:-$APP_DIR/ios/build}"
 GRACE_SECONDS="${SMOKE_GRACE_SECONDS:-30}"
-MIN_FREE_GB="${SMOKE_MIN_FREE_GB:-15}"
 APP_PATH="$DERIVED_DATA/Build/Products/Release-iphonesimulator/$PROJECT.app"
 APK_DEBUG=android/app/build/outputs/apk/debug/app-debug.apk
 APK_RELEASE=android/app/build/outputs/apk/release/app-release.apk
@@ -272,29 +273,47 @@ android_prebuild() {
   echo "native-smoke: ok: Wear module included, no Android widget receiver"
 }
 
-# Whole gigabytes available on the filesystem that holds the current directory (POSIX df, so the
-# same on Linux and macOS).
+# Whole gigabytes available on the filesystem that holds the current directory: `df -P` prints the
+# same columns on Linux and macOS, the fourth being the space available in 1024-byte blocks. (On
+# APFS it leaves purgeable space out, so a Mac reads low, never high.)
 free_gb() {
   df -Pk . | awk 'NR == 2 { printf "%d", $4 / 1048576 }'
 }
 
+# Fails unless NEED whole gigabytes are free before WHAT (0 skips the check). A step that fills
+# the disk takes a hosted runner down with it, and the runner then uploads no log at all (every
+# scheduled run from 2026-09-24 to 2026-09-29), so the steps that write gigabytes check first.
+disk_guard() {
+  local need="$1" what="$2" room
+  [[ "$need" =~ ^[0-9]+$ ]] ||
+    fail "the room to check before ${what} must be whole gigabytes, not '${need}'"
+  room="$(free_gb)"
+  [[ "$room" =~ ^[0-9]+$ ]] || fail "could not read the free space before ${what} from df"
+  if [ "$need" -gt 0 ] && [ "$room" -lt "$need" ]; then
+    fail "only ${room} GB free before ${what}, which needs about ${need} GB"
+  fi
+  echo "native-smoke: ${room} GB free before ${what}"
+}
+
 android_build() {
   cd "$APP_DIR/android"
-  local abis=() room
+  local abis=() listed=() count=4 rc=0
   if [ -n "${SMOKE_ANDROID_ABIS:-}" ]; then
     abis=("-PreactNativeArchitectures=$SMOKE_ANDROID_ABIS")
+    IFS=, read -r -a listed <<<"$SMOKE_ANDROID_ABIS"
+    count="${#listed[@]}"
   fi
-  # A build that fills the disk takes a hosted runner down with it, and the runner then uploads no
-  # log at all (every scheduled run from 2026-09-24 to 2026-09-29), so refuse to start without room.
-  room="$(free_gb)"
-  [ "$room" -ge "$MIN_FREE_GB" ] ||
-    fail "only ${room} GB free before the Android build, which needs about ${MIN_FREE_GB} GB (SMOKE_MIN_FREE_GB)"
-  echo "native-smoke: ${room} GB free before the Android build (ABIs: ${SMOKE_ANDROID_ABIS:-all})"
+  # Build output measured on 2026-09-30: 5.8 GB for x86_64 alone, 18.1 GB for all four ABIs, so
+  # about 5 GB an ABI plus room for Gradle's caches and an NDK download.
+  disk_guard "${SMOKE_BUILD_MIN_FREE_GB:-$((10 + 5 * count))}" \
+    "the Android build (ABIs: ${SMOKE_ANDROID_ABIS:-all})"
   # assembleDebug is the compile the spec names; assembleRelease embeds the JavaScript bundle the
-  # launch step needs (review ruling Z5), signed with the template's debug keystore.
+  # launch step needs (review ruling Z5), signed with the template's debug keystore. The space left
+  # is reported whether or not the build succeeds; a failed build keeps its exit code.
   ./gradlew assembleDebug assembleRelease --console=plain \
-    "-Dorg.gradle.jvmargs=${SMOKE_GRADLE_JVMARGS:--Xmx4g -XX:MaxMetaspaceSize=1g}" ${abis[@]+"${abis[@]}"}
+    "-Dorg.gradle.jvmargs=${SMOKE_GRADLE_JVMARGS:--Xmx4g -XX:MaxMetaspaceSize=1g}" ${abis[@]+"${abis[@]}"} || rc=$?
   echo "native-smoke: $(free_gb) GB free after the Android build"
+  return "$rc"
 }
 
 # The newest build-tools' aapt2 of the SDK the build used.
@@ -401,11 +420,13 @@ case "${1:-}" in
   android-build) android_build ;;
   android-archive) android_archive ;;
   android-launch) android_launch ;;
+  # The workflow runs this before the emulator step, which downloads its system image.
+  disk-guard) disk_guard "${2:-}" "${3:-the next step}" ;;
   # Internal, for tools/workflows/native-smoke.test.js: the two classifiers, on stdin.
   logcat-errors) logcat_errors ;;
   permissions-differ) permissions_differ ;;
   *)
-    sed -n '2,13p' "${BASH_SOURCE[0]}"
+    sed -n '2,14p' "${BASH_SOURCE[0]}"
     exit 2
     ;;
 esac

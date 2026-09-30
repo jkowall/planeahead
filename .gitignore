@@ -16,7 +16,7 @@ dist/
 # Gradle output of the local Expo module (its project directory is its own android/ folder)
 /apps/mobile/modules/*/android/build/
 /apps/mobile/modules/*/android/.gradle/
-# scripts/native-smoke.sh's derived data in the nightly workflow
+# scripts/native-smoke.sh's derived data in the native-smoke workflow
 /.native-smoke/
 
 # Secrets and local environment (the committed *.example templates are the exception)

@@ -177,17 +177,16 @@ Before the first device build that signs in (copied into the build log by the or
   build of each variant should still go through TestFlight before a store submission: no
   device-signed archive of the watch shells has been processed by App Store Connect yet.
 - Native smoke (`.github/workflows/native-smoke.yml`, weekly and on demand): GitHub-hosted
-  runners only, never EAS. The gate leg needs a `macos-26` image with Xcode 26.6 installed (the EAS SDK 57 image's
-  Xcode) and at least one iPhone simulator runtime; the Xcode 27 leg runs with
+  runners only, never EAS. The gate leg needs a `macos-26` image with Xcode 26.6 installed (the
+  EAS SDK 57 image's Xcode) and at least one iPhone simulator runtime; the Xcode 27 leg runs with
   `continue-on-error` and reports "Xcode missing" until an image carries Xcode 27 (switch its
   `runs-on` when GitHub publishes one). The Android leg needs `ubuntu-24.04` with KVM and the
   preinstalled Android SDK (its build-tools' `aapt2` checks the manifest and the permissions),
-  downloads an API 36 `google_apis` x86_64 image, and builds the release APK as well as the
-  debug one (about ten more minutes). No secrets are used. macOS minutes are billed at a
-  multiple of Linux minutes on a private repository: two iOS legs of 30 to 60 minutes each per
-  night is the budget to approve, or trim the Xcode 27 leg to `workflow_dispatch`. A new Android
-  permission from a dependency fails the Android leg until it is blocked in `app.config.ts` or
-  added to the expected list in `scripts/native-smoke.sh` on purpose.
+  builds `x86_64` only, downloads an API 36 `google_apis` x86_64 image, and builds the release APK
+  as well as the debug one. No secrets are used. The minutes it costs and how to make it nightly
+  are in `docs/runbooks/first-deploy.md` step 15. A new Android permission from a dependency fails
+  the Android leg until it is blocked in `app.config.ts` or added to the expected list in
+  `scripts/native-smoke.sh` on purpose.
 - Expo: an account on the Starter plan, `eas init` in `apps/mobile` (its project id becomes the
   `EAS_PROJECT_ID` variable in all three EAS environments and the GitHub variable
   `EAS_PROJECT_ID`), the EAS environment variables above, and a robot token as the GitHub secret

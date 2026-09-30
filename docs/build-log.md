@@ -23,18 +23,26 @@ increment is reviewed.
 - **The native-smoke workflow (2026-09-30).** Every scheduled run from 2026-09-24 to 2026-09-29
   failed. The Android leg compiled all four ABIs in debug and release on a hosted Ubuntu runner
   and filled its disk: the runner's annotation reads "No space left on device", and a runner that
-  dies that way uploads no job log, so the failing step showed nothing. Measured on this machine:
-  18.1 GB of build output in about 6.7 minutes for four ABIs against 5.8 GB in 2.5 minutes for
-  `x86_64`. The leg now builds `x86_64` only (the emulator's ABI; EAS builds compile every store
-  ABI, ADR 0001), frees the preinstalled toolchains it never uses first, and the build refuses to
-  start with less than 15 GB free. The Xcode 26.6 gate leg passed every night. The Xcode 27 leg
-  fails at selection because no `macos-26` image carries Xcode 27 yet (`continue-on-error`, so it
-  never failed the run); the selection now runs before the checkout. The same week the account
-  ran out of Actions minutes: 616 Linux and 136 macOS minutes in September, about $12.13 at list
-  price against the $12 that GitHub Free's 2,000 included minutes are worth, and GitHub then
-  refused every job (a manual run on 2026-09-30 was "not started" for billing), so the schedule
-  moved from nightly to weekly until a budget covers macOS minutes (runbook step 15). A manual run
-  can pick one platform (`platforms`). Opus 5.5 fix and review; no Fable.
+  dies that way uploads no job log, so the failing step showed nothing. Measured on this machine,
+  all four ABIs write 18.1 GB of build output against 5.8 GB for `x86_64`. The leg now builds
+  `x86_64` only (the emulator's ABI; EAS builds compile every store ABI, ADR 0001), frees the
+  preinstalled toolchains it never uses first, and checks the free space before the build (25 GB
+  on the runner) and before the emulator step (10 GB). The Xcode 26.6 gate leg passed every
+  night. The Xcode 27 leg fails at selection because no `macos-26` image carries Xcode 27 yet
+  (`continue-on-error`, so it never failed the run); the selection now runs before the checkout.
+  The same week the account ran out of Actions minutes: 616 Linux and 136 macOS minutes in
+  September, about $12.13 at list price against the $12 that GitHub Free's 2,000 included minutes
+  are worth, and GitHub then refused every job (a manual run on 2026-09-30 was "not started" for
+  billing), so the schedule moved from nightly to weekly until a budget covers macOS minutes
+  (runbook step 15). A manual run can pick one platform (`platforms`), with one concurrency group
+  per choice. An Opus review found no blocker or major; its eight minors and nits (tests that
+  matched the script's text instead of running it, a floor below what the job writes after the
+  check, a one-platform run cancelling the other's, stale wording) are applied, and nine script
+  mutants are now caught by the tools tests. Opus 5.5 fix and review; no Fable.
+- **A date-dependent mobile test (2026-09-30).** `offline-flow.test.ts` recorded a replacement at
+  the fixtures' fixed clock (2026-09-23T14:00Z) and read it through `readFlightFollowing`, which
+  checks its age against the real clock, so it failed on `main` from 2026-09-24T14:00Z (increment
+  12's merge CI ran before that). The test now pins the clock.
 
 ## Measurements and decisions (increment 12 review fixes)
 

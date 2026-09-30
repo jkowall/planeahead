@@ -1,4 +1,4 @@
-# 0008. Native surfaces: expo-widgets, the watchOS shells, the Android stubs, the nightly smoke
+# 0008. Native surfaces: expo-widgets, the watchOS shells, the Android stubs, the native smoke
 
 - Status: Accepted
 - Date: 2026-09-23
@@ -6,7 +6,8 @@
 - Supersedes: none
 - Superseded by: none
 - Amended: 2026-09-23, by the increment's review round (rulings Z1 to Z11; what ran is in
-  `docs/increments/11-verification.md`)
+  `docs/increments/11-verification.md`); 2026-09-30, the smoke runs weekly and its Android leg
+  builds `x86_64` only (item 8, ADR 0001, runbook step 15)
 
 ## Context
 
@@ -14,7 +15,7 @@ PlaneAhead's value is on surfaces outside the app: the Lock Screen and Dynamic I
 Activity), home-screen widgets, the watch, Android's ongoing notification. Every one is native
 code in any cross-platform framework. The Phase 0 plan (section 3) chose `expo-widgets`, which
 builds WidgetKit widgets and Live Activities from JavaScript layouts, and increment 11 turns that
-into compiling shells for every surface Phase 1 and 2 fill, plus a nightly job that proves the
+into compiling shells for every surface Phase 1 and 2 fill, plus a scheduled job that proves the
 native projects still build and launch with all of them present. Facts that shape the decisions
 (`docs/increments/09-11-mobile.facts.md` section 5 and its native-surfaces open questions):
 
@@ -46,8 +47,9 @@ native projects still build and launch with all of them present. Facts that shap
 
 We will build every iOS surface with expo-widgets 57.0.20, ship the watchOS shells with
 `@bacons/apple-targets` 5.0.0 because the coexistence spike passed, keep Android to an
-ongoing-notification stub and a Wear OS module that compile, and prove all of it every night on
-GitHub runners by building, installing and launching both apps.
+ongoing-notification stub and a Wear OS module that compile, and prove all of it on a schedule
+on GitHub runners (nightly until 2026-09-30, weekly since) by building, installing and launching
+both apps.
 
 1. **expo-widgets, exact 57.0.20** (the toolchain guard asserts the pin and one installed copy).
    One `widgets[]` entry, the placeholder home-screen widget (`PlaneAheadPlaceholder`,
@@ -74,7 +76,7 @@ GitHub runners by building, installing and launching both apps.
    base mod that runs the rest of the `xcodeproj` chain first and edits on the way out, so it
    edits the project after expo-widgets created the target; apple-targets' own mod rewrites the
    project later and keeps build settings. `xcodebuild -showBuildSettings` confirms the values
-   after every nightly prebuild, and the nightly fails on any `*.debug.dylib` or
+   after every smoke prebuild, and the smoke fails on any `*.debug.dylib` or
    `__preview.dylib` in the Release app. Upstream generator behaviour under the exact pin: an
    expo-widgets bump re-checks it.
 
@@ -182,8 +184,8 @@ GitHub runners by building, installing and launching both apps.
 
 8. **Native smoke** (`.github/workflows/native-smoke.yml`, every step in
    `scripts/native-smoke.sh`): a weekly cron (nightly until 2026-09-30, when six nightly runs had
-   used up GitHub Free's monthly Actions allowance; ADR 0001 and the build log) plus
-   `workflow_dispatch` with a `platforms` input, never on EAS, no secrets. The iOS
+   used up GitHub Free's monthly Actions allowance, see runbook step 15 and open-decisions
+   section 7) plus `workflow_dispatch` with a `platforms` input, never on EAS, no secrets. The iOS
    job is a matrix on `macos-26`: Xcode 26.6 (the gate) and Xcode 27 (`continue-on-error`). It
    prebuilds the production variant with the production profile's `APNS_ENVIRONMENT`, asserts
    the generated entitlements and `xcodebuild -list`, builds Release for an iPhone simulator
@@ -407,8 +409,8 @@ in for the 26.6 gate leg; commands and full results in `docs/increments/11-verif
   of either is a new spike; the widget build relies on pnpm's default hidden hoisting; two
   corrections to expo-widgets' generated output (`plugins/withExpoWidgetsBuild.ts`) to re-check
   on every bump; three more bundle ids per variant to register with Apple; a list of expected
-  Android permissions to keep in step with the dependencies; the nightly costs macOS runner
-  minutes and a release Android build.
+  Android permissions to keep in step with the dependencies; the smoke costs macOS runner
+  minutes (about 22 a run, weekly) and a release Android build.
 - Reversibility: high for the Android stub, the Wear module and the watch shells (delete the
   directory and the plugin entry); medium for expo-widgets (the layouts are JavaScript, but the
   bundle ids and App Groups the extension uses are permanent once shipped).
