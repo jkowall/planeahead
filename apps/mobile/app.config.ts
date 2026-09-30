@@ -160,22 +160,46 @@ export function apnsEnvironment(value: string | undefined, onEasBuilder: boolean
 }
 
 /**
- * `APPLE_TEAM_ID` (increment 13, ruling S7): the ten-character team id, for `ios.appleTeamId`,
- * which Expo, expo-widgets and @bacons/apple-targets write into every target's
- * `DEVELOPMENT_TEAM` for a local device build (apple-targets warns while it is missing). Unset,
- * nothing is written, as before; an EAS build signs each target with its provisioning profile's
- * team either way (R5 C13). The value enters the runtime version like the rest of the config, so
- * on EAS it is an environment variable of Plain text visibility in all three environments, or in
- * none (README, owner tasks).
+ * `IOS_DEVELOPMENT_TEAM` (increment 13, ruling S7, renamed by review ruling G6): the
+ * ten-character team id, for `ios.appleTeamId`, which Expo, expo-widgets and @bacons/apple-targets
+ * write into every target's `DEVELOPMENT_TEAM` for a LOCAL device build (apple-targets warns
+ * while it is missing). Unset, nothing is written. Never in an EAS environment: an EAS build signs
+ * each target with its provisioning profile's team anyway (R5 C13), and `ios.appleTeamId` is part
+ * of the config @expo/fingerprint hashes, so a build carrying it would have a runtime version no
+ * update made without it matches (README, owner tasks). Not `APPLE_TEAM_ID`: the API Worker has a
+ * variable of that name (the association files), which must not reach the app's config.
  */
-export function appleTeamId(value: string | undefined): string | undefined {
+export function iosDevelopmentTeam(value: string | undefined): string | undefined {
   if (value === undefined) {
     return undefined;
   }
   if (!/^[A-Z0-9]{10}$/.test(value)) {
-    throw new Error(`APPLE_TEAM_ID must be the ten-character Apple team id; got "${value}"`);
+    throw new Error(`IOS_DEVELOPMENT_TEAM must be the ten-character Apple team id; got "${value}"`);
   }
   return value;
+}
+
+/**
+ * `GOOGLE_IOS_CLIENT_ID` (review ruling G5). A preview or production build on an EAS builder
+ * (`EAS_BUILD`) must carry the variant's real iOS client id, or it ships the placeholder's URL
+ * scheme and Google sign-in fails for every tester; so there, unset is an error, as it is for
+ * `APNS_ENVIRONMENT`. Elsewhere (a local prebuild, a development build, a test) the placeholder
+ * keeps prebuild working.
+ */
+export function googleIosClientId(
+  value: string | undefined,
+  variant: AppVariant,
+  onEasBuilder: boolean,
+): string {
+  if (value !== undefined) {
+    return value;
+  }
+  if (onEasBuilder && variant !== 'development') {
+    throw new Error(
+      `GOOGLE_IOS_CLIENT_ID must be set in the EAS ${variant} environment for a ${variant} build`,
+    );
+  }
+  return PLACEHOLDER_GOOGLE_IOS_CLIENT_ID;
 }
 
 export function reversedClientId(clientId: string): string {
@@ -198,9 +222,10 @@ export default ({ config }: ConfigContext): ExpoConfig => {
   const variant = appVariant(env('APP_VARIANT'));
   const identity = VARIANT_IDENTITIES[variant];
   const appGroup = `group.${identity.bundleIdentifier}`;
-  const apsEnvironment = apnsEnvironment(env('APNS_ENVIRONMENT'), env('EAS_BUILD') === 'true');
-  const googleIosClientId = env('GOOGLE_IOS_CLIENT_ID') ?? PLACEHOLDER_GOOGLE_IOS_CLIENT_ID;
-  const teamId = appleTeamId(env('APPLE_TEAM_ID'));
+  const onEasBuilder = env('EAS_BUILD') === 'true';
+  const apsEnvironment = apnsEnvironment(env('APNS_ENVIRONMENT'), onEasBuilder);
+  const iosClientId = googleIosClientId(env('GOOGLE_IOS_CLIENT_ID'), variant, onEasBuilder);
+  const teamId = iosDevelopmentTeam(env('IOS_DEVELOPMENT_TEAM'));
   const easProjectId = env('EAS_PROJECT_ID');
   const sentryOrganization = env('SENTRY_ORG');
   const sentryProject = env('SENTRY_PROJECT');
@@ -350,6 +375,15 @@ export default ({ config }: ConfigContext): ExpoConfig => {
     },
     plugins: [
       'expo-router',
+      // SDK 57 links most Expo modules as prebuilt frameworks. ExpoFileSystem's prebuilt
+      // framework carries no privacy manifest although its code reads file dates and free disk
+      // space, and App Store Connect rejects the upload for it (ITMS-91053; expo/expo#50503,
+      // fixed only in expo-file-system 58.0.2), so package.json builds that one module from
+      // source (`expo.autolinking.ios.buildFromSource`): linked into the app's binary, its
+      // manifest is aggregated into the app's by the option below. Drop the override at SDK 58
+      // (__tests__/app-config.test.ts fails once expo-file-system reaches 58). React Native's own
+      // prebuilt core stays (scripts/native-smoke.sh FRAMEWORKS_WITHOUT_MANIFEST); its fallback
+      // is `ios.buildReactNativeFromSource: true` here.
       [
         'expo-build-properties',
         {
@@ -365,7 +399,7 @@ export default ({ config }: ConfigContext): ExpoConfig => {
       // No Face ID purpose string: the app never stores an item with `requireAuthentication`.
       ['expo-secure-store', { faceIDPermission: false }],
       'expo-apple-authentication',
-      ['react-native-nitro-google-signin', { iosUrlScheme: reversedClientId(googleIosClientId) }],
+      ['react-native-nitro-google-signin', { iosUrlScheme: reversedClientId(iosClientId) }],
       [
         '@sentry/react-native/expo',
         {
@@ -441,7 +475,7 @@ export default ({ config }: ConfigContext): ExpoConfig => {
       universalLinkHosts: [identity.apiHost],
       apnsEnvironment: apsEnvironment,
       appGroup,
-      googleIosClientId,
+      googleIosClientId: iosClientId,
       googleWebClientId: env('GOOGLE_WEB_CLIENT_ID') ?? null,
       sentryDsn: env('SENTRY_DSN') ?? null,
       ...(easProjectId === undefined ? {} : { eas: { projectId: easProjectId } }),

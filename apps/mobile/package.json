@@ -3,6 +3,15 @@
   "version": "0.0.0",
   "private": true,
   "main": "index.ts",
+  "expo": {
+    "autolinking": {
+      "ios": {
+        "buildFromSource": [
+          "ExpoFileSystem"
+        ]
+      }
+    }
+  },
   "scripts": {
     "start": "APP_VARIANT=development expo start --dev-client",
     "ios": "APP_VARIANT=development expo run:ios",
