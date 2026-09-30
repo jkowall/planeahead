@@ -180,8 +180,10 @@ GitHub runners by building, installing and launching both apps.
    The watch app is `minSdk 30` (Wear OS 3) and shares the phone app's package, which is what
    pairs the two. EAS builds run `:app:` tasks and never build it.
 
-8. **Nightly native-smoke** (`.github/workflows/native-smoke.yml`, every step in
-   `scripts/native-smoke.sh`): cron plus `workflow_dispatch`, never on EAS, no secrets. The iOS
+8. **Native smoke** (`.github/workflows/native-smoke.yml`, every step in
+   `scripts/native-smoke.sh`): a weekly cron (nightly until 2026-09-30, when six nightly runs had
+   used up GitHub Free's monthly Actions allowance; ADR 0001 and the build log) plus
+   `workflow_dispatch` with a `platforms` input, never on EAS, no secrets. The iOS
    job is a matrix on `macos-26`: Xcode 26.6 (the gate) and Xcode 27 (`continue-on-error`). It
    prebuilds the production variant with the production profile's `APNS_ENVIRONMENT`, asserts
    the generated entitlements and `xcodebuild -list`, builds Release for an iPhone simulator
@@ -189,8 +191,9 @@ GitHub runners by building, installing and launching both apps.
    and the watch shells built for watchOS, installs, launches and fails unless the process is
    alive after 45 s; the review added the widget extension's Release settings after prebuild and,
    in the app, the watch app's icon catalog and the absence of any debug dylib. The ubuntu job
-   prebuilds, runs `assembleDebug` (the compile the spec names) and `assembleRelease` for every
-   ABI with a 4 GB Gradle heap, asserts the Wear APK, the stub module's class, the Tile service,
+   prebuilds, runs `assembleDebug` (the compile the spec names) and `assembleRelease` for the
+   emulator's `x86_64` ABI (every ABI until 2026-09-30, which filled the runner's disk; ADR 0001)
+   with a 4 GB Gradle heap, asserts the Wear APK, the stub module's class, the Tile service,
    the release APK's embedded `index.android.bundle`, the merged manifests and the permissions,
    and launches the RELEASE APK on an API 36 emulator (ruling Z5): the debug APK embeds no
    JavaScript (it is the dev launcher), so launching it proved only the native shell. The launch

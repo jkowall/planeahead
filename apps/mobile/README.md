@@ -9,7 +9,7 @@ and the units and time-format settings (device steps and results:
 [docs/increments/10-verification.md](../../docs/increments/10-verification.md)). Increment 11
 adds the native surface shells: the expo-widgets extension (a placeholder home-screen widget and
 the flight Live Activity layout), the Live Activity token listeners, the watchOS shells, the
-Android ongoing-notification stub and the Wear OS module, and the nightly native-smoke workflow.
+Android ongoing-notification stub and the Wear OS module, and the native-smoke workflow (weekly).
 Decisions: [ADR 0001](../../docs/adr/0001-expo.md) (Expo, the isolated linker, the spike
 results, Jest), [ADR 0005](../../docs/adr/0005-identifiers.md) (bundle ids, App Groups, links,
 the install and analytics ids) and [ADR 0008](../../docs/adr/0008-expo-widgets.md) (the native
@@ -42,7 +42,7 @@ For a compile without signing, as the spikes did:
 (never `-sdk iphonesimulator`: it forces the watch shells onto the iOS SDK, ADR 0008) and, in
 `android/`, `./gradlew assembleDebug -PreactNativeArchitectures=arm64-v8a` (it builds the Wear
 module too; pass `-Dorg.gradle.jvmargs=-Xmx4g` on a cold build, where the template's 2 GB ran
-D8 out of heap). The nightly's steps run the same way from the root:
+D8 out of heap). The native-smoke workflow's steps run the same way from the root:
 `scripts/native-smoke.sh ios-prebuild` (then `ios-build`, `ios-archive`, `ios-launch`, and the
 four `android-*` steps); it prebuilds the production variant, builds the Android release APK
 next to the debug one and launches the release APK, the one that runs the app's JavaScript
@@ -176,8 +176,8 @@ Before the first device build that signs in (copied into the build log by the or
   Store Connect requires of every app bundle; nothing to upload separately. The first device
   build of each variant should still go through TestFlight before a store submission: no
   device-signed archive of the watch shells has been processed by App Store Connect yet.
-- Nightly native-smoke (`.github/workflows/native-smoke.yml`): GitHub-hosted runners only, never
-  EAS. The gate leg needs a `macos-26` image with Xcode 26.6 installed (the EAS SDK 57 image's
+- Native smoke (`.github/workflows/native-smoke.yml`, weekly and on demand): GitHub-hosted
+  runners only, never EAS. The gate leg needs a `macos-26` image with Xcode 26.6 installed (the EAS SDK 57 image's
   Xcode) and at least one iPhone simulator runtime; the Xcode 27 leg runs with
   `continue-on-error` and reports "Xcode missing" until an image carries Xcode 27 (switch its
   `runs-on` when GitHub publishes one). The Android leg needs `ubuntu-24.04` with KVM and the

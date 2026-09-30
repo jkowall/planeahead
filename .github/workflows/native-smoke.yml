@@ -1,6 +1,6 @@
 name: Native smoke
 
-# Nightly proof that the generated native projects still build AND launch with every native
+# Weekly proof that the generated native projects still build AND launch with every native
 # surface present (increment 11, ADR 0008): the expo-widgets extension (the placeholder widget
 # and the Live Activity layout), the watchOS shells from @bacons/apple-targets, the Android
 # ongoing-notification stub and the Wear OS module. Launching is the point: a dyld failure (a
@@ -14,13 +14,17 @@ name: Native smoke
 # open against. Android runs on ubuntu with JDK 17, as the EAS SDK 57 Android image
 # (ubuntu-26.04-jdk-17-ndk-r27b-sdk-57) does.
 #
-# Never on EAS: the Starter plan's credit does not cover a nightly iOS build (facts section 2).
+# Never on EAS: the Starter plan's credit does not cover a scheduled iOS build (facts section 2).
 # No secrets: the builds are unsigned simulator and debug builds of the production variant.
 
 on:
   schedule:
-    # 06:17 UTC, after the day's merges; off the hour, when scheduled runs queue longest.
-    - cron: '17 6 * * *'
+    # Mondays at 06:17 UTC (off the hour, when scheduled runs queue longest). Weekly, not nightly:
+    # a run takes about 22 macOS minutes, priced at about ten Linux minutes each ($0.062 against
+    # $0.006), against GitHub Free's 2,000 included minutes a month. The six nightly runs of
+    # September 2026 used that allowance up, and GitHub then refused every job, PR checks included,
+    # until the month reset. Nightly is '17 6 * * *' once a budget covers it (runbook step 15).
+    - cron: '17 6 * * 1'
   workflow_dispatch:
     inputs:
       platforms:
@@ -105,9 +109,9 @@ jobs:
     env:
       SMOKE_GRACE_SECONDS: '45'
       # Only the ABI the emulator below runs. Every ABI, debug and release, filled the hosted
-      # runner's disk: from 2026-09-25 each nightly died inside the build with "No space left on
-      # device", and a runner that dies that way uploads no log (ADR 0001). Store builds on EAS
-      # compile every ABI.
+      # runner's disk: every scheduled run from 2026-09-24 to 2026-09-29 died inside the build with
+      # "No space left on device", and a runner that dies that way uploads no log (ADR 0001).
+      # Store builds on EAS compile every ABI.
       SMOKE_ANDROID_ABIS: x86_64
     steps:
       # The image ships toolchains this job never touches (.NET, Haskell, Swift, Boost, CodeQL,

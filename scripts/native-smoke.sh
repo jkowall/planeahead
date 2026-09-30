@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Native smoke (increment 11, ADR 0008): every step of .github/workflows/native-smoke.yml, in one
-# script, so the nightly and a developer on a Mac run the same commands.
+# script, so the scheduled workflow and a developer on a Mac run the same commands.
 #
 #   scripts/native-smoke.sh ios-prebuild      expo prebuild, the entitlements and build settings
 #   scripts/native-smoke.sh ios-build         xcodebuild Release for an iPhone simulator
@@ -25,7 +25,7 @@
 # Inputs (environment): SMOKE_DERIVED_DATA (Xcode's derived data, default apps/mobile/ios/build),
 # SMOKE_SIMULATOR (a simulator UDID; default: an iPhone on the newest iOS runtime),
 # SMOKE_GRACE_SECONDS (default 30), SMOKE_ANDROID_ABIS (default: every ABI a store build has; the
-# nightly builds x86_64 only, the emulator's), SMOKE_MIN_FREE_GB (default 15: the room the Android
+# workflow builds x86_64 only, the emulator's), SMOKE_MIN_FREE_GB (default 15: the room the Android
 # build must have before it starts), SMOKE_GRADLE_JVMARGS (default -Xmx4g: the template's 2 GB ran
 # D8 out of heap on a cold build),
 # ANDROID_HOME (or ANDROID_SDK_ROOT; the android-archive step runs its build-tools' aapt2).
@@ -285,7 +285,7 @@ android_build() {
     abis=("-PreactNativeArchitectures=$SMOKE_ANDROID_ABIS")
   fi
   # A build that fills the disk takes a hosted runner down with it, and the runner then uploads no
-  # log at all (every nightly from 2026-09-25 to 2026-09-29), so refuse to start without room.
+  # log at all (every scheduled run from 2026-09-24 to 2026-09-29), so refuse to start without room.
   room="$(free_gb)"
   [ "$room" -ge "$MIN_FREE_GB" ] ||
     fail "only ${room} GB free before the Android build, which needs about ${MIN_FREE_GB} GB (SMOKE_MIN_FREE_GB)"

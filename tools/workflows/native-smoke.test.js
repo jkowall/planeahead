@@ -1,5 +1,5 @@
 /**
- * Every workflow's job keys are unique, and the nightly native-smoke workflow keeps its shape
+ * Every workflow's job keys are unique, and the scheduled native-smoke workflow keeps its shape
  * (increment 11, ruling V7, ADR 0008).
  *
  * A duplicate job key is a YAML mapping with the same key twice: most parsers keep the last one
@@ -83,7 +83,7 @@ describe('native-smoke.yml', () => {
     .join('\n');
   const script = readFileSync(join(repoRoot, 'scripts', 'native-smoke.sh'), 'utf8');
 
-  it('runs nightly and on demand only, never on a push or a pull request', () => {
+  it('runs on a schedule and on demand only, never on a push or a pull request', () => {
     const on = /^on:\n((?: .*\n|\n)*?)(?=^\S)/m.exec(code)?.[1] ?? '';
     expect(on).toMatch(/^ {2}schedule:\n {4}- cron: '[^']+'$/m);
     expect(on).toMatch(/^ {2}workflow_dispatch:/m);
