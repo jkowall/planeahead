@@ -5,7 +5,12 @@ what ran on the build machine with its result, how each acceptance item is prove
 departs from the spec and why, the owner's exact steps to prove the staging send, and what stays
 unverified until staging, an APNs key and a Firebase project exist. The spec is
 [14-push-transport.md](14-push-transport.md); the research behind it is
-`docs/research/phase1/R1-push-transport.md` (R1) and `R2-client-push.md` (R2).
+`docs/research/phase1/R1-push-transport.md` (R1) and `R2-client-push.md` (R2). The increment's
+review round (rulings R1 to R12; in this file "R1" alone is the research sheet, and a ruling is
+always "ruling R1") changed the push consumer, `PushAuth`, the transport, persist, registration,
+the dead letter log and the admin page; what it changed and what ran for it are in
+[Review round](#review-round) at the end, and the sections before it are corrected where the round
+made them wrong.
 
 The machine: macOS 27.0, Node 24.21.0, pnpm 12.5.1, wrangler 4.135.0, embedded PostgreSQL 18.4.
 No Apple, Google, Firebase or Cloudflare account: every APNs, FCM and Google OAuth request in
@@ -82,16 +87,22 @@ rerun on their own with the load lower, all of them passed (61 tests in the four
   backoff); FCM 5xx without `Retry-After` backs off from 10 s, doubling to 15 minutes; FCM 401
   (not `THIRD_PARTY_AUTH_ERROR`) drops the access token and retries.
 - **P3: two additions.** A changed key (a rotated secret, seen as a fingerprint of the key
-  material) is replaced at once, the one exception to "never within 20 minutes": a token signed by
-  a key the Worker no longer holds is useless. And the FCM exchange is not repeated within 60
-  seconds of the last one after a refusal. The 20-minute floor also governs `expire`, whose answer
-  (when a new token may be minted) sets the retry delay after `ExpiredProviderToken`.
+  material, over the key's DER bytes since ruling R9) is replaced at once, the one exception to
+  "never within 20 minutes": a token signed by a key the Worker no longer holds is useless. And
+  the FCM exchange is not repeated within 60 seconds in two cases: after a provider refused the
+  access token (FCM 401, `expire`), none within 60 seconds of the last exchange; after an exchange
+  that failed (Google's 4xx, 429 or 5xx, or a request that never completed), none within 60
+  seconds of the failure, the object answering the stored failure until then. The first build
+  had only the first case: every `current()` after a failed exchange called Google again, which
+  ruling R8 corrected. The 20-minute floor also governs `expire`, whose answer (when a new token
+  may be minted) sets the retry delay after `ExpiredProviderToken`.
 - **P4: the hold and the follow-ups.** `not_configured` targets are re-enqueued unsent every five
   minutes and dropped as `expired` at `expiresAt`, rather than retried as queue messages (which
   would dead-letter every job of an unconfigured environment with an ops alert). A delay is capped
-  at 12 hours, under Queues' `delaySeconds` limit. If the re-enqueue fails, the message is retried
-  whole (its sent targets may be sent twice, which the collapse id makes replace the first); if the
-  outcome message fails twice, the job is still acknowledged and the loss logged at error level.
+  at 12 hours, under Queues' `delaySeconds` limit. A job's follow-ups leave in one `sendBatch`
+  (ruling R2). If it fails, the message is retried whole (its sent targets may be sent twice,
+  which the collapse id makes replace the first); if the outcome message fails twice, the job is
+  still acknowledged and the loss logged at error level.
 - **P5 and P9: two columns.** `notification_deliveries` gains `is_test` (the test marker) and
   `attempt_log` (each attempt's outcome, reason, HTTP status and time), which is where the admin
   page's counts by reason come from; the plain `notification_id` index is replaced by the unique
@@ -146,9 +157,14 @@ test pushes write them, so the purges belong with it.
 6. `https://api-staging.planeahead.app/admin/push/test`: the token, kind APNs (iOS), app id
    `app.planeahead.mobile.dev`, Send. The result page reloads until the consumer reports.
 7. Pass: status `sent` with an `apns-id`, attempt 1 `sent`, and the notification "PlaneAhead test
-   push" on the Simulator. Record the answer here. Anything else is also a finding: the reason
-   (a 403 names the key or topic problem; `edge_52x` without an `apns-id` is the HTTP/2 question,
-   R1 U1) and the admin page's credential row (`apns:sandbox` minted once).
+   push" on the Simulator. The result page also shows Apple's `apns-unique-id` beside the
+   `apns-id`, the key to this notification in the delivery log of Apple's Push Notifications
+   Console (ruling R11). Record the answer here. Anything else is also a finding: the reason (a 403
+   names the key or topic problem; `edge_52x` without an `apns-id` is the HTTP/2 question, R1 U1)
+   and the admin page's credential row (`apns:sandbox` minted once). On `edge_52x`, first check
+   that the zone's "HTTP/2 to Origin" setting is on (Speed > Settings > Protocol Optimization,
+   runbook step 19), then open the Cloudflare ticket; whether that setting governs Worker
+   subrequests at all is unverified (R1 U3), so finding it on does not settle the question.
 8. FCM the same way once the Firebase project exists (step 19): `FCM_SERVICE_ACCOUNT_JSON` from the
    JSON key file, a development build on an Android emulator with Google Play and the
    `google-services.json` of `app.planeahead.mobile.dev`, kind FCM (Android).
@@ -173,8 +189,246 @@ deploy waits for them.
   Simulator receives a token APNs accepts for the team's key is unverified; signing it with
   `APPLE_TEAM_ID` (increment 13) is the fallback.
 - **The six-request bound.** It holds the transport's own `fetch` calls to six per invocation; the
-  `PushAuth` RPC before a send and the queue sends after a job are outside the pool (both short).
-- **Queues' `delaySeconds` ceiling.** R1 F45 reads 24 hours; the consumer caps at 12, which is
-  inside either reading.
+  `PushAuth` RPC before a send and the queue sends after a job are outside the pool (both short),
+  and so is the liveness read's Postgres client (ruling R1), which stays open and idle until the
+  invocation ends. Cloudflare's limits page counts a `connect()` socket only while it is being
+  established; that the platform does so for this socket too is not observed here.
+- **Queues' `delaySeconds` ceiling.** R1 F45 reads 24 hours, and so does the Queues JavaScript
+  API page for a `sendBatch` entry's `delaySeconds` (an integer from 0 to 86400, read in the review
+  round); the consumer caps at 12, which is inside either reading.
 - **The admin page under a real Access session,** as in increment 12, including its
   `<meta http-equiv="refresh">` under the page's CSP in a browser.
+- **What a sign-out cannot recall (ruling R1).** A push APNs or FCM accepted before the sign-out
+  stays with the provider until `apns-expiration` or the FCM `ttl` (the job's `expiresAt`) and can
+  still reach a phone that was offline at sign-out; no server check recalls it. Whether the app
+  dropping its device token at sign-out stops such a push from displaying is increment 16's to
+  verify against Apple's and Google's documentation.
+- **The liveness read under load (ruling R1).** Each push invocation reads Postgres once through
+  Hyperdrive, and the consumer's `max_concurrency` is still left to autoscale (the configuration
+  is unchanged). Many concurrent batches queue on Hyperdrive's pool; a read that fails sends
+  nothing and retries after 60 s, so the failure mode is delay, not a wrong send. Worth watching
+  when increment 15 produces real jobs, where a cap like persist's may be wanted.
+
+## Review round
+
+Two Opus 5.5 reviewers read `f9e5d53`: one through queues, idempotency and data (findings data-1
+to data-7), one through push protocol correctness against Apple's and Google's documentation
+(proto-1 to proto-5, with two probe tests that reproduced proto-1 and proto-2 in the Workers pool).
+Neither found a blocker; data-1 was the one major. The orchestrator accepted every finding, as
+rulings R1 to R12, and all of them are applied here. Names: "R1 U3" or "R1 F43" is the research
+sheet, as everywhere above; a ruling is always "ruling R1".
+
+Two skeptics then checked data-1. The code-path skeptic found every link of the chain holds (a
+queued job carries the token and the user id it was built with, the consumer sent it without
+looking at the token's row, and a sign-out, a rotation or an account switch between the job's
+creation and a send did not stop that send) and rated it minor at `f9e5d53`, because the only
+producer is the admin page's test push with its 10-minute window, and a blocker for increment 15,
+which produces real jobs; the fix proceeds either way. Beyond first attempts behind a backlog,
+retries and holds, the whole-message retry (`message.retry` after a failed re-enqueue or a job
+that threw) sends a job's already sent targets again, and ruling R1's check now runs on those
+deliveries too.
+
+Second skeptic (impact): @@SKEPTIC2@@
+
+### By ruling
+
+- **Ruling R1 (data-1, major): every send re-reads token liveness.** Finding: the consumer sent
+  every target its job named, whatever had happened to the token since the job was built: a
+  sign-out (`POST /v1/devices/current/invalidate`), a rotation, or an account switch that moves
+  the row to the new user under the same id (`src/routes/devices.ts`, the upsert's `setWhere`).
+  Changed: `src/queues/push.ts` validates the batch's jobs, then, before the first provider
+  request, reads in one statement through `openDb` the `id` and `user_id` of the rows that are
+  not invalidated, for every target the batch could send (not past its window, its platform
+  configured; at most 250 ids). A target is sent only when its row came back and its `user_id`
+  equals the target's `subjectId`; otherwise it is `failed` with reason `token_inactive`,
+  `requested` false, its attempt unchanged, which persist records like any failed delivery and
+  which invalidates nothing. If the read throws, nothing in the batch is sent: each target that
+  needed it is re-enqueued unsent after 60 s (`retry`, reason `liveness_unavailable`) or dropped
+  as `expired` when that would land past its window, and `push_liveness_failed` is logged at
+  error level; past-window and held targets are decided as before. The read is the
+  `PushConsumerDeps.liveTokens` seam (`readLiveTokens` by default). The query binds the ids with
+  drizzle's `inArray` (`id in (...)`), the codebase's form of the ruling's `id = any(...)`: the
+  same primary-key lookups. Persist's `last_used_at` UPDATE requires `invalidated_at is null`, and
+  the admin form refuses an invalidated row (409, "Register the token again from the app"), so a
+  token is only ever dropped for dying after its job was queued. P4's text carries an amendment
+  note; the consumer's header, `docs/architecture.md` section 9, the comments in
+  `wrangler.jsonc`, the header of `src/routes/devices.ts` and the threat model's section 1.8 say
+  what the check guarantees and what it cannot. Proven: `push-consumer.test.ts`, against the real
+  database through the real routes: a sign-out between the first send (a 429) and its retry
+  leaves the retry unsent, `token_inactive`; an account switch between the two (the second user
+  registers the same token from the same installation, the row keeps its id, stays live and
+  changes owner) does the same; one read for a batch of three jobs, asked for exactly the two
+  sendable ids (not the past-window job's, not the held FCM target's) and answered before the
+  first `send`, with both live tokens sent; a read that throws sends nothing, re-enqueues the
+  sendable targets after 60 s with their attempts unchanged, drops the one whose window ends
+  within 60 s, holds the unconfigured one as before, and logs one error line. `push-persist.test.ts`:
+  `token_inactive` is a failed delivery that invalidates nothing. `admin-push.test.ts`: the
+  refusal, and the end-to-end test of the admin action, which now runs the real read.
+  Departure: the ruling asked for the read's connection to be closed before the first provider
+  request, because an invocation has six simultaneous connections and the sends use all six. The
+  client is left to Hyperdrive instead, like persist's and housekeeping's. Cloudflare counts a
+  `connect()` socket toward the six only while the connection is being established and says a
+  Worker may have many connections open as long as no more than six are waiting
+  (https://developers.cloudflare.com/workers/platform/limits/, read 2026-09-30); Hyperdrive
+  returns the origin connection to its pool when the statement's transaction completes
+  (https://developers.cloudflare.com/hyperdrive/concepts/connection-pooling/), so no database
+  connection is in use while the sends wait; and ending a postgres.js 3.4.9 client on workerd is
+  not clean: the first run of these tests, which ended the client before the sends, had five
+  "This socket has been closed." unhandled rejections for five reads (the socket polyfill's
+  pending read rejects after the connection has dropped the socket's listeners), which fail the
+  suite and would be one uncaught error per batch in production. The limit of the fix: a push
+  APNs or FCM accepted before a sign-out stays with the provider until `apns-expiration` or the
+  FCM `ttl` (the job's `expiresAt`) and can still reach a phone that was offline at sign-out; no
+  server-side check can recall it. Ruling R1 closes the window only for pushes the consumer has
+  not yet sent (first attempts in the queue, retries, holds). Increment 16 owns the client half:
+  at sign-out the app also drops its device token on the device, and whether that stops an
+  already-accepted push from displaying is to be verified there against Apple's and Google's
+  documentation.
+- **Ruling R2 (data-2): one `sendBatch` for a job's follow-ups.** Finding: the follow-ups went out
+  one `send` per delay group, so a failure after the first `send` retried the whole message with
+  some groups already queued. Changed: every follow-up of a job (each delay group, the holds and
+  ruling R1's `liveness_unavailable` included) goes out in one
+  `pushQueue.sendBatch([{ body, delaySeconds }, ...])`, and `PushConsumerDeps.pushQueue` is
+  `Pick<Queue, 'sendBatch'>`; a throw still retries the message whole. What Cloudflare documents:
+  only that the messages of a `sendBatch` whose promise resolves are written to disk; nothing
+  about one that throws, neither all-or-nothing nor a partial write
+  (https://developers.cloudflare.com/queues/configuration/javascript-apis/; the pages on how Queues
+  works, delivery guarantees, and batching, retries and delays say nothing about it either). The
+  header says so, and handles a throw as nothing written: a follow-up that was written after all
+  is one more send, which the collapse id makes replace the first on screen. Proven:
+  `push-consumer.test.ts`: two delay groups make one `sendBatch` call with two entries at 60 and
+  900 s; the six-target test's four groups make one call of four; a throwing `sendBatch` retries
+  the message, acknowledges nothing, records no outcome, and nothing went out through `send`.
+- **Ruling R3 (data-3): a production push without usable credentials is loud.** Finding: a
+  production secret that is set but unusable held every job quietly until it expired. Changed: in
+  production, a target held as `not_configured` (or dropped for it at its window's end) raises
+  the new ops alert `push_not_configured` through `raiseOpsAlert`: one error line with the
+  platform and the configuration's problem (secret names, never a value) and one Sentry `fatal`
+  event, at most once per platform per batch; `platform` is also a Sentry tag
+  (`src/observability/ops-alert.ts`). Staging and local keep the quiet hold. Proven:
+  `push-consumer.test.ts`: production with a malformed `APNS_KEY_P8`, three jobs of an APNs and an
+  FCM target each: exactly one error line (`push_not_configured`, `apns`, "APNS_KEY_P8 is not a
+  PKCS8 PEM") and one alert, the key's value in no line, the three APNs targets held and the three
+  FCM targets sent; staging with the same key: no error line, no alert, the same holds.
+- **Ruling R4 (data-4): registration locks the device row.** Finding: two registrations of the
+  same device with different tokens could each insert their row while each rotation missed the
+  other's uncommitted insert, leaving two live rows of the kind. Changed: the registration
+  transaction's first statement is `select id from devices where id = $1 for update` (drizzle's
+  `.for('update')`). Proven: `devices.test.ts`: two rounds of six concurrent registrations of
+  different tokens for one device and kind, each round leaving exactly one live row, one of that
+  round's tokens. The embedded Postgres reproduces the race without the lock, but not on every
+  run, so the test is evidence for the lock rather than proof of it: with the lock line removed,
+  the final version failed in four of six runs (two or three live rows, always after the first
+  round), and with the lock it passed every targeted run (three, besides the runs below). A
+  version with ten rounds of eight failed four of four runs without the lock, but its 80 requests
+  each keep a Postgres connection until the test file's isolate ends, and beside the other files
+  it exhausted the shared cluster's connections ("too many clients already"), so it was cut down.
+  An earlier cut, four rounds of six, had failed two of three runs without the lock.
+- **Ruling R5 (data-5): the dead-letter log never carries a device token.** Finding: when a `push`
+  job's archive to R2 failed for good, the dead letter consumer logged the job's body, device
+  tokens included. Changed: `src/queues/dlq.ts` logs a `push` body through `loggableBody`, which
+  replaces each `targets[].token` with `tokenLength` (and a target that is not an object with
+  null); the R2 archive keeps the raw message. Proven: `secrets-in-logs.test.ts`: a dead-lettered
+  push job whose archive fails on its last attempt, with a sentinel FCM token and a random APNs
+  token: the error line is there with each target's `pushTokenId` and `tokenLength`, and neither
+  token is in any captured line.
+- **Ruling R6 (data-6): `last_used_at` per token.** Finding: persist stamped every token a message
+  sent with the newest `at` of the whole message. Changed: one statement per message,
+  `update push_tokens set last_used_at = sends.at from (values ...) as sends(id, at)`, with the
+  newer-only condition and ruling R1's `invalidated_at is null`. Proven: `push-persist.test.ts`: two
+  tokens sent at 12:01:00 and 12:03:30 in one message get their own times (the report counts two);
+  a later message moves neither token's time back, and moves one forward where its send is newer;
+  an invalidated row is not stamped.
+- **Ruling R7 (data-7): the test result page stops reloading.** Finding: a test job whose outcome
+  message was lost left its result page reloading every three seconds for ever. Changed:
+  `pushTestResult` reads the job id's UUIDv7 time; once that plus `TEST_PUSH_TTL_MS` has passed
+  with no delivery row, the page stops reloading, says the outcome was not recorded and points at
+  `push_outcome_send_failed` in the logs. `pushTestSend` mints the id at the instant the window
+  starts from, and the page refuses an id that is not a UUIDv7 (no test job has one). Proven:
+  `admin-push.test.ts`: a job id nine minutes old reloads; one ten minutes and a second old does
+  not, and names `push_outcome_send_failed`; a version 4 UUID is refused.
+- **Ruling R8 (proto-1): a failed FCM token exchange is not repeated within 60 seconds.**
+  Finding: after a failed exchange, every `current()` went back to Google; the reviewer's probe
+  made five requests for five calls at one instant after a 503, a 429 and a 400. Changed:
+  `PushAuth.current` answers the failure `mint_failure` holds, without calling Google, until
+  `FCM_MIN_EXCHANGE_GAP_MS` after it (`withinFailureGap`, `src/push/credentials.ts`); after the gap
+  the next call exchanges again, and a success clears the row. An APNs mint is local and never
+  held back. A service account replaced inside that minute is used once it has passed: the failure
+  row keeps no fingerprint, and adding one would be a migration. The departures section above is
+  corrected. Proven: `push-auth.test.ts`, for a 503, a 429, a 400 `invalid_grant` and a network
+  error: five sequential and three concurrent calls at one instant make one request and all answer
+  the stored failure; a call a millisecond inside the gap makes none, one at the gap the second;
+  once Google answers again, the call after the gap takes a token and the stored failure is gone;
+  an APNs mint right after a failed one is not held back. `push-credentials.test.ts`: the gap as a
+  rule. The reviewer's probe, rerun after the fix: one request for five calls, so its assertion of
+  five now fails, as it should.
+- **Ruling R9 (proto-2): fingerprints hash the key, not its text form.** Finding: the credential
+  fingerprint hashed the PEM text, so the same key put again with real newlines instead of `\n`
+  escapes (both accepted, as the owner's steps say) looked like a rotation and was minted at once
+  (the probe: two fingerprints, and `mint` one minute after the last mint, inside Apple's 20
+  minutes). Changed: `materialFingerprint` hashes the private key's DER bytes with the key id and
+  the team id for APNs, and with the client email and the project id for FCM; a PEM whose body
+  does not decode stands in as its normalised text, and its first mint fails as before. Proven:
+  `push-credentials.test.ts`: the APNs key with real newlines, `\n` escapes and CRLF gives one
+  fingerprint, and `serve` a minute after a mint; another key id, team id or key gives another;
+  the service account's key in either form one fingerprint, another client email or project
+  another; an undecodable PEM still answers. The probe after the fix: one fingerprint, `serve`.
+- **Ruling R10 (proto-3): FCM 429 backs off exponentially.** Finding: a 429 without
+  `Retry-After` waited a flat 60 s on every attempt, where Google asks for exponential backoff
+  from a one-minute minimum (https://firebase.google.com/docs/reference/fcm/rest/v1/ErrorCode).
+  Changed: `fcmQuotaBackoffSeconds`, `min(900, 60 * 2^n * (1 + 0.2 * r))` seconds rounded to whole
+  seconds, `n` the target's sends before this one and `r` uniform in [0, 1) from
+  `FcmTransportDeps.random` (`Math.random` by default); the jitter only adds, so the first retry is
+  never under 60 s. With `Retry-After` the delay stays `max(10, Retry-After)`, capped at
+  `MAX_QUEUE_DELAY_SECONDS` by the consumer. APNs `TooManyRequests` stays 60 s. Proven:
+  `push-transport.test.ts`: n = 0 gives 60, 66 and 72 for r = 0, 0.5 and 0.9999; n = 1 gives 120
+  and 132; n = 4 is the 900 s cap whatever `r` (n = 3 still shows the jitter, 480 and 575); any n
+  and a jitter source out of range stay at the cap; `Retry-After` 120 and 2 give 120 and 10
+  whatever n; APNs 429 at a fifth attempt is 60 s. The consumer's existing test still caps a
+  30-hour `Retry-After` at 12 hours.
+- **Ruling R11 (proto-4): keep Apple's `apns-unique-id`.** Finding: the sandbox's `apns-unique-id`,
+  the key to a notification in the Push Notifications Console's delivery log, was dropped.
+  Changed: `PushTargetResultV1` gains an optional `apnsUniqueId` (the schema is a `looseObject`, so
+  an older consumer keeps it and an older producer's result is still valid); the APNs transport
+  reads the header for a sandbox target, whatever the outcome, and cites Apple's page
+  (https://developer.apple.com/documentation/usernotifications/handling-notification-responses-from-apns);
+  persist stores it as `u` in the attempt's `attempt_log` entry; the result page shows it next to
+  the `apns-id`, in the summary and in each attempt's row, with a line saying it is the key to the
+  Push Notifications Console's delivery log. Proven: `push-transport.test.ts` (a sandbox 200 and a
+  sandbox 400 carry it; a production answer and an FCM answer do not, even with the header);
+  `push-persist.test.ts` (`u` stored, absent without an id); `admin-push.test.ts` end to end (a
+  sandbox send shows the id and the line, a production send shows neither);
+  `packages/shared/test/push.test.ts` (optional and bounded).
+- **Ruling R12 (proto-5): the runbook covers HTTP/2 to the origin.** Changed: runbook step 19
+  gains two items from R1 (U3 and owner action 7): confirm the zone's "HTTP/2 to Origin" setting is
+  on before the staging send, and on `edge_52x` answers without an `apns-id` check that setting
+  before opening the Cloudflare ticket, with a note that whether the setting governs Worker
+  subrequests is unverified (R1 U3). Step 7 of the owner's steps above says the same. Documents
+  only.
+
+### What ran
+
+The same machine as above, lightly loaded this time (load averages 3 to 5), on the worktree of
+this commit; every API command from `apps/api`.
+
+| Check | Command | Result |
+| --- | --- | --- |
+| The reviewer's probes, before the fixes | `pnpm exec vitest run --config <scratch>/vitest.scratch.config.mts` (the protocol reviewer's two probe files in the API's Workers pool, kept outside the repository) | 2 files, 4 tests passed: the probes assert the bugs, so both reproduced (five token requests for five `current()` calls after a 503, a 429 and a 400; two fingerprints for one key, and `mint` a minute after the last mint) |
+| The same probes, after | the same command | 2 files, 4 tests failed, as they should: one request for five calls, and one fingerprint with `serve` |
+| API typecheck | `pnpm run typecheck` (the migration hash, `tsc -b`, the typed client's consumer check) | passed |
+| API lint | `pnpm run lint` | passed: 214 files, no error, no warning |
+| Shared package | `pnpm run typecheck`, `pnpm run lint`, `pnpm exec vitest run` (packages/shared) | passed; 25 files, 605 tests (604 before the round) |
+| Database package (a schema comment changed) | `pnpm run typecheck`, `pnpm run lint` (packages/db) | passed |
+| API tests | `pnpm exec vitest run --reporter=verbose <files>`, in two batches of 17: every file the round changed, and every file under `apps/api/test` that mentions push (not counting an array's `.push(`), persist, devices, admin-push, dlq or secrets-in-logs | passed: 34 files, 557 tests (388 in 36.7 s, 169 in 48.9 s), none skipped or failed, no unhandled error; among them push-transport 76, push-credentials 22, devices 21, push-auth 19, push-consumer 18, push-persist 17, admin-push 12, dlq 6, secrets-in-logs 6 |
+| The lock of ruling R4 | the R4 test alone (`-t "concurrent registrations"`), the lock line removed, then restored | without the lock, four of six runs failed; with it, every run passed (three) |
+| Migration hash | `node scripts/gen-migration-hash.mjs --check` (repository root) | up to date: 8 migrations, `7314ec41f160...` (no migration in the round) |
+| Staging dry run | `pnpm --filter @planeahead/api exec wrangler deploy --dry-run --env staging` (repository root, as CI's `wrangler-dry-run` job) | passed: 3,578.92 KiB, gzip 710.09 KiB; `env.PUSH_AUTH (PushAuth)` and `env.PUSH_QUEUE (planeahead-push-staging)` |
+| Production dry run | `pnpm --filter @planeahead/api exec wrangler deploy --dry-run --env production` | passed: the same size; `env.PUSH_AUTH (PushAuth)` and `env.PUSH_QUEUE (planeahead-push)` |
+| Formatting | `pnpm exec prettier --check` on every changed file (repository root) | clean: 27 files |
+
+Two runs before these failed, and each changed the round: the first run of the push consumer's
+tests ended the liveness read's client before the sends and had five unhandled rejections (ruling
+R1's departure), and the first batch with the ten-round R4 test exhausted the cluster's
+connections (ruling R4). The whole API suite was not run, by the orchestrator's instruction: the
+files above exercise what the round changed, and the one module it touched beyond the push path,
+`src/observability/ops-alert.ts`, only gained an event name and a tag key no other caller passes.

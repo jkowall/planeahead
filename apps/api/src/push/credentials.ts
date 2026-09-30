@@ -14,12 +14,16 @@
  *
  * FCM. The service account's RS256 assertion is exchanged at Google's token endpoint for a
  * one-hour access token (R1 F30), cached until `FCM_EXPIRY_MARGIN_MS` before it expires, and not
- * re-exchanged within `FCM_MIN_EXCHANGE_GAP_MS` of the last exchange after a refusal.
+ * re-exchanged within `FCM_MIN_EXCHANGE_GAP_MS` of the last exchange after a provider refused the
+ * access token (`expire`). An exchange that FAILED (Google answered 4xx, 429 or 5xx, or the
+ * request never completed) is not repeated within the same gap either: `PushAuth` answers the
+ * stored failure until it has passed (review ruling R8).
  *
  * Isolates. `durableCredentialSource` keeps the token an object handed out in a module-scope map
  * until that token's window ends (`notAfterMs`), keyed by the credential and a fingerprint of the
- * key material, so a rotated secret is a miss. The map holds minted tokens only, never a key and
- * never request state, like the Sign in with Apple secret cache (src/auth/apple-client-secret.ts).
+ * key material (its DER bytes, ruling R9), so a rotated secret is a miss. The map holds minted
+ * tokens only, never a key and never request state, like the Sign in with Apple secret cache
+ * (src/auth/apple-client-secret.ts).
  *
  * Nothing here logs a token, a key or an assertion.
  */
@@ -31,7 +35,8 @@ import {
   type PushCredentialName,
 } from '@planeahead/shared';
 import type { Env } from '../env';
-import { sha256Hex } from '../crypto/hash';
+import { normalisePem } from '../auth/apple-client-secret';
+import { sha256Hex, utf8 } from '../crypto/hash';
 import {
   apnsMaterial,
   fcmServiceAccount,
@@ -39,7 +44,7 @@ import {
   type FcmServiceAccount,
   type Material,
 } from './config';
-import { PushKeyError, importApnsKey, importFcmKey, signJwt } from './jwt';
+import { PushKeyError, importApnsKey, importFcmKey, pkcs8Der, signJwt } from './jwt';
 
 /** An APNs token is served for 30 minutes after it is minted. */
 export const APNS_TOKEN_WINDOW_MS = 30 * 60_000;
@@ -51,7 +56,10 @@ export const APNS_MAX_TOKEN_AGE_MS = 60 * 60_000;
 export const FCM_ASSERTION_LIFETIME_SECONDS = 3600;
 /** An FCM access token is replaced this long before it expires. */
 export const FCM_EXPIRY_MARGIN_MS = 5 * 60_000;
-/** After a refusal, the next exchange waits at least this long after the last one. */
+/**
+ * After a provider refused the access token, the next exchange waits at least this long after the
+ * last one; after a failed exchange, at least this long after the failure (review ruling R8).
+ */
 export const FCM_MIN_EXCHANGE_GAP_MS = 60_000;
 /** Google's token endpoint (the service account's `token_uri` is never followed). */
 export const GOOGLE_OAUTH_TOKEN_URL = 'https://oauth2.googleapis.com/token';
@@ -90,6 +98,20 @@ export function credentialDecision(
   return 'mint';
 }
 
+/**
+ * Whether `PushAuth` answers a stored failure instead of trying again (review ruling R8): an FCM
+ * exchange that failed at `failedAtMs` is not repeated within `FCM_MIN_EXCHANGE_GAP_MS`, so a
+ * burst of sends during Google's outage or quota refusal asks Google once a minute, not once a
+ * send. An APNs mint is local (no request to Apple) and is never held back.
+ */
+export function withinFailureGap(
+  name: PushCredentialName,
+  failedAtMs: number,
+  nowMs: number,
+): boolean {
+  return name === 'fcm' && nowMs - failedAtMs < FCM_MIN_EXCHANGE_GAP_MS;
+}
+
 /** The earliest time a new token may be minted for a credential that minted at `mintedAtMs`. */
 export function remintAtMs(name: PushCredentialName, mintedAtMs: number, nowMs: number): number {
   const floor = name === 'fcm' ? FCM_MIN_EXCHANGE_GAP_MS : APNS_MIN_MINT_GAP_MS;
@@ -113,13 +135,38 @@ export function credentialMaterial(
   return material.ok ? { ok: true, value: { kind: 'apns', value: material.value } } : material;
 }
 
-/** A short digest of the key material: a rotated secret changes it. Never the material itself. */
+/**
+ * A short digest of the key material: a rotated secret changes it. Never the material itself.
+ * It hashes the private key's DER bytes, not its PEM text (review ruling R9): the same key put
+ * with real newlines or with `\n` escapes (both accepted) is one key, and must not look like a
+ * rotation that mints inside Apple's 20 minutes. With the key id and the team id for APNs, and
+ * with the client email and the project id for FCM. A PEM whose body does not decode stands in
+ * as its normalised text; its first mint fails as `credentials_rejected` anyway.
+ */
 export async function materialFingerprint(material: CredentialMaterial): Promise<string> {
-  const text =
+  const [label, pem, secretName] =
     material.kind === 'apns'
-      ? `apns|${material.value.keyId}|${material.value.teamId}|${material.value.keyPem}`
-      : `fcm|${material.value.clientEmail}|${material.value.privateKeyId ?? ''}|${material.value.privateKeyPem}`;
-  return (await sha256Hex(text)).slice(0, 32);
+      ? [
+          `apns|${material.value.keyId}|${material.value.teamId}|`,
+          material.value.keyPem,
+          'APNS_KEY_P8',
+        ]
+      : [
+          `fcm|${material.value.clientEmail}|${material.value.projectId}|`,
+          material.value.privateKeyPem,
+          'FCM_SERVICE_ACCOUNT_JSON private_key',
+        ];
+  let key: Uint8Array;
+  try {
+    key = new Uint8Array(pkcs8Der(pem, secretName));
+  } catch {
+    key = utf8(`pem:${normalisePem(pem)}`);
+  }
+  const prefix = utf8(label);
+  const input = new Uint8Array(prefix.length + key.length);
+  input.set(prefix);
+  input.set(key, prefix.length);
+  return (await sha256Hex(input)).slice(0, 32);
 }
 
 /** The APNs provider token: header `alg` ES256 and `kid`, claims `iss` (team id) and `iat`. */

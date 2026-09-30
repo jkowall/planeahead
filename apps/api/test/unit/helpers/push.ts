@@ -1,7 +1,8 @@
 /**
  * Shared fixtures for the push transport tests (increment 14): jobs and targets, a recording
- * `fetch` that answers from a script, a credential source that counts its calls, and the public
- * halves of the test keys in `.dev.vars.test` so a test can verify what the Worker signed.
+ * `fetch` that answers from a script, a credential source that counts its calls, the public
+ * halves of the test keys in `.dev.vars.test` so a test can verify what the Worker signed, a
+ * capturing queue, and a liveness read that finds every target live (review ruling R1).
  */
 
 import { env } from 'cloudflare:workers';
@@ -117,8 +118,12 @@ export function apnsAnswer(
   status: number,
   body: Record<string, unknown> | null = null,
   apnsId: string | null = crypto.randomUUID(),
+  extraHeaders: Record<string, string> = {},
 ): Response {
-  const headers: Record<string, string> = apnsId === null ? {} : { 'apns-id': apnsId };
+  const headers: Record<string, string> = {
+    ...(apnsId === null ? {} : { 'apns-id': apnsId }),
+    ...extraHeaders,
+  };
   return new Response(body === null ? null : JSON.stringify(body), { status, headers });
 }
 
@@ -205,20 +210,67 @@ export function testServiceAccount(): {
   };
 }
 
-/** A queue producer that keeps what it is sent (and its delay), for the consumers' seams. */
+/**
+ * A queue producer that keeps what it is sent (and its delay), for the consumers' seams: every
+ * message in `sent`, whether it came through `send` or as an entry of a `sendBatch`, and every
+ * call in `calls`, so a test can tell one batch of two from two sends.
+ */
 export interface CapturingQueue {
-  readonly queue: Pick<Queue, 'send'>;
+  readonly queue: Pick<Queue, 'send' | 'sendBatch'>;
   readonly sent: { readonly body: unknown; readonly delaySeconds: number | undefined }[];
+  readonly calls: { readonly method: 'send' | 'sendBatch'; readonly messages: number }[];
 }
 
 export function capturingQueue(fail = false): CapturingQueue {
   const sent: { body: unknown; delaySeconds: number | undefined }[] = [];
+  const calls: { method: 'send' | 'sendBatch'; messages: number }[] = [];
   const send = (body: unknown, options?: QueueSendOptions) => {
+    calls.push({ method: 'send', messages: 1 });
     if (fail) {
       return Promise.reject(new Error('queue unavailable'));
     }
     sent.push({ body, delaySeconds: options?.delaySeconds });
     return Promise.resolve();
   };
-  return { sent, queue: { send } as unknown as Pick<Queue, 'send'> };
+  const sendBatch = (messages: Iterable<MessageSendRequest>, options?: QueueSendBatchOptions) => {
+    const entries = [...messages];
+    calls.push({ method: 'sendBatch', messages: entries.length });
+    if (fail) {
+      return Promise.reject(new Error('queue unavailable'));
+    }
+    for (const entry of entries) {
+      sent.push({ body: entry.body, delaySeconds: entry.delaySeconds ?? options?.delaySeconds });
+    }
+    return Promise.resolve();
+  };
+  return {
+    sent,
+    calls,
+    queue: { send, sendBatch } as unknown as Pick<Queue, 'send' | 'sendBatch'>,
+  };
+}
+
+/**
+ * A liveness read (review ruling R1) that finds every target of these jobs live and still its
+ * subject's, for the tests whose targets have no `push_tokens` row.
+ */
+export function everyTargetLive(
+  jobs: readonly unknown[],
+): (ids: readonly string[]) => Promise<ReadonlyMap<string, string>> {
+  const owners = new Map<string, string>();
+  for (const body of jobs) {
+    const parsed = PushJobV1.safeParse(body);
+    for (const target of parsed.success ? parsed.data.targets : []) {
+      owners.set(target.pushTokenId, target.subjectId);
+    }
+  }
+  return (ids) =>
+    Promise.resolve(
+      new Map(
+        ids.flatMap((id) => {
+          const owner = owners.get(id);
+          return owner === undefined ? [] : [[id, owner] as const];
+        }),
+      ),
+    );
 }

@@ -5,6 +5,8 @@
  * mints, shares one mint between concurrent callers, exchanges the FCM assertion for an access
  * token through its `fetchImpl` seam and caches it until shortly before expiry, and says why when
  * it has no token. The objects are the three production names; each test clears their storage.
+ * The review round: an FCM exchange that failed is not repeated within a minute of the failure
+ * (ruling R8), whatever Google answered, and an APNs mint is never held back that way.
  */
 
 import { runInDurableObject } from 'cloudflare:test';
@@ -17,6 +19,7 @@ import {
   APNS_TOKEN_WINDOW_MS,
   FCM_EXPIRY_MARGIN_MS,
   FCM_MIN_EXCHANGE_GAP_MS,
+  GOOGLE_OAUTH_TOKEN_URL,
   type PushCredentialResult,
 } from '../../src/push/credentials';
 import { fromBase64Url } from '../../src/push/jwt';
@@ -318,5 +321,93 @@ describe('FCM access tokens', () => {
 
     expect(JSON.stringify(status)).not.toContain('ya29');
     expect(status).toMatchObject({ mintedAtMs: NOW, mintCount: 1, lastFailure: null });
+  });
+});
+
+describe('a failed FCM exchange (review ruling R8)', () => {
+  const failures: readonly [string, () => Response | Promise<Response>, string][] = [
+    ['a 503', () => new Response('busy', { status: 503 }), 'exchange_unavailable'],
+    ['a 429', () => new Response('slow down', { status: 429 }), 'exchange_unavailable'],
+    [
+      'a 400 invalid_grant',
+      () => new Response('{"error":"invalid_grant"}', { status: 400 }),
+      'credentials_rejected',
+    ],
+    [
+      'a network error',
+      () => Promise.reject(new TypeError('network connection lost')),
+      'exchange_unavailable',
+    ],
+  ];
+
+  it.each(failures)(
+    'after %s, answers the stored failure for a minute without asking Google, then asks again',
+    async (_label, respond, failure) => {
+      const google = fakeFetch(respond);
+      await reset('fcm', NOW, google);
+
+      const sequential: PushCredentialResult[] = [];
+      for (let call = 0; call < 5; call += 1) {
+        sequential.push(await current('fcm'));
+      }
+      const concurrent = await Promise.all(Array.from({ length: 3 }, () => current('fcm')));
+      const requestsAtOneInstant = google.requests.length;
+      await setClock('fcm', NOW + FCM_MIN_EXCHANGE_GAP_MS - 1);
+      await current('fcm');
+      const requestsJustInside = google.requests.length;
+      await setClock('fcm', NOW + FCM_MIN_EXCHANGE_GAP_MS);
+      await current('fcm');
+
+      expect(requestsAtOneInstant).toBe(1);
+      for (const answer of [...sequential, ...concurrent]) {
+        expect(answer).toEqual({
+          ok: false,
+          failure,
+          retryable: failure === 'exchange_unavailable',
+          problems: [],
+        });
+      }
+      expect(requestsJustInside).toBe(1);
+      expect(google.requests).toHaveLength(2);
+      expect(google.requests.every((request) => request.url === GOOGLE_OAUTH_TOKEN_URL)).toBe(true);
+    },
+  );
+
+  it('takes a token once Google answers again after the gap, and clears the stored failure', async () => {
+    let healthy = false;
+    const google = fakeFetch(() =>
+      healthy
+        ? Response.json({ access_token: 'ya29.after-the-gap', expires_in: 3600 })
+        : new Response('busy', { status: 503 }),
+    );
+    await reset('fcm', NOW, google);
+
+    const failed = await current('fcm');
+    healthy = true;
+    const stillStored = await current('fcm');
+    await setClock('fcm', NOW + FCM_MIN_EXCHANGE_GAP_MS);
+    const recovered = await current('fcm');
+    const status = await stub('fcm').status({ name: 'fcm' });
+
+    expect(failed).toMatchObject({ ok: false, failure: 'exchange_unavailable' });
+    expect(stillStored).toMatchObject({ ok: false, failure: 'exchange_unavailable' });
+    expect(token(recovered)).toBe('ya29.after-the-gap');
+    expect(google.requests).toHaveLength(2);
+    expect(status.lastFailure).toBeNull();
+  });
+
+  it('never holds back an APNs mint after a failed one: the mint is local', async () => {
+    const unusable = '-----BEGIN PRIVATE KEY-----\nAAAA\n-----END PRIVATE KEY-----';
+    await runInDurableObject(stub('apns:sandbox'), (instance: PushAuth) => {
+      (instance as unknown as { env: Env }).env = { ...testEnv, APNS_KEY_P8: unusable };
+    });
+    const rejected = await current('apns:sandbox');
+    await runInDurableObject(stub('apns:sandbox'), (instance: PushAuth) => {
+      (instance as unknown as { env: Env }).env = testEnv;
+    });
+    const minted = await current('apns:sandbox');
+
+    expect(rejected).toMatchObject({ ok: false, failure: 'credentials_rejected' });
+    expect(minted).toMatchObject({ ok: true, mintedAtMs: NOW });
   });
 });

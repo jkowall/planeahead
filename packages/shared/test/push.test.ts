@@ -187,6 +187,17 @@ describe('PushOutcomeMessageV1', () => {
     expect(PushTargetResultV1.safeParse({ ...result, reason: 'edge_502' }).success).toBe(true);
     expect(PushTargetResultV1.safeParse({ ...result, reason: null }).success).toBe(true);
   });
+
+  it("carries Apple's apns-unique-id when a sandbox answer had one, and is complete without it (review ruling R11)", () => {
+    const apnsUniqueId = crypto.randomUUID();
+    expect(PushTargetResultV1.parse({ ...result, apnsUniqueId }).apnsUniqueId).toBe(apnsUniqueId);
+    // An older producer's result, and every production or FCM result, has none.
+    expect(PushTargetResultV1.parse(result)).not.toHaveProperty('apnsUniqueId');
+    expect(PushTargetResultV1.safeParse({ ...result, apnsUniqueId: '' }).success).toBe(false);
+    expect(PushTargetResultV1.safeParse({ ...result, apnsUniqueId: 'x'.repeat(257) }).success).toBe(
+      false,
+    );
+  });
 });
 
 describe('PushDataV1', () => {

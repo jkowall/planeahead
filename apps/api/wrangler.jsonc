@@ -136,9 +136,10 @@
         "max_retries": 5,
         "dead_letter_queue": "planeahead-notify-dlq-local",
       },
-      // Push (increment 14): no Postgres, network bound. Five jobs a batch, no batch wait (a push
-      // is latency, not throughput), concurrency left to autoscale; each job's targets go out six at
-      // a time and retryable targets are re-enqueued with their own delay (src/queues/push.ts).
+      // Push (increment 14): network bound, one Postgres read a batch before its sends (token
+      // liveness, review ruling R1). Five jobs a batch, no batch wait (a push is latency, not
+      // throughput), concurrency left to autoscale; each job's targets go out six at a time and
+      // retryable targets are re-enqueued with their own delay (src/queues/push.ts).
       {
         "queue": "planeahead-push-local",
         "max_batch_size": 5,
@@ -301,9 +302,10 @@
             "max_retries": 5,
             "dead_letter_queue": "planeahead-notify-dlq-staging",
           },
-          // Push (increment 14): no Postgres, network bound. Five jobs a batch, no batch wait (a push
-          // is latency, not throughput), concurrency left to autoscale; each job's targets go out six at
-          // a time and retryable targets are re-enqueued with their own delay (src/queues/push.ts).
+          // Push (increment 14): network bound, one Postgres read a batch before its sends (token
+          // liveness, review ruling R1). Five jobs a batch, no batch wait (a push is latency, not
+          // throughput), concurrency left to autoscale; each job's targets go out six at a time and
+          // retryable targets are re-enqueued with their own delay (src/queues/push.ts).
           {
             "queue": "planeahead-push-staging",
             "max_batch_size": 5,
@@ -466,9 +468,10 @@
             "max_retries": 5,
             "dead_letter_queue": "planeahead-notify-dlq",
           },
-          // Push (increment 14): no Postgres, network bound. Five jobs a batch, no batch wait (a push
-          // is latency, not throughput), concurrency left to autoscale; each job's targets go out six at
-          // a time and retryable targets are re-enqueued with their own delay (src/queues/push.ts).
+          // Push (increment 14): network bound, one Postgres read a batch before its sends (token
+          // liveness, review ruling R1). Five jobs a batch, no batch wait (a push is latency, not
+          // throughput), concurrency left to autoscale; each job's targets go out six at a time and
+          // retryable targets are re-enqueued with their own delay (src/queues/push.ts).
           {
             "queue": "planeahead-push",
             "max_batch_size": 5,

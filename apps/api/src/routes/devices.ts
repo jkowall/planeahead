@@ -39,15 +39,23 @@
  *   - A registration rotates: in the same transaction as the upsert, every OTHER live row of the
  *     same device and kind is invalidated, so one device holds one live token per kind and a
  *     rotated token stops receiving pushes (R2 design item 5; ADR 0008 item 7(b) for the
- *     push-to-start kind). A skipped registration (`owned_by_another_user`) rotates nothing.
+ *     push-to-start kind). A skipped registration (`owned_by_another_user`) rotates nothing. The
+ *     transaction's first statement locks the device row (`select ... for update`, review ruling
+ *     R4), so two registrations of the same device serialize and never leave two live rows.
  *
  * `POST /v1/devices/current/invalidate` needs a session and takes the installation's id (body
  * `installId`, which must agree with `X-Install-Id` when both are sent): it invalidates every
  * live token of every kind registered to the CALLER's device row for that installation, and
- * answers how many. The app calls it before `authClient.signOut()` (increment 16): a signed-out
- * phone must receive nothing. Tokens registered to another user's device row for the same
- * installation are that user's and are not touched; the install id is not a secret. Idempotent:
- * a second call, or a call for an installation the caller never registered, answers 0.
+ * answers how many. The app calls it before `authClient.signOut()` (increment 16). What that
+ * guarantees (review ruling R1): the push consumer reads every token's row before it sends, first
+ * attempts included, so nothing it sends after the invalidation (or an account switch's re-point
+ * above) commits reaches the phone. What no server check can take back: a push APNs or FCM
+ * accepted before it, which the provider holds until the job's `expiresAt` and delivers to a phone
+ * that was offline at sign-out; and a sign-out made offline, until the app's call succeeds
+ * (increment 16 builds the call, its retry, and the device-side half). Tokens registered to
+ * another user's device row for the same installation are that user's and are not touched; the
+ * install id is not a secret. Idempotent: a second call, or a call for an installation the caller
+ * never registered, answers 0.
  */
 
 import { and, eq, inArray, isNull, ne, sql } from 'drizzle-orm';
@@ -169,6 +177,14 @@ export const devicesRoutes = new Hono<AppBindings>()
           ...(body.pushPermission === undefined ? {} : { permission: body.pushPermission }),
         };
         const stored = await db.transaction(async (tx) => {
+          // Ruling R4: the device row is locked first, so two registrations of one device run one
+          // after the other and the second one's rotation sees the first one's committed row.
+          // Without it each rotation misses the other's uncommitted insert, and both stay live.
+          await tx
+            .select({ id: devices.id })
+            .from(devices)
+            .where(eq(devices.id, device.id))
+            .for('update');
           // `setWhere` limits the DO UPDATE to a row this user already owns, or one whose device is
           // this same installation (`push_tokens` here is the EXISTING row, as Postgres names it in
           // an ON CONFLICT DO UPDATE ... WHERE); any other row is left untouched and the statement

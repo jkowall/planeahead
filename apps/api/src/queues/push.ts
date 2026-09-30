@@ -1,35 +1,69 @@
 /**
- * `push` queue consumer (increment 14, ruling P4): sends each job's targets through
- * `PushTransport` and reports every outcome to `persist`.
+ * `push` queue consumer (increment 14, ruling P4, as the review round's rulings R1 to R3 amend
+ * it): sends each job's targets through `PushTransport` and reports every outcome to `persist`.
  *
- * No Postgres here: this stage is network bound, so it holds no database connection while it
- * waits on APNs and FCM (plan section 4, R1 section 4 item 6). `max_batch_size` 5 and
- * `max_batch_timeout` 0 in wrangler.jsonc, `max_concurrency` left to autoscale.
+ * One Postgres read per batch, finished before the first send. This stage is network bound: no
+ * database connection is in use while it waits on APNs and FCM (plan section 4, R1 section 4
+ * item 6; Hyperdrive has the origin connection back once the read's statement ends), and
+ * `persist` stays the only Postgres writer. What it reads is whether each token may still be sent
+ * to (review ruling R1): a job is built before its sends, and a sign-out, an account switch or a
+ * rotation can land in between (a retry or a hold waits minutes, and so can a first attempt
+ * behind a backlog). `max_batch_size` 5 and `max_batch_timeout` 0 in wrangler.jsonc,
+ * `max_concurrency` left to autoscale.
  *
- * Per job:
+ * Per batch:
  *
- *   1. The job is validated (`PushJobV1`); one this build cannot read is acknowledged and logged,
+ *   1. Each job is validated (`PushJobV1`); one this build cannot read is acknowledged and logged,
  *      never retried (no build will ever send it).
- *   2. Each target is sent with at most `PUSH_MAX_IN_FLIGHT` (6) requests in flight across the
+ *   2. Token liveness, answered before the first provider request (ruling R1). ONE statement
+ *      through `openDb` reads `id` and `user_id` of the `push_tokens` rows that are not
+ *      invalidated, for every target the valid jobs could send (not past its job's window, its
+ *      platform configured: at most 5 jobs of 50 targets). Its client is left to Hyperdrive like
+ *      persist's and housekeeping's, not ended before the sends (`readLiveTokens` says why). A
+ *      target is sent only when its row came back AND still belongs to the target's subject: an
+ *      account switch keeps the row's id and moves the row to the new user (src/routes/devices.ts).
+ *      Otherwise it is not requested: `failed`, reason `token_inactive`, its attempt count
+ *      unchanged, which `persist` records like any failed delivery and which invalidates nothing.
+ *      If the read fails, NOTHING in the batch is sent: every target that needed it is re-enqueued
+ *      unsent after `LIVENESS_RETRY_DELAY_SECONDS` (`retry`, reason `liveness_unavailable`), or
+ *      dropped as `expired` when that would land past its window, and `push_liveness_failed` is
+ *      logged at error level. Targets that are past their window or held (below) need no answer
+ *      from the read and are decided as without it.
+ *   3. Each target is sent with at most `PUSH_MAX_IN_FLIGHT` (6) requests in flight across the
  *      invocation: Workers let six connections wait for response headers at once, and a seventh
  *      would only queue behind them (R1 F43). Jobs run one after another, so the six are shared.
  *      Every request has the transport's 10-second timeout and its body is read or cancelled.
- *   3. A target past the job's `expiresAt` is dropped unsent (`expired`, decision 7); so is a
- *      retry whose next attempt would land after it. A target whose platform has no credentials is
- *      held (`not_configured`, ruling P7): re-enqueued unsent every five minutes until it expires.
- *   4. The job is acknowledged ONCE, and only the retryable targets are re-enqueued, each group
- *      with its explicit `delaySeconds` and its attempt count raised by one: a sent target is never
- *      sent again by a retry of the whole message (`retry()` is never used for an outcome).
- *   5. The outcomes go to `persist` as one `push_outcome` message, so `persist` stays the only
+ *   4. A target past the job's `expiresAt` is dropped unsent (`expired`, decision 7); so is a retry
+ *      whose next attempt would land after it. A target whose platform has no credentials is held
+ *      (`not_configured`, ruling P7): re-enqueued unsent every five minutes until it expires. That
+ *      hold is quiet in staging and locally, where the credentials may not exist yet; in
+ *      production it means pushes are not going out, so `push_not_configured` is raised as an ops
+ *      alert (an error line with the platform and the configuration's problem, never a value, and a
+ *      Sentry event) at most once per platform per batch (ruling R3).
+ *   5. The job is acknowledged ONCE, and only its retryable targets are re-enqueued, grouped by
+ *      delay, each with its attempt count raised by one when it was requested: a sent target is
+ *      never sent again by a retry of the whole message (`retry()` is never used for an outcome).
+ *      All of a job's follow-ups, every delay group and every hold, go out in ONE `sendBatch`
+ *      (ruling R2), each entry with its own `delaySeconds`; a job has at most 50 targets, so at
+ *      most 50 entries, under the 100 a batch takes.
+ *   6. The outcomes go to `persist` as one `push_outcome` message, so `persist` stays the only
  *      Postgres writer (it records the deliveries and invalidates dead tokens, ruling P5).
  *
- * If re-enqueueing fails, the message is retried whole (the sent targets may then be sent twice,
- * which `apns-collapse-id` and the Android tag make replace the first on screen); if only the
- * outcome message fails, twice, the job is still acknowledged and the loss is logged at error
+ * If the `sendBatch` throws, the message is retried whole. Cloudflare documents only the success
+ * case, that every message of a resolved `sendBatch` is written to disk, and says nothing about a
+ * `sendBatch` that throws: neither that it wrote nothing nor that it may have written part of the
+ * batch (https://developers.cloudflare.com/queues/configuration/javascript-apis/, read
+ * 2026-09-30). So a throw is handled as if nothing was written; if some follow-ups were, their
+ * targets are sent once more than planned. The whole-message retry also sends the job's already
+ * sent targets again (the redelivery passes the liveness read like any other delivery);
+ * `apns-collapse-id` and the Android tag make a second copy replace the first on screen. If only
+ * the outcome message fails, twice, the job is still acknowledged and the loss is logged at error
  * level: the retries are safely queued, and a dead token will answer the same on its next send.
  * A job that exhausts the queue's retries goes to `push-dlq`, archived to R2 with an ops alert.
  */
 
+import { and, inArray, isNull } from 'drizzle-orm';
+import { openDb, pushTokens, type Db } from '@planeahead/db';
 import {
   PushJobV1,
   PushOutcomeMessageV1,
@@ -39,8 +73,9 @@ import {
   type PushTargetResultV1,
   type PushTargetV1,
 } from '@planeahead/shared';
-import type { Env } from '../env';
-import { errorFields } from '../observability/log';
+import { environmentName, type Env } from '../env';
+import { errorFields, type Logger } from '../observability/log';
+import { raiseOpsAlert, type CaptureMessage } from '../observability/ops-alert';
 import { pushConfiguration, fcmServiceAccount, type PushConfiguration } from '../push/config';
 import { durableCredentialSource, type PushCredentialSource } from '../push/credentials';
 import {
@@ -58,6 +93,14 @@ export const PUSH_MAX_IN_FLIGHT = 6;
 export const MAX_QUEUE_DELAY_SECONDS = 12 * 60 * 60;
 /** The delay a whole message is retried with when its follow-ups could not be enqueued. */
 export const PUSH_REQUEUE_FAILURE_DELAY_SECONDS = 30;
+/** How long a target waits, unsent, when its token's liveness could not be read (ruling R1). */
+export const LIVENESS_RETRY_DELAY_SECONDS = 60;
+
+/**
+ * `push_tokens.id` to `user_id`, both in lower case (as Postgres prints a uuid), for the rows that
+ * exist and are not invalidated.
+ */
+export type LiveTokens = ReadonlyMap<string, string>;
 
 export interface PushConsumerDeps {
   /** The transports per platform; the defaults are built from the environment. */
@@ -69,12 +112,19 @@ export interface PushConsumerDeps {
   /** The fetch the default transports use. */
   readonly fetch?: typeof fetch;
   readonly now?: () => number;
-  /** Where retries and holds are re-enqueued; the default is `PUSH_QUEUE`. */
-  readonly pushQueue?: Pick<Queue, 'send'>;
+  /** Where retries and holds are re-enqueued, one `sendBatch` per job; the default is `PUSH_QUEUE`. */
+  readonly pushQueue?: Pick<Queue, 'sendBatch'>;
   /** Where outcomes go; the default is `PERSIST_QUEUE`. */
   readonly persistQueue?: Pick<Queue, 'send'>;
   /** The in-flight bound; 6 unless a test asks otherwise. */
   readonly maxInFlight?: number;
+  /**
+   * The liveness read (ruling R1): which of these `push_tokens` ids are live, and whose. The
+   * default is `readLiveTokens` on this environment's database.
+   */
+  readonly liveTokens?: (ids: readonly string[]) => Promise<LiveTokens>;
+  /** The Sentry call behind the `push_not_configured` ops alert; the default is Sentry's. */
+  readonly capture?: CaptureMessage | undefined;
 }
 
 /** Runs `work` over `items` with at most `limit` in flight; results keep the input order. */
@@ -94,6 +144,32 @@ export async function mapWithConcurrency<T, R>(
   };
   await Promise.all(Array.from({ length: Math.min(limit, items.length) }, lane));
   return results;
+}
+
+/**
+ * The liveness read (ruling R1): ONE statement for the batch, `id` and `user_id` of the rows that
+ * exist and are not invalidated, on a client `openDb` opens for it.
+ *
+ * The client is not ended before the sends, which ruling R1 asked for so that the read would not
+ * take one of the six connections the sends use. It does not: Cloudflare counts a `connect()`
+ * socket toward that limit only while the connection is being established, and says a Worker may
+ * have many connections open as long as no more than six are waiting
+ * (https://developers.cloudflare.com/workers/platform/limits/, read 2026-09-30). Nor does the idle
+ * client hold a database connection while the sends wait: Hyperdrive returns the origin
+ * connection to its pool when the statement's transaction completes
+ * (https://developers.cloudflare.com/hyperdrive/concepts/connection-pooling/). And ending a
+ * postgres.js client on Workers is not clean: its socket polyfill's pending read rejects after the
+ * connection has dropped the socket's listeners, an unhandled rejection ("This socket has been
+ * closed.") on every batch, which the review round's test run showed. So, like persist and
+ * housekeeping, the client is left to Hyperdrive, which closes it when the invocation ends.
+ */
+export async function readLiveTokens(env: Env, ids: readonly string[]): Promise<LiveTokens> {
+  const db: Db = openDb(env);
+  const rows = await db
+    .select({ id: pushTokens.id, userId: pushTokens.userId })
+    .from(pushTokens)
+    .where(and(inArray(pushTokens.id, [...ids]), isNull(pushTokens.invalidatedAt)));
+  return new Map(rows.map((row) => [row.id.toLowerCase(), row.userId.toLowerCase()]));
 }
 
 function defaultTransports(
@@ -152,6 +228,24 @@ function unsent(
   };
 }
 
+/** The token's row is gone, invalidated, or now another user's (ruling R1): nothing is sent. */
+const TOKEN_INACTIVE: TransportOutcome = {
+  outcome: 'failed',
+  requested: false,
+  reason: 'token_inactive',
+  httpStatus: null,
+  fcmErrorDetail: null,
+};
+
+/** The liveness read failed (ruling R1): the target waits, unsent. */
+const LIVENESS_UNAVAILABLE: TransportOutcome = {
+  outcome: 'retry',
+  requested: false,
+  reason: 'liveness_unavailable',
+  delaySeconds: LIVENESS_RETRY_DELAY_SECONDS,
+  httpStatus: null,
+};
+
 /** Folds one transport outcome into the target's result and, for a retry, its re-enqueue. */
 export function decideTarget(
   target: PushTargetV1,
@@ -166,6 +260,8 @@ export function decideTarget(
     attempt,
     requested: outcome.requested,
     httpStatus: outcome.httpStatus,
+    // Apple's sandbox delivery-log key, whatever the outcome (ruling R11).
+    ...(outcome.apnsUniqueId === undefined ? {} : { apnsUniqueId: outcome.apnsUniqueId }),
   };
   switch (outcome.outcome) {
     case 'sent':
@@ -227,20 +323,71 @@ export function decideTarget(
   }
 }
 
+/** The liveness read's answer for the batch; `null` when the read failed. */
+type Liveness = LiveTokens | null;
+
+/**
+ * Step 2 of the header: the ids of every target the batch could send, read once. A batch with
+ * nothing to send (every target past its window or held) reads nothing.
+ */
+async function readLiveness(
+  jobs: readonly PushJobV1[],
+  configuration: PushConfiguration,
+  nowMs: number,
+  liveTokens: (ids: readonly string[]) => Promise<LiveTokens>,
+  log: Logger,
+): Promise<Liveness> {
+  const ids = new Set<string>();
+  for (const job of jobs) {
+    if (nowMs >= Date.parse(job.expiresAt)) {
+      continue;
+    }
+    for (const target of job.targets) {
+      if (configuration[target.kind].configured) {
+        ids.add(target.pushTokenId);
+      }
+    }
+  }
+  if (ids.size === 0) {
+    return new Map();
+  }
+  try {
+    return await liveTokens([...ids]);
+  } catch (error) {
+    // Nothing in the batch is sent: a token that might have signed out must not get a push.
+    log.error('push_liveness_failed', {
+      jobs: jobs.length,
+      targets: ids.size,
+      delay_seconds: LIVENESS_RETRY_DELAY_SECONDS,
+      ...errorFields(error),
+    });
+    return null;
+  }
+}
+
 interface JobReport {
   readonly results: PushTargetResultV1[];
   readonly requeues: Map<number, PushTargetV1[]>;
+  /** The platforms a target was held for, or dropped for, having no usable credentials. */
+  readonly unconfigured: ReadonlySet<PushTargetKind>;
 }
 
 async function sendJob(
   job: PushJobV1,
   transports: Record<PushTargetKind, PushTransport>,
   configuration: PushConfiguration,
+  liveness: Liveness,
   now: () => number,
   maxInFlight: number,
 ): Promise<JobReport> {
   const expiresAtMs = Date.parse(job.expiresAt);
   const requeues = new Map<number, PushTargetV1[]>();
+  const unconfigured = new Set<PushTargetKind>();
+  const requeue = (delaySeconds: number, target: PushTargetV1): void => {
+    const group = requeues.get(delaySeconds) ?? [];
+    group.push(target);
+    requeues.set(delaySeconds, group);
+  };
   const results = await mapWithConcurrency(job.targets, maxInFlight, async (target) => {
     const startedAt = now();
     const at = new Date(startedAt).toISOString();
@@ -248,24 +395,28 @@ async function sendJob(
       return unsent(target, 'expired', 'expired', at);
     }
     if (!configuration[target.kind].configured) {
+      unconfigured.add(target.kind);
       if (startedAt + NOT_CONFIGURED_HOLD_SECONDS * 1000 >= expiresAtMs) {
         return unsent(target, 'expired', 'not_configured', at);
       }
-      const held = requeues.get(NOT_CONFIGURED_HOLD_SECONDS) ?? [];
-      held.push(target);
-      requeues.set(NOT_CONFIGURED_HOLD_SECONDS, held);
+      requeue(NOT_CONFIGURED_HOLD_SECONDS, target);
       return unsent(target, 'not_configured', 'not_configured', at);
     }
-    const outcome = await transports[target.kind].send(job, target);
+    let outcome: TransportOutcome;
+    if (liveness === null) {
+      outcome = LIVENESS_UNAVAILABLE;
+    } else if (liveness.get(target.pushTokenId.toLowerCase()) !== target.subjectId.toLowerCase()) {
+      outcome = TOKEN_INACTIVE;
+    } else {
+      outcome = await transports[target.kind].send(job, target);
+    }
     const decision = decideTarget(target, outcome, expiresAtMs, now());
     if (decision.requeue !== null) {
-      const group = requeues.get(decision.requeue.delaySeconds) ?? [];
-      group.push(decision.requeue.target);
-      requeues.set(decision.requeue.delaySeconds, group);
+      requeue(decision.requeue.delaySeconds, decision.requeue.target);
     }
     return decision.result;
   });
-  return { results, requeues };
+  return { results, requeues, unconfigured };
 }
 
 function tally(results: readonly PushTargetResultV1[]): Record<string, number> {
@@ -288,43 +439,79 @@ export async function handlePushBatch(
   const pushQueue = deps.pushQueue ?? env.PUSH_QUEUE;
   const persistQueue = deps.persistQueue ?? env.PERSIST_QUEUE;
   const maxInFlight = deps.maxInFlight ?? PUSH_MAX_IN_FLIGHT;
+  const liveTokens = deps.liveTokens ?? ((ids) => readLiveTokens(env, ids));
+  const production = environmentName(env) === 'production';
+  /** Platforms already alerted as not configured in this batch (ruling R3). */
+  const alerted = new Set<PushTargetKind>();
   let acked = 0;
   let retried = 0;
 
+  const jobs: { readonly message: Message<unknown>; readonly job: PushJobV1 }[] = [];
   for (const message of batch.messages) {
-    try {
-      const parsed = PushJobV1.safeParse(message.body);
-      if (!parsed.success) {
-        // No build will ever send it; the body is not logged (it carries device tokens).
-        const issue = parsed.error.issues[0];
-        log.error('push_job_invalid', {
-          message_id: message.id,
-          attempts: message.attempts,
-          issue: issue?.message,
-          path: issue?.path.map(String).join('.'),
-        });
-        message.ack();
-        acked += 1;
-        continue;
-      }
-      const job = parsed.data;
-      const report = await sendJob(job, transports, configuration, now, maxInFlight);
+    const parsed = PushJobV1.safeParse(message.body);
+    if (!parsed.success) {
+      // No build will ever send it; the body is not logged (it carries device tokens).
+      const issue = parsed.error.issues[0];
+      log.error('push_job_invalid', {
+        message_id: message.id,
+        attempts: message.attempts,
+        issue: issue?.message,
+        path: issue?.path.map(String).join('.'),
+      });
+      message.ack();
+      acked += 1;
+      continue;
+    }
+    jobs.push({ message, job: parsed.data });
+  }
 
-      try {
-        for (const [delaySeconds, targets] of report.requeues) {
-          const next: PushJobV1Input = { ...job, targets };
-          await pushQueue.send(next, { delaySeconds });
+  // Answered before the first provider request (ruling R1).
+  const liveness = await readLiveness(
+    jobs.map(({ job }) => job),
+    configuration,
+    now(),
+    liveTokens,
+    log,
+  );
+
+  for (const { message, job } of jobs) {
+    try {
+      const report = await sendJob(job, transports, configuration, liveness, now, maxInFlight);
+
+      if (production) {
+        for (const kind of report.unconfigured) {
+          if (!alerted.has(kind)) {
+            alerted.add(kind);
+            raiseOpsAlert(
+              'push_not_configured',
+              { platform: kind, reason: configuration[kind].problems.join('; ') },
+              log,
+              deps.capture,
+            );
+          }
         }
-      } catch (error) {
-        log.error('push_requeue_failed', {
-          message_id: message.id,
-          job_id: job.jobId,
-          attempts: message.attempts,
-          ...errorFields(error),
-        });
-        message.retry({ delaySeconds: PUSH_REQUEUE_FAILURE_DELAY_SECONDS });
-        retried += 1;
-        continue;
+      }
+
+      // Every follow-up of the job in one batch, each with its own delay (ruling R2).
+      const followUps = [...report.requeues].map(([delaySeconds, targets]) => ({
+        body: { ...job, targets } satisfies PushJobV1Input,
+        delaySeconds,
+      }));
+      if (followUps.length > 0) {
+        try {
+          await pushQueue.sendBatch(followUps);
+        } catch (error) {
+          log.error('push_requeue_failed', {
+            message_id: message.id,
+            job_id: job.jobId,
+            attempts: message.attempts,
+            follow_ups: followUps.length,
+            ...errorFields(error),
+          });
+          message.retry({ delaySeconds: PUSH_REQUEUE_FAILURE_DELAY_SECONDS });
+          retried += 1;
+          continue;
+        }
       }
 
       const outcome = PushOutcomeMessageV1.safeParse({

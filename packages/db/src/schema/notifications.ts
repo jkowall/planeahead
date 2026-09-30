@@ -235,8 +235,9 @@ export const DELIVERY_STATUSES = [
  * redelivered outcome a no-op. The persist consumer writes it from the `push` consumer's outcome
  * messages: `status` and `attempts` follow the newest attempt, `attempt_log` keeps every attempt's
  * outcome and reason (`{"<attempt>:<outcome>": {"r": reason, "s": http status, "p": provider id,
- * "at": instant}}`), which the admin page counts by reason. A test push (the admin page's, ruling
- * P8) has no notification: its row is keyed by the job id and marked `is_test`.
+ * "at": instant}}`, plus `"u"`, Apple's `apns-unique-id`, when a sandbox answer carried one:
+ * increment 14's review ruling R11), which the admin page counts by reason. A test push (the admin
+ * page's, ruling P8) has no notification: its row is keyed by the job id and marked `is_test`.
  */
 export const notificationDeliveries = pgTable(
   'notification_deliveries',

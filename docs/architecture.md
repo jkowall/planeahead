@@ -277,7 +277,8 @@ a number fails the message (retried, then dead-lettered with the ops alert), nev
 ## 8. Observability
 
 JSON log lines with the request id on every line (`src/observability/log.ts`); Sentry for
-exceptions and ops alerts (dead letters, kill switch, stuck outboxes, lifetime rejections), with
+exceptions and ops alerts (dead letters, kill switch, stuck outboxes, lifetime rejections, a push
+platform without usable credentials in production), with
 bodies, headers, queries and webhook tokens scrubbed; Analytics Engine for provider calls and
 product events; and the admin page (`/admin`, behind Cloudflare Access): provider calls per flight
 key and per provider per day, the Durable Object schema versions, the sync watermark lag (marked
@@ -317,17 +318,24 @@ a request that reached the support inbox and the test push (`/admin/push/test`, 
   last mint, with `minted_at_ms` and the token in its SQLite storage so a restart keeps the rule;
   it exchanges the FCM service account's RS256 assertion for an access token and serves it until
   five minutes before it expires. Isolates cache what they were given until its window ends. APNs
-  `ExpiredProviderToken` and FCM 401 expire the refused token (never within the floor). The
+  `ExpiredProviderToken` and FCM 401 expire the refused token (never within the floor), and a
+  failed FCM exchange is not repeated within a minute of the failure. The
   secrets (`APNS_KEY_P8`, `APNS_KEY_ID`, `APNS_TEAM_ID`, `FCM_SERVICE_ACCOUNT_JSON`) are required
   in production and optional in staging and locally; a platform without them is held.
-- **The `push` consumer** (`src/queues/push.ts`, no Postgres) sends each job's targets with at most
-  six requests in flight (Workers' limit on connections waiting for headers), a 10-second timeout
-  and every body read or cancelled, then acknowledges the job and re-enqueues only its retryable
-  targets, grouped by delay: FCM never sooner than 10 s, FCM 429 honours `Retry-After` or waits
-  60 s, APNs 429 60 s, APNs 5xx 15 minutes; a target past `expiresAt`, or whose retry would land
-  after it, is dropped (`expired`), and an unconfigured platform's targets are held
-  (`not_configured`) every five minutes until then. The outcomes go to `persist` as one
-  `push_outcome` message per job.
+- **The `push` consumer** (`src/queues/push.ts`) first reads token liveness, once per batch and
+  before any send (review ruling R1, which amended the increment's "no Postgres": no Postgres
+  connection is in use while the sends wait, and `persist` stays the only writer): one statement
+  for the `push_tokens` rows of every target the batch could send, and a target is sent only when
+  its row is live and still its subject's, else it is `failed` `token_inactive` unsent; a failed
+  read sends nothing and re-enqueues after 60 s. It sends each job's targets with at most six
+  requests in flight (Workers' limit on connections waiting for headers), a 10-second timeout and
+  every body read or cancelled, then acknowledges the job and re-enqueues only its retryable
+  targets, grouped by delay in one `sendBatch` per job: FCM never sooner than 10 s, FCM 429
+  honours `Retry-After` or backs off exponentially from 60 s with jitter, APNs 429 60 s, APNs 5xx
+  15 minutes; a target past `expiresAt`, or whose retry would land after it, is dropped
+  (`expired`), and an unconfigured platform's targets are held (`not_configured`) every five
+  minutes until then, which in production raises the `push_not_configured` ops alert. The
+  outcomes go to `persist` as one `push_outcome` message per job.
 - **Deliveries and dead tokens** (`src/queues/push-outcomes.ts`, in the persist consumer): one
   `notification_deliveries` row per notification and token (unique key; a test push keys by its
   job id and is marked `is_test`), following the newest attempt, `sent` never undone, every
@@ -335,16 +343,21 @@ a request that reached the support inbox and the test push (`/admin/push/test`, 
   token is invalidated only by APNs 410 `Unregistered` or `ExpiredToken` when it was registered
   at or before Apple's timestamp, `BadDeviceToken` and `DeviceTokenNotForTopic`, FCM
   `UNREGISTERED`, `SENDER_ID_MISMATCH`, and `INVALID_ARGUMENT` with an `FcmError` detail, and for
-  APNs only when the answer was about the row's own app id and environment. `last_used_at` is the
-  last accepted send.
+  APNs only when the answer was about the row's own app id and environment. `last_used_at` is each
+  token's last accepted send, never written on an invalidated row.
 - **Registration.** `push_tokens` carries the `app_id` (the APNs topic; an old client's
   registration is the production app's), `registered_at` (written on every registration, the 410
-  guard's comparison) and the permission state. A registration invalidates the device's other
-  live rows of the same kind; `POST /v1/devices/current/invalidate` invalidates every kind of the
-  caller's installation before sign-out.
+  guard's comparison) and the permission state. A registration locks its device row, then
+  invalidates the device's other live rows of the same kind, so concurrent registrations leave one
+  live row; `POST /v1/devices/current/invalidate` invalidates every kind of the caller's
+  installation before sign-out, and nothing the consumer sends after that commits reaches the
+  phone (a push the provider had already accepted still can, until its `expiresAt`).
 - **Visibility.** The admin page's push section and "Send a test push" (section 8); the test push
   is the plan's staging smoke, sent through the real queue, consumer, `PushAuth` and transport to a
-  registered token (in production only one of a user id in `PUSH_INJECT_ALLOWED_USER_IDS`).
+  registered, live token (in production only one of a user id in `PUSH_INJECT_ALLOWED_USER_IDS`).
+  Its result page shows Apple's `apns-unique-id` for a sandbox send (the key to the Push
+  Notifications Console's delivery log) and stops reloading once the job's window has passed
+  without an outcome.
 
 ## Refresh cadence
 

@@ -492,11 +492,22 @@ commands are in `docs/increments/14-verification.md`.
       step 6's `FCM_SERVICE_ACCOUNT_JSON`. The apps' `google-services.json` files are the client
       half (apps/mobile/README.md).
 - [ ] Access for `/admin` (step 14) exists in the environment.
+- [ ] Cloudflare, before the staging send: confirm the `planeahead.app` zone's **HTTP/2 to Origin**
+      setting is on (dashboard, the zone, Speed > Settings > Protocol Optimization; on by default
+      on every plan). APNs speaks HTTP/2 only; whether this zone setting governs a Worker's
+      subrequests to a third-party host such as Apple at all is unverified (R1 U3): Cloudflare
+      documents it for a zone proxying to its own origin. Keeping it on costs nothing.
 - [ ] The staging send: a development build on the Simulator (Apple silicon, iOS 16+), signed in
       (a guest is enough), registers its token with Settings > Notifications > Allow
       notifications; `/admin/push/test` with that token, kind APNs and app id
       `app.planeahead.mobile.dev`; the result page shows `sent` with an `apns-id` and the
       Simulator shows the notification. Any other answer is a result too: record it in
       `docs/increments/14-verification.md`.
+- [ ] If the send, or later the admin page's outcomes by reason during the soak, shows `edge_52x`
+      answers without an `apns-id`: check the HTTP/2 to Origin setting above first, and only then
+      open the Cloudflare support ticket asking how Worker subrequests to third-party origins are
+      pooled and whether they speak HTTP/2 (R1 U2 and U3, owner action 7). That the setting
+      governs Worker subrequests is unverified, so a setting found on does not close the question.
+      Record the setting's state and the answer in `docs/increments/14-verification.md`.
 - [ ] Production, after the first TestFlight install (increment 16): `PUSH_INJECT_ALLOWED_USER_IDS`
       set to your own user id, then the same test push to your iPhone's token.

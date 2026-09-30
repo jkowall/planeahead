@@ -9,7 +9,9 @@
  * queue and the message ids. A failed archive write is retried with backoff while the
  * `max_retries: 2` every `-dlq` consumer declares in wrangler.jsonc allows (a transient R2
  * failure must not discard the only copy), and acknowledged on the last attempt with the body on
- * the log line: a dead letter message must never loop.
+ * the log line: a dead letter message must never loop. A `push` job's body is logged without its
+ * device tokens (increment 14's review ruling R5): each `targets[].token` is replaced by its
+ * length, and the rest of the job stays, since that line is then its only trace.
  *
  * A `persist` message archived here is REPORTED to the FlightTracker lifetime that sent it, by
  * `origin` and `seq` (`confirmPersisted` with `deadLettered: true`), and never confirmed: a
@@ -56,6 +58,32 @@ export interface DeadLetterRecord {
   readonly timestamp: string;
   readonly attempts: number;
   readonly body: unknown;
+}
+
+/**
+ * The body as the last attempt's log line may carry it (ruling R5): a `push` job's device tokens
+ * never reach a log, so every `targets[].token` becomes `tokenLength`; a target that is not an
+ * object (which no build writes) is dropped to null rather than risk logging a bare token. Every
+ * other queue's body is logged as it is.
+ */
+export function loggableBody(kind: QueueKind, body: unknown): unknown {
+  if (kind !== 'push' || typeof body !== 'object' || body === null) {
+    return body;
+  }
+  const targets: unknown = (body as { targets?: unknown }).targets;
+  if (!Array.isArray(targets)) {
+    return body;
+  }
+  return {
+    ...body,
+    targets: targets.map((target: unknown) => {
+      if (typeof target !== 'object' || target === null) {
+        return null;
+      }
+      const { token, ...rest } = target as { token?: unknown };
+      return { ...rest, tokenLength: typeof token === 'string' ? token.length : null };
+    }),
+  };
 }
 
 export async function handleDeadLetterBatch(
@@ -116,7 +144,7 @@ export async function handleDeadLetterBatch(
         queue_kind: kind,
         message_id: message.id,
         attempts: message.attempts,
-        body: record.body,
+        body: loggableBody(kind, record.body),
         ...errorFields(error),
       });
     }

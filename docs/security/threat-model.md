@@ -339,7 +339,8 @@ the token currently points at (the `install_id` of the token's `devices` row equ
 `installId`, checked inside the upsert's `ON CONFLICT ... WHERE`). That is the phone itself in
 the two flows the merge and increment 8's deletion do not cover: an account switch on one install
 (sign out, sign in as someone else), where a token left on the first account kept sending that
-account's flight alerts to a phone it had signed out of; and a cross-device magic link whose
+account's flight alerts to a phone it had signed out of (what the re-point stops, and what it
+cannot, is at the end of this section); and a cross-device magic link whose
 merge was withheld (section 1.5), where the token stayed on an orphaned anonymous user and the
 signed-in user's own registration was refused. From a DIFFERENT installation the token is not
 re-pointed: there is no proof of possession in the request, anonymous principals are free to
@@ -360,7 +361,17 @@ is not a secret, so a caller who names another user's installation reaches nothi
 push path invalidates a token only on the provider answers ruling P5 lists, and an APNs answer only
 when it was about the row's own app id and environment, so a request that names a wrong topic
 cannot be used to kill someone else's registration. Device tokens never reach a log line: the
-`push` consumer logs push token ids and counts, and refuses an unreadable job without its body.
+`push` consumer logs push token ids and counts, and refuses an unreadable job without its body;
+the dead letter consumer logs a push job whose archive failed with each token replaced by its
+length (review ruling R5).
+
+What a sign-out or a re-point guarantees (increment 14's review ruling R1): the `push` consumer
+reads every token's row before it sends, first attempts included, and sends only to a live row
+still owned by the job's user, so nothing it sends after the invalidation or the re-point commits
+reaches the phone. Two windows no server check closes: a push APNs or FCM had already accepted,
+which the provider holds until the job's `expiresAt` and delivers to a phone that was offline at
+sign-out; and a sign-out made offline, until the app's invalidate call succeeds, which increment
+16 builds with its retry (`docs/open-decisions.md`, section 5, decision 1).
 
 ## 2. Envelope encryption
 

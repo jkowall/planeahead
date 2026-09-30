@@ -10,7 +10,11 @@
  *     over an hour old; R1 F18). A token signed by a key the Worker no longer holds (a rotated
  *     secret, seen as a changed fingerprint) is replaced at once.
  *   - FCM: the service account's RS256 assertion exchanged at Google's token endpoint for an access
- *     token, served until five minutes before it expires.
+ *     token, served until five minutes before it expires. An exchange that failed (Google's 4xx,
+ *     429 or 5xx, or a request that never completed) is not repeated within a minute of the
+ *     failure: until then `current` answers the failure `mint_failure` holds, without calling
+ *     Google (review ruling R8). A service account replaced inside that minute is used once it
+ *     has passed; the failure row keeps no fingerprint, and adding one would be a migration.
  *
  * `minted_at_ms` and the token are persisted in SQLite, so a restarted object keeps both rules: it
  * serves what it minted rather than minting early. The rules themselves are pure functions in
@@ -40,11 +44,13 @@ import {
   credentialDecision,
   credentialMaterial,
   exchangeFcmAccessToken,
+  isPushCredentialFailure,
   materialFingerprint,
   mintApnsProviderToken,
   mintFailureOf,
   notAfterFor,
   remintAtMs,
+  withinFailureGap,
   type PushCredentialExpireResult,
   type PushCredentialResult,
   type PushCredentialStatus,
@@ -140,6 +146,21 @@ export class PushAuth extends DurableObject<Env> {
         fingerprint: row.fingerprint,
       };
     }
+    const failed = this.#lastFailure(name);
+    if (failed !== null && withinFailureGap(name, failed.at_ms, this.#now())) {
+      // Ruling R8: the exchange failed under a minute ago; asking Google again would only add load
+      // to an outage or a quota refusal. The same answer, from storage.
+      const failure =
+        isPushCredentialFailure(failed.failure) && failed.failure !== 'not_configured'
+          ? failed.failure
+          : 'exchange_unavailable';
+      return {
+        ok: false,
+        failure,
+        retryable: failure === 'exchange_unavailable',
+        problems: [],
+      };
+    }
     const inFlight = this.#minting.get(name);
     if (inFlight !== undefined) {
       return inFlight;
@@ -177,10 +198,7 @@ export class PushAuth extends DurableObject<Env> {
   status(input: unknown): PushCredentialStatus {
     const { name } = parseRpcRequest(PushCredentialRequestV1, input);
     const row = this.#load(name);
-    const failure =
-      this.ctx.storage.sql
-        .exec<FailureRow>('SELECT failure, at_ms FROM mint_failure WHERE name = ?', name)
-        .toArray()[0] ?? null;
+    const failure = this.#lastFailure(name);
     return {
       name,
       mintedAtMs: row?.mintedAtMs ?? null,
@@ -279,6 +297,14 @@ export class PushAuth extends DurableObject<Env> {
       name,
       failure,
       atMs,
+    );
+  }
+
+  #lastFailure(name: PushCredentialName): FailureRow | null {
+    return (
+      this.ctx.storage.sql
+        .exec<FailureRow>('SELECT failure, at_ms FROM mint_failure WHERE name = ?', name)
+        .toArray()[0] ?? null
     );
   }
 

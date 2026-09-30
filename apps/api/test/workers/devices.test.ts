@@ -9,7 +9,9 @@
  * Increment 14 (ruling P6): `appId` and `pushPermission` stored with the token (both optional, an
  * old client's registration still accepted with the production app id), `registered_at` written on
  * every registration and `last_used_at` no longer, the rotation that invalidates the device's other
- * live rows of the same kind, and `POST /v1/devices/current/invalidate`, the sign-out half.
+ * live rows of the same kind, and `POST /v1/devices/current/invalidate`, the sign-out half. The
+ * review round (ruling R4): concurrent registrations of one device serialize on its row, so the
+ * rotation leaves exactly one live row of the kind.
  */
 
 import { and, eq } from 'drizzle-orm';
@@ -620,5 +622,28 @@ describe('POST /v1/devices/current/invalidate (ruling P6)', () => {
     await registerDevice(session, installId, { pushTokenKind: 'apns', pushToken: token });
 
     expect(await tokensOf(installId)).toMatchObject([{ token, invalidatedAt: null }]);
+  });
+});
+
+describe('concurrent registrations of one device (review ruling R4)', () => {
+  it('leave exactly one live row of the kind, round after round', async () => {
+    const session = await signInAnonymously();
+    const installId = uniqueInstallId('r4-race');
+    // The phone registered before (the device row exists), then registers new tokens at once.
+    await registerDevice(session, installId);
+
+    for (let round = 0; round < 2; round += 1) {
+      const tokens = Array.from({ length: 6 }, () => `apns-${crypto.randomUUID()}`);
+      const responses = await Promise.all(
+        tokens.map((token) =>
+          registerDevice(session, installId, { pushTokenKind: 'apns', pushToken: token }),
+        ),
+      );
+      expect(responses.map((response) => response.status)).toEqual(tokens.map(() => 200));
+
+      const live = (await tokensOf(installId)).filter((row) => row.invalidatedAt === null);
+      expect(live, `round ${String(round)}`).toHaveLength(1);
+      expect(tokens).toContain(live[0]?.token);
+    }
   });
 });

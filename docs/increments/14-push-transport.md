@@ -1,10 +1,24 @@
 # Increment 14: push transport
 
-Status: built (2026-09-30); what ran, the departures, the owner's steps to prove the staging send
-and what stays unverified are in `docs/increments/14-verification.md`. Builder: Opus 5.5.
-Reviewers: two Opus 5.5 lenses (push protocol correctness against Apple and Google; queues,
-idempotency and data) plus the orchestrator's read. Branch `inc14-push-transport`, stacked on
-`inc13-store-pipeline`.
+Status: built (2026-09-30), and the review round's rulings (R1 to R12) applied the same day; what
+ran, the departures, the owner's steps to prove the staging send and what stays unverified are in
+`docs/increments/14-verification.md` (the rulings' changes in its Review round section). Builder:
+Opus 5.5. Reviewers: two Opus 5.5 lenses (push protocol correctness against Apple and Google;
+queues, idempotency and data) plus the orchestrator's read. Branch `inc14-push-transport`, stacked
+on `inc13-store-pipeline`.
+
+Review round. The two lenses read the first build (findings data-1 to data-7 and proto-1 to
+proto-5): no blocker, one major, data-1 (a token signed out, rotated or moved to another user
+after its job was queued was still sent, on a first attempt behind a backlog, a retry or a hold).
+Every finding was accepted, as rulings R1 to R12: the push consumer reads token liveness once per
+batch before its first send (R1, which amends P4 below), a job's follow-ups leave in one
+`sendBatch` (R2), a production platform without usable credentials raises an ops alert (R3),
+registration locks the device row (R4), the dead letter log carries no device token (R5),
+`last_used_at` is written per token (R6), the test result page stops reloading (R7), a failed FCM
+token exchange is not repeated within a minute (R8), key fingerprints hash the DER bytes (R9), FCM
+429 backs off exponentially (R10), Apple's `apns-unique-id` is kept and shown (R11), and the
+runbook covers HTTP/2 to the origin (R12). One departure: ruling R1's liveness read leaves its
+client to Hyperdrive instead of ending it before the sends (the verification doc says why).
 
 Read first (the plan and the facts sheets reach `main` with PR #14): `docs/plans/phase1-plan.md` (sections 3 rows Push transport, Push credentials and
 Fan-out; section 4 Push path, Payload contract, Transport gate; section 5; section 8 row 14;
@@ -55,6 +69,20 @@ sends a test push through the real consumer so the transport can be proven on st
   honours `Retry-After`, else 60 s; APNs `TooManyRequests` 60 s; APNs 5xx 15 minutes per Apple),
   dropping a target once past the job's `expiresAt` (decision 7). Outcomes go to `persist` as a new
   message kind, so `persist` stays the only Postgres writer.
+
+  Amended by the review round (ruling R1): "no Postgres" now reads "no Postgres connection in use
+  while the sends wait". Before the first provider request of a batch the consumer reads, in one
+  statement, the `push_tokens` rows of every target it could send, and sends a target only when
+  its row is live and still belongs to the target's subject (else `failed` `token_inactive`); a
+  failed read sends nothing and re-enqueues after 60 s. `persist` stays the only writer. The
+  limit of that fix: a push APNs or FCM accepted before a sign-out stays with the provider until
+  `apns-expiration` or the FCM `ttl` (the job's `expiresAt`) and can still reach a phone that was
+  offline at sign-out; no server-side check can recall it. Ruling R1 closes the window only for
+  pushes the consumer has not yet sent (first attempts in the queue, retries, holds). Increment 16 owns
+  the client half: at sign-out the app also drops its device token on the device, and whether
+  that stops an already-accepted push from displaying is to be verified there against Apple's and
+  Google's documentation. Ruling R10 replaces the flat 60 s after an FCM 429 without
+  `Retry-After` with an exponential backoff from Google's one-minute minimum, with jitter.
 - **P5. Dead tokens and deliveries.** `persist` records one `notification_deliveries` row per
   notification and token (the new unique key makes a redelivered outcome a no-op; test pushes carry
   no notification id and record under a test marker) and invalidates tokens: APNs `Unregistered`

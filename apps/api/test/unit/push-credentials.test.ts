@@ -3,13 +3,15 @@
  * signature format (WebCrypto's raw R||S, a standard JWS ES256), the FCM assertion and its
  * exchange with an injected `fetch`, the mint window as pure rules, the isolate cache in front of
  * the `PushAuth` objects, and the configuration check. `test/workers/push-auth.test.ts` drives the
- * object itself.
+ * object itself. The review round: the gap after a failed FCM exchange (ruling R8) and the key
+ * fingerprint over DER bytes, the same for either newline form of one key (ruling R9).
  */
 
 import { decodeProtectedHeader, importPKCS8, jwtVerify } from 'jose';
 import { describe, expect, it } from 'vitest';
 import type { PushCredentialName } from '@planeahead/shared';
 import type { Env } from '../../src/env';
+import { normalisePem } from '../../src/auth/apple-client-secret';
 import { apnsMaterial, fcmServiceAccount, pushConfiguration } from '../../src/push/config';
 import {
   APNS_MAX_TOKEN_AGE_MS,
@@ -22,12 +24,15 @@ import {
   GOOGLE_OAUTH_TOKEN_URL,
   PushCredentialError,
   credentialDecision,
+  credentialMaterial,
   durableCredentialSource,
   exchangeFcmAccessToken,
+  materialFingerprint,
   mintApnsProviderToken,
   notAfterFor,
   remintAtMs,
   signFcmAssertion,
+  withinFailureGap,
   type CachedCredential,
   type PushAuthStub,
   type PushCredentialResult,
@@ -386,5 +391,114 @@ describe('the configuration (ruling P7)', () => {
       /^FCM_SERVICE_ACCOUNT_JSON has no valid /,
     );
     expect(JSON.stringify(pushConfiguration(broken))).not.toContain('short');
+  });
+});
+
+describe('the gap after a failed FCM exchange (review ruling R8)', () => {
+  it('holds an FCM failure for a minute, and never holds back an APNs mint', () => {
+    expect(withinFailureGap('fcm', NOW, NOW)).toBe(true);
+    expect(withinFailureGap('fcm', NOW, NOW + FCM_MIN_EXCHANGE_GAP_MS - 1)).toBe(true);
+    expect(withinFailureGap('fcm', NOW, NOW + FCM_MIN_EXCHANGE_GAP_MS)).toBe(false);
+    expect(withinFailureGap('apns:sandbox', NOW, NOW)).toBe(false);
+    expect(withinFailureGap('apns:production', NOW, NOW + 1)).toBe(false);
+  });
+});
+
+describe('the key fingerprint (review ruling R9)', () => {
+  async function fingerprintOf(env: Env, name: PushCredentialName): Promise<string> {
+    const material = credentialMaterial(env, name);
+    if (!material.ok) {
+      throw new Error(material.problems.join('; '));
+    }
+    return materialFingerprint(material.value);
+  }
+  /** The suite's APNs key with real newlines. */
+  const pem = normalisePem(testEnv.APNS_KEY_P8 ?? '');
+  const apnsEnv = (keyPem: string, overrides: Record<string, string> = {}) =>
+    ({ ...testEnv, APNS_KEY_P8: keyPem, ...overrides }) as Env;
+
+  /** A fresh P-256 key as a PKCS#8 PEM: another key of Apple's shape. */
+  async function anotherP256Pem(): Promise<string> {
+    const pair = (await crypto.subtle.generateKey({ name: 'ECDSA', namedCurve: 'P-256' }, true, [
+      'sign',
+      'verify',
+    ])) as CryptoKeyPair;
+    const der = new Uint8Array(
+      (await crypto.subtle.exportKey('pkcs8', pair.privateKey)) as ArrayBuffer,
+    );
+    let binary = '';
+    for (const byte of der) {
+      binary += String.fromCharCode(byte);
+    }
+    const body =
+      btoa(binary)
+        .match(/.{1,64}/g)
+        ?.join('\n') ?? '';
+    return `-----BEGIN PRIVATE KEY-----\n${body}\n-----END PRIVATE KEY-----`;
+  }
+
+  it('is one fingerprint for one APNs key put with real newlines, with \\n escapes or with CRLF', async () => {
+    const real = await fingerprintOf(apnsEnv(pem), 'apns:production');
+    const escaped = await fingerprintOf(apnsEnv(pem.replaceAll('\n', '\\n')), 'apns:production');
+    const crlf = await fingerprintOf(apnsEnv(pem.replaceAll('\n', '\r\n')), 'apns:production');
+
+    expect(pem).toContain('\n');
+    expect(escaped).toBe(real);
+    expect(crlf).toBe(real);
+    // So the same key put again in its other form is served, not minted within 20 minutes.
+    const row: StoredCredential = {
+      token: 'token',
+      fingerprint: real,
+      mintedAtMs: NOW,
+      notAfterMs: NOW + APNS_TOKEN_WINDOW_MS,
+      mintCount: 1,
+    };
+    expect(credentialDecision('apns:production', row, escaped, NOW + MINUTE)).toBe('serve');
+  });
+
+  it('is another fingerprint for another key id, team id or key', async () => {
+    const base = await fingerprintOf(apnsEnv(pem), 'apns:sandbox');
+    const keyId = await fingerprintOf(apnsEnv(pem, { APNS_KEY_ID: 'ROTATED001' }), 'apns:sandbox');
+    const teamId = await fingerprintOf(
+      apnsEnv(pem, { APNS_TEAM_ID: 'OTHERTEAM1' }),
+      'apns:sandbox',
+    );
+    const key = await fingerprintOf(apnsEnv(await anotherP256Pem()), 'apns:sandbox');
+
+    expect(new Set([base, keyId, teamId, key]).size).toBe(4);
+    expect(base).toMatch(/^[0-9a-f]{32}$/);
+  });
+
+  it('is one fingerprint for the service account key in either newline form, another for its email or project', async () => {
+    const account = testServiceAccount();
+    const fcmEnv = (overrides: Record<string, string>) =>
+      ({
+        ...testEnv,
+        FCM_SERVICE_ACCOUNT_JSON: JSON.stringify({ ...account, ...overrides }),
+      }) as Env;
+    const real = await fingerprintOf(fcmEnv({}), 'fcm');
+    const escaped = await fingerprintOf(
+      fcmEnv({ private_key: normalisePem(account.private_key).replaceAll('\n', '\\n') }),
+      'fcm',
+    );
+    const email = await fingerprintOf(
+      fcmEnv({ client_email: 'other-sender@planeahead-test.iam.gserviceaccount.com' }),
+      'fcm',
+    );
+    const project = await fingerprintOf(fcmEnv({ project_id: 'planeahead-other' }), 'fcm');
+
+    expect(escaped).toBe(real);
+    expect(new Set([real, email, project]).size).toBe(3);
+  });
+
+  it('still answers for a PEM whose body does not decode (its first mint fails instead)', async () => {
+    const broken = '-----BEGIN PRIVATE KEY-----\n!!!! not base64 !!!!\n-----END PRIVATE KEY-----';
+    const first = await fingerprintOf(apnsEnv(broken), 'apns:sandbox');
+
+    expect(first).toMatch(/^[0-9a-f]{32}$/);
+    expect(await fingerprintOf(apnsEnv(broken.replaceAll('\n', '\\n')), 'apns:sandbox')).toBe(
+      first,
+    );
+    expect(first).not.toBe(await fingerprintOf(apnsEnv(pem), 'apns:sandbox'));
   });
 });

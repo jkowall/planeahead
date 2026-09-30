@@ -4,9 +4,16 @@
  * retry delays per reason, drops past `expiresAt`, per-target acknowledgement (the job is
  * acknowledged, only retryable targets come back, each with its own delay and attempt count),
  * the hold of an unconfigured platform, and the outcome message it sends to `persist`.
+ *
+ * The review round: the liveness read before the first send (ruling R1), against the real
+ * database for a sign-out and an account switch between a first send and its retry, and with an
+ * injected read for its failure and its order; one `sendBatch` for a job's follow-ups (R2); the
+ * ops alert of a production platform without usable credentials (R3). The other tests' targets
+ * have no `push_tokens` row, so their read finds every target live (`everyTargetLive`).
  */
 
 import { createExecutionContext, createMessageBatch, getQueueResult } from 'cloudflare:test';
+import { sql } from 'drizzle-orm';
 import {
   PushJobV1,
   PushOutcomeMessageV1,
@@ -14,21 +21,26 @@ import {
   type PushTargetResultV1,
 } from '@planeahead/shared';
 import { describe, expect, it } from 'vitest';
+import type { Env } from '../../src/env';
 import { createLogger, type LogLine } from '../../src/observability/log';
+import type { CaptureMessage } from '../../src/observability/ops-alert';
 import { pushConfiguration, type PushConfiguration } from '../../src/push/config';
-import { NOT_CONFIGURED_HOLD_SECONDS } from '../../src/push/transport';
+import { NOT_CONFIGURED_HOLD_SECONDS, type TransportOutcome } from '../../src/push/transport';
 import {
+  LIVENESS_RETRY_DELAY_SECONDS,
   MAX_QUEUE_DELAY_SECONDS,
   PUSH_MAX_IN_FLIGHT,
   PUSH_REQUEUE_FAILURE_DELAY_SECONDS,
   handlePushBatch,
   mapWithConcurrency,
+  readLiveTokens,
   type PushConsumerDeps,
 } from '../../src/queues/push';
 import {
   FCM_ERROR_TYPE,
   apnsAnswer,
   capturingQueue,
+  everyTargetLive,
   fakeCredentials,
   fakeFetch,
   fcmError,
@@ -40,6 +52,15 @@ import {
   type RecordedRequest,
   type Responder,
 } from '../unit/helpers/push';
+import {
+  jsonRequest,
+  registerDevice,
+  signInAnonymously,
+  uniqueInstallId,
+  worker,
+  type AnonymousSession,
+} from './helpers/auth';
+import { db } from './helpers/routes';
 
 const NOW = Date.UTC(2026, 9, 2, 12, 0, 0);
 const HOUR = 3_600_000;
@@ -48,6 +69,8 @@ interface Run {
   readonly requests: RecordedRequest[];
   readonly maxInFlight: number;
   readonly requeued: CapturingQueue['sent'];
+  /** Every call on the push queue: one `sendBatch` per job with follow-ups (ruling R2). */
+  readonly requeueCalls: CapturingQueue['calls'];
   readonly outcomes: PushOutcomeMessageV1[];
   readonly result: Awaited<ReturnType<typeof getQueueResult>>;
   readonly lines: LogLine[];
@@ -61,8 +84,14 @@ async function run(
     failRequeue?: boolean;
     failPersist?: boolean;
     now?: number;
+    env?: Env;
+    /** The liveness read; every target live by default, `'database'` for the real read. */
+    liveTokens?: PushConsumerDeps['liveTokens'] | 'database';
+    capture?: CaptureMessage;
+    transports?: PushConsumerDeps['transports'];
   } = {},
 ): Promise<Run> {
+  const env = options.env ?? testEnv;
   const fake = fakeFetch(respond);
   const push = capturingQueue(options.failRequeue);
   const persist = capturingQueue(options.failPersist);
@@ -77,23 +106,29 @@ async function run(
     })),
   );
   const ctx = createExecutionContext();
+  const liveTokens =
+    options.liveTokens === 'database' ? undefined : (options.liveTokens ?? everyTargetLive(jobs));
   const deps: PushConsumerDeps = {
     fetch: fake.fetch,
     credentials: fakeCredentials(),
     now: () => options.now ?? NOW,
     pushQueue: push.queue,
     persistQueue: persist.queue,
-    configuration: options.configuration ?? pushConfiguration(testEnv),
+    configuration: options.configuration ?? pushConfiguration(env),
+    ...(liveTokens === undefined ? {} : { liveTokens }),
+    ...(options.capture === undefined ? {} : { capture: options.capture }),
+    ...(options.transports === undefined ? {} : { transports: options.transports }),
   };
   await handlePushBatch(
     batch,
-    { env: testEnv, ctx, log: createLogger({}, (line) => lines.push(line)) },
+    { env, ctx, log: createLogger({}, (line) => lines.push(line)) },
     deps,
   );
   return {
     requests: fake.requests,
     maxInFlight: fake.maxInFlight,
     requeued: push.sent,
+    requeueCalls: push.calls,
     outcomes: persist.sent.map((entry) => PushOutcomeMessageV1.parse(entry.body)),
     result: await getQueueResult(batch, ctx),
     lines,
@@ -198,6 +233,8 @@ describe('the push consumer (ruling P4)', () => {
     // One acknowledgement, never a retry of the message: a sent target is never sent again.
     expect(outcome.result.explicitAcks).toEqual(['job-0']);
     expect(outcome.result.retryMessages).toEqual([]);
+    // The four delay groups leave in one batch (ruling R2).
+    expect(outcome.requeueCalls).toEqual([{ method: 'sendBatch', messages: 4 }]);
     const requeued = new Map(
       outcome.requeued.map((entry) => [entry.delaySeconds, PushJobV1.parse(entry.body)]),
     );
@@ -350,6 +387,7 @@ describe('the push consumer (ruling P4)', () => {
     expect(outcome.result.retryMessages.map((message) => message.msgId)).toEqual(['job-0']);
     expect(outcome.result.explicitAcks).toEqual([]);
     expect(outcome.outcomes).toEqual([]);
+    expect(outcome.requeueCalls).toEqual([{ method: 'sendBatch', messages: 1 }]);
     expect(PUSH_REQUEUE_FAILURE_DELAY_SECONDS).toBeGreaterThan(0);
   });
 
@@ -382,5 +420,359 @@ describe('the push consumer (ruling P4)', () => {
     expect(outcome.outcomes[0]?.results[0]?.providerId).toBe('apns-id-1');
     expect(JSON.stringify(outcome.lines)).not.toContain(hex(11));
     expect(JSON.stringify(outcome.lines)).not.toContain('token-for-');
+  });
+});
+
+/** A 64-hex APNs device token, as the app registers one. */
+function hexToken(): string {
+  return [...crypto.getRandomValues(new Uint8Array(32))]
+    .map((byte) => byte.toString(16).padStart(2, '0'))
+    .join('');
+}
+
+interface Registered {
+  readonly pushTokenId: string;
+  readonly token: string;
+  readonly userId: string;
+}
+
+/** `POST /v1/devices` with a sandbox APNs token of the development app, through the Worker. */
+async function registeredToken(
+  session: AnonymousSession,
+  installId: string,
+  token: string = hexToken(),
+): Promise<Registered> {
+  const response = await registerDevice(session, installId, {
+    pushTokenKind: 'apns',
+    pushToken: token,
+    pushEnvironment: 'sandbox',
+    appId: 'app.planeahead.mobile.dev',
+  });
+  const body = await response.json<{ pushToken: { id: string } | null }>();
+  if (body.pushToken === null) {
+    throw new Error('the token was not registered');
+  }
+  return { pushTokenId: body.pushToken.id, token, userId: session.userId };
+}
+
+/** A job for a registered token, as notify will build it: the row's id and its owner. */
+function jobFor(token: Registered): PushJobV1Input {
+  return inOneHour({
+    targets: [
+      target({ pushTokenId: token.pushTokenId, subjectId: token.userId, token: token.token }),
+    ],
+  });
+}
+
+/** Where the first send of each liveness test ends: a 429, so the target comes back as a retry. */
+const throttled = () => apnsAnswer(429, { reason: 'TooManyRequests' });
+
+describe('token liveness before the first send (review ruling R1)', () => {
+  it('sends nothing on the retry after a sign-out between the first send and the retry', async () => {
+    const session = await signInAnonymously();
+    const installId = uniqueInstallId('r1-sign-out');
+    const token = await registeredToken(session, installId);
+
+    const first = await run([jobFor(token)], throttled, { liveTokens: 'database' });
+    const signOut = await worker(
+      jsonRequest(
+        '/v1/devices/current/invalidate',
+        'POST',
+        { installId },
+        { ip: session.ip, cookie: session.cookie },
+      ),
+    );
+    const retry = await run([first.requeued[0]?.body], () => apnsAnswer(200), {
+      liveTokens: 'database',
+    });
+
+    // The first send went out, live; the retry after the sign-out does not.
+    expect(first.requests).toHaveLength(1);
+    expect(first.requeued.map((entry) => entry.delaySeconds)).toEqual([60]);
+    expect(signOut.status).toBe(200);
+    expect(retry.requests).toEqual([]);
+    expect(retry.requeued).toEqual([]);
+    expect(retry.outcomes[0]?.results[0]).toMatchObject({
+      pushTokenId: token.pushTokenId,
+      outcome: 'failed',
+      reason: 'token_inactive',
+      requested: false,
+      attempt: 1,
+      httpStatus: null,
+    });
+    expect(retry.result.explicitAcks).toEqual(['job-0']);
+  });
+
+  it('sends nothing on the retry after an account switch moved the row to another user', async () => {
+    const before = await signInAnonymously();
+    const installId = uniqueInstallId('r1-switch');
+    const token = await registeredToken(before, installId);
+
+    const first = await run([jobFor(token)], throttled, { liveTokens: 'database' });
+    // The phone signs in as someone else and registers the same token from the same installation:
+    // the row keeps its id, stays live, and now belongs to the second user.
+    const after = await signInAnonymously();
+    const moved = await registeredToken(after, installId, token.token);
+    const [row] = await db().execute<{ user_id: string; invalidated_at: string | null }>(sql`
+      select user_id::text as user_id, invalidated_at::text as invalidated_at
+      from push_tokens where id = ${token.pushTokenId}::uuid
+    `);
+    const retry = await run([first.requeued[0]?.body], () => apnsAnswer(200), {
+      liveTokens: 'database',
+    });
+
+    expect(first.requests).toHaveLength(1);
+    expect(moved.pushTokenId).toBe(token.pushTokenId);
+    expect(row).toEqual({ user_id: after.userId, invalidated_at: null });
+    expect(retry.requests).toEqual([]);
+    expect(retry.outcomes[0]?.results[0]).toMatchObject({
+      outcome: 'failed',
+      reason: 'token_inactive',
+      requested: false,
+      attempt: 1,
+    });
+  });
+
+  it('reads once for the batch, and has its answer before the first send; a live token is sent', async () => {
+    const session = await signInAnonymously();
+    const live = [
+      await registeredToken(session, uniqueInstallId('r1-live-a')),
+      await registeredToken(session, uniqueInstallId('r1-live-b')),
+    ];
+    const events: string[] = [];
+    const asked: (readonly string[])[] = [];
+    const sent: TransportOutcome = {
+      outcome: 'sent',
+      requested: true,
+      providerId: 'apns-id-r1',
+      httpStatus: 200,
+    };
+    const configuration: PushConfiguration = {
+      apns: { configured: true, problems: [] },
+      fcm: {
+        configured: false,
+        problems: ['FCM_SERVICE_ACCOUNT_JSON is not set'],
+        projectId: null,
+      },
+    };
+
+    const outcome = await run(
+      [
+        inOneHour({
+          targets: live.map((token) =>
+            target({ pushTokenId: token.pushTokenId, subjectId: token.userId, token: token.token }),
+          ),
+        }),
+        // Neither of these needs the read: one past its window, one held.
+        inOneHour({ expiresAt: new Date(NOW - 1000).toISOString() }),
+        inOneHour({ targets: [fcmTarget()] }),
+      ],
+      () => apnsAnswer(200),
+      {
+        configuration,
+        // The real read on the real database, observed.
+        liveTokens: async (ids) => {
+          asked.push(ids);
+          const found = await readLiveTokens(testEnv, ids);
+          events.push('read');
+          return found;
+        },
+        transports: {
+          apns: {
+            kind: 'apns',
+            send: () => {
+              events.push('send');
+              return Promise.resolve(sent);
+            },
+          },
+        },
+      },
+    );
+
+    expect(asked).toHaveLength(1);
+    expect([...(asked[0] ?? [])].sort()).toEqual(live.map((token) => token.pushTokenId).sort());
+    expect(events).toEqual(['read', 'send', 'send']);
+    expect(outcome.outcomes[0]?.results.map((result) => result.outcome)).toEqual(['sent', 'sent']);
+    expect(outcome.outcomes[1]?.results[0]?.outcome).toBe('expired');
+    expect(outcome.outcomes[2]?.results[0]?.outcome).toBe('not_configured');
+  });
+
+  it('sends nothing when the read fails: re-enqueued unsent after 60 s, or dropped past the window', async () => {
+    const [first, second] = [target({ token: hex(21) }), target({ token: hex(22) })];
+    const soon = target({ token: hex(23) });
+    const android = fcmTarget();
+    const configuration: PushConfiguration = {
+      apns: { configured: true, problems: [] },
+      fcm: {
+        configured: false,
+        problems: ['FCM_SERVICE_ACCOUNT_JSON is not set'],
+        projectId: null,
+      },
+    };
+
+    const outcome = await run(
+      [
+        inOneHour({ targets: [first, second] }),
+        inOneHour({ expiresAt: new Date(NOW + 30_000).toISOString(), targets: [soon] }),
+        inOneHour({ targets: [android] }),
+      ],
+      () => apnsAnswer(200),
+      { configuration, liveTokens: () => Promise.reject(new Error('Hyperdrive unavailable')) },
+    );
+
+    expect(outcome.requests).toEqual([]);
+    expect(outcome.lines.filter((line) => line.event === 'push_liveness_failed')).toMatchObject([
+      { level: 'error', jobs: 3, targets: 3, delay_seconds: LIVENESS_RETRY_DELAY_SECONDS },
+    ]);
+    const unsentRetry = {
+      outcome: 'retry',
+      reason: 'liveness_unavailable',
+      requested: false,
+      attempt: 0,
+      retryDelaySeconds: 60,
+    };
+    expect(outcome.outcomes[0]?.results).toMatchObject([unsentRetry, unsentRetry]);
+    // Its retry would land past its window: dropped now.
+    expect(outcome.outcomes[1]?.results[0]).toMatchObject({
+      outcome: 'expired',
+      reason: 'liveness_unavailable',
+      requested: false,
+      attempt: 0,
+    });
+    // A hold needs no answer from the read: decided as before.
+    expect(outcome.outcomes[2]?.results[0]).toMatchObject({
+      outcome: 'not_configured',
+      reason: 'not_configured',
+    });
+    expect(
+      outcome.requeued.map((entry) => [
+        entry.delaySeconds,
+        PushJobV1.parse(entry.body).targets.map((t) => [t.pushTokenId, t.attempt]),
+      ]),
+    ).toEqual([
+      [
+        60,
+        [
+          [first.pushTokenId, 0],
+          [second.pushTokenId, 0],
+        ],
+      ],
+      [NOT_CONFIGURED_HOLD_SECONDS, [[android.pushTokenId, 0]]],
+    ]);
+    expect(outcome.result.explicitAcks).toEqual(['job-0', 'job-1', 'job-2']);
+  });
+});
+
+describe("a job's follow-ups (review ruling R2)", () => {
+  it('sends its delay groups in one sendBatch, each entry with its own delay', async () => {
+    const slow = target({ token: hex(31) });
+    const down = target({ token: hex(32) });
+
+    const outcome = await run(
+      [inOneHour({ expiresAt: new Date(NOW + 2 * HOUR).toISOString(), targets: [slow, down] })],
+      byToken({
+        [hex(31)]: () => apnsAnswer(429, { reason: 'TooManyRequests' }),
+        [hex(32)]: () => apnsAnswer(503, { reason: 'ServiceUnavailable' }),
+      }),
+    );
+
+    expect(outcome.requeueCalls).toEqual([{ method: 'sendBatch', messages: 2 }]);
+    expect(
+      outcome.requeued
+        .map((entry) => [entry.delaySeconds, PushJobV1.parse(entry.body).targets[0]?.pushTokenId])
+        .sort((a, b) => Number(a[0]) - Number(b[0])),
+    ).toEqual([
+      [60, slow.pushTokenId],
+      [900, down.pushTokenId],
+    ]);
+  });
+
+  it('retries the message whole when the sendBatch throws, and sends nothing on its own', async () => {
+    const outcome = await run(
+      [
+        inOneHour({
+          expiresAt: new Date(NOW + 2 * HOUR).toISOString(),
+          targets: [target({ token: hex(33) }), target({ token: hex(34) })],
+        }),
+      ],
+      byToken({
+        [hex(33)]: () => apnsAnswer(429, { reason: 'TooManyRequests' }),
+        [hex(34)]: () => apnsAnswer(503, { reason: 'ServiceUnavailable' }),
+      }),
+      { failRequeue: true },
+    );
+
+    expect(outcome.requeueCalls).toEqual([{ method: 'sendBatch', messages: 2 }]);
+    expect(outcome.requeued).toEqual([]);
+    expect(outcome.result.retryMessages.map((message) => message.msgId)).toEqual(['job-0']);
+    expect(outcome.result.explicitAcks).toEqual([]);
+    expect(outcome.outcomes).toEqual([]);
+    expect(outcome.lines.find((line) => line.event === 'push_requeue_failed')).toMatchObject({
+      level: 'error',
+      follow_ups: 2,
+    });
+  });
+});
+
+describe('a production platform without usable credentials (review ruling R3)', () => {
+  const MALFORMED_KEY = 'not-a-key-R3-sentinel';
+  const malformed = (environment: string) =>
+    ({ ...testEnv, ENVIRONMENT: environment, APNS_KEY_P8: MALFORMED_KEY }) as Env;
+  const jobs = () =>
+    [51, 52, 53].map((label) =>
+      inOneHour({ targets: [target({ token: hex(label) }), fcmTarget()] }),
+    );
+  const fcmSent = () => Response.json({ name: 'projects/planeahead-test/messages/1' });
+
+  it('raises one ops alert, with one error line, for a batch of several jobs in production', async () => {
+    const alerts: { message: string; tags: Record<string, string> }[] = [];
+    const outcome = await run(jobs(), fcmSent, {
+      env: malformed('production'),
+      capture: (message, context) => {
+        alerts.push({ message, tags: context.tags });
+      },
+    });
+
+    const errors = outcome.lines.filter((line) => line.level === 'error');
+    expect(errors).toHaveLength(1);
+    expect(errors[0]).toMatchObject({
+      event: 'push_not_configured',
+      ops_alert: 'push_not_configured',
+      platform: 'apns',
+      reason: 'APNS_KEY_P8 is not a PKCS8 PEM',
+    });
+    expect(alerts).toEqual([
+      {
+        message: 'push_not_configured',
+        tags: {
+          ops_alert: 'push_not_configured',
+          platform: 'apns',
+          reason: 'APNS_KEY_P8 is not a PKCS8 PEM',
+        },
+      },
+    ]);
+    expect(JSON.stringify(outcome.lines)).not.toContain(MALFORMED_KEY);
+    // Still held as before, and the configured platform still sends.
+    const results = outcome.outcomes.flatMap((message) => message.results);
+    expect(results.filter((result) => result.outcome === 'not_configured')).toHaveLength(3);
+    expect(results.filter((result) => result.outcome === 'sent')).toHaveLength(3);
+  });
+
+  it('holds quietly in staging: no error line and no alert', async () => {
+    const alerts: string[] = [];
+    const outcome = await run(jobs(), fcmSent, {
+      env: malformed('staging'),
+      capture: (message) => {
+        alerts.push(message);
+      },
+    });
+
+    expect(outcome.lines.filter((line) => line.level === 'error')).toEqual([]);
+    expect(alerts).toEqual([]);
+    expect(
+      outcome.outcomes
+        .flatMap((message) => message.results)
+        .filter((result) => result.outcome === 'not_configured'),
+    ).toHaveLength(3);
   });
 });

@@ -17,16 +17,23 @@
  *     with (the registered one when blank: every client before increment 16 registered without
  *     one, so a development build's row says the production app until then).
  *   - `POST /admin/push/test`: same origin only, like the account deletion. The token must be a
- *     registered `push_tokens` row of that kind, which names the user, the APNs environment and
- *     the registration time the job carries; in production only a row of a user id in
- *     `PUSH_INJECT_ALLOWED_USER_IDS` is accepted. One test job (`test: true`, kind `system`, a
- *     ten-minute relevance window) goes onto the real `push` queue, so the real consumer, the
- *     real `PushAuth` and the real transport send it; an `audit_log` row names the operator. The
+ *     registered, live `push_tokens` row of that kind, which names the user, the APNs environment
+ *     and the registration time the job carries; an invalidated row is refused with a note to
+ *     register the token again from the app (review ruling R1: the consumer would only drop it as
+ *     `token_inactive`, and a token is then only ever dropped for dying after its job was queued).
+ *     In production only a row of a user id in `PUSH_INJECT_ALLOWED_USER_IDS` is accepted. One
+ *     test job (`test: true`, kind `system`, a ten-minute relevance window, its UUIDv7 job id
+ *     minted at the same instant) goes onto the real `push` queue, so the real consumer, the real
+ *     `PushAuth` and the real transport send it; an `audit_log` row names the operator. The
  *     answer is a redirect to the result page.
  *   - `GET /admin/push/test/result?job=...`: the job's delivery row, which the persist consumer
  *     writes from the outcome message (keyed by the job id, marked `is_test`): the status, the
- *     `apns-id` or FCM message name, the reason, and every attempt. It reloads itself every
- *     three seconds until the first outcome arrives.
+ *     `apns-id` or FCM message name, Apple's `apns-unique-id` for a sandbox send (the key to the
+ *     notification in the Push Notifications Console's delivery log, ruling R11), the reason, and
+ *     every attempt. It reloads itself every three seconds until the first outcome arrives, but
+ *     not for ever (ruling R7): once the job id's embedded time plus `TEST_PUSH_TTL_MS` has passed
+ *     without a delivery row, the page stops reloading and says the outcome was not recorded,
+ *     pointing at `push_outcome_send_failed` in the logs.
  *
  * A test push invalidates a dead token like any send, but only when it was sent with the row's
  * own app id and environment (src/queues/push-outcomes.ts): a hand-typed app id that earns
@@ -42,7 +49,9 @@ import {
   PUSH_TARGET_KINDS,
   PushJobV1,
   RPC_SCHEMA_VERSION,
+  isUuidv7,
   uuidv7,
+  uuidv7Timestamp,
   type PushCredentialName,
   type PushJobV1Input,
   type PushTargetKind,
@@ -325,6 +334,14 @@ export async function pushTestSend(
       404,
     );
   }
+  if (row.invalidated_at !== null) {
+    // Ruling R1: the consumer would drop it unsent (`token_inactive`).
+    log.warn('admin_push_test_refused', { reason: 'token_invalidated' });
+    return again(
+      `That token was invalidated at ${row.invalidated_at} (a sign-out, a rotation or a provider's answer). Register the token again from the app (the app registers its token with POST /v1/devices), then send the test.`,
+      409,
+    );
+  }
   const environment = environmentName(env);
   if (environment === 'production' && !allowedTestPushUserIds(env).has(row.user_id)) {
     log.warn('admin_push_test_refused', { reason: 'not_allow_listed' });
@@ -335,7 +352,8 @@ export async function pushTestSend(
   }
 
   const now = (options.now ?? Date.now)();
-  const jobId = uuidv7();
+  // The id embeds the instant the ten-minute window starts from (the result page reads it back).
+  const jobId = uuidv7(() => now);
   const sendAppId = appId?.data ?? row.app_id;
   const job: PushJobV1Input = {
     kind: 'push_job',
@@ -379,7 +397,6 @@ export async function pushTestSend(
       kind,
       app_id: sendAppId,
       environment: parsed.data.targets[0]?.environment,
-      invalidated: row.invalidated_at !== null,
       operator_email: identity?.email ?? null,
       operator_subject: identity?.subject ?? 'unknown',
     },
@@ -404,7 +421,7 @@ interface DeliveryRow extends Record<string, unknown> {
   readonly created_at: string;
   readonly attempt_log: Record<
     string,
-    { r?: string | null; s?: number | null; p?: string | null; at?: string }
+    { r?: string | null; s?: number | null; p?: string | null; at?: string; u?: string | null }
   > | null;
 }
 
@@ -414,7 +431,8 @@ export async function pushTestResult(
   style: string,
 ): Promise<Response> {
   const job = (c.req.query('job') ?? '').trim().toLowerCase();
-  if (!UUID_SHAPE.test(job)) {
+  // Every test job id is a UUIDv7 (`pushTestSend`), whose embedded time starts its window.
+  if (!isUuidv7(job)) {
     return pushPage(style, '<p class="unavailable">That is not a test job id.</p>', {
       status: 400,
     });
@@ -427,6 +445,16 @@ export async function pushTestResult(
     where notification_id = ${job}::uuid and is_test
   `);
   if (row === undefined) {
+    const windowEndsMs = uuidv7Timestamp(job) + TEST_PUSH_TTL_MS;
+    if ((options.now ?? Date.now)() >= windowEndsMs) {
+      // Ruling R7: the consumer reports every delivery it takes, and a job's first one normally
+      // comes well inside its window; nothing recorded once the window has passed means the
+      // report was most likely lost, and reloading every three seconds would never end.
+      return pushPage(
+        style,
+        `<p class="unavailable">No outcome was recorded for job ${esc(job)}, and its ten-minute window ended at ${esc(new Date(windowEndsMs).toISOString())}. The push consumer's outcome message may have been lost: look for push_outcome_send_failed with this job id in the Workers logs. This page no longer reloads itself; reload it to look again.</p><p><a href="${ADMIN_PUSH_TEST_PATH}">Send another</a></p>`,
+      );
+    }
     return pushPage(
       style,
       `<p>Job ${esc(job)} is queued. The push consumer has not reported its outcome yet; this page reloads every three seconds.</p>`,
@@ -439,30 +467,43 @@ export async function pushTestResult(
       return { attempt, outcome, ...value };
     })
     .sort((a, b) => (a.at ?? '').localeCompare(b.at ?? ''));
+  // Apple's sandbox key to the notification's delivery log, from the newest attempt with one.
+  const uniqueId = entries.filter((entry) => typeof entry.u === 'string').at(-1)?.u ?? '';
   const pending = row.status === 'queued';
   return pushPage(
     style,
     `${table(
-      ['Job', 'Channel', 'Status', 'apns-id or message name', 'Reason', 'Attempts', 'Sent at'],
+      [
+        'Job',
+        'Channel',
+        'Status',
+        'apns-id or message name',
+        'apns-unique-id',
+        'Reason',
+        'Attempts',
+        'Sent at',
+      ],
       [
         [
           job,
           row.channel,
           row.status,
           row.provider_message_id ?? '',
+          uniqueId,
           row.error ?? '',
           row.attempts,
           row.sent_at ?? '',
         ],
       ],
-    )}<h2>Attempts</h2>${table(
-      ['Attempt', 'Outcome', 'Reason', 'HTTP status', 'Provider id', 'At'],
+    )}${uniqueId === '' ? '' : '<p class="meta">The apns-unique-id is the key to this notification in the delivery log of Apple\'s Push Notifications Console (sandbox sends only).</p>'}<h2>Attempts</h2>${table(
+      ['Attempt', 'Outcome', 'Reason', 'HTTP status', 'Provider id', 'apns-unique-id', 'At'],
       entries.map((entry) => [
         entry.attempt,
         entry.outcome,
         entry.r ?? '',
         entry.s ?? '',
         entry.p ?? '',
+        entry.u ?? '',
         entry.at ?? '',
       ]),
     )}${pending ? '<p>Still in flight (a retry or a hold is queued); this page reloads every three seconds.</p>' : ''}<p><a href="${ADMIN_PUSH_TEST_PATH}">Send another</a></p>`,

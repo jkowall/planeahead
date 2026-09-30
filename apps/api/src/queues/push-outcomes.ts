@@ -13,8 +13,12 @@
  * order, which is what the admin page counts by reason (ruling P9) and increment 16's soak reads.
  *
  * Status per outcome: `sent`; `invalid_token`; `failed` for `failed` and `expired` (dropped past the
- * relevance window, the reason saying why); `queued` for `retry` and `not_configured` (still in
- * flight). `error` is the reason; `provider_message_id` the `apns-id` or FCM message name.
+ * relevance window, the reason saying why; a token the push consumer found signed out, invalidated
+ * or moved to another user is `failed` with `token_inactive`, review ruling R1, and invalidates
+ * nothing); `queued` for `retry` and `not_configured` (still in flight). `error` is the reason;
+ * `provider_message_id` the `apns-id` or FCM message name. An attempt's `attempt_log` entry also
+ * keeps Apple's `apns-unique-id` (`u`) when a sandbox answer carried one (ruling R11), the key to
+ * the notification in the Push Notifications Console.
  *
  * Dead tokens (ruling P5). A token is invalidated only by the answers listed in
  * `invalidationRule`: APNs `Unregistered` and `ExpiredToken` only when the row's `registered_at` is
@@ -28,10 +32,13 @@
  * invalidated by an answer about a different topic. `invalidated_at` is set once; a later
  * registration of the same token clears it (`POST /v1/devices`).
  *
- * `last_used_at` becomes the time of the newest send that reached the provider and was accepted.
+ * `last_used_at` is the time of the token's newest send that reached the provider and was
+ * accepted: each sent token gets its own result's `at`, in one statement for the message (review
+ * ruling R6), never moved back, and never written on a row that is already invalidated (ruling R1:
+ * a push accepted just before a sign-out does not touch the signed-out row).
  */
 
-import { and, eq, inArray, isNull, lt, or, sql, type SQL } from 'drizzle-orm';
+import { and, eq, isNull, sql, type SQL } from 'drizzle-orm';
 import { notificationDeliveries, pushTokens, type Db } from '@planeahead/db';
 import type { PushOutcome, PushOutcomeMessageV1, PushTargetResultV1 } from '@planeahead/shared';
 
@@ -134,6 +141,7 @@ export async function recordPushOutcomes(
         s: result.httpStatus,
         p: result.providerId,
         at: result.at,
+        ...(result.apnsUniqueId === undefined ? {} : { u: result.apnsUniqueId }),
       },
     },
   }));
@@ -193,29 +201,32 @@ export async function recordPushOutcomes(
     invalidated += updated.length;
   }
 
-  const sent = message.results.filter((result) => result.outcome === 'sent');
+  // Each sent token its own newest send (ruling R6); a job names a token once, this is defence.
+  const newestSend = new Map<string, { readonly at: string; readonly ms: number }>();
+  for (const result of message.results) {
+    if (result.outcome !== 'sent') {
+      continue;
+    }
+    const ms = Date.parse(result.at);
+    const previous = newestSend.get(result.pushTokenId);
+    if (previous === undefined || ms > previous.ms) {
+      newestSend.set(result.pushTokenId, { at: result.at, ms });
+    }
+  }
   let lastUsed = 0;
-  if (sent.length > 0) {
-    const newest =
-      sent
-        .map((result) => result.at)
-        .sort()
-        .at(-1) ??
-      sent[0]?.at ??
-      '';
-    const updated = await db
-      .update(pushTokens)
-      .set({ lastUsedAt: newest })
-      .where(
-        and(
-          inArray(
-            pushTokens.id,
-            sent.map((result) => result.pushTokenId),
-          ),
-          or(isNull(pushTokens.lastUsedAt), lt(pushTokens.lastUsedAt, newest)),
-        ),
-      )
-      .returning({ id: pushTokens.id });
+  if (newestSend.size > 0) {
+    const sends = sql.join(
+      [...newestSend].map(([id, send]) => sql`(${id}::uuid, ${send.at}::timestamptz)`),
+      sql`, `,
+    );
+    const updated = await db.execute<{ id: string }>(sql`
+      update ${pushTokens} set last_used_at = sends.at
+      from (values ${sends}) as sends(id, at)
+      where ${pushTokens.id} = sends.id
+        and ${pushTokens.invalidatedAt} is null
+        and (${pushTokens.lastUsedAt} is null or ${pushTokens.lastUsedAt} < sends.at)
+      returning ${pushTokens.id}
+    `);
     lastUsed = updated.length;
   }
 

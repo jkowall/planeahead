@@ -1,8 +1,10 @@
 /**
  * `PushTransport` with an injected `fetch` (increment 14, acceptance: request path and headers per
  * platform, payload under 4,096 bytes, collapse id under 64 bytes, every mapped APNs and FCM reason
- * to its outcome, the 410 timestamp carried through, the FCM `INVALID_ARGUMENT` detail rule).
- * Nothing here reaches a network: every request goes to the fake `fetch`.
+ * to its outcome, the 410 timestamp carried through, the FCM `INVALID_ARGUMENT` detail rule; the
+ * review round: FCM's exponential 429 backoff, ruling R10, and Apple's `apns-unique-id` kept from
+ * a sandbox answer, ruling R11). Nothing here reaches a network: every request goes to the fake
+ * `fetch`.
  */
 
 import {
@@ -28,12 +30,15 @@ import {
   APNS_SERVER_ERROR_DELAY_SECONDS,
   APNS_THROTTLED_DELAY_SECONDS,
   APNS_TRANSIENT_DELAY_SECONDS,
+  FCM_MAX_BACKOFF_SECONDS,
   FCM_MIN_RETRY_DELAY_SECONDS,
   NOT_CONFIGURED_HOLD_SECONDS,
   PUSH_REQUEST_TIMEOUT_MS,
   createApnsTransport,
   createFcmTransport,
   fcmBackoffSeconds,
+  fcmQuotaBackoffSeconds,
+  mapFcmResponse,
   retryAfterSeconds,
   type TransportOutcome,
 } from '../../src/push/transport';
@@ -65,7 +70,12 @@ function apns(respond: Parameters<typeof fakeFetch>[0], credentials = fakeCreden
   };
 }
 
-function fcm(respond: Parameters<typeof fakeFetch>[0], credentials = fakeCredentials()) {
+/** `random` is the 429 backoff's jitter source: 0 (no jitter) unless a test asks. */
+function fcm(
+  respond: Parameters<typeof fakeFetch>[0],
+  credentials = fakeCredentials(),
+  random: () => number = () => 0,
+) {
   const fake = fakeFetch(respond);
   return {
     fake,
@@ -75,6 +85,7 @@ function fcm(respond: Parameters<typeof fakeFetch>[0], credentials = fakeCredent
       credentials,
       now,
       projectId: 'planeahead-test',
+      random,
     }),
   };
 }
@@ -642,5 +653,127 @@ describe('failures without an answer', () => {
       reason: 'not_configured',
       delaySeconds: NOT_CONFIGURED_HOLD_SECONDS,
     });
+  });
+});
+
+describe('FCM 429 without Retry-After: exponential backoff (review ruling R10)', () => {
+  const quota = () =>
+    fcmError(429, 'RESOURCE_EXHAUSTED', [{ '@type': FCM_ERROR_TYPE, errorCode: 'QUOTA_EXCEEDED' }]);
+
+  /** The delay a quota refusal earns a target with `sendsBefore` sends, jitter `r`. */
+  async function delayAfter(
+    sendsBefore: number,
+    r: number,
+    respond: () => Response = quota,
+  ): Promise<number | null> {
+    const built = job({ targets: [fcmTarget({ attempt: sendsBefore })] });
+    const outcome = await fcm(respond, fakeCredentials(), () => r).transport.send(
+      built,
+      built.targets[0]!,
+    );
+    expect(outcome).toMatchObject({ outcome: 'retry', requested: true, httpStatus: 429 });
+    return outcome.outcome === 'retry' ? outcome.delaySeconds : null;
+  }
+
+  it('n = 0: starts at the one-minute minimum and adds up to 20 percent, never less', async () => {
+    expect(await delayAfter(0, 0)).toBe(60);
+    expect(await delayAfter(0, 0.5)).toBe(66);
+    expect(await delayAfter(0, 0.9999)).toBe(72);
+  });
+
+  it('n = 1: doubles', async () => {
+    expect(await delayAfter(1, 0)).toBe(120);
+    expect(await delayAfter(1, 0.5)).toBe(132);
+  });
+
+  it('n = 4: 60 * 16 is past the cap, so 15 minutes whatever the jitter', async () => {
+    expect(await delayAfter(4, 0)).toBe(FCM_MAX_BACKOFF_SECONDS);
+    expect(await delayAfter(4, 0.9999)).toBe(900);
+    // One step short of it, the jitter still shows.
+    expect(await delayAfter(3, 0)).toBe(480);
+    expect(await delayAfter(3, 0.99)).toBe(575);
+  });
+
+  it('the cap: any number of sends, and a jitter source out of range, stay at 15 minutes', () => {
+    expect(fcmQuotaBackoffSeconds(50, () => 0.5)).toBe(FCM_MAX_BACKOFF_SECONDS);
+    expect(fcmQuotaBackoffSeconds(1000, () => 1)).toBe(900);
+    expect(fcmQuotaBackoffSeconds(0, () => 7)).toBe(72);
+    expect(fcmQuotaBackoffSeconds(0, () => -1)).toBe(60);
+    expect(fcmQuotaBackoffSeconds(-3, () => 0)).toBe(60);
+  });
+
+  it('with Retry-After, keeps it (at least 10 s) whatever n; the consumer caps it at the queue maximum', async () => {
+    const after = (value: string) => () =>
+      fcmError(
+        429,
+        'RESOURCE_EXHAUSTED',
+        [{ '@type': FCM_ERROR_TYPE, errorCode: 'QUOTA_EXCEEDED' }],
+        { 'retry-after': value },
+      );
+    expect(await delayAfter(4, 0.5, after('120'))).toBe(120);
+    expect(await delayAfter(0, 0.5, after('2'))).toBe(FCM_MIN_RETRY_DELAY_SECONDS);
+    expect(await delayAfter(0, 0.5, after(String(30 * 3600)))).toBe(30 * 3600);
+    expect(mapFcmResponse(429, null, 45, 9, () => 0.5)).toMatchObject({ delaySeconds: 45 });
+  });
+
+  it('leaves APNs TooManyRequests at 60 s on every attempt (Apple states no backoff)', async () => {
+    const late = job({ targets: [target({ attempt: 4 })] });
+    const { transport } = apns(() => apnsAnswer(429, { reason: 'TooManyRequests' }));
+
+    expect(await transport.send(late, late.targets[0]!)).toMatchObject({
+      outcome: 'retry',
+      delaySeconds: APNS_THROTTLED_DELAY_SECONDS,
+    });
+  });
+});
+
+describe("Apple's apns-unique-id (review ruling R11)", () => {
+  const uniqueId = crypto.randomUUID();
+  const withUniqueId = (status: number, body: Record<string, unknown> | null = null) =>
+    apnsAnswer(status, body, crypto.randomUUID(), { 'apns-unique-id': uniqueId });
+
+  it('keeps it from a sandbox answer, sent or refused', async () => {
+    const sandbox = job();
+    const sent = await apns(() => withUniqueId(200)).transport.send(sandbox, sandbox.targets[0]!);
+    const refused = await apns(() =>
+      withUniqueId(400, { reason: 'BadDeviceToken' }),
+    ).transport.send(sandbox, sandbox.targets[0]!);
+
+    expect(sent).toMatchObject({ outcome: 'sent', apnsUniqueId: uniqueId });
+    expect(refused).toMatchObject({ outcome: 'invalid_token', apnsUniqueId: uniqueId });
+  });
+
+  it('has none from a production answer, which carries none', async () => {
+    const production = job({
+      targets: [target({ environment: 'production', appId: 'app.planeahead.mobile' })],
+    });
+    const outcome = await apns(() => apnsAnswer(200)).transport.send(
+      production,
+      production.targets[0]!,
+    );
+
+    expect(outcome.outcome).toBe('sent');
+    expect(outcome).not.toHaveProperty('apnsUniqueId');
+  });
+
+  it('reads it for the sandbox only, and never from an FCM answer', async () => {
+    const production = job({
+      targets: [target({ environment: 'production', appId: 'app.planeahead.mobile' })],
+    });
+    const android = job({ targets: [fcmTarget()] });
+
+    const apnsOutcome = await apns(() => withUniqueId(200)).transport.send(
+      production,
+      production.targets[0]!,
+    );
+    const fcmOutcome = await fcm(
+      () =>
+        new Response(JSON.stringify({ name: 'projects/x/messages/1' }), {
+          headers: { 'apns-unique-id': uniqueId },
+        }),
+    ).transport.send(android, android.targets[0]!);
+
+    expect(apnsOutcome).not.toHaveProperty('apnsUniqueId');
+    expect(fcmOutcome).not.toHaveProperty('apnsUniqueId');
   });
 });

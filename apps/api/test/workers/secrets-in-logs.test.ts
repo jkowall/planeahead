@@ -10,7 +10,9 @@
  *      Worker while the console is captured (the Worker runs in this isolate), including the
  *      failure paths that log the most, and every captured line is searched for every secret:
  *      the configured ones, and the per-request ones (the magic-link token, the Apple refresh
- *      token, the identity tokens, the authorization code, the session cookies).
+ *      token, the identity tokens, the authorization code, the session cookies). Increment 14's
+ *      review ruling R5 adds the dead letter consumer's last attempt, whose line carries a
+ *      message body: a `push` job's device tokens never reach it.
  */
 
 import {
@@ -35,12 +37,14 @@ import {
 import { createLogger } from '../../src/observability/log';
 import { durableCredentialSource } from '../../src/push/credentials';
 import { createApnsTransport, createFcmTransport } from '../../src/push/transport';
+import { DEAD_LETTER_MAX_RETRIES, handleDeadLetterBatch } from '../../src/queues/dlq';
 import { handlePersistBatch } from '../../src/queues/persist';
 import { handlePushBatch } from '../../src/queues/push';
 import wranglerConfig from '../../wrangler.jsonc?raw';
 import {
   apnsAnswer,
   capturingQueue,
+  everyTargetLive,
   fakeFetch,
   fcmError,
   jobInput,
@@ -152,6 +156,7 @@ async function pushFlows(): Promise<string[]> {
       testEnv.PUSH_AUTH.getByName(name, { locationHint: 'enam' }),
       (instance: PushAuth, state) => {
         state.storage.sql.exec('DELETE FROM credential');
+        state.storage.sql.exec('DELETE FROM mint_failure');
         instance.fetchImpl = oauth.fetch;
         instance._setClock(null);
       },
@@ -213,6 +218,8 @@ async function pushFlows(): Promise<string[]> {
       },
       pushQueue: capturingQueue().queue,
       persistQueue: persist.queue,
+      // The targets have no `push_tokens` rows; the liveness read (ruling R1) finds them live.
+      liveTokens: everyTargetLive(jobs),
     },
   );
   await handlePersistBatch(
@@ -416,6 +423,55 @@ describe('no secret value reaches a log line', () => {
     }
     // The raw email address never appears either (the cap hashes it, the sender logs a domain).
     expect(joined.includes('@example.test')).toBe(false);
+  });
+
+  it('logs a dead-lettered push job whose archive failed for good without its device tokens (ruling R5)', async () => {
+    const sentinel = `DEVICETOKENSENTINEL${crypto.randomUUID().replaceAll('-', '')}`;
+    const apnsSentinel = [...crypto.getRandomValues(new Uint8Array(32))]
+      .map((byte) => byte.toString(16).padStart(2, '0'))
+      .join('');
+    const job = PushJobV1.parse(
+      jobInput({
+        targets: [
+          target({ token: apnsSentinel }),
+          target({ kind: 'fcm', token: sentinel, environment: 'production' }),
+        ],
+      }),
+    );
+    const id = `dlq-push-${crypto.randomUUID()}`;
+    const ctx = createExecutionContext();
+
+    const { lines } = await captureLogs(() =>
+      handleDeadLetterBatch(
+        createMessageBatch('planeahead-push-dlq-local', [
+          // The last attempt `max_retries: 2` allows: acknowledged with the body on the line.
+          { id, timestamp: new Date(), attempts: DEAD_LETTER_MAX_RETRIES + 1, body: job },
+        ]),
+        'push',
+        { env: testEnv, ctx, log: createLogger({}) },
+        {
+          bucket: { put: () => Promise.reject(new Error('R2 unavailable')) } as unknown as Pick<
+            R2Bucket,
+            'put'
+          >,
+          capture: () => undefined,
+        },
+      ),
+    );
+    const [failed] = logEvents(lines, 'queue_dead_letter_archive_failed');
+    const joined = lines.join('\n');
+
+    expect(failed?.['level']).toBe('error');
+    // Still the message's trace: the job and its targets, each token only as its length.
+    expect(failed?.['body']).toMatchObject({
+      jobId: job.jobId,
+      targets: [
+        { pushTokenId: job.targets[0]?.pushTokenId, tokenLength: 64 },
+        { pushTokenId: job.targets[1]?.pushTokenId, tokenLength: sentinel.length },
+      ],
+    });
+    expect(joined).not.toContain(sentinel);
+    expect(joined).not.toContain(apnsSentinel);
   });
 
   it('logs a failed statement without its bound parameters, through the real error handler', async () => {

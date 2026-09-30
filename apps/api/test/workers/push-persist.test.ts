@@ -5,7 +5,10 @@
  * every dead-token rule: APNs 410 only when the token was registered at or before Apple's
  * timestamp, BadDeviceToken and DeviceTokenNotForTopic always, FCM UNREGISTERED and
  * SENDER_ID_MISMATCH always, INVALID_ARGUMENT only with an FcmError detail, and never an answer
- * about a topic or environment the row does not have.
+ * about a topic or environment the row does not have. The review round: `last_used_at` per token
+ * (ruling R6) and never on an invalidated row (ruling R1), the consumer's `token_inactive` recorded
+ * as a failed delivery that invalidates nothing (R1), and Apple's `apns-unique-id` kept in the
+ * attempt log (R11).
  */
 
 import { createExecutionContext, createMessageBatch, getQueueResult } from 'cloudflare:test';
@@ -406,5 +409,89 @@ describe('dead tokens (ruling P5)', () => {
       'none',
     );
     expect(invalidationRule({ ...base, outcome: 'sent' })).toBe('none');
+  });
+});
+
+describe('the review round (rulings R1, R6 and R11)', () => {
+  it('stamps each sent token with its own send time, both in one message (ruling R6)', async () => {
+    const [early, late] = [await registered(), await registered('fcm')];
+
+    const { lines } = await persist(
+      outcome([
+        result(early, { at: '2026-10-02T12:01:00.000Z' }),
+        result(late, { at: '2026-10-02T12:03:30.000Z' }),
+      ]),
+    );
+
+    expect((await tokenState(early.pushTokenId))?.last_used_at).toBe('2026-10-02 12:01:00+00');
+    expect((await tokenState(late.pushTokenId))?.last_used_at).toBe('2026-10-02 12:03:30+00');
+    expect(lines.find((line) => line.event === 'push_outcome_recorded')?.['lastUsed']).toBe(2);
+  });
+
+  it('keeps the newer time per token, never moving one back for the other', async () => {
+    const [first, second] = [await registered(), await registered()];
+    await persist(
+      outcome([
+        result(first, { at: '2026-10-02T12:10:00.000Z' }),
+        result(second, { at: '2026-10-02T12:00:00.000Z' }),
+      ]),
+    );
+
+    await persist(
+      outcome([
+        result(first, { at: '2026-10-02T12:05:00.000Z' }),
+        result(second, { at: '2026-10-02T12:06:00.000Z' }),
+      ]),
+    );
+
+    expect((await tokenState(first.pushTokenId))?.last_used_at).toBe('2026-10-02 12:10:00+00');
+    expect((await tokenState(second.pushTokenId))?.last_used_at).toBe('2026-10-02 12:06:00+00');
+  });
+
+  it('never stamps a token that was invalidated before its outcome arrived (ruling R1)', async () => {
+    const token = await registered();
+    await db.execute(sql`
+      update push_tokens set invalidated_at = now() where id = ${token.pushTokenId}::uuid
+    `);
+
+    await persist(outcome([result(token, { at: '2026-10-02T12:05:00.000Z' })]));
+
+    expect((await tokenState(token.pushTokenId))?.last_used_at).toBeNull();
+  });
+
+  it("records the consumer's token_inactive as a failed delivery, and invalidates nothing (ruling R1)", async () => {
+    const token = await registered();
+    const inactive = result(token, {
+      outcome: 'failed',
+      reason: 'token_inactive',
+      requested: false,
+      httpStatus: null,
+      providerId: null,
+    });
+
+    await persist(outcome([inactive]));
+
+    expect((await deliveries(inactive.notificationId ?? ''))[0]).toMatchObject({
+      status: 'failed',
+      error: 'token_inactive',
+      attempt_log: { '1:failed': { r: 'token_inactive', s: null } },
+    });
+    expect((await tokenState(token.pushTokenId))?.invalidated_at).toBeNull();
+  });
+
+  it("keeps Apple's apns-unique-id in the attempt's log entry, and nothing when there is none (ruling R11)", async () => {
+    const token = await registered();
+    const apnsUniqueId = crypto.randomUUID();
+    const withId = result(token, { apnsUniqueId });
+    const without = result(token);
+
+    await persist(outcome([withId]), outcome([without]));
+
+    expect((await deliveries(withId.notificationId ?? ''))[0]?.attempt_log).toEqual({
+      '1:sent': { r: null, s: 200, p: withId.providerId, at: withId.at, u: apnsUniqueId },
+    });
+    expect((await deliveries(without.notificationId ?? ''))[0]?.attempt_log).toEqual({
+      '1:sent': { r: null, s: 200, p: without.providerId, at: without.at },
+    });
   });
 });

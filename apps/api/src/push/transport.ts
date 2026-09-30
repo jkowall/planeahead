@@ -4,8 +4,11 @@
  *
  *   - `sent`, with the `apns-id` or the FCM message name;
  *   - `retry`, with the delay the `push` consumer re-enqueues the target with (ruling P4): FCM never
- *     sooner than 10 s, FCM 429 honours `Retry-After` or waits 60 s, APNs `TooManyRequests` 60 s,
- *     APNs 5xx Apple's 15 minutes (decision 7);
+ *     sooner than 10 s; FCM 429 honours `Retry-After`, and without one backs off exponentially
+ *     from Google's one-minute minimum initial delay with up to 20 percent jitter,
+ *     `min(900, 60 * 2^n * (1 + 0.2 * r))` seconds for a target with `n` sends before (review
+ *     ruling R10, https://firebase.google.com/docs/reference/fcm/rest/v1/ErrorCode); APNs
+ *     `TooManyRequests` 60 s (Apple states no backoff); APNs 5xx Apple's 15 minutes (decision 7);
  *   - `invalid_token`, with the reason `persist` judges the invalidation by (ruling P5): APNs 410
  *     `Unregistered` and `ExpiredToken` (with Apple's timestamp), 400 `BadDeviceToken` and
  *     `DeviceTokenNotForTopic`; FCM `UNREGISTERED`, `SENDER_ID_MISMATCH`, and `INVALID_ARGUMENT`
@@ -20,6 +23,14 @@
  * APNs answers from APNs carry an `apns-id` header. A non-200 answer without one came from
  * something in between (a Cloudflare edge 52x, R1 U7), and is retried and counted as `edge_{status}`
  * for the transport soak (plan section 4).
+ *
+ * An answer from the sandbox also carries `apns-unique-id`: Apple documents it as available in the
+ * Development environment only, and as the key to the notification's Delivery Log in the Push
+ * Notifications Console
+ * (https://developer.apple.com/documentation/usernotifications/handling-notification-responses-from-apns).
+ * The transport keeps it, for a sandbox target only, as the outcome's `apnsUniqueId` (review
+ * ruling R11): persist stores it in the attempt log and the admin page's test result shows it, so
+ * the staging send can be followed into Apple's console. A production answer has none.
  *
  * THE RELAY (decision 8, designed here and not built). APNs needs HTTP/2, which Workers' `fetch`
  * speaks to origins only by the undocumented behaviour of Cloudflare's proxy (R1 F1 to F7). If the
@@ -71,9 +82,14 @@ export const APNS_SERVER_ERROR_DELAY_SECONDS = 15 * 60;
 export const APNS_TRANSIENT_DELAY_SECONDS = 60;
 /** FCM: "never retry sooner than 10 s" (R1 F36). */
 export const FCM_MIN_RETRY_DELAY_SECONDS = 10;
-/** FCM 429 without `Retry-After`: "default 60 s". */
+/**
+ * FCM 429 without `Retry-After`: the first step of its exponential backoff, Google's minimum
+ * initial delay of one minute (review ruling R10).
+ */
 export const FCM_QUOTA_DEFAULT_DELAY_SECONDS = 60;
-/** The cap of FCM's exponential backoff on 5xx. */
+/** The jitter on each step of FCM's 429 backoff: up to 20 percent on top (review ruling R10). */
+export const FCM_QUOTA_BACKOFF_JITTER = 0.2;
+/** The cap of FCM's exponential backoffs, on 5xx and on 429. */
 export const FCM_MAX_BACKOFF_SECONDS = 15 * 60;
 /** A credential that could not be had right now (the token exchange, the object). */
 export const CREDENTIAL_RETRY_DELAY_SECONDS = 60;
@@ -83,9 +99,10 @@ export const NOT_CONFIGURED_HOLD_SECONDS = 5 * 60;
 /**
  * What one send came to (ruling P1). `requested` says whether a request left the Worker: a local
  * verdict (a payload over the limit, a token that is not hex, no credential) sends nothing and
- * does not count as an attempt.
+ * does not count as an attempt. `apnsUniqueId` is Apple's `apns-unique-id` from a sandbox answer
+ * (review ruling R11), whatever the outcome; absent everywhere else.
  */
-export type TransportOutcome =
+export type TransportOutcome = (
   | {
       readonly outcome: 'sent';
       readonly requested: true;
@@ -113,7 +130,8 @@ export type TransportOutcome =
       readonly reason: string;
       readonly httpStatus: number | null;
       readonly fcmErrorDetail: 'FcmError' | 'BadRequest' | null;
-    };
+    }
+) & { readonly apnsUniqueId?: string | undefined };
 
 export interface PushTransport {
   readonly kind: PushTargetKind;
@@ -297,24 +315,25 @@ export function createApnsTransport(deps: TransportDeps): PushTransport {
       if ('error' in response) {
         return retry(response.error, APNS_TRANSIENT_DELAY_SECONDS, null);
       }
-      const header = response.headers.get('apns-id')?.trim() ?? '';
-      const apnsId = header === '' ? null : header.slice(0, 256);
+      const apnsId = headerValue(response, 'apns-id');
+      // Sandbox only: the Push Notifications Console's key to this notification (ruling R11).
+      const uniqueId =
+        target.environment === 'sandbox' ? headerValue(response, 'apns-unique-id') : null;
       let body: unknown = null;
       if (response.status === 200 || apnsId === null) {
         await response.body?.cancel();
       } else {
         body = await jsonBody(response);
       }
-      const outcome = mapApnsResponse(response.status, apnsId, body);
+      const outcome = withUniqueId(mapApnsResponse(response.status, apnsId, body), uniqueId);
       if (outcome.outcome === 'retry' && outcome.reason === 'ExpiredProviderToken') {
         // The token is too old for Apple: drop it, and retry once PushAuth may mint again.
         try {
           const remintAt = await deps.credentials.expire(name, bearer);
           const wait = Math.ceil((remintAt - now()) / 1000);
-          return retry(
-            outcome.reason,
-            Math.max(APNS_THROTTLED_DELAY_SECONDS, wait),
-            outcome.httpStatus,
+          return withUniqueId(
+            retry(outcome.reason, Math.max(APNS_THROTTLED_DELAY_SECONDS, wait), outcome.httpStatus),
+            uniqueId,
           );
         } catch {
           return outcome;
@@ -323,6 +342,16 @@ export function createApnsTransport(deps: TransportDeps): PushTransport {
       return outcome;
     },
   };
+}
+
+/** A response header as an outcome may carry it: trimmed, at most 256 characters, or null. */
+function headerValue(response: Response, name: string): string | null {
+  const value = response.headers.get(name)?.trim() ?? '';
+  return value === '' ? null : value.slice(0, 256);
+}
+
+function withUniqueId(outcome: TransportOutcome, uniqueId: string | null): TransportOutcome {
+  return uniqueId === null ? outcome : { ...outcome, apnsUniqueId: uniqueId };
 }
 
 /** `Retry-After` as seconds (a number of seconds or an HTTP date), or null. */
@@ -344,6 +373,21 @@ export function fcmBackoffSeconds(sendsBefore: number): number {
   return Math.min(FCM_MAX_BACKOFF_SECONDS, FCM_MIN_RETRY_DELAY_SECONDS * 2 ** exponent);
 }
 
+/**
+ * FCM's backoff on a 429 without `Retry-After` (review ruling R10): `min(900, 60 * 2^n *
+ * (1 + 0.2 * r))` seconds, `n` the sends made for the target before this one and `r` uniform in
+ * [0, 1), rounded to whole seconds (a queue delay is an integer). The jitter only adds, so the
+ * first retry is never under Google's one-minute minimum; it spreads the targets one quota
+ * refusal throttled, so they do not all come back in the same second.
+ */
+export function fcmQuotaBackoffSeconds(sendsBefore: number, random: () => number): number {
+  const exponent = Math.max(0, Math.min(sendsBefore, 10));
+  const jitter = Math.min(Math.max(random(), 0), 1);
+  const seconds =
+    FCM_QUOTA_DEFAULT_DELAY_SECONDS * 2 ** exponent * (1 + FCM_QUOTA_BACKOFF_JITTER * jitter);
+  return Math.min(FCM_MAX_BACKOFF_SECONDS, Math.round(seconds));
+}
+
 interface FcmErrorDetail {
   readonly '@type'?: unknown;
   readonly errorCode?: unknown;
@@ -355,13 +399,14 @@ interface FcmErrorBody {
 
 /**
  * The outcome of an FCM answer (R1 F35, F36). `sendsBefore` is how many sends the target had
- * before this one, for the 5xx backoff.
+ * before this one, for the 5xx and 429 backoffs; `random` is the 429 backoff's jitter source.
  */
 export function mapFcmResponse(
   status: number,
   body: unknown,
   retryAfter: number | null,
   sendsBefore: number,
+  random: () => number = Math.random,
 ): TransportOutcome {
   if (status >= 200 && status < 300) {
     const name = (body as { name?: unknown } | null)?.name;
@@ -413,9 +458,12 @@ export function mapFcmResponse(
     }
   }
   if (status === 429) {
+    // `Retry-After` wins (never under 10 s; the consumer caps it at the queue's maximum delay).
     return retry(
       code ?? 'QUOTA_EXCEEDED',
-      Math.max(FCM_MIN_RETRY_DELAY_SECONDS, retryAfter ?? FCM_QUOTA_DEFAULT_DELAY_SECONDS),
+      retryAfter === null
+        ? fcmQuotaBackoffSeconds(sendsBefore, random)
+        : Math.max(FCM_MIN_RETRY_DELAY_SECONDS, retryAfter),
       status,
     );
   }
@@ -432,6 +480,8 @@ export function mapFcmResponse(
 export interface FcmTransportDeps extends TransportDeps {
   /** The Firebase project id, from the service account. */
   readonly projectId: string;
+  /** The jitter source of the 429 backoff, uniform in [0, 1); `Math.random` unless a test asks. */
+  readonly random?: (() => number) | undefined;
 }
 
 export function createFcmTransport(deps: FcmTransportDeps): PushTransport {
@@ -459,6 +509,7 @@ export function createFcmTransport(deps: FcmTransportDeps): PushTransport {
         body,
         retryAfterSeconds(response.headers.get('retry-after'), now()),
         target.attempt,
+        deps.random ?? Math.random,
       );
       if (outcome.outcome === 'retry' && response.status === 401) {
         // Drop the refused access token here and in PushAuth; the retry exchanges a new one.

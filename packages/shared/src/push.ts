@@ -224,6 +224,12 @@ export const PushTargetResultV1 = z.looseObject({
   /** `retry` only: the delay the consumer re-enqueued the target with. */
   retryDelaySeconds: z.int().nonnegative().nullable(),
   at: IsoInstantSchema,
+  /**
+   * APNs sandbox answers only: Apple's `apns-unique-id`, the key to the notification in the
+   * delivery log of Apple's Push Notifications Console (review ruling R11). Optional, so a result
+   * without it (production, FCM, an older producer) is still a result.
+   */
+  apnsUniqueId: z.string().min(1).max(256).optional(),
 });
 export type PushTargetResultV1 = z.infer<typeof PushTargetResultV1>;
 

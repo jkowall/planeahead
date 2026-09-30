@@ -5,8 +5,12 @@
  * no Access, an unregistered token, production without the allow list), then the whole path. The
  * POST puts one job on the push queue (captured here, because the pool would hand a real send to
  * the consumer with no stub in it); the real consumer sends it with the real `PushAuth` object's
- * token through the real APNs transport, whose `fetch` is the stub; the real persist consumer
- * records the outcome; and the result page shows the status and the `apns-id`, or the reason.
+ * token through the real APNs transport, whose `fetch` is the stub, after the real liveness read
+ * of the token's row (review ruling R1); the real persist consumer records the outcome; and the
+ * result page shows the status and the `apns-id`, or the reason. The review round adds the
+ * refusal of an invalidated token (R1), the result page that stops reloading once the job's
+ * window has passed without an outcome (R7), and Apple's `apns-unique-id` beside the `apns-id`
+ * for a sandbox send (R11).
  */
 
 import {
@@ -16,7 +20,7 @@ import {
 } from 'cloudflare:test';
 import { sql } from 'drizzle-orm';
 import { SignJWT, exportJWK, generateKeyPair } from 'jose';
-import { PushJobV1 } from '@planeahead/shared';
+import { PushJobV1, createUuidv7Generator } from '@planeahead/shared';
 import { describe, expect, it } from 'vitest';
 import { createApp } from '../../src/app';
 import type { Env } from '../../src/env';
@@ -146,7 +150,10 @@ interface RegisteredToken {
   readonly pushTokenId: string;
 }
 
-async function registeredApnsToken(appId?: string): Promise<RegisteredToken> {
+async function registeredApnsToken(
+  appId?: string,
+  environment: 'sandbox' | 'production' = 'sandbox',
+): Promise<RegisteredToken> {
   const session = await signInAnonymously();
   const token = [...crypto.getRandomValues(new Uint8Array(32))]
     .map((byte) => byte.toString(16).padStart(2, '0'))
@@ -154,7 +161,7 @@ async function registeredApnsToken(appId?: string): Promise<RegisteredToken> {
   const response = await registerDevice(session, uniqueInstallId('admin-push'), {
     pushTokenKind: 'apns',
     pushToken: token,
-    pushEnvironment: 'sandbox',
+    pushEnvironment: environment,
     ...(appId === undefined ? {} : { appId }),
   });
   const body = await response.json<{ pushToken: { id: string } }>();
@@ -412,7 +419,9 @@ describe('Send a test push (ruling P8)', () => {
       await admin({ path: wrongTopic.response.headers.get('location') ?? '' })
     ).text();
 
-    expect(page).toContain('<td>invalid_token</td><td></td><td>DeviceTokenNotForTopic</td>');
+    expect(page).toContain(
+      '<td>invalid_token</td><td></td><td></td><td>DeviceTokenNotForTopic</td>',
+    );
     expect(await invalidated()).toBeNull();
 
     // The registered app id, and a dead token: invalidated like any send.
@@ -436,7 +445,7 @@ describe('Send a test push (ruling P8)', () => {
 
     expect(form).toContain('APNs is not configured here');
     expect(network.requests).toEqual([]);
-    expect(result).toContain('<td>queued</td><td></td><td>not_configured</td>');
+    expect(result).toContain('<td>queued</td><td></td><td></td><td>not_configured</td>');
     expect(result).toContain('<td>0</td><td>not_configured</td><td>not_configured</td>');
     expect(result).toContain('http-equiv="refresh"');
   });
@@ -445,7 +454,78 @@ describe('Send a test push (ruling P8)', () => {
     const response = await admin({
       path: `${ADMIN_PUSH_RESULT_PATH}?job=${encodeURIComponent('<b>')}`,
     });
+    // A test job id is a UUIDv7; another version cannot be one.
+    const notV7 = await admin({ path: `${ADMIN_PUSH_RESULT_PATH}?job=${crypto.randomUUID()}` });
     expect(response.status).toBe(400);
     expect(await response.text()).not.toContain('<b>');
+    expect(notV7.status).toBe(400);
+  });
+});
+
+describe('the review round (rulings R1, R7 and R11)', () => {
+  it('refuses an invalidated token, and says to register it again from the app (ruling R1)', async () => {
+    const token = await registeredApnsToken('app.planeahead.mobile.dev');
+    await db().execute(sql`
+      update push_tokens set invalidated_at = now() where id = ${token.pushTokenId}::uuid
+    `);
+
+    const { response, job } = await sendTest({ token: token.token, kind: 'apns', app_id: '' });
+    const html = await response.text();
+
+    expect(response.status).toBe(409);
+    expect(html).toContain('Register the token again from the app');
+    expect(html).toContain(`<form method="post" action="${ADMIN_PUSH_TEST_PATH}">`);
+    expect(job).toBeNull();
+  });
+
+  it('reloads while the window is open, and stops once it has passed without an outcome (ruling R7)', async () => {
+    const recent = createUuidv7Generator(() => Date.now() - TEST_PUSH_TTL_MS + 60_000)();
+    const lost = createUuidv7Generator(() => Date.now() - TEST_PUSH_TTL_MS - 1_000)();
+
+    const waiting = await admin({ path: `${ADMIN_PUSH_RESULT_PATH}?job=${recent}` });
+    const waitingHtml = await waiting.text();
+    const ended = await admin({ path: `${ADMIN_PUSH_RESULT_PATH}?job=${lost}` });
+    const endedHtml = await ended.text();
+
+    expect(waiting.status).toBe(200);
+    expect(waitingHtml).toContain('is queued');
+    expect(waitingHtml).toContain('<meta http-equiv="refresh" content="3">');
+    expect(ended.status).toBe(200);
+    expect(endedHtml).not.toContain('http-equiv="refresh"');
+    expect(endedHtml).toContain(`No outcome was recorded for job ${lost}`);
+    expect(endedHtml).toContain('push_outcome_send_failed');
+  });
+
+  it("shows a sandbox send's apns-unique-id beside its apns-id, and none for production (ruling R11)", async () => {
+    const sandbox = await registeredApnsToken();
+    const sent = await sendTest({
+      token: sandbox.token,
+      kind: 'apns',
+      app_id: 'app.planeahead.mobile.dev',
+    });
+    const apnsId = crypto.randomUUID();
+    const uniqueId = crypto.randomUUID();
+    await deliver(sent.job, () => apnsAnswer(200, null, apnsId, { 'apns-unique-id': uniqueId }));
+    const sandboxPage = await (
+      await admin({ path: sent.response.headers.get('location') ?? '' })
+    ).text();
+
+    const production = await registeredApnsToken(undefined, 'production');
+    const productionSent = await sendTest({ token: production.token, kind: 'apns', app_id: '' });
+    const productionId = crypto.randomUUID();
+    await deliver(productionSent.job, () => apnsAnswer(200, null, productionId));
+    const productionPage = await (
+      await admin({ path: productionSent.response.headers.get('location') ?? '' })
+    ).text();
+
+    expect(sandboxPage).toContain(`<td>sent</td><td>${apnsId}</td><td>${uniqueId}</td>`);
+    // The attempt's own row carries it too, after its provider id.
+    expect(sandboxPage).toContain(`<td>${apnsId}</td><td>${uniqueId}</td><td>`);
+    expect(sandboxPage).toContain(
+      "the key to this notification in the delivery log of Apple's Push Notifications Console",
+    );
+    expect(productionSent.job?.targets[0]?.environment).toBe('production');
+    expect(productionPage).toContain(`<td>sent</td><td>${productionId}</td><td></td>`);
+    expect(productionPage).not.toContain('Push Notifications Console');
   });
 });
