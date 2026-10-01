@@ -100,6 +100,15 @@ describe('the error envelope', () => {
     expect(isApiError({ ...body, scope: 'install' }, 'cap_exceeded')).toBe(true);
   });
 
+  it('reads a cap it does not know as absent, keeping the body and its cap_exceeded', () => {
+    const body = { error: 'cap_exceeded', cap: 'board_views', limit: 300, requestId: 'r' };
+    const parsed = ApiErrorSchema.safeParse(body);
+    expect(parsed.success).toBe(true);
+    expect(parsed.data).toMatchObject({ error: 'cap_exceeded', limit: 300 });
+    expect(parsed.data?.cap).toBeUndefined();
+    expect(isApiError(body, 'cap_exceeded')).toBe(true);
+  });
+
   it('isApiError reads a body by its code', () => {
     const body = { error: 'cap_exceeded', cap: 'active_subscriptions', limit: 5, requestId: 'r' };
     expect(isApiError(body, 'cap_exceeded')).toBe(true);

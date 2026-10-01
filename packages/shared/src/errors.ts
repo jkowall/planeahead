@@ -87,8 +87,11 @@ export const ApiErrorSchema = z.looseObject({
   requestId: z.string(),
   /** `validation_failed`: what the validator rejected. */
   issues: z.array(ValidationIssueSchema).optional(),
-  /** `cap_exceeded`: which cap and its limit. */
-  cap: z.enum(CAP_NAMES).optional(),
+  /**
+   * `cap_exceeded`: which cap and its limit. A cap this build does not know reads as absent, as
+   * `scope` does, so a later server's new cap never costs a shipped app the whole body.
+   */
+  cap: z.enum(CAP_NAMES).optional().catch(undefined),
   limit: z.int().nonnegative().optional(),
   /**
    * `cap_exceeded`: whose allowance ran out (increment 18, R11): the account's own (`user`), or
