@@ -33,4 +33,4 @@ export {
  * Number of migrations in `migrations/meta/_journal.json`. A test keeps it in sync; `/health`
  * reports the journal's SHA-256 (`migrationHash()` in `@planeahead/db/migrate`) rather than this.
  */
-export const DB_SCHEMA_VERSION = 9;
+export const DB_SCHEMA_VERSION = 10;

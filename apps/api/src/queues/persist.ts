@@ -236,27 +236,20 @@ export type LiveWindowStage = 'before' | 'live' | 'over';
 
 const OVER_STATUSES: ReadonlySet<string> = new Set(['arrived', 'cancelled']);
 
-/**
- * A `cancelled` row the tracker still suspects (`cancelSuspect`, increment 15 ruling N4) is not
- * over: the confirming re-read may clear it, and a slot released meanwhile could not be taken
- * back once the user's cap filled. Until it is confirmed it is judged by time alone, as if the
- * flight still operated. A stored row carries no flag, so it is judged by its status.
- */
 export function liveWindowStage(
   row: {
     readonly status: string;
     readonly trackingState: string;
     readonly scheduledOut: string | null;
-    readonly cancelSuspect?: boolean | undefined;
   },
   nowMs: number,
 ): LiveWindowStage {
-  const suspect = row.cancelSuspect === true && row.status === 'cancelled';
-  if (isTerminal(row.trackingState) || (OVER_STATUSES.has(row.status) && !suspect)) {
+  if (isTerminal(row.trackingState) || OVER_STATUSES.has(row.status)) {
     return 'over';
   }
-  const phase = suspect ? 'unknown' : row.status;
-  return isInLiveWindow({ phase, scheduledOut: row.scheduledOut }, nowMs) ? 'live' : 'before';
+  return isInLiveWindow({ phase: row.status, scheduledOut: row.scheduledOut }, nowMs)
+    ? 'live'
+    : 'before';
 }
 
 /**
@@ -272,6 +265,13 @@ export function liveWindowStage(
  * the Live Activity). OVER: every flagged live subscription is cleared and its slot released,
  * never below zero. Both are idempotent through the flag, and each decided row gets its upsert in
  * `user_sync_changes`, so the client can show whether the flight is live-tracked.
+ *
+ * Increment 15, ruling Q1: the OVER clear stamps `live_tracked_released_at` with the releasing
+ * row's own Durable Object instant (`finishedAt`, else `lastRefreshedAt`, which the tracker sets
+ * from the same clock reading as the `producedAt` of the alarm's intents), never this consumer's
+ * clock, in the same UPDATE; a take clears it. The notify consumer pushes to a subscription that
+ * is live-tracked or was released at or after the intent's `producedAt`, so an intent and the
+ * release of one flush reach the devices whatever order the two queues run in.
  */
 async function applyLiveWindow(
   tx: Tx,
@@ -282,7 +282,8 @@ async function applyLiveWindow(
     status: string;
     trackingState: string;
     scheduledOut: string | null;
-    cancelSuspect: boolean;
+    /** The row's own Durable Object instant (`finishedAt`, else `lastRefreshedAt`; Q1). */
+    instant: string | null;
   },
   nowMs: number,
 ): Promise<void> {
@@ -291,7 +292,7 @@ async function applyLiveWindow(
   if (stage === 'over') {
     const cleared = await tx
       .update(flightSubscriptions)
-      .set({ liveTracked: false })
+      .set({ liveTracked: false, liveTrackedReleasedAt: next.instant })
       .where(
         and(
           eq(flightSubscriptions.flightInstanceId, instanceId),
@@ -336,7 +337,7 @@ async function applyLiveWindow(
     if (await takeCap(tx, userCap('live_tracked', row.userId, now))) {
       const [flagged] = await tx
         .update(flightSubscriptions)
-        .set({ liveTracked: true })
+        .set({ liveTracked: true, liveTrackedReleasedAt: null })
         .where(eq(flightSubscriptions.id, row.id))
         .returning();
       decided = flagged ?? row;
@@ -450,7 +451,7 @@ async function upsertFlightInstanceIn(
         status: mutable.status,
         trackingState: mutable.trackingState,
         scheduledOut: mutable.scheduledOut,
-        cancelSuspect: p.cancelSuspect === true,
+        instant: p.finishedAt ?? p.lastRefreshedAt,
       },
       nowMs,
     );

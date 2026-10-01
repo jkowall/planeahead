@@ -3,8 +3,9 @@
  * 6: a provider's kill switch tripping; increment 7: a message landing on a dead letter queue, a
  * finished flight offered a second lifetime, an outbox that will not drain, a provider that is
  * not configured; increment 14's review ruling R3: a push platform without usable credentials in
- * production). Each one is logged at error level AND sent to Sentry as a `fatal` message, so it
- * reaches whoever watches either.
+ * production; increment 15's review ruling Q2: a notify intent still failing at its sixth attempt,
+ * raised once while its retries continue). Each one is logged at error level AND sent to Sentry as
+ * a `fatal` message, so it reaches whoever watches either.
  *
  * Call it where a Sentry client exists: the Worker's `fetch`, `queue` and `scheduled` handlers,
  * all wrapped by `withSentry` in src/index.ts. A Durable Object has no client, which is why the
@@ -26,7 +27,8 @@ export type OpsAlertEvent =
   | 'flight_tracker_outbox_stuck'
   | 'designator_resolver_outbox_stuck'
   | 'provider_config_error'
-  | 'push_not_configured';
+  | 'push_not_configured'
+  | 'notify_intent_failing';
 
 /** The Sentry call, injectable so a test can observe it. */
 export type CaptureMessage = (

@@ -13,11 +13,13 @@ import {
   devices,
   flightInstances,
   flightSubscriptions,
+  notificationDeliveries,
   notificationPreferences,
   notifications,
   pushTokens,
   userPreferences,
   users,
+  type Db,
 } from '@planeahead/db';
 import {
   PushJobV1,
@@ -26,8 +28,13 @@ import {
   type FlightKey,
   type NotifyIntentV1Input,
 } from '@planeahead/shared';
-import { createLogger } from '../../src/observability/log';
-import { handleNotifyBatch } from '../../src/queues/notify';
+import { createLogger, type LogLine } from '../../src/observability/log';
+import {
+  NOTIFY_ALERT_ATTEMPT,
+  handleNotifyBatch,
+  notifyRetryDelaySeconds,
+} from '../../src/queues/notify';
+import wranglerConfig from '../../wrangler.jsonc?raw';
 import { testEnv, uniqueEmail, uniqueInstallId } from './helpers/auth';
 import { db, seededFlightFor } from './helpers/routes';
 
@@ -56,6 +63,8 @@ interface PlantOptions {
   readonly muted?: boolean;
   /** The subscription's `live_tracked` flag; true by default, as only those are pushed. */
   readonly liveTracked?: boolean;
+  /** When persist released the slot (ruling Q1); null by default. */
+  readonly releasedAt?: string;
   readonly unsubscribed?: boolean;
   readonly preferences?: { pushEnabled?: boolean; events?: Record<string, boolean> };
   readonly timeFormat?: '12h' | '24h';
@@ -83,6 +92,7 @@ async function plantFollower(
       flightInstanceId: instance?.id ?? '',
       muted: options.muted ?? false,
       liveTracked: options.liveTracked ?? true,
+      liveTrackedReleasedAt: options.releasedAt ?? null,
       deletedAt: options.unsubscribed === true ? new Date().toISOString() : null,
     });
   if (options.preferences !== undefined) {
@@ -214,6 +224,58 @@ async function deliver(
   };
 }
 
+/** A database whose every statement fails, as Postgres or Hyperdrive in an outage (Q2). */
+const unreachableDb = new Proxy(
+  {},
+  {
+    get: () => () => {
+      throw new Error('connect ECONNREFUSED');
+    },
+  },
+) as unknown as Db;
+
+interface AttemptOptions {
+  readonly attempts: number;
+  readonly db?: Db;
+  readonly now?: number;
+}
+
+/** One delivery of `body` at its `attempts`th attempt: what Queues was told, what was logged. */
+async function attempt(
+  body: NotifyIntentV1Input,
+  queue: Pick<Queue, 'sendBatch'>,
+  options: AttemptOptions,
+) {
+  const lines: LogLine[] = [];
+  const alerts: string[] = [];
+  messageCounter += 1;
+  const id = `notify-${String(messageCounter)}`;
+  const batch = createMessageBatch('planeahead-notify-local', [
+    { id, timestamp: new Date(), attempts: options.attempts, body },
+  ]);
+  const ctx = createExecutionContext();
+  await handleNotifyBatch(
+    batch,
+    { env: testEnv, ctx, log: createLogger({}, (line) => lines.push(line)) },
+    {
+      pushQueue: queue,
+      ...(options.db === undefined ? {} : { db: options.db }),
+      ...(options.now === undefined ? {} : { now: () => options.now ?? 0 }),
+      capture: (message) => alerts.push(message),
+    },
+  );
+  const result = await getQueueResult(batch, ctx);
+  // The pool records a retry without its delay; `consumeBatch` logs the delay it asked for.
+  const delay = lines.find((line) => line.event === 'queue_message_failed')?.['delay_seconds'];
+  const retried = result.retryMessages.some((retry) => retry.msgId === id);
+  return {
+    acked: result.explicitAcks.includes(id),
+    retryDelay: retried && typeof delay === 'number' ? delay : null,
+    events: lines.map((line) => line.event),
+    alerts,
+  };
+}
+
 async function rowsFor(dedupeKey: string) {
   return db()
     .select({ id: notifications.id, userId: notifications.userId, isTest: notifications.isTest })
@@ -299,6 +361,69 @@ describe('notify: who hears of an intent', () => {
     expect((await deliver([quietIntent], quiet.queue)).retried).toEqual([]);
     expect(quiet.made()).toBe(0);
     expect((await rowsFor(quietIntent.dedupeKey)).map((row) => row.userId)).toEqual([alone.userId]);
+  });
+
+  it('also pushes a subscription released at or after producedAt; one released before, or never held, is inbox only (Q1)', async () => {
+    const flightKey = await plantFlight();
+    const producedMs = Date.now() - 60_000;
+    const at = (offsetMs: number) => new Date(producedMs + offsetMs).toISOString();
+    const releasedAtProduction = await plantFollower(flightKey, {
+      liveTracked: false,
+      releasedAt: at(0),
+    });
+    const releasedAfter = await plantFollower(flightKey, { liveTracked: false, releasedAt: at(1) });
+    const releasedBefore = await plantFollower(flightKey, {
+      liveTracked: false,
+      releasedAt: at(-1),
+    });
+    // The cap refused its slot: never flagged, so never stamped.
+    const capRefused = await plantFollower(flightKey, { liveTracked: false });
+    const all = [releasedAtProduction, releasedAfter, releasedBefore, capRefused];
+    for (const follower of all) {
+      await plantTokens(follower.userId, 1);
+    }
+    const recorder = recordingQueue();
+    const intent = intentFor(flightKey, {}, { producedAt: at(0) });
+    expect((await deliver([intent], recorder.queue)).retried).toEqual([]);
+
+    expect(subjectsOf(recorder.jobs())).toEqual(
+      new Set([releasedAtProduction.userId, releasedAfter.userId]),
+    );
+    expect(new Set((await rowsFor(intent.dedupeKey)).map((row) => row.userId))).toEqual(
+      new Set(all.map((follower) => follower.userId)),
+    );
+  });
+
+  it('pushes nothing to a token that already has a delivery row for the notification (Q1, F6)', async () => {
+    const flightKey = await plantFlight();
+    const { userId } = await plantFollower(flightKey);
+    const tokens = await plantTokens(userId, 2);
+    const recorder = recordingQueue();
+    const intent = intentFor(flightKey);
+    await deliver([intent], recorder.queue);
+    const [first] = recorder.jobs();
+    expect(first?.targets).toHaveLength(2);
+
+    // The push consumer's outcomes, as persist recorded them: one sent, one failed.
+    const [row] = await rowsFor(intent.dedupeKey);
+    await db()
+      .insert(notificationDeliveries)
+      .values(
+        tokens.map((pushTokenId, index) => ({
+          id: uuidv7(),
+          notificationId: row?.id ?? '',
+          subjectId: userId,
+          channel: 'fcm',
+          pushTokenId,
+          status: index === 0 ? 'sent' : 'failed',
+          attempts: 1,
+        })),
+      );
+    // The finished tracker's re-send of the same intent, its confirmation lost.
+    const resent = recordingQueue();
+    expect((await deliver([intent], resent.queue)).acked).toHaveLength(1);
+    expect(resent.made()).toBe(0);
+    expect(await rowsFor(intent.dedupeKey)).toHaveLength(1);
   });
 });
 
@@ -529,5 +654,93 @@ describe('notify: sendBatch limits and failures', () => {
     expect(delivered.acked).toHaveLength(1);
     expect(delivered.retried).toEqual([]);
     expect(recorder.made()).toBe(0);
+  });
+});
+
+describe("notify: retries within the intent's relevance (Q2)", () => {
+  it('retries a failing database with a future expiresAt and sends nothing, then sends once after recovery', async () => {
+    const flightKey = await plantFlight();
+    const { userId } = await plantFollower(flightKey);
+    await plantTokens(userId, 1);
+    const queue = recordingQueue();
+    const body = intentFor(flightKey);
+    const delays: (number | null)[] = [];
+    for (let attempts = 1; attempts <= 20; attempts += 1) {
+      const outcome = await attempt(body, queue.queue, { attempts, db: unreachableDb });
+      expect(outcome.acked).toBe(false);
+      delays.push(outcome.retryDelay);
+    }
+    expect(delays).toEqual([2, 4, 8, 16, 32, 64, ...Array<number>(14).fill(120)]);
+    expect(queue.made()).toBe(0);
+    expect(await rowsFor(body.dedupeKey)).toEqual([]);
+
+    const recovered = await attempt(body, queue.queue, { attempts: 21 });
+    expect(recovered).toMatchObject({ acked: true, retryDelay: null });
+    expect(queue.jobs()).toHaveLength(1);
+    expect(subjectsOf(queue.jobs())).toEqual(new Set([userId]));
+    expect(await rowsFor(body.dedupeKey)).toHaveLength(1);
+  });
+
+  it('acknowledges without sending or dead-lettering once the next attempt would land past expiresAt', async () => {
+    const flightKey = await plantFlight();
+    const { userId } = await plantFollower(flightKey);
+    await plantTokens(userId, 1);
+    const queue = recordingQueue();
+    const now = Date.now();
+    const body = intentFor(flightKey, { expiresAt: new Date(now + 60_000).toISOString() });
+
+    // Attempt 5 waits 32 s, inside the minute; attempt 6 would wait 64 s, past it.
+    const inside = await attempt(body, queue.queue, { attempts: 5, db: unreachableDb, now });
+    expect(inside).toMatchObject({ acked: false, retryDelay: 32 });
+    expect(inside.events).not.toContain('notify_intent_expired');
+    const late = await attempt(body, queue.queue, { attempts: 6, db: unreachableDb, now });
+    expect(late).toMatchObject({ acked: true, retryDelay: null });
+    expect(late.events).toContain('notify_intent_expired');
+
+    // Already past its window at the first failure.
+    const passed = intentFor(flightKey, {
+      expiresAt: new Date(now - 1000).toISOString(),
+      dedupeValue: 'origin:C9',
+    });
+    const first = await attempt(passed, queue.queue, { attempts: 1, db: unreachableDb, now });
+    expect(first).toMatchObject({ acked: true, retryDelay: null });
+    expect(first.events).toContain('notify_intent_expired');
+    expect(queue.made()).toBe(0);
+  });
+
+  it('raises the ops alert once, at attempt 6, while the retries continue', async () => {
+    const flightKey = await plantFlight();
+    const queue = recordingQueue();
+    const body = intentFor(flightKey);
+    const alerted: number[] = [];
+    for (let attempts = 1; attempts <= 9; attempts += 1) {
+      const outcome = await attempt(body, queue.queue, { attempts, db: unreachableDb });
+      expect(outcome.acked).toBe(false);
+      if (outcome.alerts.length > 0) {
+        expect(outcome.alerts).toEqual(['notify_intent_failing']);
+        alerted.push(attempts);
+      }
+    }
+    expect(alerted).toEqual([NOTIFY_ALERT_ATTEMPT]);
+    expect(NOTIFY_ALERT_ATTEMPT).toBe(6);
+  });
+
+  it('runs 100 retries, about three hours, in all three environments', () => {
+    const consumers = [
+      ...wranglerConfig.matchAll(
+        /"queue": "(planeahead-notify(?:-local|-staging)?)",[^}]*?"max_retries": (\d+),\s*"dead_letter_queue": "planeahead-notify-dlq(?:-local|-staging)?"/g,
+      ),
+    ].map((match) => ({ queue: match[1], maxRetries: Number(match[2]) }));
+    expect(consumers).toEqual([
+      { queue: 'planeahead-notify-local', maxRetries: 100 },
+      { queue: 'planeahead-notify-staging', maxRetries: 100 },
+      { queue: 'planeahead-notify', maxRetries: 100 },
+    ]);
+    let runway = 0;
+    for (let attempts = 1; attempts <= 100; attempts += 1) {
+      runway += notifyRetryDelaySeconds(attempts);
+    }
+    expect(runway / 3600).toBeGreaterThan(3);
+    expect(runway / 3600).toBeLessThan(3.25);
   });
 });

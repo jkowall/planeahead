@@ -118,16 +118,6 @@ describe('PersistMessageV1', () => {
       FlightInstanceOutboxPayloadV1.safeParse({ ...INSTANCE.payload, trackingState: 'active' })
         .success,
     ).toBe(false);
-    // Increment 15: the suspected-cancellation flag is optional (absent from every older tracker).
-    expect(FlightInstanceOutboxPayloadV1.parse(INSTANCE.payload).cancelSuspect).toBeUndefined();
-    expect(
-      FlightInstanceOutboxPayloadV1.parse({ ...INSTANCE.payload, cancelSuspect: true })
-        .cancelSuspect,
-    ).toBe(true);
-    expect(
-      FlightInstanceOutboxPayloadV1.safeParse({ ...INSTANCE.payload, cancelSuspect: 'yes' })
-        .success,
-    ).toBe(false);
   });
 
   it('parses a flight_event message with the outbox seq as the event seq', () => {

@@ -134,12 +134,6 @@ export const FlightInstanceOutboxPayloadV1 = z.looseObject({
   operatorSource: OperatorSourceSchema.nullable(),
   finishedAt: IsoInstantSchema.nullable(),
   eventsR2Key: z.string().nullable(),
-  /**
-   * Increment 15 (ruling N4): the snapshot's `cancelled` is a suspicion awaiting the confirming
-   * re-read, so the flight is not over yet and persist keeps its live-tracking slots. Absent
-   * (every tracker before 15) is false.
-   */
-  cancelSuspect: z.boolean().optional(),
 });
 export type FlightInstanceOutboxPayloadV1 = z.infer<typeof FlightInstanceOutboxPayloadV1>;
 
