@@ -66,7 +66,12 @@
   // tag. Empty means not configured, and the admin page answers 403 to everyone (fail closed).
   // CF_ACCOUNT_ID is the account the admin page and the Analytics Engine rollup query through the
   // Cloudflare API (with the optional CF_API_TOKEN secret); empty shows those figures as
-  // unavailable. SUPPORT_EMAIL is the inbox the account-deletion page names.
+  // unavailable. SUPPORT_EMAIL is the inbox the account-deletion page names. BOARDS_ENABLED
+  // (increment 18, R8) serves the airport boards and the route search when "true": here and in
+  // staging. Production sets "false" (anything but "true" is off), and both routes answer 404
+  // `boards_disabled`, until AeroDataBox confirms in writing that boards are End Use AND the
+  // per-user board budget (R3) is built (docs/runbooks/first-deploy.md, docs/open-decisions.md).
+  // The flip is that one word in "env.production.vars", and only then.
   "vars": {
     "ENVIRONMENT": "local",
     "API_PUBLIC_URL": "http://localhost:8787",
@@ -74,6 +79,7 @@
     "ACCESS_AUD": "",
     "CF_ACCOUNT_ID": "",
     "SUPPORT_EMAIL": "support@planeahead.app",
+    "BOARDS_ENABLED": "true",
   },
 
   "durable_objects": {
@@ -201,14 +207,19 @@
 
   // Rate limit namespace ids are account-wide counters: two Workers that name the same id share
   // the same budget. Staging traffic must never spend production's allowance, so every
-  // environment gets its own block of ids (1001-1003 staging, 2001-2003 production, 3001-3003
+  // environment gets its own block of ids (1001-1005 staging, 2001-2005 production, 3001-3005
   // local). `period` is hard enumerated to 10 or 60 seconds by the platform. EVENTS_RL is 300
   // batches per 60 s per client IP in every environment (ruling AA4): carrier NAT puts many
   // installs behind one address, and a batch is one write of a few Analytics Engine points.
+  // Every board or route-search request (increment 18, ruling B9) takes BOARD_RL, 30 per 60 s,
+  // keyed by the user, and BOARD_IP_RL, 300 per 60 s, keyed by the client's /64 (R11: one NAT or
+  // one IPv6 subnet holds many installs, the reason EVENTS_RL is 300), in every environment.
   "ratelimits": [
     { "name": "PUBLIC_RL", "namespace_id": "3001", "simple": { "limit": 120, "period": 10 } },
     { "name": "USER_RL", "namespace_id": "3002", "simple": { "limit": 600, "period": 60 } },
     { "name": "EVENTS_RL", "namespace_id": "3003", "simple": { "limit": 300, "period": 60 } },
+    { "name": "BOARD_RL", "namespace_id": "3004", "simple": { "limit": 30, "period": 60 } },
+    { "name": "BOARD_IP_RL", "namespace_id": "3005", "simple": { "limit": 300, "period": 60 } },
   ],
 
   "env": {
@@ -255,6 +266,7 @@
         "ACCESS_AUD": "",
         "CF_ACCOUNT_ID": "",
         "SUPPORT_EMAIL": "support@planeahead.app",
+        "BOARDS_ENABLED": "true",
       },
 
       "durable_objects": {
@@ -376,6 +388,8 @@
         { "name": "PUBLIC_RL", "namespace_id": "1001", "simple": { "limit": 120, "period": 10 } },
         { "name": "USER_RL", "namespace_id": "1002", "simple": { "limit": 600, "period": 60 } },
         { "name": "EVENTS_RL", "namespace_id": "1003", "simple": { "limit": 300, "period": 60 } },
+        { "name": "BOARD_RL", "namespace_id": "1004", "simple": { "limit": 30, "period": 60 } },
+        { "name": "BOARD_IP_RL", "namespace_id": "1005", "simple": { "limit": 300, "period": 60 } },
       ],
     },
 
@@ -428,6 +442,9 @@
         "ACCESS_AUD": "",
         "CF_ACCOUNT_ID": "",
         "SUPPORT_EMAIL": "support@planeahead.app",
+        // Off until the End Use answer and the per-user board budget (R3, R8): see the top-level
+        // "vars" comment before making this "true".
+        "BOARDS_ENABLED": "false",
       },
 
       "durable_objects": {
@@ -549,6 +566,8 @@
         { "name": "PUBLIC_RL", "namespace_id": "2001", "simple": { "limit": 120, "period": 10 } },
         { "name": "USER_RL", "namespace_id": "2002", "simple": { "limit": 600, "period": 60 } },
         { "name": "EVENTS_RL", "namespace_id": "2003", "simple": { "limit": 300, "period": 60 } },
+        { "name": "BOARD_RL", "namespace_id": "2004", "simple": { "limit": 30, "period": 60 } },
+        { "name": "BOARD_IP_RL", "namespace_id": "2005", "simple": { "limit": 300, "period": 60 } },
       ],
     },
   },

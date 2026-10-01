@@ -20,7 +20,12 @@ import { FlightKeySchema } from './flight-key';
  *   is still checked at compile time.
  * - Every other vocabulary (`ProviderId`, `ProviderCallTrigger`, `ProviderCallResult`,
  *   `AlertEvent`, `FieldQuality`, `SyncEntity`) is closed and append-only: a producer may emit
- *   a new value only one release after every consumer accepts it.
+ *   a new value only one release after every consumer accepts it. Increment 18 adds the
+ *   triggers `board` and `route_search` in the same release as their producer (`AirportState`):
+ *   every deploy is one whole `wrangler deploy` of the Worker and its objects
+ *   (deploy-staging.yml, deploy-production.yml), so no older consumer runs beside the new
+ *   producer except during a deploy's switchover seconds, where a refused record is an accepted
+ *   accounting loss. Migration 0010 widens the `provider_calls` trigger check before that deploy.
  *
  * `z.infer` of a `looseObject` carries a string index signature, which switches off
  * TypeScript's excess-property check, so a producer that misspells a field would compile.
@@ -173,6 +178,16 @@ export const OPERATOR_SOURCES = ['provider', 'callsign', 'hint', 'marketing'] as
 export const OperatorSourceSchema = z.enum(OPERATOR_SOURCES);
 export type OperatorSource = z.infer<typeof OperatorSourceSchema>;
 
+/**
+ * AeroDataBox `CodeshareStatus` (direct-gateway OpenAPI 1.15.3.0). Defined here, not in
+ * `operator.ts`, because `BoardRowSchema` carries it and `operator.ts` already imports from this
+ * module. A value AeroDataBox adds later parses as `Unknown`, which resolves to the marketing
+ * carrier.
+ */
+export const CODESHARE_STATUSES = ['Unknown', 'IsOperator', 'IsCodeshared'] as const;
+export type CodeshareStatus = (typeof CODESHARE_STATUSES)[number];
+export const CodeshareStatusSchema = tolerantEnum(CODESHARE_STATUSES, 'Unknown');
+
 export const PROVIDER_CALL_TRIGGERS = [
   'alarm',
   'provider_alert',
@@ -184,6 +199,9 @@ export const PROVIDER_CALL_TRIGGERS = [
   'cron',
   'import',
   'manual',
+  // Increment 18: AirportState's FIDS calls, for an airport board or a route search.
+  'board',
+  'route_search',
 ] as const;
 export const ProviderCallTriggerSchema = z.enum(PROVIDER_CALL_TRIGGERS);
 export type ProviderCallTrigger = z.infer<typeof ProviderCallTriggerSchema>;
@@ -324,6 +342,15 @@ export const FlightStatusSchema = z.looseObject({
 export type FlightStatus = z.infer<typeof FlightStatusSchema>;
 export type FlightStatusInput = z.input<typeof FlightStatusSchema>;
 
+/**
+ * One flight on an airport board, normalised (increment 18, R3 D2): the board's own airport is
+ * the HOME side, the other end of the flight is the COUNTERPART. The home leg is the departure on
+ * a departures board and the arrival on an arrivals board; the counterpart leg is the other one.
+ * Both legs carry their scheduled time and the best time known (`actual`, else `estimated`, else
+ * the schedule), so one cached bucket serves the boards and the route search. Rows are stored in
+ * `AirportState` and filtered and grouped by the Worker (codeshares, R3 D7); they are never the
+ * provider's JSON.
+ */
 export const BoardRowSchema = z.looseObject({
   direction: z.enum(['dep', 'arr']),
   /** Marketing designator as displayed on the board, e.g. `AA100`. */
@@ -335,8 +362,17 @@ export const BoardRowSchema = z.looseObject({
    * matches its tracker's key), or the marketing number when there is no operator.
    */
   flightNumber: z.string().regex(FLIGHT_NUMBER_RE),
+  /** The carrier that markets `designator`, for the airline filter (operating or marketing). */
+  marketingCarrierIcao: z.string().regex(ICAO_CARRIER_RE).optional(),
+  marketingCarrierIata: z.string().regex(IATA_CARRIER_RE).optional(),
+  /** The provider's codeshare role for this number; absent reads as `Unknown`. */
+  codeshareStatus: CodeshareStatusSchema.optional(),
+  /** ATC callsign and registration, the codeshare grouping keys beside time and counterpart. */
+  callSign: z.string().optional(),
+  registration: z.string().optional(),
   /** The other end of the flight: destination for departures, origin for arrivals. */
   counterpart: AirportRefSchema,
+  /** Home leg: the departure at a departures board, the arrival at an arrivals board. */
   scheduled: IsoInstantSchema,
   estimated: IsoInstantSchema.optional(),
   actual: IsoInstantSchema.optional(),
@@ -344,7 +380,20 @@ export const BoardRowSchema = z.looseObject({
   terminal: z.string().optional(),
   gate: z.string().optional(),
   baggageClaim: z.string().optional(),
+  /** Counterpart leg: the arrival of a departure, the departure of an arrival. */
+  counterpartScheduled: IsoInstantSchema.optional(),
+  counterpartEstimated: IsoInstantSchema.optional(),
+  counterpartActual: IsoInstantSchema.optional(),
+  counterpartTerminal: z.string().optional(),
+  counterpartGate: z.string().optional(),
+  /**
+   * The ORIGIN-local scheduled departure date, the date `POST /v1/flights` takes with
+   * `designator`: the home leg's for a departure, the counterpart leg's for an arrival.
+   */
+  scheduledDepartureDateLocal: IsoDateSchema.optional(),
   aircraftTypeIcao: z.string().optional(),
+  /** The provider's free-text model (`Boeing 777-300ER`); FIDS has no ICAO type code. */
+  aircraftModel: z.string().optional(),
   codeshares: z.array(CodeshareSchema).default([]),
   flightKey: FlightKeySchema.optional(),
   source: ProviderIdSchema,

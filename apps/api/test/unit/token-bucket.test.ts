@@ -14,6 +14,8 @@ import httpSource from '../../src/providers/http.ts?raw';
 import routerSource from '../../src/providers/router.ts?raw';
 import bucketSource from '../../src/providers/token-bucket.ts?raw';
 import webhookTokenSource from '../../src/providers/webhook-token.ts?raw';
+import { boardTokenFloor } from '../../src/providers/boards-budget';
+import { ADB_PLANS } from '../../src/providers/config';
 import {
   backoff,
   bucketConfig,
@@ -164,6 +166,74 @@ describe('bucketForLimit: a provider limit held in ANY one-second window', () =>
       expect(maxInWindow(granted, 1_000, false)).toBe(1);
     },
   );
+});
+
+describe('the floor a board call leaves for the trackers (ruling R2)', () => {
+  const GROWTH = bucketForLimit(10); // a burst of 5, refilled at 5 a second
+
+  it('takes only while the bucket keeps the floor, waits for it, and says when it alone refused', () => {
+    let state = initialBucket(GROWTH, T0);
+    const allowed: boolean[] = [];
+    for (let i = 0; i < 4; i += 1) {
+      const result = take(state, GROWTH, T0, 1, 2);
+      allowed.push(result.allowed);
+      state = result.state;
+    }
+    expect(allowed).toEqual([true, true, true, false]);
+    // Two tokens left: enough for the call, not for the call and the floor; 200 ms refills one.
+    expect(take(state, GROWTH, T0, 1, 2)).toMatchObject({
+      allowed: false,
+      floored: true,
+      retryAfterMs: 200,
+    });
+    expect(take(state, GROWTH, T0 + 200, 1, 2).allowed).toBe(true);
+    // A tracker (no floor) still finds both tokens.
+    const first = take(state, GROWTH, T0);
+    const second = take(first.state, GROWTH, T0);
+    expect([first, second].map((r) => [r.allowed, r.floored])).toEqual([
+      [true, false],
+      [true, false],
+    ]);
+    // Empty, a board call meets the rate itself: not the floor's refusal; the wait covers both.
+    expect(take(second.state, GROWTH, T0, 1, 2)).toMatchObject({
+      allowed: false,
+      floored: false,
+      retryAfterMs: 600,
+    });
+  });
+
+  it('never takes the bucket below the floor, however hard board calls press', () => {
+    let state = initialBucket(GROWTH, T0);
+    let granted = 0;
+    for (let ms = 0; ms < 3_000; ms += 1) {
+      const result = take(state, GROWTH, T0 + ms, 1, 2);
+      state = result.state;
+      if (result.allowed) {
+        granted += 1;
+        expect(state.tokens).toBeGreaterThanOrEqual(2 - 1e-9);
+      }
+    }
+    // Three tokens above the floor, then the refill: the rate is unchanged, only the burst shrinks.
+    expect(granted).toBe(3 + 15 - 1);
+  });
+
+  it('caps the floor below the burst, so a full bucket always serves the call', () => {
+    const starter = bucketForLimit(5); // a burst of 2
+    expect(take(initialBucket(starter, T0), starter, T0, 1, 5).allowed).toBe(true);
+    const one = bucketForLimit(1);
+    expect(take(initialBucket(one, T0), one, T0, 1, 1).allowed).toBe(true);
+    // A blocked bucket is a rate refusal, never the floor's.
+    const blocked = backoff(initialBucket(starter, T0), starter, T0, 1_000);
+    expect(take(blocked, starter, T0, 1, 1)).toMatchObject({ allowed: false, floored: false });
+  });
+
+  it.each([
+    ['starter', 1],
+    ['growth', 2],
+    ['scale', 5],
+  ] as const)('%s keeps %i token(s): half its burst, rounded down', (plan, floor) => {
+    expect(boardTokenFloor(bucketForLimit(ADB_PLANS[plan].perSecondLimit))).toBe(floor);
+  });
 });
 
 describe('no timers in the provider layer', () => {

@@ -7,6 +7,7 @@
 
 import { describe, expect, it } from 'vitest';
 import {
+  BoardRowSchema,
   canonicalizeFromProvider,
   type FlightKey,
   type ProviderCallRecord,
@@ -22,6 +23,7 @@ import { ADB_PLANS } from '../../src/providers/config';
 import airportKjfk from '../../src/providers/fixtures/aerodatabox/airport-kjfk.json';
 import cloudflare403 from '../../src/providers/fixtures/aerodatabox/cloudflare-403.json';
 import fidsKjfkArrivals from '../../src/providers/fixtures/aerodatabox/fids-kjfk-arrivals.json';
+import fidsKjfkBoth from '../../src/providers/fixtures/aerodatabox/fids-kjfk-both.json';
 import fidsKjfk from '../../src/providers/fixtures/aerodatabox/fids-kjfk-departures.json';
 import flightArrived from '../../src/providers/fixtures/aerodatabox/flight-arrived.json';
 import flightCancelled from '../../src/providers/fixtures/aerodatabox/flight-cancelled.json';
@@ -59,6 +61,7 @@ const FIXTURES: Record<string, Fixture> = {
   'airport-kjfk': airportKjfk,
   'cloudflare-403': cloudflare403,
   'fids-kjfk-arrivals': fidsKjfkArrivals,
+  'fids-kjfk-both': fidsKjfkBoth,
   'fids-kjfk-departures': fidsKjfk,
   'flight-arrived': flightArrived,
   'flight-cancelled': flightCancelled,
@@ -89,9 +92,10 @@ function adapter(fetch: ReturnType<typeof fixtureFetch>['fetch'], alertsEnabled 
 }
 
 const AA100 = { carrier: { iata: 'AA' }, flightNumber: '100', dateLocal: '2026-09-22' } as const;
-const KJFK_EVENING = {
-  from: '2026-09-22T17:00',
-  to: '2026-09-23T17:00',
+/** The PM bucket of 2026-09-22 at JFK (increment 18's 12-hour buckets). */
+const KJFK_PM = {
+  from: '2026-09-22T12:00',
+  to: '2026-09-22T23:59',
   tz: 'America/New_York',
 } as const;
 
@@ -773,78 +777,104 @@ describe('getFlight: misses, suppression and push-back', () => {
 });
 
 describe('boards, airports and coverage', () => {
-  it('getBoard asks FIDS by ICAO, caps the window at the plan, maps rows and skips the unkeyable', async () => {
-    const stub = fixtureFetch(FIXTURES['fids-kjfk-departures'] as Fixture);
+  it('getAirportBoard makes one FIDS call in R3 D2 shape and maps both directions with both legs', async () => {
+    const stub = fixtureFetch(FIXTURES['fids-kjfk-both'] as Fixture);
     const { ctx } = providerContext({ now: '2026-09-22T22:40:00Z' });
-    const { data, call } = await adapter(stub.fetch).getBoard('kjfk', 'dep', KJFK_EVENING, ctx);
+    const { data, call } = await adapter(stub.fetch).getAirportBoard('kjfk', KJFK_PM, ctx);
+    expect(stub.requests).toHaveLength(1);
     const url = stub.urls()[0];
-    // Growth allows 24 hours; the 24-hour ask stays, anything longer is cut.
-    expect(url?.pathname).toBe('/flights/airports/Icao/KJFK/2026-09-22T17:00/2026-09-23T17:00');
+    expect(url?.pathname).toBe('/flights/airports/Icao/KJFK/2026-09-22T12:00/2026-09-22T23:59');
     expect(Object.fromEntries(url?.searchParams ?? [])).toEqual({
-      direction: 'Departure',
-      withLeg: 'false',
+      direction: 'Both',
+      withLeg: 'true',
       withCancelled: 'true',
       withCodeshared: 'true',
       withCargo: 'false',
       withPrivate: 'false',
     });
-    expect(call).toMatchObject({ operation: 'fids', costUnits: 2, result: 'ok' });
+    // The unkeyable row is counted on the record, not dropped silently.
+    expect(call).toMatchObject({
+      operation: 'fids',
+      costUnits: 2,
+      result: 'ok',
+      error: 'skipped 1: no_counterpart_icao x1',
+    });
     expect(
       data.map((row) => [
+        row.direction,
         row.designator,
         row.operatingCarrierIcao,
         row.flightNumber,
         row.counterpart.icao,
         row.status,
+        row.codeshareStatus,
       ]),
     ).toEqual([
-      ['AA100', 'AAL', '100', 'EGLL', 'boarding'],
-      // The codeshare row names the operating designator its tracker is keyed by (AAL-100-...).
-      ['BA1512', 'AAL', '100', 'EGLL', 'boarding'],
-      ['AF11', 'AFR', '11', 'LFPG', 'departed'],
+      ['dep', 'AA100', 'AAL', '100', 'EGLL', 'boarding', 'IsOperator'],
+      // The codeshare names the operating designator its tracker is keyed by (AAL-100-...).
+      ['dep', 'BA1512', 'AAL', '100', 'EGLL', 'boarding', 'IsCodeshared'],
+      // Off the runway: en route, from the runway time the status enum makes an actual.
+      ['dep', 'AF11', 'AFR', '11', 'LFPG', 'en_route', 'IsOperator'],
+      ['arr', 'AA101', 'AAL', '101', 'EGLL', 'en_route', 'IsOperator'],
+      ['arr', 'BA117', 'BAW', '117', 'EGLL', 'arrived', 'IsOperator'],
+      // A regional codeshare with no callsign takes the hint, exactly as getFlight does.
+      ['arr', 'AA3456', 'ENY', '3456', 'KBOS', 'boarding', 'IsCodeshared'],
+      ['arr', 'DL404', 'DAL', '404', 'KATL', 'cancelled', 'IsOperator'],
     ]);
-    expect(data[0]).toMatchObject({
-      estimated: '2026-09-22T23:10:00.000Z',
-      gate: 'B32',
-      terminal: '8',
-    });
-    expect(data[2]).toMatchObject({ actual: '2026-09-22T21:34:00.000Z' });
-
-    const wide = fixtureFetch(FIXTURES['fids-kjfk-departures'] as Fixture);
-    await adapter(wide.fetch).getBoard(
-      'KJFK',
-      'arr',
-      { from: '2026-09-22T00:00', to: '2026-09-24T00:00', tz: 'America/New_York' },
-      ctx,
-    );
-    expect(wide.urls()[0]?.pathname).toBe(
-      '/flights/airports/Icao/KJFK/2026-09-22T00:00/2026-09-23T00:00',
-    );
-    expect(wide.urls()[0]?.searchParams.get('direction')).toBe('Arrival');
   });
 
-  it('arrival rows derive their status from what an arrival row has, and resolve operators like flights', async () => {
-    const stub = fixtureFetch(FIXTURES['fids-kjfk-arrivals'] as Fixture);
-    const { data } = await adapter(stub.fetch).getBoard(
-      'KJFK',
-      'arr',
-      KJFK_EVENING,
-      providerContext({ now: '2026-09-22T21:30:00Z' }).ctx,
-    );
-    expect(
-      data.map((row) => [row.designator, row.operatingCarrierIcao, row.flightNumber, row.status]),
-    ).toEqual([
-      // In the air (the enum says it left the origin), with an estimated arrival: en route.
-      ['AA101', 'AAL', '101', 'en_route'],
-      // At the gate: the revised time is the actual in.
-      ['BA117', 'BAW', '117', 'arrived'],
-      // A regional codeshare with no callsign takes the hint, exactly as getFlight does.
-      ['AA3456', 'ENY', '3456', 'scheduled'],
-      ['DL404', 'DAL', '404', 'cancelled'],
-    ]);
-    expect(data[0]).toMatchObject({ estimated: '2026-09-22T22:05:00.000Z' });
+  it('board rows carry both legs, the codeshare keys, the aircraft and the origin-local date', async () => {
+    const { data } = await adapter(
+      fixtureFetch(FIXTURES['fids-kjfk-both'] as Fixture).fetch,
+    ).getAirportBoard('KJFK', KJFK_PM, providerContext({ now: '2026-09-22T22:40:00Z' }).ctx);
+    expect(data[0]).toMatchObject({
+      scheduled: '2026-09-22T22:00:00.000Z',
+      estimated: '2026-09-22T23:10:00.000Z',
+      terminal: '8',
+      gate: 'B32',
+      counterpartScheduled: '2026-09-23T05:05:00.000Z',
+      counterpartEstimated: '2026-09-23T06:15:00.000Z',
+      counterpartTerminal: '3',
+      marketingCarrierIcao: 'AAL',
+      marketingCarrierIata: 'AA',
+      callSign: 'AAL100',
+      registration: 'N718AN',
+      aircraftModel: 'Boeing 777-300ER',
+      scheduledDepartureDateLocal: '2026-09-22',
+      source: 'aerodatabox',
+    });
     expect(data[0]?.actual).toBeUndefined();
-    expect(data[1]).toMatchObject({ actual: '2026-09-22T20:52:00.000Z', baggageClaim: '4' });
+    expect(data[0]?.baggageClaim).toBeUndefined();
+    expect(data[1]).toMatchObject({
+      marketingCarrierIcao: 'BAW',
+      marketingCarrierIata: 'BA',
+      callSign: 'AAL100',
+      registration: 'N718AN',
+      counterpartScheduled: data[0]?.counterpartScheduled,
+    });
+    expect(data[2]).toMatchObject({
+      actual: '2026-09-22T21:34:00.000Z',
+      counterpartEstimated: '2026-09-23T05:10:00.000Z',
+      counterpartGate: 'K41',
+    });
+    // An arrival: the departure leg is the counterpart, and its local date is the flight's date.
+    expect(data[3]).toMatchObject({
+      scheduled: '2026-09-22T21:40:00.000Z',
+      estimated: '2026-09-22T22:05:00.000Z',
+      counterpartScheduled: '2026-09-22T14:10:00.000Z',
+      counterpartActual: '2026-09-22T14:25:00.000Z',
+      counterpartTerminal: '3',
+      scheduledDepartureDateLocal: '2026-09-22',
+    });
+    expect(data[4]).toMatchObject({
+      actual: '2026-09-22T20:52:00.000Z',
+      terminal: '7',
+      gate: '2',
+      baggageClaim: '4',
+    });
+    for (const row of data) {
+      expect(BoardRowSchema.safeParse(row).success).toBe(true);
+    }
     // The row and the flight for the same operation resolve to the same operator.
     const flight = await adapter(
       fixtureFetch(FIXTURES['flight-codeshared-regional'] as Fixture).fetch,
@@ -853,9 +883,99 @@ describe('boards, airports and coverage', () => {
       providerContext().ctx,
     );
     expect([flight.data[0]?.operatingCarrierIcao, flight.data[0]?.flightNumber]).toEqual([
-      data[2]?.operatingCarrierIcao,
-      data[2]?.flightNumber,
+      data[5]?.operatingCarrierIcao,
+      data[5]?.flightNumber,
     ]);
+  });
+
+  it('counts every skipped item, reads a home leg without its airport and a movement-only row', async () => {
+    const lhr = { icao: 'EGLL', iata: 'LHR', name: 'Heathrow', timeZone: 'Europe/London' };
+    const at = (utc: string) => ({ utc, local: utc.slice(0, 16) });
+    const base = { status: 'Expected', codeshareStatus: 'IsOperator', isCargo: false };
+    const body = {
+      departures: [
+        {
+          ...base,
+          number: 'AA 100',
+          // The leg at the requested airport may omit `airport` (AirportFlightContract).
+          departure: { scheduledTime: at('2026-09-22 22:00Z'), quality: ['Basic'] },
+          arrival: { airport: lhr, scheduledTime: at('2026-09-23 05:05Z'), quality: ['Basic'] },
+        },
+        { ...base, number: 'AA 7' },
+        { ...base, number: '' },
+        { ...base, number: 'AA 8', departure: { quality: [] }, arrival: { airport: lhr } },
+        {
+          ...base,
+          number: '!!',
+          movement: { airport: lhr, scheduledTime: at('2026-09-22 22:00Z') },
+        },
+      ],
+      arrivals: [
+        {
+          ...base,
+          number: 'B6 100',
+          movement: { airport: lhr, scheduledTime: at('2026-09-22 15:00Z'), quality: ['Basic'] },
+        },
+      ],
+    };
+    const stub = fetchStub(() => Response.json(body));
+    const { data, call } = await adapter(stub.fetch).getAirportBoard(
+      'KJFK',
+      KJFK_PM,
+      providerContext({ now: '2026-09-22T12:00:00Z' }).ctx,
+    );
+    expect(
+      data.map((row) => [row.direction, row.designator, row.counterpart.icao, row.status]),
+    ).toEqual([
+      ['dep', 'AA100', 'EGLL', 'scheduled'],
+      ['arr', 'B6100', 'EGLL', 'scheduled'],
+    ]);
+    expect(data[0]?.counterpartScheduled).toBe('2026-09-23T05:05:00.000Z');
+    // A gateway that ignored withLeg: the row has no counterpart leg.
+    expect(data[1]?.counterpartScheduled).toBeUndefined();
+    expect(call.result).toBe('ok');
+    expect(call.error).toBe(
+      'skipped 4: no_home_leg x1; invalid_contract x1; no_scheduled_time x1; unparseable_number x1',
+    );
+
+    const none = fetchStub(() => Response.json({ departures: [{ number: 'AA 1' }] }));
+    const allSkipped = await adapter(none.fetch).getAirportBoard(
+      'KJFK',
+      KJFK_PM,
+      providerContext().ctx,
+    );
+    expect(allSkipped.data).toEqual([]);
+    expect(allSkipped.call).toMatchObject({
+      result: 'error',
+      error: 'skipped 1: invalid_contract x1',
+    });
+  });
+
+  it('getAirportBoard cuts a window wider than the plan, bills a 204 as an empty board, refuses bad input', async () => {
+    const wide = fixtureFetch(FIXTURES['fids-kjfk-both'] as Fixture);
+    await adapter(wide.fetch).getAirportBoard(
+      'KJFK',
+      { from: '2026-09-22T00:00', to: '2026-09-24T00:00', tz: 'America/New_York' },
+      providerContext().ctx,
+    );
+    // Growth allows 24 hours.
+    expect(wide.urls()[0]?.pathname).toBe(
+      '/flights/airports/Icao/KJFK/2026-09-22T00:00/2026-09-23T00:00',
+    );
+    const miss = fixtureFetch(FIXTURES['miss-204'] as Fixture);
+    const empty = await adapter(miss.fetch).getAirportBoard('KJFK', KJFK_PM, providerContext().ctx);
+    expect(empty.data).toEqual([]);
+    expect(empty.call).toMatchObject({ result: 'not_found', costUnits: 2 });
+    await expect(
+      adapter(miss.fetch).getAirportBoard('JFK', KJFK_PM, providerContext().ctx),
+    ).rejects.toThrow(RangeError);
+    await expect(
+      adapter(miss.fetch).getAirportBoard(
+        'KJFK',
+        { ...KJFK_PM, to: KJFK_PM.from },
+        providerContext().ctx,
+      ),
+    ).rejects.toThrow(RangeError);
   });
 
   it('getAirport is one unit and yields the time zone', async () => {
@@ -876,7 +996,6 @@ describe('boards, airports and coverage', () => {
       schedules: 'OK',
       live: 'OKPartial',
       adsb: 'OK',
-      covered: true,
     });
     expect(call).toMatchObject({
       operation: 'health',
@@ -885,6 +1004,24 @@ describe('boards, airports and coverage', () => {
       estCostUsdMicros: 0,
     });
     expect(recorder.reservations[0]).toMatchObject({ operation: 'health', pollEquivalents: 0 });
+  });
+
+  it('passes a status outside the enum on as sent, not as a failed check (R5)', async () => {
+    const fixture = FIXTURES['health-kjfk'] as Fixture;
+    const body = fixture.response.body as Record<string, object>;
+    const stub = fixtureFetch({
+      ...fixture,
+      response: {
+        ...fixture.response,
+        body: {
+          ...body,
+          liveFlightUpdatesFeed: { service: 'FlightLiveUpdates', status: 'NoData' },
+        },
+      },
+    });
+    const { data, call } = await adapter(stub.fetch).checkCoverage('KJFK', providerContext().ctx);
+    expect(data).toEqual({ airportIcao: 'KJFK', schedules: 'OK', live: 'NoData', adsb: 'OK' });
+    expect(call).toMatchObject({ operation: 'health', result: 'ok' });
   });
 });
 

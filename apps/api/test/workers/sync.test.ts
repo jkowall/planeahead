@@ -348,6 +348,16 @@ describe('GET /v1/sync', () => {
 
     expect(response.status).toBe(401);
   });
+
+  it('sends Cache-Control: no-store, so no device cache keeps the itinerary past sign-out (R1)', async () => {
+    const session = await signInAnonymously();
+    const page = await authed(session, '/v1/sync');
+    expect(page.status).toBe(200);
+    expect(page.headers.get('cache-control')).toBe('no-store');
+    const refused = await worker(jsonRequest('/v1/sync', 'GET', undefined));
+    expect(refused.status).toBe(401);
+    expect(refused.headers.get('cache-control')).toBe('no-store');
+  });
 });
 
 describe('the watermark and the cursor', () => {

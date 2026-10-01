@@ -84,7 +84,20 @@ import {
   type Ladder,
   type ProviderBudgetIdentity,
 } from '../providers/budget';
-import { budgetDefaults, providerSettings, type BudgetProvider } from '../providers/config';
+import {
+  boardTokenFloor,
+  boardsCapUnits,
+  boardsShareSpent,
+  checkBoards,
+  isBoardTrigger,
+  type BoardsLedger,
+} from '../providers/boards-budget';
+import {
+  ADB_BOARD_AIRPORTS_PER_HOUR,
+  budgetDefaults,
+  providerSettings,
+  type BudgetProvider,
+} from '../providers/config';
 import {
   backoff as bucketBackoff,
   bucketForLimit,
@@ -101,6 +114,7 @@ import {
   runSqlMigrations,
 } from './migrate';
 import { PROVIDER_BUDGET_MIGRATION_001 } from './migrations/provider-budget/001';
+import { PROVIDER_BUDGET_MIGRATION_002 } from './migrations/provider-budget/002';
 
 /** The `CONFIG` KV key of a manual kill switch that outlives the day. */
 export function persistentKillKey(provider: BudgetProvider): string {
@@ -169,6 +183,18 @@ export interface BudgetSnapshot {
    * when the day's storage was already deleted, gone: every counter then reads zero).
    */
   readonly dayClosed: boolean;
+  /** The boards share and the hourly airport cap (increment 18), for the admin page. */
+  readonly boards: BoardsSnapshot;
+}
+
+export interface BoardsSnapshot {
+  readonly spentUnits: number;
+  readonly capUnits: number;
+  /** 0 to 1; a day without a cap reads as spent. */
+  readonly shareSpent: number;
+  readonly airportsPerHourCap: number;
+  /** The airports counted in the current UTC hour, first refreshed first. */
+  readonly airportsThisHour: readonly string[];
 }
 
 /** What `setKillSwitch` answers: the snapshot, and whether `CONFIG` KV took the change. */
@@ -247,10 +273,13 @@ type PersistentKillState =
 
 export class ProviderBudget extends DurableObject<Env> {
   /** Schema version this build expects. Reported by `GET /health` without touching an object. */
-  static readonly SCHEMA_VERSION = 1;
+  static readonly SCHEMA_VERSION = 2;
 
   /** Append only, in order. Index 0 is migration id 1. */
-  static readonly MIGRATIONS: SqlMigrations = [PROVIDER_BUDGET_MIGRATION_001];
+  static readonly MIGRATIONS: SqlMigrations = [
+    PROVIDER_BUDGET_MIGRATION_001,
+    PROVIDER_BUDGET_MIGRATION_002,
+  ];
 
   /** Test seam: the clock every decision reads. */
   clock: () => number = () => Date.now();
@@ -302,8 +331,11 @@ export class ProviderBudget extends DurableObject<Env> {
    * Reserves one call. Refusals: `routing_rule` (a request for another provider, or an operation
    * with no price, which would otherwise debit nothing), `provider_kill_switch`,
    * `provider_daily_cap` (which also trips the kill switch) and `provider_rate_limit` with the
-   * bucket's `retryAfterMs`. Never throws for a bad request: an exception would cross the RPC
-   * boundary into the caller's alarm.
+   * bucket's `retryAfterMs`; for board triggers also `boards_share`, `board_airports_per_hour`
+   * and `board_rate_floor` (the bucket holds the call but not the trackers' floor, with the wait
+   * until it would). A board trigger's free `health` call (the coverage check) meets only the
+   * floor: it costs no units and fetches no board, so it takes no airport slot. Never throws for
+   * a bad request: an exception would cross the RPC boundary into the caller's alarm.
    */
   async reserve(request: BudgetRequest): Promise<BudgetDecision> {
     const identity = this.#requireIdentity();
@@ -336,22 +368,48 @@ export class ProviderBudget extends DurableObject<Env> {
         tripped = true;
         return { allowed: false, reason: 'provider_daily_cap' };
       }
+      // Increment 18 (ruling B5): board and route-search calls only. The free coverage check
+      // fetches no board, so it takes no airport slot (ruling R5, review A's ma4).
+      const boardCall = isBoardTrigger(request.trigger);
+      const boards =
+        boardCall && request.operation !== 'health'
+          ? checkBoards(request, units, config.daily_unit_cap, now, this.#boardsLedger())
+          : null;
+      if (boards !== null && !boards.allowed) {
+        this.#countDenial(boards.reason);
+        return { allowed: false, reason: boards.reason, boardsShareSpent: boards.shareSpent };
+      }
       const bucket = bucketFor(config.per_second_limit);
-      const taken = take(this.#bucket(bucket, now), bucket, now);
+      // Ruling R2: a board call, the coverage check included, leaves the trackers' floor.
+      const keep = boardCall ? boardTokenFloor(bucket) : 0;
+      const taken = take(this.#bucket(bucket, now), bucket, now, 1, keep);
       this.#saveBucket(taken.state);
       if (!taken.allowed) {
-        this.#countDenial('provider_rate_limit');
-        return {
-          allowed: false,
-          reason: 'provider_rate_limit',
-          retryAfterMs: taken.retryAfterMs,
-        };
+        const reason = taken.floored ? 'board_rate_floor' : 'provider_rate_limit';
+        this.#countDenial(reason);
+        return { allowed: false, reason, retryAfterMs: taken.retryAfterMs };
       }
       this.#debit(request.trigger, units, request.pollEquivalents);
+      if (boards === null) {
+        return {
+          allowed: true,
+          granted: request.pollEquivalents,
+          ladder: ladderFor(spent + units, config.daily_unit_cap),
+        };
+      }
+      if (!boards.counted) {
+        this.ctx.storage.sql.exec(
+          'INSERT INTO board_airports (hour_utc, airport_icao, first_at_ms) VALUES (?, ?, ?)',
+          boards.hourUtc,
+          boards.airportIcao,
+          now,
+        );
+      }
       return {
         allowed: true,
         granted: request.pollEquivalents,
         ladder: ladderFor(spent + units, config.daily_unit_cap),
+        boardsShareSpent: boards.shareAfter,
       };
     });
     // `#trip` and a fail-closed first touch both queue an alert; send it now, once.
@@ -842,6 +900,52 @@ export class ProviderBudget extends DurableObject<Env> {
     );
   }
 
+  /** What the boards decision reads (increment 18): spend by board triggers, airports by hour. */
+  #boardsLedger(): BoardsLedger {
+    const sql = this.ctx.storage.sql;
+    const spent = sql
+      .exec<{ units: number }>(
+        "SELECT COALESCE(SUM(units), 0) AS units FROM ledger WHERE trigger IN ('board', 'route_search')",
+      )
+      .one().units;
+    return {
+      spentUnits: spent,
+      counted: (hourUtc, airportIcao) =>
+        sql
+          .exec(
+            'SELECT 1 FROM board_airports WHERE hour_utc = ? AND airport_icao = ?',
+            hourUtc,
+            airportIcao,
+          )
+          .toArray().length > 0,
+      airportsIn: (hourUtc) =>
+        sql
+          .exec<{ n: number }>(
+            'SELECT COUNT(*) AS n FROM board_airports WHERE hour_utc = ?',
+            hourUtc,
+          )
+          .one().n,
+    };
+  }
+
+  #boardsSnapshot(now: number, dailyUnitCap: number): BoardsSnapshot {
+    const capUnits = boardsCapUnits(dailyUnitCap);
+    const spentUnits = this.#boardsLedger().spentUnits;
+    const airports = this.ctx.storage.sql
+      .exec<{ airport_icao: string }>(
+        'SELECT airport_icao FROM board_airports WHERE hour_utc = ? ORDER BY first_at_ms, airport_icao',
+        new Date(now).getUTCHours(),
+      )
+      .toArray();
+    return {
+      spentUnits,
+      capUnits,
+      shareSpent: boardsShareSpent(spentUnits, capUnits),
+      airportsPerHourCap: ADB_BOARD_AIRPORTS_PER_HOUR,
+      airportsThisHour: airports.map((row) => row.airport_icao),
+    };
+  }
+
   #countDenial(reason: BudgetDenialReason): void {
     this.ctx.storage.sql.exec(
       `INSERT INTO denials (reason, count) VALUES (?, 1)
@@ -991,6 +1095,7 @@ export class ProviderBudget extends DurableObject<Env> {
       tokens: this.#bucket(bucket, now).tokens,
       finalised: config?.finalised === 1,
       dayClosed: this.#dayClosed(now),
+      boards: this.#boardsSnapshot(now, cap),
     };
   }
 
@@ -1016,6 +1121,13 @@ export class ProviderBudget extends DurableObject<Env> {
       tokens: 0,
       finalised: true,
       dayClosed: this.#dayClosed(now),
+      boards: {
+        spentUnits: 0,
+        capUnits: 0,
+        shareSpent: 0,
+        airportsPerHourCap: ADB_BOARD_AIRPORTS_PER_HOUR,
+        airportsThisHour: [],
+      },
     };
   }
 

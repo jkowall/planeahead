@@ -1,6 +1,6 @@
 import { ICAO_CARRIER_RE } from './carriers';
 import { FlightKeyError, flightNumberToken, normalizeFlightNumber } from './flight-key';
-import { tolerantEnum, type OperatorSource } from './flight-status';
+import type { CodeshareStatus, OperatorSource } from './flight-status';
 
 /**
  * Operator resolution (ADR 0010). AeroDataBox never names an operating carrier: its `airline`
@@ -17,12 +17,6 @@ import { tolerantEnum, type OperatorSource } from './flight-status';
  * as `AAL100` would key as `AAL-1512-...`, which is American's own AA 1512), so a callsign
  * supplies both halves or neither (orchestrator ruling I3).
  */
-
-/** AeroDataBox `CodeshareStatus` (direct-gateway OpenAPI 1.15.3.0). */
-export const CODESHARE_STATUSES = ['Unknown', 'IsOperator', 'IsCodeshared'] as const;
-export type CodeshareStatus = (typeof CODESHARE_STATUSES)[number];
-/** A value AeroDataBox adds later parses as `Unknown`, which resolves to the marketing carrier. */
-export const CodeshareStatusSchema = tolerantEnum(CODESHARE_STATUSES, 'Unknown');
 
 export interface ResolveOperatorInput {
   /** ICAO code of the carrier that owns the flight number. */

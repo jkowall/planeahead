@@ -40,7 +40,10 @@ are in `docs/adr/`; the data model is `docs/schema-review.md`; threats are
   consumers and the crons. The middleware chain has exactly one definition, `createApp()` in
   `src/app.ts`, in the order request-id, Sentry, CORS, the per-IP limiter (`PUBLIC_RL`),
   idempotency (the global slot for non-`/v1` paths), auth (Better Auth session into `c.var.user`);
-  under `/v1` the per-principal limiter (`USER_RL`) and the `/v1` idempotency instance follow.
+  under `/v1` the `Cache-Control: no-store` default (increment 18, `src/middleware/no-store.ts`:
+  first, so it sees every answer the `/v1` chain produces last and adds `no-store` to each that
+  names no `Cache-Control` of its own), the per-principal limiter (`USER_RL`) and the `/v1`
+  idempotency instance follow.
 - **Durable Objects**, SQLite-backed, declared with `exports` (so plain deploys only, never
   gradual ones), each with a `_sql_schema_migrations` runner under `blockConcurrencyWhile`:
   - **FlightTracker**, one per flight key (`AAL-100-2026-09-19-KJFK`, ADR 0003): polls the
@@ -52,17 +55,32 @@ are in `docs/adr/`; the data model is `docs/schema-review.md`; threats are
     provider call for an unresolved search, canonicalises the key, seeds the tracker, caches the
     answer for 24 h in its storage and 15 min in KV.
   - **ProviderBudget**, one per provider per UTC day: the provider-wide unit cap, the per-second
-    token bucket and the kill switch (persisted in `CONFIG` KV).
+    token bucket and the kill switch (persisted in `CONFIG` KV). Since increment 18 it also holds
+    the limits only board and route-search calls meet: their 35 percent share of the day's units,
+    the distinct airports refreshed per UTC hour, and a token floor (`board_rate_floor`: a board
+    call leaves half the bucket's burst, rounded down, to the trackers, which share the bucket).
+    The free coverage check is no refresh: it takes no share and no airport slot, but keeps the
+    floor.
   - **PushAuth** (increment 14), one per push credential (`apns:sandbox`, `apns:production`,
     `fcm`): mints the shared APNs provider token and exchanges the FCM access token (section 9).
-  - **AirportState** and **UserInbox** are schema shells for Phase 1.
+  - **AirportState** (increment 18), one per airport, named by its ICAO code: the only caller
+    of AeroDataBox FIDS. It caches the airport's 12-hour board buckets (one `direction=Both` call
+    each, rows gzip-compressed in chunks of at most 1 MB), coalesces concurrent misses, serves
+    R3's freshness ladder with stale-while-revalidate, keeps the airport's coverage from the free
+    health call in its own storage (a day; an hour while a feed is down or of unknown status, and
+    `not_covered` only when AeroDataBox provides neither feed), copies each bucket to KV
+    `board:v2:{ICAO}:{bucketStartLocal}`, and purges a bucket at the sooner of 48 hours after it
+    ends and 7 days after its fetch.
+  - **UserInbox** is a schema shell for Phase 1.
 - **Postgres** (Neon, PostgreSQL 18, us-east-1) is the source of truth for users, subscriptions,
   the flight registry, the sync feed and the ledgers, reached ONLY from the Worker through the
   Hyperdrive binding `DB` (one postgres.js client per request or queue batch, ADR 0009). Durable
   Objects never open Postgres (ADR 0007): their writes travel through the persist queue.
 - **KV**: `CACHE` (search answers 15 min, flight snapshots, used identity tokens, the ProviderBudget
-  read copy, and since increment 12 the tombstones of deleted accounts' sessions), `PUBLIC`,
-  `CONFIG` (the kill switch). Never a source of truth, never a cap.
+  read copy, since increment 12 the tombstones of deleted accounts' sessions, and since increment
+  18 the board buckets `board:v2:{ICAO}:{bucketStartLocal}` until their purge and airport
+  references `ref:airport:{code}` a day; an airport's coverage stays in its AirportState),
+  `PUBLIC`, `CONFIG` (the kill switch). Never a source of truth, never a cap.
 - **R2**: `PRIVATE_BUCKET` holds finished trackers' timelines (`events/{key}@{epochMs}.json`) and
   dead-lettered messages (`dlq/{queue}/{messageId}.json`, `dlq/persist-parked/`);
   `PUBLIC_BUCKET` is reserved for share images (Phase 5).
@@ -77,8 +95,9 @@ are in `docs/adr/`; the data model is `docs/schema-review.md`; threats are
   `PRODUCT_EVENTS` (increment 12, one point per accepted app event, index = the analytics id),
   `API_METRICS` (reserved). Every sum weights rows by `_sample_interval`; Postgres stays the ledger.
 - **Rate limit bindings**: `PUBLIC_RL` (120 per 10 s per IP), `USER_RL` (600 per 60 s per user),
-  `EVENTS_RL` (300 per 60 s per IP on `/v1/events`). Abuse brakes only; every quota is a
-  `usage_counters` row.
+  `EVENTS_RL` (300 per 60 s per IP on `/v1/events`), and on the board and route-search routes
+  (increment 18) `BOARD_RL` (30 per 60 s per user) and `BOARD_IP_RL` (300 per 60 s per client
+  address reduced to its /64). Abuse brakes only; every quota is a `usage_counters` row.
 - **Outside the Worker**: Cloudflare Access in front of `/admin`; Sentry (errors, scrubbed);
   Workers Logs (JSON lines, 10% sampled in production); GitHub Actions (CI, the staging and
   production deploys, the weekly native smoke, the mobile preview); from increment 14 APNs
@@ -106,31 +125,59 @@ to production (ADR 0005).
 
 ## 3. Request paths
 
-| Path                                                                  | Who calls it                            | Auth                                                                          | What it touches                                                                                                                           |
-| --------------------------------------------------------------------- | --------------------------------------- | ----------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------- |
-| `GET /health`                                                         | deploy smoke, monitors                  | none                                                                          | build constants only (migration hash, Durable Object schema versions), no I/O                                                             |
-| `/api/auth/*`                                                         | Better Auth Expo client                 | Better Auth (anonymous, magic link, native Apple and Google, session refresh) | `users`, `sessions`, `accounts`, `verifications`, `rate_limits`; the anonymous merge                                                      |
-| `GET /auth/magic-link`, `POST /api/auth/magic-link/consume`           | a browser from the email                | the token                                                                     | a non-consuming landing page; the consume route verifies server side                                                                      |
-| `GET /.well-known/*`                                                  | Apple's and Google's crawlers           | none                                                                          | the association files from vars                                                                                                           |
-| `GET /v1/me`, `PATCH /v1/me/preferences`, `POST /v1/me/delete`        | the app                                 | session                                                                       | Postgres; the deletion unsubscribes trackers, revokes at Apple, deletes in one transaction, writes KV session tombstones                  |
-| `POST /v1/devices`                                                    | the app                                 | session                                                                       | `devices`, `push_tokens` (increment 14: `appId`, permission, `registered_at`, rotation of the device's other rows of the kind)            |
-| `POST /v1/devices/current/invalidate`                                 | the app, before sign-out (increment 16) | session                                                                       | `push_tokens`: every live row of every kind on the caller's device row for the installation (increment 14)                                |
-| `GET /v1/flights/search`                                              | the app                                 | session (anonymous accepted), always read from the session row                | KV, `flight_designators`, then the DesignatorResolver (one provider call per designator and date) and caps                                |
-| `POST /v1/flights`, `GET /v1/flights[/:id]`, `DELETE /v1/flights/:id` | the app                                 | session, `Idempotency-Key` on the POST                                        | caps in `usage_counters`, the tracker's `subscribe` or `unsubscribe` under an 8 s deadline, then one transaction with the sync change row |
-| `POST /v1/flights/:id/refresh`                                        | the app                                 | session                                                                       | the per-user refresh budget, then the tracker's coalesced `forceRefresh`                                                                  |
-| `GET /v1/sync`                                                        | the app                                 | session                                                                       | the two change tables below the watermark (section 6)                                                                                     |
-| `POST /v1/events`                                                     | the app's analytics client              | none (install-scoped analytics id)                                            | `EVENTS_RL`, one `PRODUCT_EVENTS` point per accepted event, 202                                                                           |
-| `POST /v1/webhooks/{aerodatabox,aeroapi}/{token}`                     | the providers                           | 256-bit path token                                                            | enqueue on `provider-events` only                                                                                                         |
-| `POST /v1/webhooks/{apple,revenuecat}`                                | reserved (Apple, RevenueCat)            | none yet                                                                      | nothing: 501 until the Phase 1 handlers land                                                                                              |
-| `GET /admin`                                                          | the operator, through Cloudflare Access | `Cf-Access-Jwt-Assertion` validated                                           | read-only Postgres, the Analytics Engine SQL API, the Queues API, the `PushAuth` objects' status                                          |
-| `GET`, `POST /admin/accounts/delete`                                  | the operator, through Cloudflare Access | the Access assertion; the POST also same-origin and the user id typed twice   | a write action: `deleteAccount`, exactly as `POST /v1/me/delete`, with an audit row naming the operator                                   |
-| `GET`, `POST /admin/push/test`, `GET /admin/push/test/result`         | the operator, through Cloudflare Access | the Access assertion; the POST also same-origin; production: allow-listed ids | the other write action (increment 14): one test job on the `push` queue, an audit row, then the delivery row the persist consumer writes  |
-| `GET /account/delete`                                                 | Google Play's listing, anyone           | none                                                                          | a static page                                                                                                                             |
+| Path                                                                  | Who calls it                            | Auth                                                                                                                                                                                         | What it touches                                                                                                                                                                                                                                                                  |
+| --------------------------------------------------------------------- | --------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `GET /health`                                                         | deploy smoke, monitors                  | none                                                                                                                                                                                         | build constants only (migration hash, Durable Object schema versions), no I/O                                                                                                                                                                                                    |
+| `/api/auth/*`                                                         | Better Auth Expo client                 | Better Auth (anonymous, magic link, native Apple and Google, session refresh)                                                                                                                | `users`, `sessions`, `accounts`, `verifications`, `rate_limits`; the anonymous merge                                                                                                                                                                                             |
+| `GET /auth/magic-link`, `POST /api/auth/magic-link/consume`           | a browser from the email                | the token                                                                                                                                                                                    | a non-consuming landing page; the consume route verifies server side                                                                                                                                                                                                             |
+| `GET /.well-known/*`                                                  | Apple's and Google's crawlers           | none                                                                                                                                                                                         | the association files from vars                                                                                                                                                                                                                                                  |
+| `GET /v1/me`, `PATCH /v1/me/preferences`, `POST /v1/me/delete`        | the app                                 | session                                                                                                                                                                                      | Postgres; the deletion unsubscribes trackers, revokes at Apple, deletes in one transaction, writes KV session tombstones                                                                                                                                                         |
+| `POST /v1/devices`                                                    | the app                                 | session                                                                                                                                                                                      | `devices`, `push_tokens` (increment 14: `appId`, permission, `registered_at`, rotation of the device's other rows of the kind)                                                                                                                                                   |
+| `POST /v1/devices/current/invalidate`                                 | the app, before sign-out (increment 16) | session                                                                                                                                                                                      | `push_tokens`: every live row of every kind on the caller's device row for the installation (increment 14)                                                                                                                                                                       |
+| `GET /v1/flights/search`                                              | the app                                 | session (anonymous accepted), always read from the session row                                                                                                                               | KV, `flight_designators`, then the DesignatorResolver (one provider call per designator and date) and caps                                                                                                                                                                       |
+| `GET /v1/airports/{code}/board`                                       | the app (increment 18)                  | `BOARDS_ENABLED` (else 404 `boards_disabled`; `"false"` in production); a session principal; anonymous only for airports of its live subscriptions; `BOARD_RL` by user, `BOARD_IP_RL` by /64 | the airport resolved in Postgres through KV, then the bucket cache (KV, else `AirportState`, the only FIDS caller); a window ending at most 72 h ahead; each flight once, codeshares grouped, kept by scheduled or best time, filtered after the cache; ETag and 304, `no-store` |
+| `GET /v1/airports/{origin}/flights/to/{destination}`                  | the app (increment 18)                  | `BOARDS_ENABLED`; a session principal (anonymous accepted), always read from the session row; `BOARD_RL` by user, `BOARD_IP_RL` by /64                                                       | the origin's two buckets of the date, its departures of that date to the destination; `route_searches` caps (per user, and per salted IP when anonymous; the 403 names its `scope`); ETag and 304, `no-store`                                                                    |
+| `POST /v1/flights`, `GET /v1/flights[/:id]`, `DELETE /v1/flights/:id` | the app                                 | session, `Idempotency-Key` on the POST                                                                                                                                                       | caps in `usage_counters`, the tracker's `subscribe` or `unsubscribe` under an 8 s deadline, then one transaction with the sync change row                                                                                                                                        |
+| `POST /v1/flights/:id/refresh`                                        | the app                                 | session                                                                                                                                                                                      | the per-user refresh budget, then the tracker's coalesced `forceRefresh`                                                                                                                                                                                                         |
+| `GET /v1/sync`                                                        | the app                                 | session                                                                                                                                                                                      | the two change tables below the watermark (section 6)                                                                                                                                                                                                                            |
+| `POST /v1/events`                                                     | the app's analytics client              | none (install-scoped analytics id)                                                                                                                                                           | `EVENTS_RL`, one `PRODUCT_EVENTS` point per accepted event, 202                                                                                                                                                                                                                  |
+| `POST /v1/webhooks/{aerodatabox,aeroapi}/{token}`                     | the providers                           | 256-bit path token                                                                                                                                                                           | enqueue on `provider-events` only                                                                                                                                                                                                                                                |
+| `POST /v1/webhooks/{apple,revenuecat}`                                | reserved (Apple, RevenueCat)            | none yet                                                                                                                                                                                     | nothing: 501 until the Phase 1 handlers land                                                                                                                                                                                                                                     |
+| `GET /admin`                                                          | the operator, through Cloudflare Access | `Cf-Access-Jwt-Assertion` validated                                                                                                                                                          | read-only Postgres, the Analytics Engine SQL API, the Queues API, the `PushAuth` objects' status                                                                                                                                                                                 |
+| `GET`, `POST /admin/accounts/delete`                                  | the operator, through Cloudflare Access | the Access assertion; the POST also same-origin and the user id typed twice                                                                                                                  | a write action: `deleteAccount`, exactly as `POST /v1/me/delete`, with an audit row naming the operator                                                                                                                                                                          |
+| `GET`, `POST /admin/push/test`, `GET /admin/push/test/result`         | the operator, through Cloudflare Access | the Access assertion; the POST also same-origin; production: allow-listed ids                                                                                                                | the other write action (increment 14): one test job on the `push` queue, an audit row, then the delivery row the persist consumer writes                                                                                                                                         |
+| `GET /account/delete`                                                 | Google Play's listing, anyone           | none                                                                                                                                                                                         | a static page                                                                                                                                                                                                                                                                    |
 
 Every non-2xx JSON answer under `/v1` is the envelope `{ error, message, requestId, ... }`
 (`API_ERROR_CODES` in shared); a 401 `account_deleted` tells the app to wipe its store. The global
 error handler maps SQLSTATE 23503 on a user foreign key, for a principal whose `users` row is gone
 (an account deleted while the request was in flight), to that 401 as well.
+
+Every answer the `/v1` chain produces, errors included, carries `Cache-Control: no-store` unless
+its route names its own (increment 18's review ruling R1; only the board routes do, with
+`no-store` on their 200 and 304). An answer given before that chain runs carries none: the
+per-IP limiter's 429 (`PUBLIC_RL`) and an error the root chain's middleware raises (a 500), and
+neither holds user data. The app's `expo/fetch` keeps a disk cache on each platform (OkHttp's on
+Android, the shared `URLCache` on iOS) that stores any GET not marked `no-store` and outlives
+sign-out and account deletion, which wipe only SQLite and the query cache; every `/v1` route
+answers with the caller's own data.
+
+The board routes (increment 18) answer 404 `boards_disabled` while `BOARDS_ENABLED` is not exactly
+`"true"` (it is `"false"` in production until AeroDataBox's written End Use answer and the per-user
+board limits, `docs/open-decisions.md` section 9), before the route's session checks, brakes and
+lookups. A board keeps a flight by its home leg's scheduled time or its best time (actual, else
+estimated) in the window, and one scheduled earlier with no best time while live data says it has
+not yet arrived (in effect an arrival that has left its origin); a row repeating a direction,
+designator and scheduled minute (one flight in two buckets) is dropped, the copy kept being the most
+recently fetched bucket's, and codeshares group by registration or callsign, a keyless
+`IsCodeshared` row joining its slot's operator (same direction, minute and counterpart) only when
+the slot holds exactly one row not marked `IsCodeshared` and that row is `IsOperator`. `partial`
+marks a bucket that could not be read, never one out of range. A 503 `board_unavailable` says
+`Retry-After: 2` when the per-second bucket alone refused the buckets missing (30 otherwise), and a
+route search `partial` for that reason alone is not charged. Every 403 `cap_exceeded`, on any route,
+names its `scope` (`user` or `ip`), so the app can tell an anonymous account held by its network's
+cap to sign in; the shared envelope reads a `scope` or a `cap` it does not know as absent, so a
+later server's new value never costs a shipped app the body.
 
 ## 4. The FlightTracker lifecycle
 

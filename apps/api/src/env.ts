@@ -326,3 +326,16 @@ export function environmentName(env: Env): EnvironmentName {
   }
   return 'local';
 }
+
+/**
+ * Whether this deployment serves the airport boards and the route search (increment 18, R8):
+ * `BOARDS_ENABLED` from wrangler.jsonc `vars`, `"true"` in local and staging, `"false"` in
+ * production until AeroDataBox confirms in writing that boards are End Use and the per-user board
+ * budget (R3) exists. Read through a widened string, like `ENVIRONMENT` above: `wrangler types`
+ * knows only the literals the config declares, and any value but exactly `"true"` (absent, a
+ * dashboard override, `TRUE` or ` true ` included) is off (the re-review's N6).
+ */
+export function boardsEnabled(env: Pick<Env, 'BOARDS_ENABLED'>): boolean {
+  const value: string | undefined = env.BOARDS_ENABLED;
+  return value === 'true';
+}

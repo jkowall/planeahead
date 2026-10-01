@@ -193,6 +193,7 @@ describe('principalLimiter', () => {
       c.set('user', {
         id: 'user-123',
         isAnonymous: false,
+        kind: 'session',
         sessionId: 'session-123',
         scopes: ['user'],
       });

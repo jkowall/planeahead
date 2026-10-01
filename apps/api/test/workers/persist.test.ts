@@ -10,14 +10,8 @@
  */
 
 import { createExecutionContext, createMessageBatch, getQueueResult } from 'cloudflare:test';
-import { and, eq } from 'drizzle-orm';
-import {
-  flightEvents,
-  flightInstances,
-  openDb,
-  providerCallDaily,
-  providerCalls,
-} from '@planeahead/db';
+import { and, eq, inArray } from 'drizzle-orm';
+import { flightEvents, flightInstances, providerCallDaily, providerCalls } from '@planeahead/db';
 import { afterEach, describe, expect, it } from 'vitest';
 import {
   NotifyIntentV1,
@@ -45,6 +39,8 @@ import {
   uniqueFlight,
   type TestFlight,
 } from './helpers/flights';
+// One client for the file: one per test or per batch held its connections until the file ended.
+import { db as fileDb } from './helpers/routes';
 
 afterEach(drainTouched);
 
@@ -144,7 +140,12 @@ async function run(
   await handlePersistBatch(
     batch,
     { env: options.env ?? testEnv, ctx, log: quietLog },
-    { capture: options.capture, trackerFor: options.trackerFor, notifyQueue: options.notifyQueue },
+    {
+      db: fileDb(),
+      capture: options.capture,
+      trackerFor: options.trackerFor,
+      notifyQueue: options.notifyQueue,
+    },
   );
   return getQueueResult(batch, ctx);
 }
@@ -187,7 +188,7 @@ function notifyIntentMessage(flight: TestFlight, seq: number): PersistMessageV1I
 describe('persist consumer', () => {
   it('applies instance rows monotonically under duplicate and reordered delivery', async () => {
     const flight = uniqueFlight();
-    const db = openDb(testEnv);
+    const db = fileDb();
     const v1 = message(flight, 1, {
       kind: 'flight_instance',
       flightKey: flight.flightKey,
@@ -228,7 +229,7 @@ describe('persist consumer', () => {
 
   it('inserts events and provider calls once, and retries an event whose instance is not there yet', async () => {
     const flight = uniqueFlight();
-    const db = openDb(testEnv);
+    const db = fileDb();
     const event = message(flight, 2, {
       kind: 'flight_event',
       flightKey: flight.flightKey,
@@ -393,11 +394,7 @@ describe('persist consumer', () => {
       })),
     );
     const ctx = createExecutionContext();
-    await handleNotifyBatch(batch, {
-      env: testEnv,
-      ctx,
-      log: quietLog,
-    });
+    await handleNotifyBatch(batch, { env: testEnv, ctx, log: quietLog }, { db: fileDb() });
     const notified = await getQueueResult(batch, ctx);
     expect(notified.retryMessages).toEqual([]);
     expect(notified.explicitAcks).toEqual(['n-0']);
@@ -437,7 +434,7 @@ describe('persist consumer', () => {
       seqs: [1, 2, 3],
     });
     expect(foreign).toMatchObject({ matched: false, deleted: 0 });
-    const db = openDb(testEnv);
+    const db = fileDb();
     const [row] = await db
       .select({ version: flightInstances.version, trackingState: flightInstances.trackingState })
       .from(flightInstances)
@@ -468,12 +465,49 @@ describe('persist consumer', () => {
     expect(first.explicitAcks).toEqual(['m-0', 'm-1']);
     expect(second.explicitAcks).toEqual(['m-0']);
     expect(points).toBe(1);
-    const db = openDb(testEnv);
+    const db = fileDb();
     const rows = await db
       .select({ id: providerCalls.id })
       .from(providerCalls)
       .where(eq(providerCalls.id, call.id));
     expect(rows).toHaveLength(1);
+  });
+
+  it('records an AirportState board call with its airport and no flight (increment 18, migration 0010)', async () => {
+    const flight = uniqueFlight();
+    const call = callRecord(flight.flightKey, {
+      operation: 'fids',
+      trigger: 'board',
+      airportIcao: 'KATL',
+    });
+    delete call.flightKey;
+    const search = callRecord(flight.flightKey, {
+      operation: 'health',
+      trigger: 'route_search',
+      airportIcao: 'KATL',
+      costUnits: 0,
+    });
+    delete search.flightKey;
+    const origin = `airport_state:KATL@${String(EPOCH)}`;
+    const result = await run([
+      { kind: 'provider_call', seq: 1, origin, payload: call },
+      { kind: 'provider_call', seq: 2, origin, payload: search },
+    ]);
+    expect(result.explicitAcks).toEqual(['m-0', 'm-1']);
+    const db = fileDb();
+    const rows = await db
+      .select({
+        trigger: providerCalls.trigger,
+        airportIcao: providerCalls.airportIcao,
+        flightKey: providerCalls.flightKey,
+      })
+      .from(providerCalls)
+      .where(inArray(providerCalls.id, [call.id, search.id]))
+      .orderBy(providerCalls.trigger);
+    expect(rows).toEqual([
+      { trigger: 'board', airportIcao: 'KATL', flightKey: null },
+      { trigger: 'route_search', airportIcao: 'KATL', flightKey: null },
+    ]);
   });
 
   it('keeps one provider_call_daily row per ProviderBudget shard, replaced on redelivery (L10)', async () => {
@@ -501,7 +535,7 @@ describe('persist consumer', () => {
     const result = await run([daily(1, 60, 30), daily(0, 40, 20), daily(1, 60, 30)]);
 
     expect(result.explicitAcks).toEqual(['m-0', 'm-1', 'm-2']);
-    const db = openDb(testEnv);
+    const db = fileDb();
     const rows = await db
       .select({
         operation: providerCallDaily.operation,
@@ -520,7 +554,7 @@ describe('persist consumer', () => {
 
   it('ignores an older tracker lifetime and refuses a newer one for a finished instance (L9)', async () => {
     const flight = uniqueFlight();
-    const db = openDb(testEnv);
+    const db = fileDb();
     const lifetime = (
       epochMs: number,
       seq: number,
@@ -631,7 +665,7 @@ describe('persist consumer', () => {
     );
     expect(result.explicitAcks).toEqual(['m-0', 'm-1', 'm-2']);
     expect(captured).toEqual(['provider_kill_switch_tripped']);
-    const db = openDb(testEnv);
+    const db = fileDb();
     const rows = await db
       .select({
         calls: providerCallDaily.calls,

@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import {
   API_ERROR_CODES,
+  ApiErrorSchema,
   CAP_NAMES,
   FREE_TIER_LIMITS,
   LIVE_TRACKING_LEAD_MS,
@@ -22,6 +23,8 @@ describe('free-tier limits (ruling K3)', () => {
       instancesCreatedPerDay: 20,
       anonymousTrackerCreationsPerDayPerIp: 10,
       refreshesPerFlightPerDay: 10,
+      routeSearchesPerDay: 30,
+      anonymousRouteSearchesPerDayPerIp: 30,
     });
     expect(SYNC_PAGE_SIZE).toBe(200);
     expect(Object.isFrozen(FREE_TIER_LIMITS)).toBe(true);
@@ -34,6 +37,7 @@ describe('free-tier limits (ruling K3)', () => {
       ['instances_created', 20],
       ['tracker_creations', 10],
       ['refresh', 10],
+      ['route_searches', 30],
     ]);
   });
 });
@@ -72,6 +76,37 @@ describe('the error envelope', () => {
       expect(API_ERROR_CODES, code).toContain(code);
     }
     expect(new Set(API_ERROR_CODES).size).toBe(API_ERROR_CODES.length);
+  });
+
+  it('lists the increment 18 board codes, and reads whose allowance a cap_exceeded names', () => {
+    for (const code of ['board_requires_account', 'boards_disabled']) {
+      expect(API_ERROR_CODES, code).toContain(code);
+    }
+    const body = { error: 'cap_exceeded', cap: 'route_searches', limit: 30, requestId: 'r' };
+    for (const scope of ['user', 'ip'] as const) {
+      const parsed = ApiErrorSchema.safeParse({ ...body, scope });
+      expect(parsed.success && parsed.data.scope).toBe(scope);
+    }
+    expect(ApiErrorSchema.safeParse(body).success).toBe(true);
+  });
+
+  it('reads a scope it does not know as absent, keeping the body and its cap_exceeded (N7)', () => {
+    // A later server's third scope (the magic-link caps already use `install`).
+    const body = { error: 'cap_exceeded', cap: 'route_searches', limit: 30, requestId: 'r' };
+    const parsed = ApiErrorSchema.safeParse({ ...body, scope: 'install' });
+    expect(parsed.success).toBe(true);
+    expect(parsed.data).toMatchObject({ error: 'cap_exceeded', cap: 'route_searches', limit: 30 });
+    expect(parsed.data?.scope).toBeUndefined();
+    expect(isApiError({ ...body, scope: 'install' }, 'cap_exceeded')).toBe(true);
+  });
+
+  it('reads a cap it does not know as absent, keeping the body and its cap_exceeded', () => {
+    const body = { error: 'cap_exceeded', cap: 'board_views', limit: 300, requestId: 'r' };
+    const parsed = ApiErrorSchema.safeParse(body);
+    expect(parsed.success).toBe(true);
+    expect(parsed.data).toMatchObject({ error: 'cap_exceeded', limit: 300 });
+    expect(parsed.data?.cap).toBeUndefined();
+    expect(isApiError(body, 'cap_exceeded')).toBe(true);
   });
 
   it('isApiError reads a body by its code', () => {

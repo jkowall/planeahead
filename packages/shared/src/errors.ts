@@ -7,15 +7,15 @@ import { CAP_NAMES } from './limits';
  * The PlaneAhead error envelope and its codes (increment 8, rulings K14 and O10).
  *
  * Every non-2xx JSON answer from the API Worker has this shape, including the ones a framework
- * layer raises under `/v1` (a malformed JSON body is 400 `validation_failed` with an
- * `invalid_json` issue, an oversized one 413 `payload_too_large`): `error` is a stable machine code
- * from `API_ERROR_CODES`, `message` is for a human and may change, `requestId` is the correlation
- * id also sent as `X-Request-Id`. Some codes carry extra fields (`issues` on
- * `validation_failed`, `cap` and `limit` on `cap_exceeded`, `flight` on `refresh_timeout` and on
- * the refresh route's `flight_archived`, `triedDates` and `suggestions` on `flight_not_found` from
- * the search and subscribe-by-number routes), so the schema is loose. The mobile client branches
- * on `error`, never on `message` or the status alone: 401 `account_deleted` wipes the local store,
- * 401 `unauthenticated` signs in again.
+ * layer raises under `/v1` (a malformed JSON body is 400 `validation_failed` with an `invalid_json`
+ * issue, an oversized one 413 `payload_too_large`): `error` is a stable machine code from
+ * `API_ERROR_CODES`, `message` is for a human and may change, `requestId` is the correlation id
+ * also sent as `X-Request-Id`. Some codes carry extra fields (`issues` on `validation_failed`,
+ * `cap`, `limit` and `scope` on `cap_exceeded`, `flight` on `refresh_timeout` and on the refresh
+ * route's `flight_archived`, `triedDates` and `suggestions` on `flight_not_found` from the search
+ * and subscribe-by-number routes), so the schema is loose. The mobile client branches on `error`,
+ * never on `message` or the status alone: 401 `account_deleted` wipes the local store, 401
+ * `unauthenticated` signs in again.
  *
  * A REPLAYED answer (`Idempotent-Replayed: true`, a stored response to an `Idempotency-Key` sent
  * again) carries the ORIGINAL request's `requestId` in its body, since the body is stored and
@@ -55,6 +55,17 @@ export const API_ERROR_CODES = [
   'upstream_timeout',
   'provider_unavailable',
   'provider_error',
+  // Boards and route search (increment 18): an airport code no `airports` row with a real ICAO
+  // code answers; an airport AeroDataBox covers neither live nor by schedule (no provider call
+  // was made); no copy of a bucket exists and the provider could not fill it; an anonymous
+  // account asked for the board of an airport none of its live subscriptions touches; boards and
+  // the route search are switched off in this deployment (`BOARDS_ENABLED`, increment 18 R8: off
+  // in production until AeroDataBox confirms in writing that they are End Use).
+  'airport_not_found',
+  'board_not_covered',
+  'board_unavailable',
+  'board_requires_account',
+  'boards_disabled',
   // Sync
   'resync_required',
   'invalid_cursor',
@@ -76,9 +87,20 @@ export const ApiErrorSchema = z.looseObject({
   requestId: z.string(),
   /** `validation_failed`: what the validator rejected. */
   issues: z.array(ValidationIssueSchema).optional(),
-  /** `cap_exceeded`: which cap and its limit. */
-  cap: z.enum(CAP_NAMES).optional(),
+  /**
+   * `cap_exceeded`: which cap and its limit. A cap this build does not know reads as absent, as
+   * `scope` does, so a later server's new cap never costs a shipped app the whole body.
+   */
+  cap: z.enum(CAP_NAMES).optional().catch(undefined),
   limit: z.int().nonnegative().optional(),
+  /**
+   * `cap_exceeded`: whose allowance ran out (increment 18, R11): the account's own (`user`), or
+   * the network's (`ip`, an anonymous account's per-address cap, shared by every anonymous
+   * install behind that address; signing in lifts it). A scope this build does not know reads as
+   * absent, so a later server's third scope never costs a shipped app the whole body and its
+   * `cap_exceeded` (the re-review's N7).
+   */
+  scope: z.enum(['user', 'ip']).optional().catch(undefined),
   /** `flight_not_found` from a search: the origin-local dates the provider was asked for. */
   triedDates: z.array(IsoDateSchema).optional(),
   /** `flight_not_found` from a search: reserved, always empty in Phase 0 (ruling O4). */

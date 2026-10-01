@@ -86,6 +86,8 @@ describe('GET /v1/flights/search', () => {
     const firstBody = await first.json<SearchBody>();
 
     expect(first.status).toBe(200);
+    // Provider data for this caller: no device cache may keep it past sign-out (R1).
+    expect(first.headers.get('cache-control')).toBe('no-store');
     expect(firstBody.flightKey).toBe(flight.flightKey);
     expect(firstBody.status?.status).toBe('scheduled');
     expect(firstBody.tracker).toBe('seeded');

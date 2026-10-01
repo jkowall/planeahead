@@ -216,7 +216,8 @@ async function deliver(
     }),
   );
   const ctx = createExecutionContext();
-  await handleNotifyBatch(batch, { env, ctx, log: quietLog }, { pushQueue: queue });
+  // The file's handle: a client opened per call here holds its sockets until the file ends.
+  await handleNotifyBatch(batch, { env, ctx, log: quietLog }, { db: db(), pushQueue: queue });
   const result = await getQueueResult(batch, ctx);
   return {
     acked: result.explicitAcks,
@@ -259,7 +260,7 @@ async function attempt(
     { env: testEnv, ctx, log: createLogger({}, (line) => lines.push(line)) },
     {
       pushQueue: queue,
-      ...(options.db === undefined ? {} : { db: options.db }),
+      db: options.db ?? db(),
       ...(options.now === undefined ? {} : { now: () => options.now ?? 0 }),
       capture: (message) => alerts.push(message),
     },

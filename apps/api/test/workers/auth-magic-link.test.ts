@@ -16,7 +16,7 @@
  */
 
 import { and, eq, inArray, like } from 'drizzle-orm';
-import { devices, rateLimits, usageCounters, users, verifications, withDb } from '@planeahead/db';
+import { devices, rateLimits, usageCounters, users, verifications } from '@planeahead/db';
 import { describe, expect, it } from 'vitest';
 import { MAGIC_LINK_CONSUME_PATH, MAGIC_LINK_LANDING_PATH } from '../../src/auth/paths';
 import {
@@ -57,6 +57,8 @@ import {
   verifyMagicLink,
   worker,
 } from './helpers/auth';
+// One client for the file: a `withDb` per helper call held a connection until the file ended.
+import { withFileDb } from './helpers/routes';
 
 interface LinkOptions {
   readonly ip?: string;
@@ -86,7 +88,7 @@ function requestLink(email: string, options: LinkOptions = {}): Promise<Response
 /** The owner rows for one (address, requester) pair, as the gate keys them. */
 async function addressCounters(email: string, headers: Record<string, string>) {
   const subjects = await magicLinkSubjects(email, requestersOf(new Headers(headers)));
-  return withDb(testEnv, (db) =>
+  return withFileDb((db) =>
     db
       .select({ subject: usageCounters.subject, count: usageCounters.count })
       .from(usageCounters)
@@ -111,7 +113,7 @@ function requesterSubjects(ip: string): Promise<CounterSubjects> {
 /** Writes one counter row at `count`, as if that many requests had already been made. */
 async function seedCounter(subject: CounterSubjects, window: 'hour' | 'day', count: number) {
   const windows = windowsAt(Date.now());
-  await withDb(testEnv, (db) =>
+  await withFileDb((db) =>
     db
       .insert(usageCounters)
       .values({
@@ -134,7 +136,7 @@ async function seedCounter(subject: CounterSubjects, window: 'hour' | 'day', cou
 }
 
 async function counterValue(subject: string): Promise<number | undefined> {
-  const [row] = await withDb(testEnv, (db) =>
+  const [row] = await withFileDb((db) =>
     db
       .select({ count: usageCounters.count })
       .from(usageCounters)
@@ -150,7 +152,7 @@ async function counterValue(subject: string): Promise<number | undefined> {
  */
 async function resetBetterAuthLimiter(ip: string) {
   const key = normaliseClientIp(ip) ?? ip;
-  await withDb(testEnv, (db) => db.delete(rateLimits).where(like(rateLimits.key, `${key}|%`)));
+  await withFileDb((db) => db.delete(rateLimits).where(like(rateLimits.key, `${key}|%`)));
 }
 
 /** A fresh documentation-range /64 for one test, so parallel files never share it. */
@@ -160,7 +162,7 @@ function uniqueIpv6Subnet(): string {
 }
 
 async function userStatus(userId: string): Promise<string | undefined> {
-  const [row] = await withDb(testEnv, (db) =>
+  const [row] = await withFileDb((db) =>
     db.select({ status: users.status }).from(users).where(eq(users.id, userId)).limit(1),
   );
   return row?.status;
@@ -188,7 +190,7 @@ describe('POST /api/auth/sign-in/magic-link', () => {
     expect(sent?.body.text).not.toContain('callbackURL');
 
     // The token itself is nowhere in the database; only hashes of it are.
-    const rows = await withDb(testEnv, (db) =>
+    const rows = await withFileDb((db) =>
       db.select({ identifier: verifications.identifier }).from(verifications),
     );
     expect(rows.some((row) => row.identifier.includes(token))).toBe(false);
@@ -465,7 +467,7 @@ describe('GET /api/auth/magic-link/verify', () => {
     expect(response.headers.get('content-type')).toContain('application/json');
     expect(response.headers.get('location')).toBeNull();
     expect(cookie).toContain('better-auth.session_token=');
-    const row = await withDb(testEnv, (db) =>
+    const row = await withFileDb((db) =>
       db
         .select({
           email: users.email,
@@ -539,7 +541,7 @@ describe('GET /api/auth/magic-link/verify', () => {
     expect(await userStatus(anonymous.userId)).toBe('deleting');
 
     // The device followed the user and the old cookie no longer resolves.
-    const [device] = await withDb(testEnv, (db) =>
+    const [device] = await withFileDb((db) =>
       db.select({ userId: devices.userId }).from(devices).where(eq(devices.installId, installId)),
     );
     expect(device?.userId).toBe(upgraded.userId);
@@ -583,7 +585,7 @@ describe('GET /api/auth/magic-link/verify', () => {
     expect(skipped).toHaveLength(1);
     expect(skipped[0]?.['reason']).toBe('requester_mismatch');
     expect(logEvents(lines, 'merge_committed')).toHaveLength(0);
-    const [device] = await withDb(testEnv, (db) =>
+    const [device] = await withFileDb((db) =>
       db.select({ userId: devices.userId }).from(devices).where(eq(devices.installId, installId)),
     );
     expect(device?.userId).toBe(victim.userId);

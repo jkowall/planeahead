@@ -13,7 +13,9 @@
  *   only), which the card and the detail show. A flight the store already tracks is answered
  *   locally (`findTracked`): by flight key first, then by any name a live row is known by on that
  *   date (the one typed here, the operating designator, the snapshot's marketing designator and
- *   codeshares, IATA and ICAO; ruling Y3), so re-typing the name a card shows says so. A pending
+ *   codeshares, IATA and ICAO; ruling Y3), so re-typing the name a card shows says so. An add
+ *   from a board or a route search names its leg's origin, and only a key departing from it
+ *   matches (increment 18, R9), so a second leg of the same number can be added. A pending
  *   add that a pull later shows the store already holds (the flight arrived after the add was
  *   queued) is marked superseded and hidden (src/lib/sync/local-intent.ts), and its POST settles
  *   it.
@@ -77,8 +79,10 @@ import type { ApiClient, RawResponse } from './api-client';
 import type { SqliteLike } from './db/sqlite-like';
 import { commitWrite, type StoreTable } from './db/store-signal';
 import {
+  keyOriginIcao,
   liveRowNamed,
   PENDING_KEY_PREFIX,
+  parsePendingKey,
   pendingFlightKey,
   toFlightItem,
   type FlightRowRecord,
@@ -111,6 +115,12 @@ export interface AddFlightRequest {
   readonly designator: string;
   /** Origin-local departure date `YYYY-MM-DD`. */
   readonly date: string;
+  /**
+   * The departure airport, when the add comes from a board or a route search (increment 18): the
+   * row's `add.origin`, an ICAO code. It picks the leg of a flight number that flies more than one
+   * that day, and the duplicate check compares it with a key's origin ICAO (R9).
+   */
+  readonly origin?: string;
 }
 
 export type AddFlightErrors = Partial<Record<keyof AddFlightInput, string>>;
@@ -201,23 +211,38 @@ function probableKeyParts(
 
 /**
  * A live row that already tracks this add. First by FLIGHT KEY (increment 10 review): a pending
- * row with the same placeholder key, or a synced row whose key has the designator's operating
- * carrier, number and date. Then by name (ruling Y3): a synced row that `pendingMatchesLive` would
- * match, known on that date by the typed designator (the one typed here, the operating one, the
- * snapshot's marketing designator or a codeshare, in IATA or ICAO spelling). A codeshare no row
- * here is known by is queued, and the server's 200 `created: false` settles it (see the header).
+ * row with the same designator and date in its placeholder key, or a synced row whose key has the
+ * designator's operating carrier, number and date. Then by name (ruling Y3): a synced row that
+ * `pendingMatchesLive` would match, known on that date by the typed designator (the one typed
+ * here, the operating one, the snapshot's marketing designator or a codeshare, in IATA or ICAO
+ * spelling). A codeshare no row here is known by is queued, and the server's 200 `created: false`
+ * settles it (see the header).
+ *
+ * An add that names its leg's origin (from a board or a route search, R9) matches only a key
+ * departing from that origin, so a second leg of the same number that day can be added: a synced
+ * key's origin ICAO, a pending add's from its placeholder. A typed pending add names no leg and
+ * does not match it; if it is the same leg, the server's `created: false` settles it.
  */
 export function findTracked(db: SqliteLike, request: AddFlightRequest): string | null {
-  const placeholder = pendingFlightKey(request.designator, request.date);
+  const origin = request.origin ?? null;
   const wanted = probableKeyParts(request);
   const rows = db.all<FlightRowRecord>(
     'SELECT * FROM flight_subscriptions WHERE deleted_at IS NULL AND id IS NOT NULL',
   );
+  const sameLeg = (key: string) => origin === null || keyOriginIcao(key) === origin;
   for (const row of rows) {
-    if (row.flight_key === placeholder) {
-      return row.id;
+    const pending = parsePendingKey(row.flight_key);
+    if (pending !== null) {
+      if (
+        pending.designator === request.designator &&
+        pending.dateLocal === request.date &&
+        sameLeg(row.flight_key)
+      ) {
+        return row.id;
+      }
+      continue;
     }
-    if (wanted === null || row.flight_key.startsWith(PENDING_KEY_PREFIX)) {
+    if (wanted === null) {
       continue;
     }
     try {
@@ -225,7 +250,8 @@ export function findTracked(db: SqliteLike, request: AddFlightRequest): string |
       if (
         key.operatingCarrierIcao === wanted.carrierIcao &&
         key.flightNumber === wanted.number &&
-        key.scheduledDepartureDateLocal === wanted.date
+        key.scheduledDepartureDateLocal === wanted.date &&
+        sameLeg(row.flight_key)
       ) {
         return row.id;
       }
@@ -235,12 +261,13 @@ export function findTracked(db: SqliteLike, request: AddFlightRequest): string |
   }
   const named = rows
     .map(toFlightItem)
-    .find((item) => liveRowNamed(item, request.designator, request.date));
+    .find((item) => liveRowNamed(item, request.designator, request.date, origin));
   return named?.id ?? null;
 }
 
 /**
- * Writes the optimistic row and queues `POST /v1/flights { subscriptionId, number, date }` in one
+ * Writes the optimistic row and queues `POST /v1/flights { subscriptionId, number, date }` (and
+ * `origin`, for an add from a board or a route search: the row's `add`, increment 18) in one
  * immediate transaction (see the header). A flight the store already tracks is not queued again.
  */
 export function addFlight(
@@ -260,6 +287,7 @@ export function addFlight(
     subscriptionId,
     number: request.designator,
     date: request.date,
+    ...(request.origin === undefined ? {} : { origin: request.origin }),
   });
   const item = commitWrite(db, ['flight_subscriptions', 'outbox'], (): OutboxItem => {
     db.run(
@@ -269,7 +297,7 @@ export function addFlight(
        ) VALUES (?, ?, 0, '{}', 'app', 0, ?, ?, ?)`,
       [
         subscriptionId,
-        pendingFlightKey(request.designator, request.date),
+        pendingFlightKey(request.designator, request.date, request.origin ?? null),
         stamp,
         stamp,
         request.designator,

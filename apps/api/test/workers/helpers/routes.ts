@@ -44,6 +44,11 @@ export function db(): Db {
   return fileHandle;
 }
 
+/** `withDb`'s shape on the file's handle, for a helper that would otherwise open one per call. */
+export function withFileDb<T>(fn: (handle: Db) => Promise<T>): Promise<T> {
+  return fn(db());
+}
+
 function randomFlightNumber(): string {
   return String(1 + Math.floor(Math.random() * 9_998));
 }

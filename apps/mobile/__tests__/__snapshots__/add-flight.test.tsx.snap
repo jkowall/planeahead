@@ -198,6 +198,89 @@ exports[`the sheet in light and dark renders with its validation errors in dark 
               "testID": "add-flight-close",
               "type": "View",
             },
+            {
+              "children": [
+                {
+                  "children": [
+                    "Find it another way",
+                  ],
+                  "style": {
+                    "color": "#A3ACB8",
+                  },
+                  "type": "Text",
+                },
+                {
+                  "children": [
+                    {
+                      "children": [
+                        "Search by route",
+                      ],
+                      "style": {
+                        "color": "#F2F4F8",
+                      },
+                      "type": "Text",
+                    },
+                  ],
+                  "label": "Find a flight by route",
+                  "style": {
+                    "backgroundColor": "#171B22",
+                    "borderColor": "#2A303A",
+                  },
+                  "testID": "add-flight-route-search",
+                  "type": "View",
+                },
+                {
+                  "children": [
+                    {
+                      "children": [
+                        "Airport board",
+                      ],
+                      "style": {
+                        "color": "#A3ACB8",
+                      },
+                      "type": "Text",
+                    },
+                    {
+                      "label": "Airport board",
+                      "style": {
+                        "backgroundColor": "#1F242D",
+                        "borderColor": "#707A8C",
+                        "color": "#F2F4F8",
+                      },
+                      "testID": "add-flight-airport",
+                      "type": "TextInput",
+                    },
+                  ],
+                  "type": "View",
+                },
+                {
+                  "children": [
+                    {
+                      "children": [
+                        "Open the board",
+                      ],
+                      "style": {
+                        "color": "#F2F4F8",
+                      },
+                      "type": "Text",
+                    },
+                  ],
+                  "label": "Open this airport's departures and arrivals",
+                  "style": {
+                    "backgroundColor": "#171B22",
+                    "borderColor": "#2A303A",
+                  },
+                  "testID": "add-flight-open-board",
+                  "type": "View",
+                },
+              ],
+              "style": {
+                "backgroundColor": "#171B22",
+                "borderColor": "#2A303A",
+              },
+              "testID": "add-flight-other-ways",
+              "type": "View",
+            },
           ],
           "type": "View",
         },
@@ -409,6 +492,89 @@ exports[`the sheet in light and dark renders with its validation errors in light
                 "borderColor": "#D6DAE1",
               },
               "testID": "add-flight-close",
+              "type": "View",
+            },
+            {
+              "children": [
+                {
+                  "children": [
+                    "Find it another way",
+                  ],
+                  "style": {
+                    "color": "#525B67",
+                  },
+                  "type": "Text",
+                },
+                {
+                  "children": [
+                    {
+                      "children": [
+                        "Search by route",
+                      ],
+                      "style": {
+                        "color": "#101418",
+                      },
+                      "type": "Text",
+                    },
+                  ],
+                  "label": "Find a flight by route",
+                  "style": {
+                    "backgroundColor": "#F2F4F8",
+                    "borderColor": "#D6DAE1",
+                  },
+                  "testID": "add-flight-route-search",
+                  "type": "View",
+                },
+                {
+                  "children": [
+                    {
+                      "children": [
+                        "Airport board",
+                      ],
+                      "style": {
+                        "color": "#525B67",
+                      },
+                      "type": "Text",
+                    },
+                    {
+                      "label": "Airport board",
+                      "style": {
+                        "backgroundColor": "#FFFFFF",
+                        "borderColor": "#7D8591",
+                        "color": "#101418",
+                      },
+                      "testID": "add-flight-airport",
+                      "type": "TextInput",
+                    },
+                  ],
+                  "type": "View",
+                },
+                {
+                  "children": [
+                    {
+                      "children": [
+                        "Open the board",
+                      ],
+                      "style": {
+                        "color": "#101418",
+                      },
+                      "type": "Text",
+                    },
+                  ],
+                  "label": "Open this airport's departures and arrivals",
+                  "style": {
+                    "backgroundColor": "#F2F4F8",
+                    "borderColor": "#D6DAE1",
+                  },
+                  "testID": "add-flight-open-board",
+                  "type": "View",
+                },
+              ],
+              "style": {
+                "backgroundColor": "#F2F4F8",
+                "borderColor": "#D6DAE1",
+              },
+              "testID": "add-flight-other-ways",
               "type": "View",
             },
           ],

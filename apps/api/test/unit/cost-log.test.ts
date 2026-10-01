@@ -79,6 +79,7 @@ describe('the provider_calls row', () => {
       flightKey: 'AAL-100-2026-09-22-KJFK',
       requestId: 'req-cost-log',
       errorCode: 'x'.repeat(200),
+      airportIcao: null,
     });
     const refused = record({ result: 'rate_limited', costUnits: 0, estCostUsdMicros: 0 });
     delete refused.httpStatus;
@@ -88,14 +89,22 @@ describe('the provider_calls row', () => {
       flightKey: null,
       errorCode: null,
     });
+    // Increment 18: a board call carries its airport into `provider_calls.airport_icao`.
+    const board = record({ operation: 'fids', trigger: 'board', airportIcao: 'KATL' });
+    delete board.flightKey;
+    expect(providerCallRow(board)).toMatchObject({
+      trigger: 'board',
+      airportIcao: 'KATL',
+      flightKey: null,
+    });
   });
 });
 
 describe('the Analytics Engine point (shape fixed in shared)', () => {
-  it('index1 provider; blobs operation, flight_key, trigger, result, environment; four doubles', () => {
+  it('index1 provider; blobs operation, flight_key, trigger, result, environment, airport_icao; four doubles', () => {
     expect(providerCallPoint(record(), 'test')).toEqual({
       indexes: ['aerodatabox'],
-      blobs: ['flight_status', 'AAL-100-2026-09-22-KJFK', 'alarm', 'ok', 'test'],
+      blobs: ['flight_status', 'AAL-100-2026-09-22-KJFK', 'alarm', 'ok', 'test', ''],
       doubles: [412, 2, 500, 200],
     });
     expect(PROVIDER_CALL_POINT_BLOBS).toEqual([
@@ -104,6 +113,7 @@ describe('the Analytics Engine point (shape fixed in shared)', () => {
       'trigger',
       'result',
       'environment',
+      'airport_icao',
     ]);
     expect(PROVIDER_CALL_POINT_DOUBLES).toEqual([
       'latency_ms',
@@ -135,7 +145,7 @@ describe('in a Worker', () => {
     expect(points).toHaveLength(2);
     expect(points[0]).toEqual({
       indexes: ['aerodatabox'],
-      blobs: ['flight_status', 'AAL-100-2026-09-22-KJFK', 'user_search', 'not_found', 'test'],
+      blobs: ['flight_status', 'AAL-100-2026-09-22-KJFK', 'user_search', 'not_found', 'test', ''],
       doubles: [412, 2, 500, 200],
     });
     const rows = await withDb(env as Env, (db) =>

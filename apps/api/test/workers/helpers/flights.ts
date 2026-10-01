@@ -37,6 +37,14 @@ export function track<T extends DurableObjectStub>(stub: T): T {
   return stub;
 }
 
+/** Forgets a stub its object's reset (`ctx.abort()`) has spent; `track` the new one instead. */
+export function untrack(stub: DurableObjectStub): void {
+  const index = touched.indexOf(stub);
+  if (index >= 0) {
+    touched.splice(index, 1);
+  }
+}
+
 /**
  * The `afterEach` drain: cancels the alarm rather than running it (a tracker's alarm would make
  * a provider call and send outbox rows, which no test wants after its assertions), then lets

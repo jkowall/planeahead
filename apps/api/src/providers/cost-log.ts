@@ -58,6 +58,7 @@ export function providerCallRow(record: ProviderCallRecord): typeof providerCall
     flightKey: record.flightKey ?? null,
     requestId: record.requestId,
     errorCode: record.error === undefined ? null : record.error.slice(0, ERROR_CODE_MAX_LENGTH),
+    airportIcao: record.airportIcao ?? null,
   };
 }
 

@@ -26,6 +26,12 @@ export default function AppLayout() {
     <Stack screenOptions={{ headerShown: false }}>
       {/* The add-flight sheet (increment 10): a modal is a swipe-to-dismiss page sheet on iOS. */}
       <Stack.Screen name="add" options={{ presentation: 'modal' }} />
+      {/*
+        The route search (increment 18) opens from the add sheet as a sheet over it, so closing
+        it returns to the sheet. The airport board (`airport/[code]`) is a pushed screen: the add
+        sheet replaces itself with it, so it never lands behind the sheet.
+      */}
+      <Stack.Screen name="route-search" options={{ presentation: 'modal' }} />
     </Stack>
   );
 }

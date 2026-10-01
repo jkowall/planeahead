@@ -37,6 +37,14 @@
  * alarms from failing. Revisit (a larger plan, or the sharding hatch) when the mean debit rate
  * approaches half the plan limit, not when the peak does.
  *
+ * That reasoning counts tracker debits only. Since increment 18 the `board` and `route_search`
+ * calls draw from the same bucket, and a cold board open takes several tokens at once, which
+ * would spend the burst the clustered alarms need (review A's MA1: two cold opens on Growth
+ * emptied it and the next tracker alarm lost its slot). So a board call takes a token only while
+ * the bucket keeps `keep` more (`take`'s floor, sized by `boardTokenFloor` in `boards-budget.ts`,
+ * ruling R2): board traffic alone never takes the bucket below the floor, and a tracker alarm
+ * finds at least that many tokens unless other trackers spent them (2 of Growth's burst of 5).
+ *
  * Sharding caveat: the burst cannot go below one token, so eight shards of one provider each keep
  * a burst of 1 and can release 8 grants in the same instant against a limit of 5. The sharding
  * escape hatch (src/do/provider-budget.ts) must route the per-second limit through one object or
@@ -62,8 +70,10 @@ export interface TakeResult {
   readonly allowed: boolean;
   /** The state to store, whether or not the take succeeded (it carries the refill). */
   readonly state: TokenBucketState;
-  /** 0 when allowed; otherwise the wait until a token is available. */
+  /** 0 when allowed; otherwise the wait until a token (and the floor, if any) is available. */
   readonly retryAfterMs: number;
+  /** True for a refusal that only the `keep` floor caused: the bucket held the cost itself. */
+  readonly floored: boolean;
 }
 
 /** Float noise guard: 4.999999999 tokens is 5. */
@@ -120,29 +130,43 @@ export function refill(
   };
 }
 
-/** Takes `cost` tokens if the bucket has them and is not blocked. */
+/**
+ * Takes `cost` tokens if the bucket has them and is not blocked. `keep` is a floor the take may
+ * not cross (ruling R2): the bucket must hold `cost + keep`, and a refusal waits for that much. It
+ * is capped at `burst - cost`, so a full bucket always serves the call and a floor can only delay
+ * it, never starve it.
+ */
 export function take(
   state: TokenBucketState,
   config: TokenBucketConfig,
   nowMs: number,
   cost = 1,
+  keep = 0,
 ): TakeResult {
   const refilled = refill(state, config, nowMs);
   if (nowMs < refilled.blockedUntilMs) {
-    return { allowed: false, state: refilled, retryAfterMs: refilled.blockedUntilMs - nowMs };
+    return {
+      allowed: false,
+      state: refilled,
+      retryAfterMs: refilled.blockedUntilMs - nowMs,
+      floored: false,
+    };
   }
-  if (refilled.tokens + EPSILON >= cost) {
+  const needed = cost + Math.max(0, Math.min(keep, config.burst - cost));
+  if (refilled.tokens + EPSILON >= needed) {
     return {
       allowed: true,
       state: { ...refilled, tokens: Math.max(0, refilled.tokens - cost) },
       retryAfterMs: 0,
+      floored: false,
     };
   }
-  const missing = cost - refilled.tokens;
+  const missing = needed - refilled.tokens;
   return {
     allowed: false,
     state: refilled,
     retryAfterMs: Math.max(1, Math.ceil((missing * 1_000) / config.ratePerSecond)),
+    floored: refilled.tokens + EPSILON >= cost,
   };
 }
 

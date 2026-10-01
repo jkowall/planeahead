@@ -17,15 +17,22 @@
  * system.
  *
  * Windows: the UTC day for the monotonic caps (`instances_created`, `tracker_creations`,
- * `refresh:{flightKey}`), the epoch for the two that go down again (`active_subscriptions`,
- * `live_tracked`), which are decremented on unsubscribe and never below zero. Drift between those
- * two and `flight_subscriptions` (a crash between a take and its compensating release) is repaired
- * by the nightly reconciliation the increment 12 housekeeping cron adds.
+ * `refresh:{flightKey}`, `route_searches`), the epoch for the two that go down again
+ * (`active_subscriptions`, `live_tracked`), which are decremented on unsubscribe and never below
+ * zero. Drift between those two and `flight_subscriptions` (a crash between a take and its
+ * compensating release) is repaired by the nightly reconciliation the increment 12 housekeeping
+ * cron adds.
  */
 
 import { sql } from 'drizzle-orm';
 import type { Db } from '@planeahead/db';
-import { type CapName, type FlightKey, freeTierLimit, uuidv7 } from '@planeahead/shared';
+import {
+  FREE_TIER_LIMITS,
+  type CapName,
+  type FlightKey,
+  freeTierLimit,
+  uuidv7,
+} from '@planeahead/shared';
 
 /** Anything that can run a statement: the request's handle or a transaction on it. */
 export type SqlExecutor = Pick<Db, 'execute'>;
@@ -76,6 +83,21 @@ export function ipTrackerCreationCap(saltedSubject: string, now: Date): CapSlot 
     counter: 'tracker_creations',
     windowStart: utcDayStart(now),
     limit: freeTierLimit('tracker_creations'),
+  };
+}
+
+/**
+ * The anonymous per-IP route-search slot (increment 18, ruling B9): taken beside the user's own
+ * `route_searches` slot when the caller is an anonymous account, as `tracker_creations` is.
+ */
+export function ipRouteSearchCap(saltedSubject: string, now: Date): CapSlot {
+  return {
+    cap: 'route_searches',
+    scope: 'ip',
+    subject: saltedSubject,
+    counter: 'route_searches',
+    windowStart: utcDayStart(now),
+    limit: FREE_TIER_LIMITS.anonymousRouteSearchesPerDayPerIp,
   };
 }
 
@@ -146,12 +168,20 @@ export class CapLedger {
   }
 }
 
-/** The 403 body for a cap that was hit. */
+/**
+ * The 403 body for a cap that was hit. `scope` says whose allowance ran out (increment 18, R11):
+ * `user` the account's own, `ip` the per-address one an anonymous account shares with every other
+ * anonymous install behind its network, which signing in lifts. Typed inline, not as `CapScope`:
+ * the typed client's declarations would otherwise import this module, and with it the database
+ * package, into the mobile app's view (test/consumer).
+ */
 export function capExceededBody(slot: CapSlot, requestId: string) {
+  const scope: 'user' | 'ip' = slot.scope;
   return {
     error: 'cap_exceeded' as const,
     cap: slot.cap,
     limit: slot.limit,
+    scope,
     message: `the free plan allows ${String(slot.limit)} (${slot.cap.replaceAll('_', ' ')})`,
     requestId,
   };

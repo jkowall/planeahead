@@ -48,10 +48,13 @@ describe('GET /health', () => {
       // increment 15: the notification policy state.
       FlightTracker: 3,
       DesignatorResolver: 2,
-      AirportState: 0,
+      // Increment 18: the board buckets, their chunks, coverage and the outbox; then the stored
+      // waits of buckets whose fetch failed deterministically (close-out, M1).
+      AirportState: 2,
       UserInbox: 0,
-      // Increment 6: the ledger, bucket, kill switch and outbox tables.
-      ProviderBudget: 1,
+      // Increment 6: the ledger, bucket, kill switch and outbox tables; increment 18: the
+      // distinct airports refreshed per hour.
+      ProviderBudget: 2,
       // Increment 14: the push credentials.
       PushAuth: 1,
     });
