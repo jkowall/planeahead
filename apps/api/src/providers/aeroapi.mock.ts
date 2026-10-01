@@ -38,11 +38,8 @@
  *   - A delivery's `event_code` is one of 18 values and may grow: it is mapped tolerantly. Its
  *     `flight` object has no timezone and no status, so it is merged onto the last polled
  *     snapshot (`mergeAeroApiAlert`), never treated as a full status.
- *   - Boards take the shared `BoardWindow` (airport-local wall clock plus the airport's zone) and
- *     convert it to UTC. AeroAPI's `departures` and `arrivals` select flights by their ACTUAL off
- *     or on time (already departed, already landed), unlike AeroDataBox FIDS, which selects by
- *     schedule: an AeroAPI board of a future window is empty. `scheduled_departures` and
- *     `scheduled_arrivals` would answer that and are priced apart; Phase 1 decides.
+ *   - No boards: boards and route search are AeroDataBox only (Phase 1 plan section 3,
+ *     increment 18), so this adapter has no board method and `capabilities.boards` is false.
  */
 
 import { z } from 'zod';
@@ -66,8 +63,6 @@ import {
   type AirportRef,
   type AlertEvent,
   type AlertRegistrationOptions,
-  type BoardRow,
-  type BoardWindow,
   type CarrierIataToIcaoTable,
   type Codeshare,
   type Exact,
@@ -296,81 +291,6 @@ export function bracketLocalDate(dateLocal: string, now: Date): BracketWindow | 
   const start = Math.max(midnight - 14 * HOUR_MS, earliestStartMs(nowMs));
   const end = Math.min(midnight + DAY_MS + 12 * HOUR_MS, latestEndMs(nowMs));
   return start < end ? { start: isoSeconds(start), end: isoSeconds(end) } : null;
-}
-
-const LOCAL_MINUTE_RE = /^([0-9]{4})-([0-9]{2})-([0-9]{2})T([0-9]{2}):([0-9]{2})$/;
-
-/** Wall clock minus UTC at `utcMs` in `tz`, in milliseconds. */
-function zoneOffsetMs(utcMs: number, tz: string): number {
-  const parts = new Intl.DateTimeFormat('en-US', {
-    timeZone: tz,
-    hourCycle: 'h23',
-    year: 'numeric',
-    month: '2-digit',
-    day: '2-digit',
-    hour: '2-digit',
-    minute: '2-digit',
-    second: '2-digit',
-  }).formatToParts(new Date(utcMs));
-  const part = (type: Intl.DateTimeFormatPartTypes): number =>
-    Number(parts.find((candidate) => candidate.type === type)?.value ?? Number.NaN);
-  const wall = Date.UTC(
-    part('year'),
-    part('month') - 1,
-    part('day'),
-    part('hour'),
-    part('minute'),
-    part('second'),
-  );
-  return wall - Math.floor(utcMs / 1_000) * 1_000;
-}
-
-/**
- * The instant at which the zone's offset changes, searched to the second between `lo` and `hi`
- * (whose offsets differ). Only ever called for a wall time inside a spring-forward gap.
- */
-function transitionBetween(lo: number, hi: number, tz: string): number {
-  const before = zoneOffsetMs(lo, tz);
-  let low = lo;
-  let high = hi;
-  while (high - low > 1_000) {
-    const mid = low + Math.floor((high - low) / 2_000) * 1_000;
-    if (zoneOffsetMs(mid, tz) === before) {
-      low = mid;
-    } else {
-      high = mid;
-    }
-  }
-  return high;
-}
-
-/**
- * An airport-local wall-clock minute (`YYYY-MM-DDTHH:mm`) in `tz` as a UTC instant in ms, or null
- * for a malformed time or zone. Two passes over the zone's offset, so the answer is right on both
- * sides of a DST change; an ambiguous fall-back time is its first occurrence. A wall time inside
- * a spring-forward gap exists on no clock, and it lands ON the transition (the first instant after
- * the gap): the mapping stays monotonic, so a local `from < to` window that straddles the gap
- * stays ordered as UTC, and one lying entirely inside the gap collapses to an empty window. The
- * earlier two-pass result put a gap time an hour BEFORE the gap, which reversed such a window.
- */
-export function localMinuteToUtcMs(local: string, tz: string): number | null {
-  const match = LOCAL_MINUTE_RE.exec(local);
-  if (match === null || !isValidTimeZone(tz)) {
-    return null;
-  }
-  const [, y, mo, d, h, mi] = match;
-  const wall = Date.UTC(Number(y), Number(mo) - 1, Number(d), Number(h), Number(mi));
-  if (Number.isNaN(wall) || new Date(wall).toISOString().slice(0, 16) !== local) {
-    return null;
-  }
-  const guessOffset = zoneOffsetMs(wall, tz);
-  const first = wall - guessOffset;
-  const offset = zoneOffsetMs(first, tz);
-  const candidate = wall - offset;
-  if (offset === guessOffset || zoneOffsetMs(candidate, tz) === offset) {
-    return candidate;
-  }
-  return transitionBetween(Math.min(first, candidate), Math.max(first, candidate), tz);
 }
 
 /** The alert id in a 201 `Location` header (`/alerts/12345`, or the absolute URL). */
@@ -729,60 +649,6 @@ export function onLocalDate(
   );
 }
 
-function boardRowOf(
-  flight: AeroApiFlight,
-  direction: 'dep' | 'arr',
-  ctx: AeroApiMappingContext,
-): Exact<BoardRow> | null {
-  let status: Exact<FlightStatus>;
-  try {
-    status = mapAeroApiFlight(flight, ctx);
-  } catch {
-    return null;
-  }
-  const scheduled = direction === 'dep' ? status.times.scheduledOut : status.times.scheduledIn;
-  if (scheduled === undefined) {
-    return null;
-  }
-  const row: Exact<BoardRow> = {
-    direction,
-    designator:
-      clean(flight.ident_iata) ??
-      clean(flight.ident) ??
-      `${status.operatingCarrierIcao}${status.flightNumber}`,
-    operatingCarrierIcao: status.operatingCarrierIcao,
-    flightNumber: status.flightNumber,
-    counterpart: direction === 'dep' ? status.destination : status.origin,
-    scheduled,
-    status: status.status,
-    codeshares: status.codeshares,
-    source: 'aeroapi',
-  };
-  const estimated = direction === 'dep' ? status.times.estimatedOut : status.times.estimatedIn;
-  const actual = direction === 'dep' ? status.times.actualOut : status.times.actualIn;
-  const gate = direction === 'dep' ? status.originGate : status.destinationGate;
-  const terminal = direction === 'dep' ? status.originTerminal : status.destinationTerminal;
-  if (estimated !== undefined) {
-    row.estimated = estimated;
-  }
-  if (actual !== undefined) {
-    row.actual = actual;
-  }
-  if (gate !== undefined) {
-    row.gate = gate;
-  }
-  if (terminal !== undefined) {
-    row.terminal = terminal;
-  }
-  if (direction === 'arr' && status.baggageClaim !== undefined) {
-    row.baggageClaim = status.baggageClaim;
-  }
-  if (status.aircraftTypeIcao !== undefined) {
-    row.aircraftTypeIcao = status.aircraftTypeIcao;
-  }
-  return row;
-}
-
 // ---------------------------------------------------------------------------------------------
 // Alert deliveries.
 // ---------------------------------------------------------------------------------------------
@@ -982,7 +848,7 @@ export class AeroApiAdapter implements FlightDataProvider {
     alerts: true,
     // Which fields a delivery carries in practice is measured with a live alert (owner task).
     alertFields: ['unknown'],
-    boards: true,
+    boards: false,
     maxDaysAhead: AEROAPI_STANDARD.maxDaysAhead,
     fidsWindowHours: AEROAPI_STANDARD.fidsWindowHours,
     inboundLink: true,
@@ -1202,75 +1068,6 @@ export class AeroApiAdapter implements FlightDataProvider {
         error: `skipped ${String(skipped.length)}: ${skipped.join('; ')}`.slice(0, 200),
       },
     };
-  }
-
-  /**
-   * Departures or arrivals at an airport (`airport_departures` / `airport_arrivals`). The window
-   * is the shared `BoardWindow`, airport-local wall clock plus the airport's zone, converted to
-   * UTC here; AeroAPI selects these boards by ACTUAL off or on time (flights that already left or
-   * landed), so a future window answers nothing.
-   */
-  async getBoard(
-    airportIcao: string,
-    direction: 'dep' | 'arr',
-    window: BoardWindow,
-    ctx: ProviderCallContext,
-  ): Promise<ProviderResult<Exact<BoardRow>[]>> {
-    const icao = airportIcao.trim().toUpperCase();
-    const now = ctx.now();
-    const fromMs = localMinuteToUtcMs(window.from, window.tz);
-    const toMs = localMinuteToUtcMs(window.to, window.tz);
-    if (fromMs === null || toMs === null || toMs <= fromMs) {
-      throw new RangeError(
-        'a board window needs two local times YYYY-MM-DDTHH:mm, from < to, and a valid zone',
-      );
-    }
-    const start = Math.max(fromMs, earliestStartMs(now.getTime()));
-    const end = Math.min(toMs, latestEndMs(now.getTime()));
-    const operation = direction === 'dep' ? 'airport_departures' : 'airport_arrivals';
-    if (start >= end) {
-      return {
-        data: [],
-        call: callRecord({
-          ctx,
-          provider: this.id,
-          operation,
-          startedAt: now,
-          finishedAt: now,
-          result: 'error',
-          billed: false,
-          error: 'outside_aeroapi_window',
-        }),
-      };
-    }
-    const url = this.#url(
-      `airports/${encodeURIComponent(icao)}/flights/${direction === 'dep' ? 'departures' : 'arrivals'}`,
-      { start: isoSeconds(start), end: isoSeconds(end), max_pages: '1' },
-    );
-    const { call, body } = await this.#send(
-      ctx,
-      operation,
-      new Request(url, { method: 'GET' }),
-      200,
-    );
-    if (call.result !== 'ok' || body?.kind !== 'json') {
-      return { data: [], call };
-    }
-    const key = direction === 'dep' ? 'departures' : 'arrivals';
-    const items = (body.value as Record<string, unknown> | null)?.[key];
-    if (!Array.isArray(items)) {
-      return { data: [], call: { ...call, result: 'error', error: 'not_a_board_response' } };
-    }
-    const mapping = this.#mapping(now);
-    const rows: Exact<BoardRow>[] = [];
-    for (const item of items) {
-      const parsed = AeroApiFlightSchema.safeParse(item);
-      const row = parsed.success ? boardRowOf(parsed.data, direction, mapping) : null;
-      if (row !== null) {
-        rows.push(row);
-      }
-    }
-    return { data: rows, call };
   }
 
   /**

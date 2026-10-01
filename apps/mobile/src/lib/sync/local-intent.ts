@@ -14,9 +14,10 @@
  *   replace (src/lib/sync/store.ts) and goes for good when the DELETE settles.
  * - A pending add (the optimistic row of a queued `POST /v1/flights`) carries a placeholder key
  *   that never equals a canonical one, so it cannot be matched to a server row by key. It is
- *   matched by designator and origin-local date instead (`pendingMatchesLive`): a pending row the
- *   store already holds as a live row is marked `superseded` and hidden from the list, and its POST
- *   stays queued, so the server's 200 `created: false` settles it (src/lib/flights.ts).
+ *   matched by designator and origin-local date instead (`pendingMatchesLive`; an add from a board
+ *   also by the origin its placeholder names, R9): a pending row the store already holds as a live
+ *   row is marked `superseded` and hidden from the list, and its POST stays queued, so the
+ *   server's 200 `created: false` settles it (src/lib/flights.ts).
  */
 
 import type { SqliteLike } from '../db/sqlite-like';
@@ -78,7 +79,8 @@ export function reapplyQueuedUnsubscribes(db: SqliteLike, now: Date): number {
 
 /**
  * Marks each live pending row superseded when a live synced row names the same flight (same
- * designator and date), and clears the mark when none does any more; returns the rows changed.
+ * designator and date, and origin when the add named one), and clears the mark when none does any
+ * more; returns the rows changed.
  */
 export function markSupersededPending(db: SqliteLike): number {
   const prefix = [PENDING_KEY_PREFIX.length, PENDING_KEY_PREFIX] as const;

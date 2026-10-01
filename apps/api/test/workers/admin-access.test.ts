@@ -337,6 +337,9 @@ describe('the page', () => {
     expect(html).toContain('<td>planeahead-housekeeping-local</td><td>7</td><td>1234</td>');
     expect(html).toContain('sync_epoch');
     expect(html).toContain('housekeeping.sync_purge');
+    // The boards section (increment 18, ruling B11): today's share and the hourly airport cap.
+    expect(html).toContain('<h2>Boards and route search (AeroDataBox FIDS)</h2>');
+    expect(html).toContain('<td>Distinct airports refreshed this UTC hour</td>');
     expect(html).not.toContain('class="unavailable"');
     // The suite's role is a superuser, so the watermark is complete; the deletion write action is a
     // link to its own page, and this page carries no form.

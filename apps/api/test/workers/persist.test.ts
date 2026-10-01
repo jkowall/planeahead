@@ -10,7 +10,7 @@
  */
 
 import { createExecutionContext, createMessageBatch, getQueueResult } from 'cloudflare:test';
-import { and, eq } from 'drizzle-orm';
+import { and, eq, inArray } from 'drizzle-orm';
 import { flightEvents, flightInstances, providerCallDaily, providerCalls } from '@planeahead/db';
 import { afterEach, describe, expect, it } from 'vitest';
 import {
@@ -471,6 +471,43 @@ describe('persist consumer', () => {
       .from(providerCalls)
       .where(eq(providerCalls.id, call.id));
     expect(rows).toHaveLength(1);
+  });
+
+  it('records an AirportState board call with its airport and no flight (increment 18, migration 0010)', async () => {
+    const flight = uniqueFlight();
+    const call = callRecord(flight.flightKey, {
+      operation: 'fids',
+      trigger: 'board',
+      airportIcao: 'KATL',
+    });
+    delete call.flightKey;
+    const search = callRecord(flight.flightKey, {
+      operation: 'health',
+      trigger: 'route_search',
+      airportIcao: 'KATL',
+      costUnits: 0,
+    });
+    delete search.flightKey;
+    const origin = `airport_state:KATL@${String(EPOCH)}`;
+    const result = await run([
+      { kind: 'provider_call', seq: 1, origin, payload: call },
+      { kind: 'provider_call', seq: 2, origin, payload: search },
+    ]);
+    expect(result.explicitAcks).toEqual(['m-0', 'm-1']);
+    const db = fileDb();
+    const rows = await db
+      .select({
+        trigger: providerCalls.trigger,
+        airportIcao: providerCalls.airportIcao,
+        flightKey: providerCalls.flightKey,
+      })
+      .from(providerCalls)
+      .where(inArray(providerCalls.id, [call.id, search.id]))
+      .orderBy(providerCalls.trigger);
+    expect(rows).toEqual([
+      { trigger: 'board', airportIcao: 'KATL', flightKey: null },
+      { trigger: 'route_search', airportIcao: 'KATL', flightKey: null },
+    ]);
   });
 
   it('keeps one provider_call_daily row per ProviderBudget shard, replaced on redelivery (L10)', async () => {

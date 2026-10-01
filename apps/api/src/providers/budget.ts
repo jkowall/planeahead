@@ -236,13 +236,15 @@ export class ProviderBudgetGuard implements BudgetGuard {
 /**
  * Two or more guards that must all allow a call. They are asked in order; when one refuses,
  * everything the earlier ones granted is released, so a refused call never leaves a debit behind.
- * `release` and `backoff` fan out to every guard.
+ * The grant carries the worst ladder rung and the highest boards share any guard reported (a
+ * board caller degrades its freshness from it). `release` and `backoff` fan out to every guard.
  */
 export function composeBudgets(...guards: readonly BudgetGuard[]): BudgetGuard {
   return {
     async reserve(request) {
       const granted: BudgetGuard[] = [];
       let ladder: 'normal' | 'warn' | 'degraded' = 'normal';
+      let boardsShareSpent: number | undefined;
       for (const guard of guards) {
         const decision = await guard.reserve(request);
         if (!decision.allowed) {
@@ -255,8 +257,12 @@ export function composeBudgets(...guards: readonly BudgetGuard[]): BudgetGuard {
         if (decision.ladder === 'degraded' || (decision.ladder === 'warn' && ladder === 'normal')) {
           ladder = decision.ladder;
         }
+        if (decision.boardsShareSpent !== undefined) {
+          boardsShareSpent = Math.max(boardsShareSpent ?? 0, decision.boardsShareSpent);
+        }
       }
-      return { allowed: true, granted: request.pollEquivalents, ladder };
+      const grant = { allowed: true, granted: request.pollEquivalents, ladder } as const;
+      return boardsShareSpent === undefined ? grant : { ...grant, boardsShareSpent };
     },
     async release(request, unused) {
       for (const guard of guards) {

@@ -20,7 +20,8 @@
  *      parent delete under a child fails, and deleting the child first works. The FlightTracker's
  *      schema orders its deletes accordingly.
  *
- * Hosts: `AirportState` (empty migrations, no alarm handler) for the storage spikes, and
+ * Hosts: `UserInbox` (empty migrations, no alarm handler; `AirportState` until increment 18
+ * gave it tables and an alarm) for the storage spikes, and
  * `ProviderBudget` (a real `alarm()` that calls `deleteAll()` on an object nothing was reserved
  * on) for the two that need the platform to invoke a handler. No test-only Durable Object class:
  * `exports` in wrangler.jsonc is a one-way door.
@@ -36,7 +37,7 @@ const testEnv = env as Env;
 const touched: DurableObjectStub[] = [];
 
 function airportHost(prefix: string): DurableObjectStub {
-  const stub = testEnv.AIRPORT_STATE.getByName(`spike-${prefix}-${crypto.randomUUID()}`);
+  const stub = testEnv.USER_INBOX.getByName(`spike-${prefix}-${crypto.randomUUID()}`);
   touched.push(stub);
   return stub;
 }

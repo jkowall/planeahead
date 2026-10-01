@@ -28,8 +28,22 @@ import {
   type AlertEvent,
   type AlertRegistrationOptions,
   type AnyProviderOperation,
+  type AirportBoardResponse,
+  type BoardAirportView,
+  type BoardDirection,
+  type BoardViewRow,
+  type RouteSearchResponse,
   type BoardRow,
   type BoardWindow,
+  type BoardBucketBounds,
+  type BoardBucketRequestV1,
+  type BoardBucketResponseV1,
+  type BoardCallTrigger,
+  type BoardCoverage,
+  type BoardFreshness,
+  type BoardKvMetaV1,
+  type BoardLadderRung,
+  type BoardPosition,
   type BudgetDecision,
   type BudgetDenialReason,
   type BudgetGuard,
@@ -323,6 +337,22 @@ interface TypeSurface {
   // providers
   flightLookup: FlightLookup;
   boardWindow: BoardWindow;
+  // board-view (increment 18, part 2)
+  airportBoardResponse: AirportBoardResponse;
+  boardAirportView: BoardAirportView;
+  boardDirection: BoardDirection;
+  boardViewRow: BoardViewRow;
+  routeSearchResponse: RouteSearchResponse;
+  // boards (increment 18)
+  boardBucketBounds: BoardBucketBounds;
+  boardBucketRequest: BoardBucketRequestV1;
+  boardBucketResponse: BoardBucketResponseV1;
+  boardCallTrigger: BoardCallTrigger;
+  boardCoverage: BoardCoverage;
+  boardFreshness: BoardFreshness;
+  boardKvMeta: BoardKvMetaV1;
+  boardLadderRung: BoardLadderRung;
+  boardPosition: BoardPosition;
   providerCapabilities: ProviderCapabilities;
   budgetDenialReason: BudgetDenialReason;
   budgetDecision: BudgetDecision;

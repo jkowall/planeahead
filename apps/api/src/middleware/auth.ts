@@ -237,6 +237,7 @@ export function authMiddleware(): MiddlewareHandler<AppBindings> {
       const user: AuthenticatedUser = {
         id: session.user.id,
         isAnonymous: (session.user as { isAnonymous?: boolean | null }).isAnonymous === true,
+        kind: 'session',
         sessionId: session.session.id,
         scopes: ['user'],
       };
@@ -330,6 +331,32 @@ export function requireScope(scope: AuthScope): MiddlewareHandler<AppBindings> {
         {
           error: 'insufficient_scope',
           message: `this action needs the ${scope} scope`,
+          requestId: c.var.requestId,
+        },
+        403,
+      );
+    }
+    await next();
+  });
+}
+
+/**
+ * 401 without a principal, 403 `insufficient_scope` for one that is not a Better Auth session (an
+ * API token, once those exist), whatever scopes it carries. For routes whose answers may reach
+ * only the person on their own device: the boards and the route search (ruling B9's licence
+ * posture; increment 18 R15).
+ */
+export function requireSession(): MiddlewareHandler<AppBindings> {
+  return createMiddleware<AppBindings>(async (c, next) => {
+    const user = c.var.user ?? null;
+    if (user === null) {
+      return unauthenticated(c);
+    }
+    if (user.kind !== 'session') {
+      return c.json(
+        {
+          error: 'insufficient_scope',
+          message: 'this action needs a signed-in session',
           requestId: c.var.requestId,
         },
         403,

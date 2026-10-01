@@ -1,8 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import { buildFlightKey } from '../src/flight-key';
+import { CODESHARE_STATUSES, CodeshareStatusSchema } from '../src/flight-status';
 import {
-  CODESHARE_STATUSES,
-  CodeshareStatusSchema,
   callsignOperator,
   parseAirlineCallsign,
   resolveOperator,

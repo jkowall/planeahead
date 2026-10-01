@@ -327,6 +327,36 @@ describe('BoardRowSchema', () => {
     expect(BoardRowSchema.safeParse({ ...row, status: null }).success).toBe(false);
     expect(BoardRowSchema.parse({ ...row, status: 'taxiing' }).status).toBe('unknown');
   });
+
+  it('carries the counterpart leg and the codeshare keys (increment 18), all optional', () => {
+    const full = {
+      ...row,
+      marketingCarrierIcao: 'AAL',
+      marketingCarrierIata: 'AA',
+      codeshareStatus: 'IsOperator',
+      callSign: 'AAL100',
+      registration: 'N718AN',
+      counterpartScheduled: '2026-09-20T11:05:00Z',
+      counterpartEstimated: '2026-09-20T11:15:00Z',
+      counterpartActual: '2026-09-20T11:12:00Z',
+      counterpartTerminal: '3',
+      counterpartGate: 'A10',
+      scheduledDepartureDateLocal: '2026-09-19',
+      aircraftModel: 'Boeing 777-300ER',
+    };
+    expect(BoardRowSchema.parse(full)).toMatchObject(full);
+    // A codeshare role a newer gateway adds reads as Unknown, never as a parse failure.
+    expect(BoardRowSchema.parse({ ...full, codeshareStatus: 'IsWetLease' }).codeshareStatus).toBe(
+      'Unknown',
+    );
+    expect(BoardRowSchema.safeParse({ ...full, counterpartScheduled: '11:05' }).success).toBe(
+      false,
+    );
+    expect(BoardRowSchema.safeParse({ ...full, marketingCarrierIata: 'A' }).success).toBe(false);
+    expect(
+      BoardRowSchema.safeParse({ ...full, scheduledDepartureDateLocal: '19/09' }).success,
+    ).toBe(false);
+  });
 });
 
 describe('AircraftPositionSchema', () => {

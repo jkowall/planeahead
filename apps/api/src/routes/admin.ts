@@ -29,6 +29,10 @@
  *     which also serves the second write action, "Send a test push", ruling P8), with the link
  *     to the third, "Inject a flight event" (increment 15, ruling N11);
  *   - (increment 16, ruling C9) the transport soak's state, linking to its page and its counts.
+ *   - (increment 18, ruling B11) boards and route search: the boards share spent today against its
+ *     cap, the distinct airports refreshed this hour against theirs, the airports kept live (a
+ *     bucket refreshed in the last hour) and the board and route-search calls by result
+ *     (src/routes/admin-boards.ts).
  *
  * The first write action (ruling AA9): operator account deletion, for a request that reached the
  * support inbox the public `/account/delete` page names. `GET /admin/accounts/delete` takes a user
@@ -72,6 +76,7 @@ import { defaultTrackerFor, type TrackerFor } from '../lib/trackers';
 import { accessMiddleware, type AccessOptions } from '../middleware/access';
 import { createLogger, errorFields, type Logger } from '../observability/log';
 import { pushSoakPosition, readPushSoak } from '../push/soak';
+import { boardsSection, type AdminBoardsOptions } from './admin-boards';
 import { injectFormPage, injectSend, type AdminInjectOptions } from './admin-inject';
 import {
   pushTestPage,
@@ -121,7 +126,8 @@ export function environmentQueueNames(environment: EnvironmentName): string[] {
   ]);
 }
 
-export interface AdminRoutesOptions extends AdminPushOptions, AdminInjectOptions, AdminSoakOptions {
+export interface AdminRoutesOptions
+  extends AdminPushOptions, AdminInjectOptions, AdminSoakOptions, AdminBoardsOptions {
   readonly access?: AccessOptions | undefined;
   /** The Cloudflare API's fetch (Analytics Engine SQL, Queues). */
   readonly fetch?: typeof fetch | undefined;
@@ -568,7 +574,7 @@ export function createAdminRoutes(options: AdminRoutesOptions = {}) {
     const env = c.env;
     const db = (options.db ?? openDb)(env);
     const access = cloudflareApiAccess(env.CF_ACCOUNT_ID, env.CF_API_TOKEN, options.fetch ?? fetch);
-    const [flights, days, today, watermarkSection, queueSection, sync, audit, push, soak] =
+    const [flights, days, today, watermarkSection, queueSection, sync, audit, push, soak, boards] =
       await Promise.all([
         section(log, 'per_flight', () => perFlight(db)),
         section(log, 'per_provider_day', () => perProviderDay(db)),
@@ -579,6 +585,7 @@ export function createAdminRoutes(options: AdminRoutesOptions = {}) {
         section(log, 'housekeeping', () => housekeeping(db)),
         section(log, 'push', () => pushTransportSection(env, db, options)),
         section(log, 'push_soak', () => soakSummary(env, options)),
+        section(log, 'boards', () => boardsSection(env, db, options)),
       ]);
     const identity = c.var.accessIdentity;
     const body = [
@@ -602,6 +609,7 @@ export function createAdminRoutes(options: AdminRoutesOptions = {}) {
       sectionHtml('Last housekeeping runs (audit_log)', audit),
       sectionHtml('Push transport', push),
       sectionHtml('Transport soak (staging)', soak),
+      sectionHtml('Boards and route search (AeroDataBox FIDS)', boards),
       sectionHtml('Operator account deletion', {
         ok: true,
         html: `<p>For a deletion request that reached the support inbox: <a href="${ADMIN_ACCOUNT_DELETE_PATH}">look up the account and delete it</a> (a write action).</p>`,

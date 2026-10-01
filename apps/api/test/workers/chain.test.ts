@@ -31,6 +31,7 @@ import {
   INSTALL_ID_HEADER,
   createMemoryIdempotencyStore,
 } from '../../src/middleware/idempotency';
+import { noStoreByDefault } from '../../src/middleware/no-store';
 import { REQUEST_ID_HEADER } from '../../src/middleware/request-id';
 
 /** A keyed request the way the mobile outbox sends one: key and install id together. */
@@ -137,6 +138,32 @@ describe('the deployed chain answers the shape it documents', () => {
 
     expect(response.status).toBe(400);
     expect(body.error).toBe('invalid_idempotency_key');
+  });
+});
+
+describe('the /v1 Cache-Control default (increment 18, R1)', () => {
+  it('marks every /v1 answer no-store, a 401 and a 404 included, and no other path', async () => {
+    const refused = await exports.default.fetch('https://api.planeahead.test/v1/sync');
+    expect(refused.status).toBe(401);
+    expect(refused.headers.get('cache-control')).toBe('no-store');
+    const missing = await exports.default.fetch('https://api.planeahead.test/v1/nope/unrouted');
+    expect(missing.status).toBe(404);
+    expect(missing.headers.get('cache-control')).toBe('no-store');
+    const health = await exports.default.fetch('https://api.planeahead.test/health');
+    expect(health.headers.get('cache-control')).toBeNull();
+  });
+
+  // The middleware's own contract, not the chain's order: a route that names its own value keeps it.
+  it('keeps a Cache-Control the route named itself', async () => {
+    const app = new Hono<AppBindings>()
+      .use(noStoreByDefault())
+      .get('/own', (c) => {
+        c.header('Cache-Control', 'private, max-age=60');
+        return c.json({ own: true });
+      })
+      .get('/none', (c) => c.json({ own: false }));
+    expect((await app.request('/own')).headers.get('cache-control')).toBe('private, max-age=60');
+    expect((await app.request('/none')).headers.get('cache-control')).toBe('no-store');
   });
 });
 

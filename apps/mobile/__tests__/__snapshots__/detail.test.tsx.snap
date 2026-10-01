@@ -483,6 +483,65 @@ exports[`the detail in light and dark renders the seeded timeline in dark 1`] = 
             },
             {
               "children": [
+                {
+                  "children": [
+                    "Airport boards",
+                  ],
+                  "style": {
+                    "color": "#A3ACB8",
+                  },
+                  "type": "Text",
+                },
+                {
+                  "children": [
+                    {
+                      "children": [
+                        "JFK departures",
+                      ],
+                      "style": {
+                        "color": "#F2F4F8",
+                      },
+                      "type": "Text",
+                    },
+                  ],
+                  "label": "Open the departures board at JFK",
+                  "style": {
+                    "backgroundColor": "#171B22",
+                    "borderColor": "#2A303A",
+                  },
+                  "testID": "detail-origin-board",
+                  "type": "View",
+                },
+                {
+                  "children": [
+                    {
+                      "children": [
+                        "LHR arrivals",
+                      ],
+                      "style": {
+                        "color": "#F2F4F8",
+                      },
+                      "type": "Text",
+                    },
+                  ],
+                  "label": "Open the arrivals board at LHR",
+                  "style": {
+                    "backgroundColor": "#171B22",
+                    "borderColor": "#2A303A",
+                  },
+                  "testID": "detail-destination-board",
+                  "type": "View",
+                },
+              ],
+              "style": {
+                "backgroundColor": "#171B22",
+                "borderColor": "#2A303A",
+              },
+              "testID": "detail-boards",
+              "type": "View",
+            },
+            {
+              "children": [
                 "Flight data: AeroDataBox, updated 4 min ago. Times are 12-hour, local to each airport.",
               ],
               "style": {
@@ -1024,6 +1083,65 @@ exports[`the detail in light and dark renders the seeded timeline in light 1`] =
                 "borderColor": "#D6DAE1",
               },
               "testID": "detail-details",
+              "type": "View",
+            },
+            {
+              "children": [
+                {
+                  "children": [
+                    "Airport boards",
+                  ],
+                  "style": {
+                    "color": "#525B67",
+                  },
+                  "type": "Text",
+                },
+                {
+                  "children": [
+                    {
+                      "children": [
+                        "JFK departures",
+                      ],
+                      "style": {
+                        "color": "#101418",
+                      },
+                      "type": "Text",
+                    },
+                  ],
+                  "label": "Open the departures board at JFK",
+                  "style": {
+                    "backgroundColor": "#F2F4F8",
+                    "borderColor": "#D6DAE1",
+                  },
+                  "testID": "detail-origin-board",
+                  "type": "View",
+                },
+                {
+                  "children": [
+                    {
+                      "children": [
+                        "LHR arrivals",
+                      ],
+                      "style": {
+                        "color": "#101418",
+                      },
+                      "type": "Text",
+                    },
+                  ],
+                  "label": "Open the arrivals board at LHR",
+                  "style": {
+                    "backgroundColor": "#F2F4F8",
+                    "borderColor": "#D6DAE1",
+                  },
+                  "testID": "detail-destination-board",
+                  "type": "View",
+                },
+              ],
+              "style": {
+                "backgroundColor": "#F2F4F8",
+                "borderColor": "#D6DAE1",
+              },
+              "testID": "detail-boards",
               "type": "View",
             },
             {

@@ -180,6 +180,7 @@ describe('requireScope and requireUser', () => {
           : {
               id: 'user-1',
               isAnonymous: false,
+              kind: 'session',
               sessionId: 'session-1',
               scopes: scopes as ['user'],
             },

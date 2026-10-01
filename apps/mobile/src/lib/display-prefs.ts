@@ -4,6 +4,7 @@
  * distance unit.
  */
 
+import { useMemo } from 'react';
 import type { DistanceUnit, TimeFormat } from './format';
 import { useSettings } from './settings';
 
@@ -32,5 +33,6 @@ export function displayPrefsOf(preferences: {
 
 export function useDisplayPrefs(): DisplayPrefs {
   const preferences = useSettings((state) => state.preferences);
-  return displayPrefsOf(preferences);
+  // One object per change of the preferences, so a memoised board row keeps its props (R13).
+  return useMemo(() => displayPrefsOf(preferences), [preferences]);
 }

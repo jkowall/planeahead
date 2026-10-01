@@ -24,13 +24,14 @@ const RECORD: ProviderCallRecord = {
 };
 
 describe('providerCallPoint', () => {
-  it('fixes the column order: index1 provider, five blobs, four doubles', () => {
+  it('fixes the column order: index1 provider, six blobs, four doubles', () => {
     expect(PROVIDER_CALL_POINT_BLOBS).toEqual([
       'operation',
       'flight_key',
       'trigger',
       'result',
       'environment',
+      'airport_icao',
     ]);
     expect(PROVIDER_CALL_POINT_DOUBLES).toEqual([
       'latency_ms',
@@ -43,9 +44,27 @@ describe('providerCallPoint', () => {
   it('maps a record onto that order', () => {
     expect(providerCallPoint(RECORD, 'staging')).toEqual({
       indexes: ['aerodatabox'],
-      blobs: ['flight_status', 'AAL-100-2026-09-19-KJFK', 'alarm', 'ok', 'staging'],
+      blobs: ['flight_status', 'AAL-100-2026-09-19-KJFK', 'alarm', 'ok', 'staging', ''],
       doubles: [412, 2, 500, 200],
     });
+  });
+
+  it('puts the airport of a board call in the last blob (increment 18, ruling B10)', () => {
+    const board: ProviderCallRecord = {
+      ...RECORD,
+      operation: 'fids',
+      trigger: 'board',
+      airportIcao: 'KJFK',
+    };
+    delete board.flightKey;
+    expect(providerCallPoint(board, 'staging').blobs).toEqual([
+      'fids',
+      '',
+      'board',
+      'ok',
+      'staging',
+      'KJFK',
+    ]);
   });
 
   it('keeps the arity for a call with no flight key and no HTTP status', () => {
@@ -62,6 +81,7 @@ describe('providerCallPoint', () => {
     expect(point.blobs).toHaveLength(PROVIDER_CALL_POINT_BLOBS.length);
     expect(point.doubles).toHaveLength(PROVIDER_CALL_POINT_DOUBLES.length);
     expect(point.blobs[1]).toBe('');
+    expect(point.blobs[5]).toBe('');
     expect(point.doubles[3]).toBe(0);
   });
 

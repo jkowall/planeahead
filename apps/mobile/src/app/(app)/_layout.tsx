@@ -33,6 +33,12 @@ export default function AppLayout() {
       <Stack.Screen name="add" options={{ presentation: 'modal' }} />
       {/* Increment 16: the notification pre-prompt, in the add sheet's place (ruling C1). */}
       <Stack.Screen name="notifications" options={{ presentation: 'modal' }} />
+      {/*
+        The route search (increment 18) opens from the add sheet as a sheet over it, so closing
+        it returns to the sheet. The airport board (`airport/[code]`) is a pushed screen: the add
+        sheet replaces itself with it, so it never lands behind the sheet.
+      */}
+      <Stack.Screen name="route-search" options={{ presentation: 'modal' }} />
     </Stack>
   );
 }

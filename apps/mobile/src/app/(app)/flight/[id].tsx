@@ -20,6 +20,8 @@
  * Increment 16: while the screen is focused its flight is in front, so a push about it received in
  * the foreground is not presented and the screen updates in place (ruling C6); opening it removes
  * the flight's presented notifications (ruling C7, src/lib/push-notifications.ts).
+ *
+ * Increment 18: the origin's and the destination's boards open from here (`AirportBoards`).
  */
 
 import { DO_CALL_DEADLINE_MS } from '@planeahead/shared';
@@ -116,6 +118,43 @@ function Details({ item }: { item: FlightItem }) {
       {rows.map((row) => (
         <Row key={row.testID} {...row} />
       ))}
+    </Section>
+  );
+}
+
+/**
+ * The boards of the flight's two airports (increment 18, ruling B12): its origin's departures and
+ * its destination's arrivals. Offered to everyone: an anonymous account may open the boards of
+ * its own flights' airports, which these are.
+ */
+function AirportBoards({ item }: { item: FlightItem }) {
+  const router = useRouter();
+  const ends = [
+    { code: item.origin.code, direction: 'departures', testID: 'detail-origin-board' },
+    { code: item.destination.code, direction: 'arrivals', testID: 'detail-destination-board' },
+  ] as const;
+  if (item.pending || ends.every((end) => end.code === null)) {
+    return null;
+  }
+  return (
+    <Section title="Airport boards" testID="detail-boards">
+      {ends.map((end) =>
+        end.code === null ? null : (
+          <Button
+            key={end.testID}
+            testID={end.testID}
+            title={`${end.code} ${end.direction}`}
+            accessibilityLabel={`Open the ${end.direction} board at ${end.code}`}
+            variant="secondary"
+            onPress={() => {
+              router.push({
+                pathname: '/airport/[code]',
+                params: { code: end.code, direction: end.direction },
+              });
+            }}
+          />
+        ),
+      )}
     </Section>
   );
 }
@@ -309,6 +348,8 @@ export default function FlightDetailScreen() {
       </Section>
 
       <Details item={item} />
+
+      <AirportBoards item={item} />
 
       {source === null ? null : (
         <Body muted testID="detail-attribution">

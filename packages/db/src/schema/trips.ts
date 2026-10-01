@@ -261,6 +261,9 @@ export const COUNTER_KINDS = [
   // Increment 8 (migration 0003, ruling K2).
   'live_tracked',
   'tracker_creations',
+  // Increment 18 (migration 0011, ruling B9): route searches per user, and per salted IP for an
+  // anonymous account, per UTC day.
+  'route_searches',
 ] as const;
 /**
  * The per-flight refresh counter (ruling K2): `refresh:{flightKey}` under scope `user`, so one

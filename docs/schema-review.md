@@ -87,19 +87,19 @@ orchestrator read. See section 17 for the checklist each reviewer walks.
 
 ## 3. Storage tier matrix
 
-| Data                                   | Postgres                                             | Durable Object SQLite     | KV                                                         | R2                                         | Forbidden                                                        |
-| -------------------------------------- | ---------------------------------------------------- | ------------------------- | ---------------------------------------------------------- | ------------------------------------------ | ---------------------------------------------------------------- |
-| Users, sessions, accounts, preferences | source of truth                                      | UserInbox mirrors devices | never                                                      | never                                      | KV (no auth in KV), R2                                           |
-| Flight registry (`flight_instances`)   | source of truth after flush                          | FlightTracker `flight`    | `flight:snapshot:{key}` 180 s                              | never                                      | KV as source of truth                                            |
-| Flight events                          | 90 days, then purged                                 | FlightTracker `events`    | never                                                      | `events/{YYYY}/{MM}/{key}.jsonl.gz` 365 d  | Postgres forever (retention cron is mandatory)                   |
-| Aircraft positions                     | never                                                | `positions` ring, 2,000   | never                                                      | `tracks/{YYYY}/{MM}/{key}.jsonl.gz` 365 d  | Postgres (only the `flight_tracks` pointer and a preview)        |
-| Weather, boards, NAS status            | `airport_wx_observations` 90 d, `airport_nas_events` | AirportState              | `wx:metar:{ICAO}` 600 s, `board:{ICAO}:{dir}:{hour}` 300 s | never                                      | Postgres as the hot read path                                    |
-| Provider call ledger                   | `provider_calls` 90 d, `provider_call_daily` durable | `budget` counters         | `budget:day:{date}:{provider}` 172,800 s                   | never                                      | KV as the billing record                                         |
-| Idempotency keys, rate limits, quotas  | source of truth (24 h, `usage_counters`)             | never                     | never                                                      | never                                      | KV (eventually consistent) for anything that enforces a cap      |
-| Push tokens, Live Activity tokens      | source of truth                                      | UserInbox mirrors         | never                                                      | never                                      | KV, R2                                                           |
-| Email bodies                           | never                                                | never                     | never                                                      | never                                      | Everywhere: only provider message ids and structured extractions |
-| Imports, exports, share images         | metadata rows                                        | never                     | `share:page:{sha256(token)[0:32]}` 60 s                    | `imports/`, `exports/` 7 to 30 d, `share/` | Postgres for file bodies                                         |
-| BTS aggregates                         | monthly tables                                       | never                     | never                                                      | `bts/raw/` kept                            | DO storage                                                       |
+| Data                                   | Postgres                                             | Durable Object SQLite     | KV                                                                            | R2                                         | Forbidden                                                        |
+| -------------------------------------- | ---------------------------------------------------- | ------------------------- | ----------------------------------------------------------------------------- | ------------------------------------------ | ---------------------------------------------------------------- |
+| Users, sessions, accounts, preferences | source of truth                                      | UserInbox mirrors devices | never                                                                         | never                                      | KV (no auth in KV), R2                                           |
+| Flight registry (`flight_instances`)   | source of truth after flush                          | FlightTracker `flight`    | `flight:snapshot:{key}` 180 s                                                 | never                                      | KV as source of truth                                            |
+| Flight events                          | 90 days, then purged                                 | FlightTracker `events`    | never                                                                         | `events/{YYYY}/{MM}/{key}.jsonl.gz` 365 d  | Postgres forever (retention cron is mandatory)                   |
+| Aircraft positions                     | never                                                | `positions` ring, 2,000   | never                                                                         | `tracks/{YYYY}/{MM}/{key}.jsonl.gz` 365 d  | Postgres (only the `flight_tracks` pointer and a preview)        |
+| Weather, boards, NAS status            | `airport_wx_observations` 90 d, `airport_nas_events` | AirportState              | `wx:metar:{ICAO}` 600 s, `board:v2:{ICAO}:{bucketStartLocal}` until the purge | never                                      | Postgres as the hot read path                                    |
+| Provider call ledger                   | `provider_calls` 90 d, `provider_call_daily` durable | `budget` counters         | `budget:day:{date}:{provider}` 172,800 s                                      | never                                      | KV as the billing record                                         |
+| Idempotency keys, rate limits, quotas  | source of truth (24 h, `usage_counters`)             | never                     | never                                                                         | never                                      | KV (eventually consistent) for anything that enforces a cap      |
+| Push tokens, Live Activity tokens      | source of truth                                      | UserInbox mirrors         | never                                                                         | never                                      | KV, R2                                                           |
+| Email bodies                           | never                                                | never                     | never                                                                         | never                                      | Everywhere: only provider message ids and structured extractions |
+| Imports, exports, share images         | metadata rows                                        | never                     | `share:page:{sha256(token)[0:32]}` 60 s                                       | `imports/`, `exports/` 7 to 30 d, `share/` | Postgres for file bodies                                         |
+| BTS aggregates                         | monthly tables                                       | never                     | never                                                                         | `bts/raw/` kept                            | DO storage                                                       |
 
 ## 4. Domain diagrams
 
@@ -683,9 +683,15 @@ the FlightTracker's `listSubscribers` RPC, is a new read-only method with `rpcVe
 ## 10. KV and R2 catalogs
 
 KV (all TTLs in seconds): `wx:metar:{ICAO}` 600, `wx:taf:{ICAO}` 1800, `nas:airport:{IATA}` 120,
-`airport:delay:{ICAO}` 300, `board:{ICAO}:{dep|arr}:{YYYYMMDDHH}` 300,
-`search:number:{XX1234}:{YYYY-MM-DD}` 900, `flight:snapshot:{flight_key}` 180,
-`ref:airport:{ICAO}` 86400, `budget:day:{date}:{provider}` 172800,
+`airport:delay:{ICAO}` 300, `board:v2:{ICAO}:{bucketStartLocal}` (increment 18: one 12-hour
+airport-local bucket, both directions, the gzip of its rows as the value and `fetchedAt`,
+`freshUntil` and `staleUntil` as metadata, expiring at the purge, the sooner of 48 h after the
+bucket ends and 7 days after its fetch; it replaces Phase 0's
+`board:{ICAO}:{dep|arr}:{YYYYMMDDHH}` 300, R3 C4; an airport's coverage is not in KV but in its
+AirportState's `coverage` row, for a day, or an hour while a feed is down or of unknown status),
+`search:number:{XX1234}:{YYYY-MM-DD}` 900,
+`flight:snapshot:{flight_key}` 180, `ref:airport:{code}` 86400 (an unknown code 3600; the
+code as the request named it, ICAO or IATA), `budget:day:{date}:{provider}` 172800,
 `share:page:{sha256(token)[0:32]}` 60, `cfg:flags`, `used_id_tokens:{provider}:{jti or digest}`
 (the identity token's remaining lifetime, increment 5), `tombstone:session:{base64url HMAC}` (the
 `deleted_subjects` row's remaining lifetime, at most 31 days; increment 12). Never auth,

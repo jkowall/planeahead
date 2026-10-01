@@ -8,8 +8,9 @@
  * runner with a real `ctx` is the same code path a constructor takes, minus
  * `blockConcurrencyWhile`, which the do-ping tests cover.
  *
- * `AirportState` is the host because its `MIGRATIONS` list is empty, so the object arrives with
- * the table created and no rows, which is exactly the "fresh object" state.
+ * `UserInbox` is the host because its `MIGRATIONS` list is empty, so the object arrives with
+ * the table created and no rows, which is exactly the "fresh object" state. (`AirportState` was
+ * the host until increment 18 gave it real tables.)
  */
 
 import { runDurableObjectAlarm, runInDurableObject } from 'cloudflare:test';
@@ -26,7 +27,7 @@ import {
 const touched: DurableObjectStub[] = [];
 
 function host(prefix: string): DurableObjectStub {
-  const stub = env.AIRPORT_STATE.getByName(`${prefix}-${crypto.randomUUID()}`);
+  const stub = env.USER_INBOX.getByName(`${prefix}-${crypto.randomUUID()}`);
   touched.push(stub);
   return stub;
 }

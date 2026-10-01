@@ -15,12 +15,21 @@
  * Increment 16 (ruling C1): the first add that succeeds (added, or queued offline) is where the app
  * asks for notifications, in context: the sheet gives way to the pre-prompt, once per installation
  * and only while the system prompt can still show (src/lib/push.ts `takePushPromptOffer`).
+ *
+ * Increment 18 (ruling B12): "Search by route" opens the route search over the sheet (for
+ * everyone: it is the onboarding path for an anonymous install), and signed-in users get an
+ * airport field that opens that airport's board in place of the sheet. An anonymous account may
+ * open only its own flights' airports (403 `board_requires_account`), so the free-form field is
+ * not offered to it; a session still being read counts as anonymous here.
  */
 
 import { useRouter } from 'expo-router';
 import { useEffect, useRef, useState } from 'react';
 import { StyleSheet, View } from 'react-native';
-import { Body, Button, Notice, Screen, TextField, Title } from '../../components/ui';
+import { Body, Button, Notice, Screen, Section, TextField, Title } from '../../components/ui';
+import { authClient } from '../../lib/auth-client';
+import { isAnonymousSession } from '../../lib/auth-session';
+import { validateAirportCode } from '../../lib/boards';
 import { useFlightNotices } from '../../lib/flight-notices';
 import { addFlight, drainFor, validateAddFlight, type AddFlightErrors } from '../../lib/flights';
 import { addDays, formatDateInput, formatIsoDate, localDate } from '../../lib/format';
@@ -44,6 +53,10 @@ export default function AddFlightSheet() {
   const [errors, setErrors] = useState<AddFlightErrors>({});
   const [phase, setPhase] = useState<Phase>('editing');
   const [message, setMessage] = useState<Message | null>(null);
+  const [airport, setAirport] = useState('');
+  const [airportError, setAirportError] = useState<string | null>(null);
+  const { data: session } = authClient.useSession();
+  const signedIn = session !== null && session !== undefined && !isAnonymousSession(session);
   const mounted = useRef(true);
   useEffect(() => {
     mounted.current = true;
@@ -116,6 +129,16 @@ export default function AddFlightSheet() {
         });
       }
     }
+  };
+
+  const openBoard = () => {
+    const checked = validateAirportCode(airport);
+    if (!checked.ok) {
+      setAirportError(checked.error);
+      return;
+    }
+    // In place of the sheet: a screen pushed from a sheet would open behind it.
+    router.replace({ pathname: '/airport/[code]', params: { code: checked.code } });
   };
 
   return (
@@ -196,6 +219,46 @@ export default function AddFlightSheet() {
           router.back();
         }}
       />
+
+      <Section title="Find it another way" testID="add-flight-other-ways">
+        <Button
+          testID="add-flight-route-search"
+          title="Search by route"
+          accessibilityLabel="Find a flight by route"
+          variant="secondary"
+          onPress={() => {
+            router.push('/route-search');
+          }}
+        />
+        {signedIn ? (
+          <>
+            <TextField
+              testID="add-flight-airport"
+              label="Airport board"
+              placeholder="JFK"
+              autoCapitalize="characters"
+              autoCorrect={false}
+              autoComplete="off"
+              maxLength={4}
+              returnKeyType="go"
+              value={airport}
+              onChangeText={(value) => {
+                setAirport(value);
+                setAirportError(null);
+              }}
+              onSubmitEditing={openBoard}
+              error={airportError}
+            />
+            <Button
+              testID="add-flight-open-board"
+              title="Open the board"
+              accessibilityLabel="Open this airport's departures and arrivals"
+              variant="secondary"
+              onPress={openBoard}
+            />
+          </>
+        ) : null}
+      </Section>
     </Screen>
   );
 }

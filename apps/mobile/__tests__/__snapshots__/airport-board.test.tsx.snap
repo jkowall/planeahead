@@ -1,0 +1,897 @@
+// Jest Snapshot v1, https://goo.gl/fbAQLP
+
+exports[`the board in light and dark renders from a mocked answer in dark 1`] = `
+{
+  "children": [
+    {
+      "children": [
+        {
+          "type": "RCTRefreshControl",
+        },
+        {
+          "children": [
+            {
+              "children": [
+                {
+                  "children": [
+                    {
+                      "children": [
+                        {
+                          "children": [
+                            "Back",
+                          ],
+                          "style": {
+                            "color": "#F2F4F8",
+                          },
+                          "type": "Text",
+                        },
+                      ],
+                      "label": "Back",
+                      "style": {
+                        "backgroundColor": "#171B22",
+                        "borderColor": "#2A303A",
+                      },
+                      "testID": "board-back",
+                      "type": "View",
+                    },
+                    {
+                      "children": [
+                        {
+                          "children": [
+                            "John F Kennedy International",
+                          ],
+                          "style": {
+                            "color": "#F2F4F8",
+                          },
+                          "type": "Text",
+                        },
+                        {
+                          "children": [
+                            "JFK (KJFK)",
+                          ],
+                          "style": {
+                            "color": "#A3ACB8",
+                          },
+                          "testID": "board-codes",
+                          "type": "Text",
+                        },
+                      ],
+                      "type": "View",
+                    },
+                    {
+                      "children": [
+                        {
+                          "children": [
+                            {
+                              "children": [
+                                "Departures",
+                              ],
+                              "style": {
+                                "color": "#F2F4F8",
+                              },
+                              "type": "Text",
+                            },
+                          ],
+                          "label": "Departures",
+                          "style": {
+                            "backgroundColor": "#171B22",
+                            "borderColor": "#7C9DFF",
+                          },
+                          "testID": "board-departures",
+                          "type": "View",
+                        },
+                        {
+                          "children": [
+                            {
+                              "children": [
+                                "Arrivals",
+                              ],
+                              "style": {
+                                "color": "#F2F4F8",
+                              },
+                              "type": "Text",
+                            },
+                          ],
+                          "label": "Arrivals",
+                          "style": {
+                            "backgroundColor": "#171B22",
+                            "borderColor": "#2A303A",
+                          },
+                          "testID": "board-arrivals",
+                          "type": "View",
+                        },
+                      ],
+                      "type": "View",
+                    },
+                    {
+                      "children": [
+                        {
+                          "children": [
+                            {
+                              "children": [
+                                "As of 9:58 AM (2 min ago)",
+                              ],
+                              "style": {
+                                "color": "#A3ACB8",
+                              },
+                              "testID": "board-as-of",
+                              "type": "Text",
+                            },
+                            {
+                              "children": [
+                                {
+                                  "children": [
+                                    "Schedules only",
+                                  ],
+                                  "style": {
+                                    "color": "#F2F4F8",
+                                  },
+                                  "type": "Text",
+                                },
+                              ],
+                              "label": "Schedules only: the times are the published schedule, with no live status",
+                              "style": {
+                                "backgroundColor": "#171B22",
+                                "borderColor": "#707A8C",
+                              },
+                              "testID": "board-schedules-only",
+                              "type": "View",
+                            },
+                          ],
+                          "type": "View",
+                        },
+                      ],
+                      "type": "View",
+                    },
+                    {
+                      "children": [
+                        {
+                          "children": [
+                            "Departures, 9:00 AM to 9:00 PM",
+                          ],
+                          "style": {
+                            "color": "#A3ACB8",
+                          },
+                          "type": "Text",
+                        },
+                      ],
+                      "style": {
+                        "backgroundColor": "#171B22",
+                        "borderColor": "#2A303A",
+                      },
+                      "testID": "board-rows",
+                      "type": "View",
+                    },
+                  ],
+                  "type": "View",
+                },
+              ],
+              "type": "View",
+            },
+            {
+              "children": [
+                {
+                  "children": [
+                    {
+                      "children": [
+                        {
+                          "children": [
+                            {
+                              "children": [
+                                "11:00 AM",
+                              ],
+                              "style": {
+                                "color": "#F2F4F8",
+                              },
+                              "type": "Text",
+                            },
+                            {
+                              "children": [
+                                "DL1  to LAX",
+                              ],
+                              "style": {
+                                "color": "#F2F4F8",
+                              },
+                              "type": "Text",
+                            },
+                            {
+                              "children": [
+                                {
+                                  "children": [
+                                    "Departed",
+                                  ],
+                                  "style": {
+                                    "color": "#C9D7FF",
+                                  },
+                                  "type": "Text",
+                                },
+                              ],
+                              "label": "Status: Departed",
+                              "style": {
+                                "backgroundColor": "#1B2F66",
+                              },
+                              "testID": "board-row-dep:DL1:2026-09-23T15:00:00Z-status",
+                              "type": "View",
+                            },
+                          ],
+                          "type": "View",
+                        },
+                        {
+                          "children": [
+                            "Departed 11:05 AM",
+                          ],
+                          "style": {
+                            "color": "#FFB866",
+                          },
+                          "type": "Text",
+                        },
+                        {
+                          "children": [
+                            "Terminal 4, gate B30",
+                          ],
+                          "style": {
+                            "color": "#A3ACB8",
+                          },
+                          "type": "Text",
+                        },
+                      ],
+                      "label": "DL1, to LAX, scheduled 11:00 AM, departed 11:05 AM, status Departed, Terminal 4, gate B30",
+                      "style": {
+                        "borderColor": "#2A303A",
+                      },
+                      "testID": "board-row-dep:DL1:2026-09-23T15:00:00Z",
+                      "type": "View",
+                    },
+                  ],
+                  "style": {
+                    "backgroundColor": "#171B22",
+                    "borderColor": "#2A303A",
+                  },
+                  "type": "View",
+                },
+              ],
+              "type": "View",
+            },
+            {
+              "children": [
+                {
+                  "children": [
+                    {
+                      "children": [
+                        {
+                          "children": [
+                            {
+                              "children": [
+                                "12:00 PM",
+                              ],
+                              "style": {
+                                "color": "#A3ACB8",
+                              },
+                              "type": "Text",
+                            },
+                            {
+                              "children": [
+                                "ZZ999  to KBOS",
+                              ],
+                              "style": {
+                                "color": "#A3ACB8",
+                              },
+                              "type": "Text",
+                            },
+                            {
+                              "children": [
+                                {
+                                  "children": [
+                                    "Scheduled",
+                                  ],
+                                  "style": {
+                                    "color": "#E4E8EF",
+                                  },
+                                  "type": "Text",
+                                },
+                              ],
+                              "label": "Status: Scheduled",
+                              "style": {
+                                "backgroundColor": "#2A303A",
+                              },
+                              "testID": "board-row-dep:ZZ999:2026-09-23T16:00:00Z-status",
+                              "type": "View",
+                            },
+                          ],
+                          "type": "View",
+                        },
+                        {
+                          "children": [
+                            "Terminal 8, gate 12",
+                          ],
+                          "style": {
+                            "color": "#A3ACB8",
+                          },
+                          "type": "Text",
+                        },
+                        {
+                          "children": [
+                            "Cannot be added here. Add it by its flight number.",
+                          ],
+                          "style": {
+                            "color": "#A3ACB8",
+                          },
+                          "testID": "board-row-dep:ZZ999:2026-09-23T16:00:00Z-unaddable",
+                          "type": "Text",
+                        },
+                      ],
+                      "label": "ZZ999, to KBOS, scheduled 12:00 PM, status Scheduled, Terminal 8, gate 12, cannot be added here",
+                      "style": {
+                        "borderColor": "#2A303A",
+                      },
+                      "testID": "board-row-dep:ZZ999:2026-09-23T16:00:00Z",
+                      "type": "View",
+                    },
+                  ],
+                  "style": {
+                    "backgroundColor": "#171B22",
+                    "borderColor": "#2A303A",
+                  },
+                  "type": "View",
+                },
+              ],
+              "type": "View",
+            },
+            {
+              "children": [
+                {
+                  "children": [
+                    {
+                      "children": [
+                        {
+                          "children": [
+                            {
+                              "children": [
+                                "6:00 PM",
+                              ],
+                              "style": {
+                                "color": "#F2F4F8",
+                              },
+                              "type": "Text",
+                            },
+                            {
+                              "children": [
+                                "AA100  to LHR",
+                              ],
+                              "style": {
+                                "color": "#F2F4F8",
+                              },
+                              "type": "Text",
+                            },
+                            {
+                              "children": [
+                                {
+                                  "children": [
+                                    "Scheduled",
+                                  ],
+                                  "style": {
+                                    "color": "#E4E8EF",
+                                  },
+                                  "type": "Text",
+                                },
+                              ],
+                              "label": "Status: Scheduled",
+                              "style": {
+                                "backgroundColor": "#2A303A",
+                              },
+                              "testID": "board-row-dep:AA100:2026-09-23T22:00:00Z-status",
+                              "type": "View",
+                            },
+                          ],
+                          "type": "View",
+                        },
+                        {
+                          "children": [
+                            "Expected 6:25 PM",
+                          ],
+                          "style": {
+                            "color": "#FFB866",
+                          },
+                          "type": "Text",
+                        },
+                        {
+                          "children": [
+                            "Terminal 8, gate 12. Also BA1511, IB4218",
+                          ],
+                          "style": {
+                            "color": "#A3ACB8",
+                          },
+                          "type": "Text",
+                        },
+                      ],
+                      "label": "AA100, to LHR, scheduled 6:00 PM, expected 6:25 PM, status Scheduled, Terminal 8, gate 12, also sold as BA1511, IB4218",
+                      "style": {
+                        "borderColor": "#2A303A",
+                      },
+                      "testID": "board-row-dep:AA100:2026-09-23T22:00:00Z",
+                      "type": "View",
+                    },
+                  ],
+                  "style": {
+                    "backgroundColor": "#171B22",
+                    "borderColor": "#2A303A",
+                  },
+                  "type": "View",
+                },
+              ],
+              "type": "View",
+            },
+            {
+              "children": [
+                {
+                  "style": {
+                    "backgroundColor": "#171B22",
+                    "borderColor": "#2A303A",
+                  },
+                  "type": "View",
+                },
+              ],
+              "type": "View",
+            },
+          ],
+          "type": "View",
+        },
+      ],
+      "testID": "airport-board",
+      "type": "RCTScrollView",
+    },
+  ],
+  "style": {
+    "backgroundColor": "#0B0E13",
+  },
+  "type": "View",
+}
+`;
+
+exports[`the board in light and dark renders from a mocked answer in light 1`] = `
+{
+  "children": [
+    {
+      "children": [
+        {
+          "type": "RCTRefreshControl",
+        },
+        {
+          "children": [
+            {
+              "children": [
+                {
+                  "children": [
+                    {
+                      "children": [
+                        {
+                          "children": [
+                            "Back",
+                          ],
+                          "style": {
+                            "color": "#101418",
+                          },
+                          "type": "Text",
+                        },
+                      ],
+                      "label": "Back",
+                      "style": {
+                        "backgroundColor": "#F2F4F8",
+                        "borderColor": "#D6DAE1",
+                      },
+                      "testID": "board-back",
+                      "type": "View",
+                    },
+                    {
+                      "children": [
+                        {
+                          "children": [
+                            "John F Kennedy International",
+                          ],
+                          "style": {
+                            "color": "#101418",
+                          },
+                          "type": "Text",
+                        },
+                        {
+                          "children": [
+                            "JFK (KJFK)",
+                          ],
+                          "style": {
+                            "color": "#525B67",
+                          },
+                          "testID": "board-codes",
+                          "type": "Text",
+                        },
+                      ],
+                      "type": "View",
+                    },
+                    {
+                      "children": [
+                        {
+                          "children": [
+                            {
+                              "children": [
+                                "Departures",
+                              ],
+                              "style": {
+                                "color": "#101418",
+                              },
+                              "type": "Text",
+                            },
+                          ],
+                          "label": "Departures",
+                          "style": {
+                            "backgroundColor": "#F2F4F8",
+                            "borderColor": "#1C4FD6",
+                          },
+                          "testID": "board-departures",
+                          "type": "View",
+                        },
+                        {
+                          "children": [
+                            {
+                              "children": [
+                                "Arrivals",
+                              ],
+                              "style": {
+                                "color": "#101418",
+                              },
+                              "type": "Text",
+                            },
+                          ],
+                          "label": "Arrivals",
+                          "style": {
+                            "backgroundColor": "#F2F4F8",
+                            "borderColor": "#D6DAE1",
+                          },
+                          "testID": "board-arrivals",
+                          "type": "View",
+                        },
+                      ],
+                      "type": "View",
+                    },
+                    {
+                      "children": [
+                        {
+                          "children": [
+                            {
+                              "children": [
+                                "As of 9:58 AM (2 min ago)",
+                              ],
+                              "style": {
+                                "color": "#525B67",
+                              },
+                              "testID": "board-as-of",
+                              "type": "Text",
+                            },
+                            {
+                              "children": [
+                                {
+                                  "children": [
+                                    "Schedules only",
+                                  ],
+                                  "style": {
+                                    "color": "#101418",
+                                  },
+                                  "type": "Text",
+                                },
+                              ],
+                              "label": "Schedules only: the times are the published schedule, with no live status",
+                              "style": {
+                                "backgroundColor": "#F2F4F8",
+                                "borderColor": "#7D8591",
+                              },
+                              "testID": "board-schedules-only",
+                              "type": "View",
+                            },
+                          ],
+                          "type": "View",
+                        },
+                      ],
+                      "type": "View",
+                    },
+                    {
+                      "children": [
+                        {
+                          "children": [
+                            "Departures, 9:00 AM to 9:00 PM",
+                          ],
+                          "style": {
+                            "color": "#525B67",
+                          },
+                          "type": "Text",
+                        },
+                      ],
+                      "style": {
+                        "backgroundColor": "#F2F4F8",
+                        "borderColor": "#D6DAE1",
+                      },
+                      "testID": "board-rows",
+                      "type": "View",
+                    },
+                  ],
+                  "type": "View",
+                },
+              ],
+              "type": "View",
+            },
+            {
+              "children": [
+                {
+                  "children": [
+                    {
+                      "children": [
+                        {
+                          "children": [
+                            {
+                              "children": [
+                                "11:00 AM",
+                              ],
+                              "style": {
+                                "color": "#101418",
+                              },
+                              "type": "Text",
+                            },
+                            {
+                              "children": [
+                                "DL1  to LAX",
+                              ],
+                              "style": {
+                                "color": "#101418",
+                              },
+                              "type": "Text",
+                            },
+                            {
+                              "children": [
+                                {
+                                  "children": [
+                                    "Departed",
+                                  ],
+                                  "style": {
+                                    "color": "#1537A3",
+                                  },
+                                  "type": "Text",
+                                },
+                              ],
+                              "label": "Status: Departed",
+                              "style": {
+                                "backgroundColor": "#DCE6FF",
+                              },
+                              "testID": "board-row-dep:DL1:2026-09-23T15:00:00Z-status",
+                              "type": "View",
+                            },
+                          ],
+                          "type": "View",
+                        },
+                        {
+                          "children": [
+                            "Departed 11:05 AM",
+                          ],
+                          "style": {
+                            "color": "#8A4B00",
+                          },
+                          "type": "Text",
+                        },
+                        {
+                          "children": [
+                            "Terminal 4, gate B30",
+                          ],
+                          "style": {
+                            "color": "#525B67",
+                          },
+                          "type": "Text",
+                        },
+                      ],
+                      "label": "DL1, to LAX, scheduled 11:00 AM, departed 11:05 AM, status Departed, Terminal 4, gate B30",
+                      "style": {
+                        "borderColor": "#D6DAE1",
+                      },
+                      "testID": "board-row-dep:DL1:2026-09-23T15:00:00Z",
+                      "type": "View",
+                    },
+                  ],
+                  "style": {
+                    "backgroundColor": "#F2F4F8",
+                    "borderColor": "#D6DAE1",
+                  },
+                  "type": "View",
+                },
+              ],
+              "type": "View",
+            },
+            {
+              "children": [
+                {
+                  "children": [
+                    {
+                      "children": [
+                        {
+                          "children": [
+                            {
+                              "children": [
+                                "12:00 PM",
+                              ],
+                              "style": {
+                                "color": "#525B67",
+                              },
+                              "type": "Text",
+                            },
+                            {
+                              "children": [
+                                "ZZ999  to KBOS",
+                              ],
+                              "style": {
+                                "color": "#525B67",
+                              },
+                              "type": "Text",
+                            },
+                            {
+                              "children": [
+                                {
+                                  "children": [
+                                    "Scheduled",
+                                  ],
+                                  "style": {
+                                    "color": "#27303B",
+                                  },
+                                  "type": "Text",
+                                },
+                              ],
+                              "label": "Status: Scheduled",
+                              "style": {
+                                "backgroundColor": "#E4E8EF",
+                              },
+                              "testID": "board-row-dep:ZZ999:2026-09-23T16:00:00Z-status",
+                              "type": "View",
+                            },
+                          ],
+                          "type": "View",
+                        },
+                        {
+                          "children": [
+                            "Terminal 8, gate 12",
+                          ],
+                          "style": {
+                            "color": "#525B67",
+                          },
+                          "type": "Text",
+                        },
+                        {
+                          "children": [
+                            "Cannot be added here. Add it by its flight number.",
+                          ],
+                          "style": {
+                            "color": "#525B67",
+                          },
+                          "testID": "board-row-dep:ZZ999:2026-09-23T16:00:00Z-unaddable",
+                          "type": "Text",
+                        },
+                      ],
+                      "label": "ZZ999, to KBOS, scheduled 12:00 PM, status Scheduled, Terminal 8, gate 12, cannot be added here",
+                      "style": {
+                        "borderColor": "#D6DAE1",
+                      },
+                      "testID": "board-row-dep:ZZ999:2026-09-23T16:00:00Z",
+                      "type": "View",
+                    },
+                  ],
+                  "style": {
+                    "backgroundColor": "#F2F4F8",
+                    "borderColor": "#D6DAE1",
+                  },
+                  "type": "View",
+                },
+              ],
+              "type": "View",
+            },
+            {
+              "children": [
+                {
+                  "children": [
+                    {
+                      "children": [
+                        {
+                          "children": [
+                            {
+                              "children": [
+                                "6:00 PM",
+                              ],
+                              "style": {
+                                "color": "#101418",
+                              },
+                              "type": "Text",
+                            },
+                            {
+                              "children": [
+                                "AA100  to LHR",
+                              ],
+                              "style": {
+                                "color": "#101418",
+                              },
+                              "type": "Text",
+                            },
+                            {
+                              "children": [
+                                {
+                                  "children": [
+                                    "Scheduled",
+                                  ],
+                                  "style": {
+                                    "color": "#27303B",
+                                  },
+                                  "type": "Text",
+                                },
+                              ],
+                              "label": "Status: Scheduled",
+                              "style": {
+                                "backgroundColor": "#E4E8EF",
+                              },
+                              "testID": "board-row-dep:AA100:2026-09-23T22:00:00Z-status",
+                              "type": "View",
+                            },
+                          ],
+                          "type": "View",
+                        },
+                        {
+                          "children": [
+                            "Expected 6:25 PM",
+                          ],
+                          "style": {
+                            "color": "#8A4B00",
+                          },
+                          "type": "Text",
+                        },
+                        {
+                          "children": [
+                            "Terminal 8, gate 12. Also BA1511, IB4218",
+                          ],
+                          "style": {
+                            "color": "#525B67",
+                          },
+                          "type": "Text",
+                        },
+                      ],
+                      "label": "AA100, to LHR, scheduled 6:00 PM, expected 6:25 PM, status Scheduled, Terminal 8, gate 12, also sold as BA1511, IB4218",
+                      "style": {
+                        "borderColor": "#D6DAE1",
+                      },
+                      "testID": "board-row-dep:AA100:2026-09-23T22:00:00Z",
+                      "type": "View",
+                    },
+                  ],
+                  "style": {
+                    "backgroundColor": "#F2F4F8",
+                    "borderColor": "#D6DAE1",
+                  },
+                  "type": "View",
+                },
+              ],
+              "type": "View",
+            },
+            {
+              "children": [
+                {
+                  "style": {
+                    "backgroundColor": "#F2F4F8",
+                    "borderColor": "#D6DAE1",
+                  },
+                  "type": "View",
+                },
+              ],
+              "type": "View",
+            },
+          ],
+          "type": "View",
+        },
+      ],
+      "testID": "airport-board",
+      "type": "RCTScrollView",
+    },
+  ],
+  "style": {
+    "backgroundColor": "#FFFFFF",
+  },
+  "type": "View",
+}
+`;
