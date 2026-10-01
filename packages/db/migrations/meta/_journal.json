@@ -71,6 +71,13 @@
       "when": 1790846840393,
       "tag": "0009_live_tracked_released_at",
       "breakpoints": true
+    },
+    {
+      "idx": 10,
+      "version": "7",
+      "when": 1790849132295,
+      "tag": "0010_board_calls",
+      "breakpoints": true
     }
   ]
 }
