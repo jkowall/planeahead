@@ -196,17 +196,18 @@ Run from the repository root on your own machine, never in CI. It spends about 4
    Copy each into [Unverified](#unverified) below, item by item, and commit both.
 5. Act on the answers:
    - `bill.productionCallUnits` is what one production call costs when `bill.productionCallSettled`
-     is true: it is 2, 4 or what U2 and U3 imply (`bill.impliedByU2AndU3`, the `Both` call plus
-     what `withLeg` added). Set `ADB_UNITS.fids` (`packages/shared/src/cost.ts`, and its test in
-     `packages/shared/test/cost.test.ts`) to it in the change that commits the findings (ruling
-     R7). When it is false, a reading was skipped or a lagging counter folded another call's units
-     in (the re-review's M4): leave `ADB_UNITS.fids` alone and run the probe again (about 44
-     units), waiting longer at each prompt. Left at 2 while AeroDataBox bills 4, the ledger would
-     count every board fetch at half its cost (review A: the 35 percent share would really spend 70
-     percent of the day's units, and the month would run out around day 22); set to 4, the share
-     buys half as many fetches, so revisit the share in `config.ts` with R3 O4. `bill.runUnits`
-     against the plan's 44 (40 if errors are free, 66 if `Both` bills twice) says whether the
-     readings can be trusted.
+     is true: it equals what U2 and U3 imply (`bill.impliedByU2AndU3`, the `Both` call plus what
+     `withLeg` added) when they were read, and only without them is 2 or 4 enough (so 4 where they
+     imply 2, a straggler's 2 units folded in, is not settled). Set `ADB_UNITS.fids`
+     (`packages/shared/src/cost.ts`, and its test in `packages/shared/test/cost.test.ts`) to it in
+     the change that commits the findings (ruling R7). When it is false, a reading was skipped or a
+     lagging counter folded another call's units in (the re-review's M4): leave `ADB_UNITS.fids`
+     alone and run the probe again (about 44 units), waiting longer at each prompt. Left at 2 while
+     AeroDataBox bills 4, the ledger would count every board fetch at half its cost (review A: the
+     35 percent share would really spend 70 percent of the day's units, and the month would run out
+     around day 22); set to 4, the share buys half as many fetches, so revisit the share in
+     `config.ts` with R3 O4. `bill.runUnits` against the plan's 44 (40 if errors are free, 66 if
+     `Both` bills twice) says whether the readings can be trusted.
    - U1: the board keeps a row by its scheduled or its best time from the buckets a request reads
      (ruling R14), so whichever way FIDS selects, only a delayed flight sitting in a bucket the
      request does not read is missed: by schedule, one scheduled in the bucket before the window
@@ -309,8 +310,8 @@ OkHttp client uses (as the skeptic read its sources), the iOS file the shared `U
   share, the ledger (`ADB_UNITS.fids`) and the cost estimate assume one Tier 2 call; at 4 units
   every board fetch costs double. Probe: `u2-both` against `u2-departure`, and
   `bill.productionCallUnits`, the units of `u4-KATL-am` alone (the adapter's exact query on a
-  12-hour bucket) between the readings `before-production` and `after-production`, settled only
-  at 2, 4 or what U2 and U3 imply (`bill.productionCallSettled`, the re-review's M4).
+  12-hour bucket) between the readings `before-production` and `after-production`, settled
+  (`bill.productionCallSettled`, the re-review's M4) only at what U2 and U3 imply, else at 2 or 4.
 - **R3 U3, no surcharge for `withLeg` or `withLocation`.** `withLeg` is in the production shape;
   `withLocation` is never sent by the app (only by the probe, once). Probe: `u3-withleg`,
   `u3-withlocation`.

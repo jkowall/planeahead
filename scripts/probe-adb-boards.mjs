@@ -24,8 +24,9 @@
  *   U7  whether a window of exactly the page size is accepted, and whether `toLocal` is inclusive;
  *   the bill of ONE production call (review ruling R7): `u4-KATL-am` is the adapter's exact query
  *       on a 12-hour bucket, read between two counter readings, so `ADB_UNITS.fids` can be set
- *       to what AeroDataBox charges for it once that figure is settled (2, 4, or what U2 and U3
- *       imply; the re-review's M4); a last reading gives the whole run's bill;
+ *       to what AeroDataBox charges for it once that figure is settled (what U2 and U3 imply
+ *       when they were read, else 2 or 4; the re-review's M4); a last reading gives the whole
+ *       run's bill;
  *   B7  whether codeshare rows days ahead carry a callsign or a registration, the keys the board
  *       groups codeshares by (review ruling R12; a row with neither joins the only row of its
  *       direction, minute and counterpart that is not a codeshare, when that row is `IsOperator`),
@@ -702,16 +703,17 @@ export function findingsOf({ calls, bodies, readings, delayed }) {
       toLocalInclusive: twelve.length === 0 ? null : inTo1200.length > 0,
     },
     // R7: what one production call bills, which `ADB_UNITS.fids` (packages/shared) must equal,
-    // and the whole run, first reading to last, against the plan's estimate. Settled only at a
-    // figure one call can bill (the re-review's M4): one Tier 2 call, `direction=Both` billed
-    // twice, or what U2 and U3 imply. Anything else, or no reading, is no figure to set
-    // `ADB_UNITS.fids` from: a counter that lagged folds another call's units into it.
+    // and the whole run, first reading to last, against the plan's estimate. Settled only at
+    // what U2 and U3 imply when they were read (the re-review's M4: a 2-unit straggler folded
+    // into a 2-unit call reads 4, which `direction=Both` billed twice would also explain), and
+    // without them only at a figure one call can bill: one Tier 2 call or Both billed twice.
+    // Anything else, or no reading, is no figure to set `ADB_UNITS.fids` from.
     bill: {
       productionCallUnits: production,
       productionCallSettled:
-        production === FIDS_UNITS ||
-        production === 2 * FIDS_UNITS ||
-        (implied !== null && implied > 0 && production === implied),
+        implied !== null && implied > 0
+          ? production === implied
+          : production === FIDS_UNITS || production === 2 * FIDS_UNITS,
       impliedByU2AndU3: implied,
       runUnits: spent(readings, 'before', 'end'),
     },

@@ -6,10 +6,10 @@
  * call in the adapter's exact production query between two counter readings and a last reading
  * at the end (ruling R7), and the codeshare keys of a bucket days ahead (ruling R12). The
  * re-review's M4 and M5 added a reading after the last billed call before the production call,
- * the running total each reading should reach, a bill settled only at a figure one call can
- * bill, and the count of rows of unknown codeshare status. One run against a stubbed gateway
- * (never the real one) checks the findings file: booleans and counts only, no flight number, time
- * or path, never the key, and no redirect followed.
+ * the running total each reading should reach, a bill settled only at what U2 and U3 imply (2
+ * or 4 without them), and the count of rows of unknown codeshare status. One run against a
+ * stubbed gateway (never the real one) checks the findings file: booleans and counts only, no
+ * flight number, time or path, never the key, and no redirect followed.
  */
 
 import { spawnSync } from 'node:child_process';
@@ -252,8 +252,8 @@ describe('the findings', () => {
       at1200InTo1200: 1,
       toLocalInclusive: true,
     });
-    // One production call billed 4 units here, a figure one call can bill: `ADB_UNITS.fids` would
-    // become 4.
+    // One production call billed 4 units here and U3 was not read, so 4, a figure one call can
+    // bill, settles it: `ADB_UNITS.fids` would become 4.
     expect(findings.bill).toEqual({
       productionCallUnits: 4,
       productionCallSettled: true,
@@ -263,53 +263,53 @@ describe('the findings', () => {
     expect(JSON.stringify(findings)).not.toMatch(/AA ?1\b|DL ?100|DL ?7\b|\d{2}:\d{2}/);
   });
 
-  it('settles the production bill only at 2, 4 or what U2 and U3 imply (M4)', () => {
+  it('settles the production bill at what U2 and U3 imply, else only at 2 or 4 (M4)', () => {
     const bill = (readings) =>
       findingsOf({ calls: [], bodies: new Map(), readings, delayed: null }).bill;
-    // Both 2 units, a single direction 2, with `withLeg` 3: U2 and U3 imply 3 for the production
-    // query (Both plus withLeg's surcharge of 1).
-    const u2u3 = {
+    // U2 and U3 read: Both 2 units, a single direction 2, and the same with `withLeg` as given,
+    // so they imply Both plus what withLeg adds for the production query.
+    const u2u3 = (withLegUnits) => ({
       before: 1000,
       'after-u2-both': 998,
       'after-u2-departure': 996,
-      'after-u3-withleg': 993,
-    };
-    const production = (units) =>
-      bill({ ...u2u3, 'before-production': 950, 'after-production': 950 - units });
-    expect(production(3)).toMatchObject({
-      productionCallUnits: 3,
-      productionCallSettled: true,
-      impliedByU2AndU3: 3,
+      'after-u3-withleg': 996 - withLegUnits,
     });
-    expect(production(2).productionCallSettled).toBe(true);
-    expect(production(4).productionCallSettled).toBe(true);
-    // A straggler of the calls before it, folded in by a counter that lagged: not a figure.
-    expect(production(6)).toMatchObject({ productionCallUnits: 6, productionCallSettled: false });
-    expect(production(5).productionCallSettled).toBe(false);
-    // Without U2 and U3 only 2 and 4 settle it.
-    expect(bill({ 'before-production': 950, 'after-production': 947 })).toMatchObject({
-      productionCallUnits: 3,
+    const read = (withLegUnits, units) =>
+      bill({ ...u2u3(withLegUnits), 'before-production': 950, 'after-production': 950 - units });
+    // M4's own case: U2 and U3 imply 2, and a 2-unit straggler folded in by a counter that
+    // lagged makes the production call read 4, the figure Both billed twice would also give.
+    expect(read(2, 4)).toMatchObject({
+      productionCallUnits: 4,
       productionCallSettled: false,
-      impliedByU2AndU3: null,
+      impliedByU2AndU3: 2,
     });
-    // A counter that never moved settles nothing, even where U2 and U3 imply 0 too.
-    const still = Object.fromEntries(
-      [
-        'before',
-        'after-u2-both',
-        'after-u2-departure',
-        'after-u3-withleg',
-        'before-production',
-        'after-production',
-      ].map((name) => [name, 1000]),
-    );
-    expect(bill(still)).toMatchObject({
+    expect(read(2, 2).productionCallSettled).toBe(true);
+    // With a withLeg surcharge of 1 they imply 3: only 3 settles, not 2 or 4.
+    expect(read(3, 3)).toMatchObject({ productionCallSettled: true, impliedByU2AndU3: 3 });
+    expect(read(3, 2).productionCallSettled).toBe(false);
+    expect(read(3, 4).productionCallSettled).toBe(false);
+    expect(read(3, 6).productionCallSettled).toBe(false);
+    // Without U2 and U3 only 2 and 4 settle it.
+    const alone = (units) => bill({ 'before-production': 950, 'after-production': 950 - units });
+    expect(alone(2)).toMatchObject({ productionCallSettled: true, impliedByU2AndU3: null });
+    expect(alone(4).productionCallSettled).toBe(true);
+    expect(alone(3).productionCallSettled).toBe(false);
+    // U2 and U3 implying 0 (a counter that never moved) count as unread: 2 settles, 0 does not.
+    const still = {
+      before: 1000,
+      'after-u2-both': 1000,
+      'after-u2-departure': 1000,
+      'after-u3-withleg': 1000,
+      'before-production': 1000,
+    };
+    expect(bill({ ...still, 'after-production': 1000 })).toMatchObject({
       productionCallUnits: 0,
       productionCallSettled: false,
       impliedByU2AndU3: 0,
     });
+    expect(bill({ ...still, 'after-production': 998 }).productionCallSettled).toBe(true);
     // A skipped reading leaves no figure, and nothing settled.
-    expect(bill({ ...u2u3, 'before-production': null, 'after-production': 947 })).toMatchObject({
+    expect(bill({ ...u2u3(2), 'before-production': null, 'after-production': 948 })).toMatchObject({
       productionCallUnits: null,
       productionCallSettled: false,
     });
