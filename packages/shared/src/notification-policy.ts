@@ -18,7 +18,9 @@ import type { NotificationKind } from './push';
  * `evaluateFailedReread` when that read produced no snapshot. A suspicion records the provider
  * that raised it (`context.provider`, else `next.source`) and only that provider's conclusive
  * answer on a due re-read decides it, so an alert merge never confirms (Q11 (6)), and an answer
- * from another provider, `unknown`, `statusUncertain` or a failed read keeps it.
+ * from another provider, `unknown`, `statusUncertain` or a failed read keeps it. A snapshot
+ * that shows only a suspected change (`showsSuspectedChange`) is evidence, not state: the
+ * tracker stores the returned policy state and keeps its last confirmed snapshot (Q11 (1)).
  */
 
 /** N2: the departure delay that first produces a delay intent (14 CFR 234.2). */
@@ -951,6 +953,32 @@ function resolveDiversion(d: Draft, s: SuspicionState, value: string | undefined
   } else {
     divert(d, value);
   }
+}
+
+/**
+ * Q11 (1): whether `next` shows the change `state` holds only as a suspicion: `cancelled` while
+ * a cancellation is suspected, a positively operating flight while an un-cancellation is, a
+ * diversion while one is suspected, or none while an un-diversion is. Such a snapshot is
+ * evidence, not state: the tracker stores the policy state and keeps its last confirmed
+ * snapshot, phase and cadence, so the app never shows an unconfirmed change. Pass the state
+ * the evaluation of `next` returned.
+ */
+export function showsSuspectedChange(state: PolicyState, next: FlightStatus): boolean {
+  const { cancellation, diversion } = state;
+  if (cancellation.status === 'suspect') {
+    const shown =
+      cancellation.value === 'uncancelled'
+        ? positivelyOperating(next)
+        : next.status === 'cancelled';
+    if (shown) {
+      return true;
+    }
+  }
+  if (diversion.status === 'suspect') {
+    const diverted = diversionOf(next) !== undefined;
+    return diversion.value === 'undiverted' ? !diverted : diverted;
+  }
+  return false;
 }
 
 // ---------------------------------------------------------------------------------------------

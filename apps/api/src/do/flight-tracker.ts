@@ -42,9 +42,12 @@
  *      increasing `version`, the events rows, the outbox rows, and (increment 15) the
  *      notification policy's state with one `notify_intent` outbox row per intent, each guarded
  *      by `notif_dedupe`. A re-read the policy owes (a delay's settle, a cancellation's or a
- *      diversion's confirmation) moves the next alarm to at most 5 minutes out, and a suspected
- *      cancellation never finishes the tracker before its re-read confirms it (rulings N2, N4,
- *      N7; `#policySchedule`).
+ *      diversion's confirmation) moves the next alarm to at most `wants.at`, and a failed one
+ *      is counted by the policy rather than retried in a loop. A suspected cancellation or
+ *      diversion is evidence, not state: the snapshot, phase and version stay the last confirmed
+ *      ones until the raising provider's conclusive re-read, and its fast re-reads hold the
+ *      finish past the cadence's last slot (rulings N2, N4, N7; review rulings Q1, Q3, Q4, Q11;
+ *      `#applyStatus`, `#policySchedule`). Every instance row goes out under a new version.
  *   5. After the commit: send the outbox to the `persist` queue in byte-chunked batches, and
  *      write the debounced KV snapshot off the critical path. A write the debounce suppressed is
  *      marked pending and performed by the next entry point once the gap has passed.
@@ -99,7 +102,6 @@ import {
   A2_HARD_CAP_PE,
   A2_SOFT_CAP_PE,
   CADENCES,
-  CONFIRM_REREAD_MINUTES,
   ConfirmPersistedRequestV1,
   ForceRefreshRequestV1,
   FlightStatusSchema,
@@ -115,6 +117,7 @@ import {
   USER_REFRESH_FRESHNESS_MS,
   UnsubscribeRequestV1,
   deadLetterResendSpacingMs,
+  evaluateFailedReread,
   evaluatePolicy,
   evaluateReread,
   flightTrackerOrigin,
@@ -128,6 +131,8 @@ import {
   readPolicyState,
   reconcileFlightKey,
   refreshIntervalFor,
+  resolveWindows,
+  showsSuspectedChange,
   windowAt,
   type CadenceContext,
   type CadenceDefinition,
@@ -216,7 +221,9 @@ import { chunkOutbox, forEachBindChunk, markOutboxSent, sendOutboxChunks } from 
  * the per-flight Durable Object cost. Increment 15 measured 1,205 for the same walk: migration
  * 003's `ALTER TABLE` and its id row; the policy state rides on the flight row's existing writes,
  * so an alarm writes no more rows than before, and a notify intent costs three (its
- * `notif_dedupe` row, its outbox row and the confirmation that deletes it).
+ * `notif_dedupe` row, its outbox row and the confirmation that deletes it). Its review round
+ * measured 1,204 (2026-10-01): an observation that moves the schedule now writes the flight row
+ * once, the schedule included.
  */
 export const ROWS_WRITTEN_BUDGET_PER_FLIGHT = 1_600;
 
@@ -255,11 +262,6 @@ export const PROVIDER_FETCH_TIMEOUT_MS = 30_000;
 const ABSENT_CLEANUP_MS = 60_000;
 /** The tier interval assumed for a fixed-slot window when deciding whether a slot is fresh. */
 const FIXED_SLOT_TIER_MS = FIXED_SLOT_TIER_MS_DEFAULT;
-/**
- * A due policy re-read (N2 settle, N4 confirmation) whose read failed is tried again this much
- * later: the policy's own confirmation spacing, never at once.
- */
-export const POLICY_REREAD_RETRY_MS = CONFIRM_REREAD_MINUTES * 60_000;
 
 // ---------------------------------------------------------------------------------------------
 // Row shapes.
@@ -543,6 +545,30 @@ function deadLetterResendDue(row: OutboxRow, now: number): boolean {
   return now - since >= deadLetterResendSpacingMs(row.dead_letter_count);
 }
 
+/**
+ * The cadence source of the window at `ctx.now`; past the last window's end (a finish held for
+ * a confirming re-read, review ruling Q4) the last window's, so that re-read goes to the
+ * provider that raised the suspicion; AeroDataBox when no window resolves at all.
+ */
+function windowSourceAt(cadence: CadenceDefinition, ctx: CadenceContext): CadenceSource {
+  const window = windowAt(cadence, ctx);
+  if (window !== null) {
+    return window.source;
+  }
+  const last = resolveWindows(cadence, ctx).windows.at(-1);
+  return last !== undefined && ctx.now.getTime() >= last.end ? last.window.source : 'aerodatabox';
+}
+
+/**
+ * Review rulings Q4 and Q11 (3): a suspected cancellation or diversion with fast re-reads left
+ * holds the tracker's finish, so its confirmation is not lost to the cadence's last slot.
+ */
+function holdsFinish(state: PolicyState): boolean {
+  return [state.cancellation, state.diversion].some(
+    (suspicion) => suspicion.status === 'suspect' && suspicion.fastLeft > 0,
+  );
+}
+
 /** JSON with object keys sorted at every level, so key order never reads as a change. */
 function canonicalJson(value: unknown): string {
   if (Array.isArray(value)) {
@@ -701,6 +727,11 @@ export class FlightTracker extends DurableObject<Env> {
   /** `#outInstants`' memo: the snapshot text it last parsed and the out instants in it. */
   #outMemo: { snapshot: string; estimatedOutMs: number | null; actualOutMs: number | null } | null =
     null;
+  /**
+   * `#storedPolicyState`'s memo (review ruling Q8): the stored text it last parsed and the state
+   * read from it, never mutated (the policy copies the state it is given).
+   */
+  #policyMemo: { text: string; state: PolicyState | null } | null = null;
   /** Configuration errors already alerted by this in-memory instance (once each). */
   readonly #configAlerted = new Set<string>();
 
@@ -1101,6 +1132,8 @@ export class FlightTracker extends DurableObject<Env> {
         const current = this.#requireFlight();
         const snapshot = this.#snapshotOf(current);
         const merged = mergeAeroApiAlert(snapshot, patch as AeroApiAlertPatch, new Date(now));
+        // The merged snapshot keeps the stored one's `source`; the policy is told who answered
+        // (a suspicion the alert raises is AeroAPI's, and a merge never decides one: Q11 (6)).
         return this.#applyStatus(
           current,
           snapshot,
@@ -1109,6 +1142,8 @@ export class FlightTracker extends DurableObject<Env> {
           'provider_alert',
           undefined,
           'merge',
+          0,
+          event.provider,
         );
       });
       if (applied.finish !== null) {
@@ -1816,17 +1851,27 @@ export class FlightTracker extends DurableObject<Env> {
     }
     const current = this.#requireFlight();
     if (result.status === null) {
-      // A miss or an error changes nothing about the flight; the schedule stands. The call's
-      // cost still lands on the row (one write, the same one a change would make).
+      // A miss or an error changes nothing about the flight. The call's cost still lands on the
+      // row (one write, the same one a change would make), and a due re-read that produced no
+      // snapshot is inconclusive (review rulings Q3, Q11): the policy counts it and names the
+      // next re-read, so a failing provider costs at most the policy's bounded re-reads on top
+      // of the cadence, never a loop.
+      const due = this.#rereadDue(current, now) ? this.#storedPolicyState(current) : null;
+      const policyText =
+        due === null
+          ? current.policy_state
+          : JSON.stringify(evaluateFailedReread({ state: due, now }).state);
       this.#exec(
-        'UPDATE flight SET provider_cost_units = provider_cost_units + ?, updated_at_ms = ? WHERE id = 1',
+        `UPDATE flight SET provider_cost_units = provider_cost_units + ?, policy_state = ?,
+                updated_at_ms = ? WHERE id = 1`,
         units,
+        policyText,
         now,
       );
-      // A failed read leaves a due re-read due: it is tried again a spacing later, not at once.
-      const next = this.#schedule(current, now, false, true);
-      this.#reschedule(current, next, now);
-      return { version: current.version, changed: false, finish: next.finish };
+      const after = this.#requireFlight();
+      const next = this.#schedule(after, now);
+      this.#reschedule(after, next, now);
+      return { version: after.version, changed: false, finish: next.finish };
     }
     const reconciliation = reconcileFlightKey(row.key as FlightKey, result.status);
     if (reconciliation.drift !== 'none') {
@@ -1857,7 +1902,10 @@ export class FlightTracker extends DurableObject<Env> {
     return this.#applyStatus(current, previous, status, now, result.trigger, lastId, 'read', units);
   }
 
-  /** Replaces the snapshot when it changed: events, scalars, version, outbox, schedule. */
+  /**
+   * Replaces the snapshot when it changed: events, scalars, version, outbox, schedule. `answeredBy`
+   * names the provider that answered when the snapshot's `source` is not it (an alert merge).
+   */
   #applyStatus(
     row: FlightRow,
     previous: FlightStatus,
@@ -1867,49 +1915,120 @@ export class FlightTracker extends DurableObject<Env> {
     providerCallId: string | undefined,
     source: ObservationSource,
     units = 0,
+    answeredBy?: ProviderId,
   ): ApplyOutcome {
-    const drafts = diffSnapshots(previous, next, next.source, providerCallId);
     // The notification policy (N1 to N7): classified here, on every path that stores a snapshot,
     // so its state, its intents and the snapshot commit together, and no path can finish the
     // flight on a cancellation the policy has not confirmed (N4).
-    const policy = this.#evaluate(row, previous, next, now, source === 'read');
-    const serialized = JSON.stringify(next);
+    const policy = this.#evaluate(row, previous, next, now, source === 'read', answeredBy);
+    // Review ruling Q11 (1): a change the policy only suspects is evidence, not state. The
+    // snapshot, its phase, its times and its version stay the last confirmed ones (so the
+    // cadence and the window's provider stay those of the operating flight, and neither the
+    // instance row nor KV ever shows it); only the policy state, the cost and the instant of
+    // this read are stored, and a new suspicion writes its event.
+    const held = showsSuspectedChange(policy.state, next);
+    const drafts = held ? [] : diffSnapshots(previous, next, next.source, providerCallId);
     // `fetchedAt` moves on every poll; a snapshot that differs in nothing else is the same
     // flight, so the version stays and no instance row goes out. The fresh `fetchedAt` is still
     // stored, on the same write the cost update needs anyway.
-    const changed = drafts.length > 0 || withoutFetchedAt(next) !== withoutFetchedAt(previous);
+    const changed =
+      !held && (drafts.length > 0 || withoutFetchedAt(next) !== withoutFetchedAt(previous));
     for (const draft of drafts) {
       this.#appendEvent(row, now, draft);
     }
+    this.#appendSuspicionEvents(row, now, policy.state, providerCallId);
+    // The row as it is about to be stored, so the schedule is known before the one write. An
+    // instance row goes out on a change, a moved schedule or a re-seed, and the version moves
+    // with every one (review ruling Q1: never two different payloads under one version; a
+    // moved alarm alone made the confirming alarm's second row reuse step 1's version).
+    const policyText = JSON.stringify(policy.state);
+    const stored: FlightRow = held
+      ? { ...row, policy_state: policyText }
+      : {
+          ...row,
+          snapshot: JSON.stringify(next),
+          phase: next.status,
+          scheduled_out_ms: ms(next.times.scheduledOut),
+          scheduled_in_ms: ms(next.times.scheduledIn),
+          estimated_in_ms: ms(next.times.estimatedIn),
+          actual_off_ms: ms(next.times.actualOff),
+          actual_on_ms: ms(next.times.actualOn),
+          actual_in_ms: ms(next.times.actualIn),
+          operator_source: next.operatorSource ?? null,
+          policy_state: policyText,
+        };
+    const schedule = this.#schedule(stored, now, trigger === 'reconcile');
+    const at = schedule.finish === null ? schedule.at : null;
+    const rescheduled = at !== row.next_refresh_at_ms;
+    const emit = changed || rescheduled || source === 'seed';
     this.#exec(
       `UPDATE flight SET snapshot = ?, phase = ?, version = version + ?, scheduled_out_ms = ?,
               scheduled_in_ms = ?, estimated_in_ms = ?, actual_off_ms = ?, actual_on_ms = ?,
               actual_in_ms = ?, operator_source = ?, last_refreshed_at_ms = ?,
-              provider_cost_units = provider_cost_units + ?, policy_state = ?, updated_at_ms = ?
+              provider_cost_units = provider_cost_units + ?, policy_state = ?,
+              next_refresh_at_ms = ?, updated_at_ms = ?
         WHERE id = 1`,
-      serialized,
-      next.status,
-      changed ? 1 : 0,
-      ms(next.times.scheduledOut),
-      ms(next.times.scheduledIn),
-      ms(next.times.estimatedIn),
-      ms(next.times.actualOff),
-      ms(next.times.actualOn),
-      ms(next.times.actualIn),
-      next.operatorSource ?? null,
+      stored.snapshot,
+      stored.phase,
+      emit ? 1 : 0,
+      stored.scheduled_out_ms,
+      stored.scheduled_in_ms,
+      stored.estimated_in_ms,
+      stored.actual_off_ms,
+      stored.actual_on_ms,
+      stored.actual_in_ms,
+      stored.operator_source,
       now,
       units,
-      JSON.stringify(policy.state),
+      policyText,
+      at,
       now,
     );
+    if (rescheduled && at !== null) {
+      this.#setAlarm(at);
+    }
     const current = this.#requireFlight();
     this.#appendIntents(current, now, policy.intents, next, null);
-    const schedule = this.#schedule(current, now, trigger === 'reconcile', source === 'read');
-    const rescheduled = this.#reschedule(current, schedule, now);
-    if (changed || rescheduled || source === 'seed') {
-      this.#appendInstance(this.#requireFlight(), now);
+    if (emit) {
+      this.#appendInstance(current, now);
     }
     return { version: current.version, changed, finish: schedule.finish };
+  }
+
+  /**
+   * Review ruling Q11 (1): a suspicion the observation raised goes into the timeline as evidence
+   * (`cancel_suspect`, `diversion_suspect`; the suspected value, by the provider that raised
+   * it), whether or not its snapshot is stored. A suspicion the stored state already held (the
+   * same `since`) writes nothing more.
+   */
+  #appendSuspicionEvents(
+    row: FlightRow,
+    now: number,
+    state: PolicyState,
+    providerCallId: string | undefined,
+  ): void {
+    const before = this.#storedPolicyState(row);
+    const kinds = [
+      ['cancellation', 'cancel_suspect'],
+      ['diversion', 'diversion_suspect'],
+    ] as const;
+    for (const [key, type] of kinds) {
+      const after = state[key];
+      const prior = before?.[key];
+      if (
+        after.status !== 'suspect' ||
+        (prior?.status === 'suspect' && prior.since === after.since)
+      ) {
+        continue;
+      }
+      this.#appendEvent(row, now, {
+        type,
+        field: key,
+        newValue: after.value,
+        source: after.provider,
+        providerCallId,
+      });
+    }
   }
 
   /** Moves the alarm when the schedule changed; returns whether it did. */
@@ -1988,58 +2107,55 @@ export class FlightTracker extends DurableObject<Env> {
 
   /**
    * The next alarm: the cadence's slot (`#cadenceSchedule`), moved by what the notification
-   * policy owes (`#policySchedule`) unless polling is stopped. `readNow` says a provider read is
-   * being made, or was just made, at `now`.
+   * policy owes (`#policySchedule`) unless polling is stopped (the hard cap and a key drift end
+   * the tracking whatever the policy holds). `planningRead` says step 1 is planning the provider
+   * read it is about to make at `now`.
    */
   #schedule(
     row: FlightRow,
     now: number,
     afterReconcilePoll = false,
-    readNow = false,
+    planningRead = false,
   ): { readonly at: number; readonly finish: FinishReason | null } {
     const base = this.#cadenceSchedule(row, now, afterReconcilePoll);
-    return row.polling_stopped === 1 ? base : this.#policySchedule(row, now, base, readNow);
+    return row.polling_stopped === 1 ? base : this.#policySchedule(row, now, base, planningRead);
   }
 
   /**
-   * Rulings N2 and N4 on top of the cadence. The re-read the policy owes moves the next alarm to
-   * `min(the cadence's slot, wants.at)`, at once when that instant has passed; a due re-read
-   * whose read is being made (or failed) at `now` is next tried `POLICY_REREAD_RETRY_MS` later,
-   * never at once, so a failing provider is not polled in a loop. A suspected cancellation holds
-   * the `cancelled` finish until the confirming re-read decides, for as long as the flight would
-   * still be tracked were it not cancelled (a provider that never answers cannot keep the
-   * tracker alive past the flight's own lifetime).
+   * Rulings N2 and N4 on top of the cadence, as review rulings Q3, Q4 and Q11 bound them. The
+   * re-read the policy owes moves the next alarm to `min(the cadence's slot, wants.at)`, at once
+   * when `wants.at` has passed (an alarm that ran late). A due re-read that produced no snapshot
+   * is counted by the policy (`evaluateFailedReread`), which moves `wants.at` on, so a failing
+   * provider is never polled in a loop. Step 1 plans the read it is about to make as if it
+   * failed: the alarm it commits is that read's next re-read, never `now`, so a crash before the
+   * answer resumes there and a platform retry finds the slot committed. A suspicion with fast
+   * re-reads left holds the finish, even past the cadence's last slot (Q4, Q11 (3)): a
+   * cancellation first seen at the last slot is still confirmed. Once they are spent the flight
+   * finishes unconfirmed (`#finishBody` logs it); the hard cap ends it whatever is held.
    */
   #policySchedule(
     row: FlightRow,
     now: number,
     base: { readonly at: number; readonly finish: FinishReason | null },
-    readNow: boolean,
+    planningRead: boolean,
   ): { readonly at: number; readonly finish: FinishReason | null } {
-    const state = this.#storedPolicyState(row);
-    const wants = state === null ? null : policyWants(state);
-    if (state === null || wants === null) {
+    const stored = this.#storedPolicyState(row);
+    if (stored === null) {
       return base;
     }
-    const due = wants.at <= now + EARLY_ALARM_TOLERANCE_MS;
-    const at = !due ? wants.at : readNow ? now + POLICY_REREAD_RETRY_MS : now;
+    const state =
+      planningRead && this.#rereadDue(row, now)
+        ? evaluateFailedReread({ state: stored, now }).state
+        : stored;
+    const wants = policyWants(state);
+    if (wants === null) {
+      return base;
+    }
+    const at = wants.at <= now + EARLY_ALARM_TOLERANCE_MS ? now : wants.at;
     if (base.finish === null) {
       return { at: Math.min(base.at, at), finish: null };
     }
-    const held =
-      base.finish === 'cancelled' &&
-      state.cancellation.status === 'suspect' &&
-      this.#lifetimeLeft(row, now);
-    return held ? { at, finish: null } : base;
-  }
-
-  /** Whether the cadence would still have a slot for this flight were it not cancelled. */
-  #lifetimeLeft(row: FlightRow, now: number): boolean {
-    const context = this.#cadenceContext(row, now);
-    return (
-      context !== null &&
-      refreshIntervalFor(cadenceById(row.cadence), { ...context, phase: 'unknown' }) !== null
-    );
+    return holdsFinish(state) ? { at, finish: null } : base;
   }
 
   #cadenceContext(row: FlightRow, now: number): CadenceContext | null {
@@ -2085,13 +2201,16 @@ export class FlightTracker extends DurableObject<Env> {
     return this.#outMemo;
   }
 
-  /** The call the current window asks for, priced before any adapter exists (ruling L17). */
+  /**
+   * The call the current window asks for, priced before any adapter exists (ruling L17). The
+   * window is resolved from the stored, operational phase (a suspected cancellation is never
+   * stored, review ruling Q11 (1)), so a confirming re-read goes to the window's own provider;
+   * past the cadence's last slot, where only a held finish still reads (Q4), the last window's.
+   */
   #expectedCall(row: FlightRow, now: number, context?: CadenceContext | null): ExpectedCall {
     const resolved = context === undefined ? this.#cadenceContext(row, now) : context;
     const source: CadenceSource =
-      resolved === null
-        ? 'aerodatabox'
-        : (windowAt(cadenceById(row.cadence), resolved)?.source ?? 'aerodatabox');
+      resolved === null ? 'aerodatabox' : windowSourceAt(cadenceById(row.cadence), resolved);
     const provider = expectedProviderFor(source, this.env, {
       scheduledOut: new Date(row.scheduled_out_ms ?? now),
       now: new Date(now),
@@ -2199,8 +2318,34 @@ export class FlightTracker extends DurableObject<Env> {
       this.#setAlarm(now + FINISH_ALARM_MS);
     });
     this.#log.info('flight_tracker_finished', { reason, archived: archiveKey !== null });
+    this.#logUnconfirmed(row, reason);
     await this.#flushOutbox(now);
     await this.#writeFinalKv(now);
+  }
+
+  /**
+   * Review ruling Q11 (3): a flight that finishes with a suspicion still undecided (its fast
+   * re-reads spent at the cadence's end, the hard cap, a key drift) pushed nothing for it, and
+   * says so: `cancel_unconfirmed`, or `diversion_unconfirmed` (the same shape, Q4).
+   */
+  #logUnconfirmed(row: FlightRow, reason: FinishReason): void {
+    const state = this.#storedPolicyState(row);
+    const kinds = [
+      ['cancellation', 'cancel_unconfirmed'],
+      ['diversion', 'diversion_unconfirmed'],
+    ] as const;
+    for (const [key, event] of kinds) {
+      const suspicion = state?.[key];
+      if (suspicion?.status === 'suspect') {
+        this.#log.warn(event, {
+          reason,
+          value: suspicion.value,
+          provider: suspicion.provider,
+          since: iso(suspicion.since),
+          reads: suspicion.reads,
+        });
+      }
+    }
   }
 
   /**
@@ -2622,26 +2767,38 @@ export class FlightTracker extends DurableObject<Env> {
     return FlightStatusSchema.parse(JSON.parse(row.snapshot));
   }
 
-  /** The stored policy state (migration 003), or null when there is none this build can read. */
+  /**
+   * The stored policy state (migration 003), or null when there is none this build can read.
+   * Memoised on the stored text (review ruling Q8): an alarm reads it several times.
+   */
   #storedPolicyState(row: FlightRow): PolicyState | null {
-    if (row.policy_state === null) {
+    const text = row.policy_state;
+    if (text === null) {
       return null;
     }
-    try {
-      return readPolicyState(JSON.parse(row.policy_state));
-    } catch {
-      return null;
+    if (this.#policyMemo?.text !== text) {
+      let state: PolicyState | null;
+      try {
+        state = readPolicyState(JSON.parse(text));
+      } catch {
+        state = null;
+      }
+      this.#policyMemo = { text, state };
     }
+    return this.#policyMemo.state;
   }
 
   /**
-   * Whether the policy's re-read is due at `now`: the state names a `wants` at or before it
-   * (within the early-alarm tolerance). Such an alarm must read, never be satisfied by a refresh.
+   * Whether a provider read at `now` is the policy's re-read: the state names a `wants` whose
+   * `from` is at or before it (within the early-alarm tolerance, the policy's
+   * `REREAD_TOLERANCE_MS`). `wants.at` only bounds when the alarm must run; from `wants.from`
+   * on, any read of this tracker's own is the re-read (a slow confirming re-read is the next
+   * cadence slot, review ruling Q11 (3)). Such an alarm must read, never be satisfied.
    */
   #rereadDue(row: FlightRow, now: number): boolean {
     const state = this.#storedPolicyState(row);
     const wants = state === null ? null : policyWants(state);
-    return wants !== null && wants.at <= now + EARLY_ALARM_TOLERANCE_MS;
+    return wants !== null && wants.from <= now + EARLY_ALARM_TOLERANCE_MS;
   }
 
   /**
@@ -2651,6 +2808,8 @@ export class FlightTracker extends DurableObject<Env> {
    * user refresh, a reconcile poll, an alert's re-read), all by designator through the router,
    * made once the re-read is due IS that re-read; an alert merge or a re-seed never is (an
    * AeroAPI alert is keyed by `fa_flight_id` and carries the very flag a re-read must confirm).
+   * `answeredBy` names an alert merge's provider (review ruling Q11 (6)): the merged snapshot
+   * keeps the stored snapshot's `source`, and a suspicion it raises is that provider's.
    */
   #evaluate(
     row: FlightRow,
@@ -2658,9 +2817,11 @@ export class FlightTracker extends DurableObject<Env> {
     next: FlightStatus,
     now: number,
     read: boolean,
+    answeredBy?: ProviderId,
   ): PolicyResult {
     const state = this.#storedPolicyState(row) ?? initialPolicyState(previous);
-    const input = { previous, next, state, now };
+    const context = answeredBy === undefined ? undefined : { provider: answeredBy };
+    const input = { previous, next, state, now, context };
     return read && this.#rereadDue(row, now) ? evaluateReread(input) : evaluatePolicy(input);
   }
 
@@ -2744,9 +2905,6 @@ export class FlightTracker extends DurableObject<Env> {
         : row.phase === 'finished'
           ? null
           : iso(now);
-    // Ruling N4: a `cancelled` the confirming re-read has not decided is not the flight's end, so
-    // persist keeps its live-tracking slots (`liveWindowStage`) until it is confirmed or cleared.
-    const cancellation = this.#storedPolicyState(row)?.cancellation;
     const payload: FlightInstanceOutboxPayloadV1 = {
       operatingCarrierIcao: parts.operatingCarrierIcao,
       flightNumber: parts.flightNumber,
@@ -2767,7 +2925,6 @@ export class FlightTracker extends DurableObject<Env> {
       operatorSource: row.operator_source as FlightInstanceOutboxPayloadV1['operatorSource'],
       finishedAt: iso(row.finished_at_ms),
       eventsR2Key: row.events_r2_key,
-      cancelSuspect: cancellation?.status === 'suspect' && cancellation.value === 'cancelled',
     };
     this.#appendOutbox(row, now, { kind: 'flight_instance', flightKey: key, payload });
   }

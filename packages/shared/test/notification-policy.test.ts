@@ -7,6 +7,7 @@ import {
   initialPolicyState,
   POLICY_STATE_VERSION,
   readPolicyState,
+  showsSuspectedChange,
   type PolicyIntent,
   type PolicyResult,
   type PolicyState,
@@ -1108,6 +1109,32 @@ describe('N4 cancellation and diversion', () => {
     expect(evaluateReread({ ...input, ...alert }).intents.map(summary)).toEqual([
       'cancellation flight cancelled',
     ]);
+  });
+
+  // Review ruling Q11 (1): what the tracker keeps out of its stored snapshot.
+  it('says which snapshots show only a suspected change', () => {
+    const shows = (start: Shape, steps: Step[], next: Shape): boolean =>
+      showsSuspectedChange(walk(start, steps).state, snap(next));
+    const suspected = [{ at: t(-90), shape: CANCELLED }];
+    expect(shows({}, suspected, CANCELLED)).toBe(true);
+    // An operating answer is not the suspected change (adopted, the suspicion kept or cleared).
+    expect(shows({}, suspected, {})).toBe(false);
+    expect(shows({}, suspected, { uncertain: true })).toBe(false);
+    // Confirmed: no longer a suspicion, the snapshot is adopted.
+    const confirmed = [...suspected, { at: t(-85), shape: CANCELLED, reread: true }];
+    expect(shows({}, confirmed, CANCELLED)).toBe(false);
+    expect(shows({}, [], CANCELLED)).toBe(false);
+    const diverted = [{ at: t(120), shape: DIVERTED }];
+    expect(shows(AIRBORNE, diverted, DIVERTED)).toBe(true);
+    expect(shows(AIRBORNE, diverted, AIRBORNE)).toBe(false);
+    // After a pushed diversion, an un-diversion is the suspected change, the diversion is not.
+    const undiverted = [
+      ...diverted,
+      { at: t(125), shape: DIVERTED, reread: true },
+      { at: t(130), shape: AIRBORNE },
+    ];
+    expect(shows(AIRBORNE, undiverted, AIRBORNE)).toBe(true);
+    expect(shows(AIRBORNE, undiverted, DIVERTED)).toBe(false);
   });
 });
 

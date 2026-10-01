@@ -189,6 +189,7 @@ const EXPECTED_EXPORTS = [
   'policyWants',
   'readPolicyState',
   'relevanceEndMs',
+  'showsSuspectedChange',
   // notify (increment 15)
   'ANDROID_CHANNEL_BY_KIND',
   'ANDROID_CHANNEL_IDS',
