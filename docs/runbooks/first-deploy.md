@@ -2,7 +2,8 @@
 
 Status: increment 12 (2026-09-23); the store steps (step 18) increment 13 (2026-09-30); the push
 transport (the `push` queues in step 2, its secrets in step 6, step 19) increment 14
-(2026-09-30); the boards probe and the staging boards (step 20) increment 18 (2026-10-01).
+(2026-09-30); the boards probe, the staging boards and turning boards on (step 20) increment 18
+and its review round (2026-10-01).
 Everything the owner does once, in order, before and during the first staging and production
 deploys and the first store builds, with the exact commands. Nothing here has been run: there
 is no Cloudflare account, Neon project, provider key or Apple and Google credential in the build
@@ -385,6 +386,8 @@ that the page works, so the inbox must exist before the listing names the page.
 - [ ] Actions > Deploy production > Run workflow, branch/tag `v0.0.1`, confirm
       `deploy v0.0.1`: verify, migrate `NEON_PRODUCTION_DIRECT_URL`, `wrangler deploy --env
 production`, smoke `https://api.planeahead.app/health` against the build.
+- [ ] Airport boards stay off: the production dry run lists `env.BOARDS_ENABLED ("false")`, and
+      only step 20 turns them on.
 - [ ] Rolling back: re-run the workflow on the previous tag. Migrations are forward only, so the
       previous build must work against the newer schema (expand and contract, docs/schema-review.md
       section 12); gradual deployments and `versions` rollbacks are not available to a Worker that
@@ -563,30 +566,53 @@ commands are in `docs/increments/14-verification.md`.
 - [ ] Production, after the first TestFlight install (increment 16): `PUSH_INJECT_ALLOWED_USER_IDS`
       set to your own user id, then the same test push to your iPhone's token.
 
-## 20. Boards: the AeroDataBox probe and the three staging boards
+## 20. Boards: the AeroDataBox probe, the staging checks, and turning boards on
 
-Increment 18. Airport boards and the route search are served from a per-airport cache that only
-`AirportState` fills, inside 35 percent of the day's AeroDataBox budget. Two owner checks remain:
-the provider probe (R3 U1 to U7, about 42 units) on the day the Growth key arrives, and the exit
-test, the KATL, EGLL and KJFK boards from cache on staging. The exact steps, and where each answer
-is recorded, are in `docs/increments/18-verification.md` ("The owner's steps").
+Increment 18 and its review round. Airport boards and the route search are served from a
+per-airport cache that only `AirportState` fills, inside 35 percent of the day's AeroDataBox
+budget, and only where `BOARDS_ENABLED` is `"true"`: locally and on staging. Production says
+`"false"`, so there both routes answer 404 `boards_disabled` and the app says boards are not
+available yet. Before that changes: the provider probe (R3 U1 to U7, the production call's bill
+and the codeshare keys days ahead, about 44 units) on the day the Growth key arrives; the exit
+test (the KATL, EGLL and KJFK boards from cache on staging) and the phone's HTTP cache check;
+AeroDataBox's written End Use answer; and the per-user board limits, which are not built yet.
+The exact steps, and where each answer is recorded, are in `docs/increments/18-verification.md`
+("The owner's steps").
 
 - [ ] The day the Growth key arrives (step 0), before boards reach staging users: from the
       repository root on your machine (never CI),
-      `node scripts/probe-adb-boards.mjs --dry-run --date <today in New York>` to see the 24
+      `node scripts/probe-adb-boards.mjs --dry-run --date <today in New York>` to see the 25
       calls and their units, then with the dashboard's unit counter open,
       `AERODATABOX_API_KEY=<key> node scripts/probe-adb-boards.mjs --date <the same date> --out docs/increments/18-probe-findings.json`,
-      typing the counter at each prompt once it has moved. Format the file with Prettier, copy
-      the answers into the verification file's "Unverified" section, and commit both.
-- [ ] Act on the answers as the verification file says (U2 at 4 units, U1 by revised time, U5
-      refused); none blocks the staging check below.
-- [ ] Staging runs this branch (step 10) with `AERODATABOX_API_KEY` and `ADB_PLAN=growth` (step 6)
-      and `BOARD_RL` in its bindings (the dry run lists `env.BOARD_RL (30 requests/60s)`).
+      typing the counter at each prompt once it has moved (the two around the production call,
+      `before-production` and `after-production`, matter most). The file holds booleans and
+      counts only; copy the answers into the verification file's "Unverified" section and
+      commit both.
+- [ ] Set `ADB_UNITS.fids` (`packages/shared/src/cost.ts`, and its test in
+      `packages/shared/test/cost.test.ts`) to the findings' `bill.productionCallUnits`, the units
+      one production FIDS call billed, in the change that commits them. At 4, every board fetch
+      costs double, so revisit `ADB_BOARDS_SHARE` (`apps/api/src/providers/config.ts`).
+- [ ] Act on the other answers as the verification file says (U1, U5 refused, U7 exclusive);
+      none blocks the staging checks below.
+- [ ] Staging runs this branch (step 10) with `AERODATABOX_API_KEY` and `ADB_PLAN=growth` (step 6);
+      its dry run lists `env.BOARD_RL (30 requests/60s)`, `env.BOARD_IP_RL (300 requests/60s)`
+      and `env.BOARDS_ENABLED ("true")`.
 - [ ] The three boards: a development build against staging, signed in with a real account (a
       guest opens only its own flights' airports), opens KATL, EGLL and KJFK from the add sheet's
       **Airport board** field; each shows an "As of" time, and reopening within 5 minutes shows
       the same one. `/admin`'s boards section lists the three airports as refreshed in the last
       hour, with one `ok` board call per bucket and none for the reopenings.
+- [ ] The phone's HTTP cache (review ruling R1): every `/v1` answer says `no-store`, which stops
+      new entries but purges none, so first clear the app's data on each development device
+      that ran a build from before the review round; then the device check in the verification
+      file finds no `/v1` answer on disk.
 - [ ] AeroDataBox's written answer on End Use (R3 O2, plan section 10 item 3): in-app boards for
       any airport and route search, share pages and MCP. Boards stay out of share pages, public
       tokens and MCP until it arrives, and boards reach no real user before it does.
+- [ ] Turning boards on in production, only after BOTH the written End Use answer above AND the
+      per-user board limits (`docs/open-decisions.md` section 9: a per-user daily budget charged
+      on real FIDS reservations, its per-salted-IP counterpart, and distinct airports per user per
+      hour; review ruling R3) are built and deployed: in a reviewed change, set
+      `"BOARDS_ENABLED": "true"` in `env.production.vars` (`apps/api/wrangler.jsonc`), the one
+      word the comment there names, then deploy as in step 17. The production dry run then lists
+      `env.BOARDS_ENABLED ("true")`.

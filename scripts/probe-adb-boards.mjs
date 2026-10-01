@@ -9,7 +9,7 @@
  *   AERODATABOX_API_KEY=... node scripts/probe-adb-boards.mjs --date 2026-10-02 \
  *     --out docs/increments/18-probe-findings.json [--page-hours 24] [--no-prompt] [--pause-ms 300]
  *
- * It SPENDS REAL UNITS (about 40: 2 per FIDS call, the coverage checks are free; the dry run
+ * It SPENDS REAL UNITS (about 44: 2 per FIDS call, the coverage checks are free; the dry run
  * prints the exact plan) and is never run by CI or by the test suite, which only runs the dry run.
  *
  * What it answers:
@@ -21,16 +21,26 @@
  *       limit) and latency at KATL, EGLL and KJFK, for both 12-hour buckets and a 24-hour window;
  *   U5  whether FIDS answers a date 180 days out;
  *   U6  whether a 204 (no flights) or a 400 (a window wider than the plan's page) bills units;
- *   U7  whether a window of exactly the page size is accepted, and whether `toLocal` is inclusive.
+ *   U7  whether a window of exactly the page size is accepted, and whether `toLocal` is inclusive;
+ *   the bill of ONE production call (review ruling R7): `u4-KATL-am` is the adapter's exact query
+ *       on a 12-hour bucket, read between two counter readings, so `ADB_UNITS.fids` can be set
+ *       to what AeroDataBox charges for it; a last reading gives the whole run's bill;
+ *   B7  whether codeshare rows days ahead carry a callsign or a registration, the keys the board
+ *       groups codeshares by (review ruling R12; a row with neither joins the only operator row
+ *       of its direction, minute and counterpart).
  *
- * Billing (U2, U3, U6) is read from the account's unit counter. The direct API has no endpoint for
- * it (only the webhook credit balance), so at each checkpoint the script asks for the counter as
- * the AeroDataBox dashboard shows it (Enter skips; `--no-prompt` skips all), and it records every
- * response header that looks like a quota counter in case the gateway sends one.
+ * Billing (U2, U3, U6, the production call) is read from the account's unit counter. The direct
+ * API has no endpoint for it (only the webhook credit balance), so at each checkpoint the script
+ * asks for the counter as the AeroDataBox dashboard shows it (Enter skips; `--no-prompt` skips
+ * all), and it records every response header that looks like a quota counter in case the gateway
+ * sends one.
  *
- * What it keeps: measurements only (status, latency, sizes, row counts, the times of the flights
- * U1 and U7 compare, quota-like headers). No response body is written, the key is sent only as
- * the X-Api-Key header and the findings are checked for it before they are written.
+ * What it keeps: booleans and counts only (status, latency, sizes, row counts, the counter
+ * readings, quota-like headers), never a flight number, a time or a path (U1's windows are cut
+ * around a real flight's times; the dry run reprints every other path from the recorded date).
+ * No response body is written, the key is sent only as the X-Api-Key header, a redirect is
+ * refused rather than followed with it, and the findings are checked for the key before they are
+ * written.
  */
 
 import { writeFileSync } from 'node:fs';
@@ -53,9 +63,17 @@ export const DEFAULT_EMPTY_AIRPORT = 'EGPU';
 /** Growth 10 requests a second (R3 F5): one call at a time, this pause between them by default. */
 const PAUSE_MS = 300;
 
-/** The production fetch shape (ruling B1), on which U4 measures sizes. */
+/**
+ * The production fetch shape (ruling B1), byte for byte the adapter's `FIDS_QUERY`
+ * (apps/api/src/providers/aerodatabox.adapter.ts; a test compares the two), on which U4 measures
+ * sizes and the production call its bill.
+ */
 export const BOARD_SHAPE =
-  'direction=Both&withLeg=true&withCodeshared=true&withCancelled=true&withCargo=false&withPrivate=false';
+  'direction=Both&withLeg=true&withCancelled=true&withCodeshared=true&withCargo=false&withPrivate=false';
+/** The one production call read between two counter readings (R7): KATL's 00:00 to 11:59. */
+export const PRODUCTION_CALL = 'u4-KATL-am';
+/** How far ahead B7 reads a bucket for codeshare keys (R12): the board's own 72-hour reach. */
+export const CODESHARE_DAYS_AHEAD = 3;
 /** A single direction with no leg, the base U2 and U3 compare against. */
 const DEPARTURES_SHAPE =
   'direction=Departure&withLeg=false&withCodeshared=true&withCancelled=true&withCargo=false&withPrivate=false';
@@ -83,6 +101,7 @@ function call(id, item, purpose, path, units, options = {}) {
     units,
     unitsIfBothBillsTwice: options.both === true ? units * 2 : units,
     errorProbe: options.errorProbe === true,
+    checkpointBefore: options.checkpointBefore ?? null,
     checkpoint: options.checkpoint ?? null,
   };
 }
@@ -187,14 +206,19 @@ export function planProbe({ date, pageHours = 24, emptyAirport = DEFAULT_EMPTY_A
     ),
   );
   for (const icao of HUBS) {
+    const production = `u4-${icao}-am` === PRODUCTION_CALL;
     plan.push(
       call(
         `u4-${icao}-am`,
         'U4',
-        `the 00:00 to 11:59 bucket at ${icao}, production shape`,
+        production
+          ? `the 00:00 to 11:59 bucket at ${icao}, the production call: its bill alone is ADB_UNITS.fids`
+          : `the 00:00 to 11:59 bucket at ${icao}, production shape`,
         fids(icao, day(0), wallClock(date, 719), BOARD_SHAPE),
         FIDS_UNITS,
-        { both: true },
+        production
+          ? { both: true, checkpointBefore: 'before-production', checkpoint: 'after-production' }
+          : { both: true },
       ),
       call(
         `u4-${icao}-pm`,
@@ -218,7 +242,16 @@ export function planProbe({ date, pageHours = 24, emptyAirport = DEFAULT_EMPTY_A
       );
     }
   }
+  const ahead = addDays(date, CODESHARE_DAYS_AHEAD);
   plan.push(
+    call(
+      'b7-days-ahead',
+      'B7',
+      `the 00:00 to 11:59 bucket at KATL on ${ahead}, production shape: do codeshare rows carry a callsign or a registration`,
+      fids('KATL', wallClock(ahead, 0), wallClock(ahead, 719), BOARD_SHAPE),
+      FIDS_UNITS,
+      { both: true },
+    ),
     call(
       'u1-revised-window',
       'U1',
@@ -262,6 +295,9 @@ export function describePlan(plan, { date, pageHours }) {
       `${planned.item.padEnd(3)} ${planned.id.padEnd(20)} ${String(planned.units)} units  GET ${target}`,
     );
     lines.push(`    ${planned.purpose}`);
+    if (planned.checkpointBefore !== null) {
+      lines.push(`    read the unit counter before this call (${planned.checkpointBefore})`);
+    }
     if (planned.checkpoint !== null) {
       lines.push(`    then read the unit counter (${planned.checkpoint})`);
     }
@@ -271,7 +307,8 @@ export function describePlan(plan, { date, pageHours }) {
     `Planned: ${String(estimate.calls)} calls, ${String(estimate.expected)} units expected ` +
       `(${String(estimate.ifErrorsAreFree)} if 204 and 400 are free, ` +
       `${String(estimate.ifBothBillsTwice)} if direction=Both bills both directions).`,
-    'Counter readings: before the first billed call, then at each checkpoint above.',
+    'Counter readings: before the first billed call (before), at each checkpoint above, and ' +
+      'after the last call (end).',
   );
   return `${lines.join('\n')}\n`;
 }
@@ -337,15 +374,20 @@ export function quotaHeaders(headers) {
 }
 
 /**
- * One GET, timed and measured. The body is returned for the in-memory comparisons (U1, U7) and is
- * never written; a response that echoes the key stops the probe before anything is written.
+ * One GET, timed and measured. The body is returned for the in-memory comparisons (U1, U7, B7)
+ * and is never written; a response that echoes the key stops the probe before anything is
+ * written. A redirect is an error, not followed: following one would send the key to wherever
+ * it points (review A's nit), and a FIDS answer is never a redirect.
  */
 async function measure(path, apiKey) {
   const url = new URL(path, BASE_URL);
   const started = performance.now();
   let response;
   try {
-    response = await fetch(url, { headers: { 'X-Api-Key': apiKey, Accept: 'application/json' } });
+    response = await fetch(url, {
+      headers: { 'X-Api-Key': apiKey, Accept: 'application/json' },
+      redirect: 'error',
+    });
   } catch (error) {
     return { measurement: { status: null, error: String(error?.message ?? error) }, body: null };
   }
@@ -434,6 +476,9 @@ const KEPT_BODIES = new Set([
   'u4-KATL-pm',
   'u1-revised-window',
   'u1-scheduled-window',
+  PRODUCTION_CALL,
+  'b7-days-ahead',
+  'u5-180-days',
 ]);
 
 function pause(ms) {
@@ -479,15 +524,13 @@ async function runPlan(options, apiKey) {
       await read('before');
       readBefore = true;
     }
+    if (planned.checkpointBefore !== null) {
+      await read(planned.checkpointBefore);
+    }
+    // The path goes to the terminal only: U1's windows are cut around a real flight's times.
     process.stdout.write(`${planned.id}: GET ${path}\n`);
     const { measurement, body } = await measure(path, apiKey);
-    calls.push({
-      id: planned.id,
-      item: planned.item,
-      purpose: planned.purpose,
-      path,
-      ...measurement,
-    });
+    calls.push({ id: planned.id, item: planned.item, ...measurement });
     if (KEPT_BODIES.has(planned.id)) {
       bodies.set(planned.id, body);
     }
@@ -496,6 +539,7 @@ async function runPlan(options, apiKey) {
     }
     await pause(options.pauseMs);
   }
+  await read('end');
   prompts?.close();
   return { calls, bodies, readings, delayed: delayed ?? null };
 }
@@ -507,7 +551,46 @@ function spent(readings, from, to) {
   return a === null || a === undefined || b === null || b === undefined ? null : Math.abs(b - a);
 }
 
-/** What the run settles, item by item; null where a reading or an answer is missing. */
+/**
+ * B7 (review ruling R12): how many of an answer's codeshare rows carry the keys the board groups
+ * by, a callsign or a registration, and how many operator rows do. Counts only; null when the
+ * call was not made or answered no JSON.
+ */
+export function codeshareKeys(body) {
+  if (body === null || body === undefined) {
+    return null;
+  }
+  const rows = [body.departures, body.arrivals].flatMap((side) =>
+    Array.isArray(side) ? side : [],
+  );
+  const filled = (value) => typeof value === 'string' && value.trim() !== '';
+  const count = (status) => {
+    const kept = rows.filter((row) => row?.codeshareStatus === status);
+    const callSign = kept.filter((row) => filled(row.callSign));
+    const registration = kept.filter((row) => filled(row.aircraft?.reg));
+    const neither = kept.filter((row) => !filled(row.callSign) && !filled(row.aircraft?.reg));
+    return {
+      rows: kept.length,
+      withCallSign: callSign.length,
+      withRegistration: registration.length,
+      withNeither: neither.length,
+    };
+  };
+  const codeshared = count('IsCodeshared');
+  const any = (n) => (codeshared.rows === 0 ? null : n > 0);
+  return {
+    rows: rows.length,
+    operator: count('IsOperator'),
+    codeshared,
+    codesharedCarryCallSign: any(codeshared.withCallSign),
+    codesharedCarryRegistration: any(codeshared.withRegistration),
+  };
+}
+
+/**
+ * What the run settles, item by item; null where a reading or an answer is missing. Booleans and
+ * counts only (review ruling R7): no flight number, time or path reaches the findings file.
+ */
 export function findingsOf({ calls, bodies, readings, delayed }) {
   const byId = new Map(calls.map((measured) => [measured.id, measured]));
   const status = (id) => byId.get(id)?.status ?? null;
@@ -538,7 +621,6 @@ export function findingsOf({ calls, bodies, readings, delayed }) {
         ? { settled: false, reason: 'no departure revised 90 minutes or more in u2-departure' }
         : {
             settled: true,
-            flight: delayed,
             inRevisedWindow: hasDeparture(bodies.get('u1-revised-window'), delayed.number),
             inScheduledWindow: hasDeparture(bodies.get('u1-scheduled-window'), delayed.number),
           },
@@ -565,9 +647,21 @@ export function findingsOf({ calls, bodies, readings, delayed }) {
     },
     U7: {
       exactPageStatus: status('u7-exact-page'),
-      departuresAt1200: twelve,
-      at1200InTo1200: inTo1200,
+      departuresAt1200: twelve.length,
+      at1200InTo1200: inTo1200.length,
       toLocalInclusive: twelve.length === 0 ? null : inTo1200.length > 0,
+    },
+    // R7: what one production call bills, which `ADB_UNITS.fids` (packages/shared) must equal,
+    // and the whole run, first reading to last, against the plan's estimate.
+    bill: {
+      productionCallUnits: spent(readings, 'before-production', 'after-production'),
+      runUnits: spent(readings, 'before', 'end'),
+    },
+    // R12: the same day's production call, the bucket days ahead, and the date 180 days out.
+    codeshares: {
+      sameDay: codeshareKeys(bodies.get(PRODUCTION_CALL)),
+      daysAhead: codeshareKeys(bodies.get('b7-days-ahead')),
+      days180Ahead: codeshareKeys(bodies.get('u5-180-days')),
     },
   };
 }

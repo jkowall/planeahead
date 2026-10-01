@@ -432,6 +432,8 @@ Three layers, each honest about what it is:
   Phase 1 hardening item.
 - Exact quotas (the magic-link caps now; per-user flight caps later) live in `usage_counters`.
 - The provider webhook receivers are the one exception to `PUBLIC_RL` (section 3.1).
+- Per-route brakes on top: `EVENTS_RL` (section 3.2), and `BOARD_RL` and `BOARD_IP_RL` on the
+  board routes (section 3.5).
 
 ### 3.1 Provider webhook receivers (increment 6)
 
@@ -534,6 +536,36 @@ is also the obvious social-engineering path to deleting someone else's account. 
 carries it out with the admin page's deletion action (section 3.3), never with SQL, so the
 trackers, the Apple revocation, the hashes and the tombstones happen as they do in the app.
 
+### 3.5 Airport boards and the route search (increment 18)
+
+`GET /v1/airports/{code}/board` and `GET /v1/airports/{origin}/flights/to/{destination}`
+(`src/routes/airports.ts`, `src/boards/access.ts`) spend a shared provider budget for any
+session, anonymous ones included, so their gates, brakes and caps are the surface:
+
+- **Off until licensed.** Both answer 404 `boards_disabled` unless `BOARDS_ENABLED` is `"true"`
+  (locally and on staging); production says `"false"` until AeroDataBox's written End Use answer
+  and the per-user limits below exist (review ruling R8). The check runs before the session is
+  read.
+- **Who.** A session principal with the user scope (`requireSession`: an API token, once those
+  exist, is refused whatever its scopes, ruling R15). An anonymous account opens only the boards
+  of airports on its live subscriptions, and searches routes within the `route_searches` caps
+  (30 per user per UTC day, and 30 per salted IP for anonymous accounts).
+- **Brakes.** `BOARD_RL` (30 per 60 s per user) and `BOARD_IP_RL` (300 per 60 s per client
+  address reduced to its /64 by `normaliseClientIp`, so rotating addresses within one /64 gains
+  nothing, while a NAT of real installs gets `EVENTS_RL`'s larger allowance; ruling R11). Both
+  are per colo and fail open: abuse brakes, not quotas. A 403 `cap_exceeded` names its `scope`.
+- **Spend.** No request calls AeroDataBox itself: `AirportState` coalesces misses, and
+  `ProviderBudget` holds board calls to 35 percent of the day's units, 60 distinct airports an
+  hour and a floor of per-second tokens left to the trackers; a board window ends at most 72
+  hours ahead (ruling R3). Accepted until the per-user limits exist (`docs/open-decisions.md`
+  section 9, required before production): one signed-in account rotating airports can still
+  drain the day's boards share in about 2 hours and fill the hour's airport cap, leaving every
+  board stale and new airports' boards answering 503 until the hour or the day turns; trackers
+  keep their own units and tokens.
+- **Caches.** Board answers are `no-store`, like every `/v1` answer (section 5), and the
+  airport's coverage and buckets live only in its `AirportState` and the `board:v2` KV copies,
+  all purged at the sooner of 48 hours after a bucket ends and 7 days after its fetch.
+
 ## 4. Encryption and tokens, in one view
 
 Two encryption schemes exist and one is used (section 2): PlaneAhead's AES-KW-wrapped per-user DEK
@@ -561,6 +593,16 @@ tombstones; then an unsubscribe of any subscription that committed while the del
   deletion committed and then failed a `users` foreign key (SQLSTATE 23503 on a `*_user_id` key):
   the global error handler re-reads `users` for the principal and answers the same 401 instead of
   a 500 (`error-handler.test.ts` drives it through the idempotency lease insert).
+- **The phone's HTTP cache** (increment 18, review ruling R1). Every `/v1` answer carries
+  `Cache-Control: no-store` unless its route names its own (`src/middleware/no-store.ts`).
+  `expo/fetch`'s platform caches (OkHttp's disk cache on Android, the shared `URLCache` on iOS)
+  had stored `/v1` GET answers, the sync feed's pages included, and the wipe on sign-out or
+  deletion (`forgetAccount`) clears SQLite and the query cache, not that cache, so the copies
+  outlived both. Residual: entries an earlier build wrote stay on a device until the app's data
+  is cleared, which the verification record asks for on every development device
+  (`docs/increments/18-verification.md`). On iOS such an entry may also hold the request, with
+  the session Cookie header the app sets by hand (unverified); under `no-store` no new entry is
+  written.
 - **What survives, pseudonymously** (GDPR Art. 17(3)(b) and (e)): `audit_log` (two years),
   `notification_deliveries` (90 days), `revenuecat_events` and `subscriptions` (the finance
   ledger), `provider_calls` and `provider_call_daily` (about flights, no user linkage), and

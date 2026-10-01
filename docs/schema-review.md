@@ -685,9 +685,11 @@ the FlightTracker's `listSubscribers` RPC, is a new read-only method with `rpcVe
 KV (all TTLs in seconds): `wx:metar:{ICAO}` 600, `wx:taf:{ICAO}` 1800, `nas:airport:{IATA}` 120,
 `airport:delay:{ICAO}` 300, `board:v2:{ICAO}:{bucketStartLocal}` (increment 18: one 12-hour
 airport-local bucket, both directions, the gzip of its rows as the value and `fetchedAt`,
-`freshUntil` and `staleUntil` as metadata, expiring at the purge 48 h after the bucket ends;
-it replaces Phase 0's `board:{ICAO}:{dep|arr}:{YYYYMMDDHH}` 300, R3 C4),
-`adb:coverage:{ICAO}` 86400, `search:number:{XX1234}:{YYYY-MM-DD}` 900,
+`freshUntil` and `staleUntil` as metadata, expiring at the purge, the sooner of 48 h after the
+bucket ends and 7 days after its fetch; it replaces Phase 0's
+`board:{ICAO}:{dep|arr}:{YYYYMMDDHH}` 300, R3 C4; an airport's coverage is not in KV but in its
+AirportState's `coverage` row, for a day, or an hour while a feed is down or of unknown status),
+`search:number:{XX1234}:{YYYY-MM-DD}` 900,
 `flight:snapshot:{flight_key}` 180, `ref:airport:{code}` 86400 (an unknown code 3600; the
 code as the request named it, ICAO or IATA), `budget:day:{date}:{provider}` 172800,
 `share:page:{sha256(token)[0:32]}` 60, `cfg:flags`, `used_id_tokens:{provider}:{jti or digest}`
