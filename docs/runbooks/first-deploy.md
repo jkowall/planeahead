@@ -2,9 +2,9 @@
 
 Status: increment 12 (2026-09-23); the store steps (step 18) increment 13 (2026-09-30); the push
 transport (the `push` queues in step 2, its secrets in step 6, step 19) increment 14
-(2026-09-30). Everything
-the owner does once, in order, before and during the first staging and production deploys and the
-first store builds, with the exact commands. Nothing here has been run: there
+(2026-09-30); the boards probe and the staging boards (step 20) increment 18 (2026-10-01).
+Everything the owner does once, in order, before and during the first staging and production
+deploys and the first store builds, with the exact commands. Nothing here has been run: there
 is no Cloudflare account, Neon project, provider key or Apple and Google credential in the build
 environment, so every command below is the documented form (wrangler flags checked against
 `wrangler <command> --help` at 4.135.0; Neon and Apple steps against their docs). Tick each box
@@ -513,3 +513,31 @@ commands are in `docs/increments/14-verification.md`.
       Record the setting's state and the answer in `docs/increments/14-verification.md`.
 - [ ] Production, after the first TestFlight install (increment 16): `PUSH_INJECT_ALLOWED_USER_IDS`
       set to your own user id, then the same test push to your iPhone's token.
+
+## 20. Boards: the AeroDataBox probe and the three staging boards
+
+Increment 18. Airport boards and the route search are served from a per-airport cache that only
+`AirportState` fills, inside 35 percent of the day's AeroDataBox budget. Two owner checks remain:
+the provider probe (R3 U1 to U7, about 42 units) on the day the Growth key arrives, and the exit
+test, the KATL, EGLL and KJFK boards from cache on staging. The exact steps, and where each answer
+is recorded, are in `docs/increments/18-verification.md` ("The owner's steps").
+
+- [ ] The day the Growth key arrives (step 0), before boards reach staging users: from the
+      repository root on your machine (never CI),
+      `node scripts/probe-adb-boards.mjs --dry-run --date <today in New York>` to see the 24
+      calls and their units, then with the dashboard's unit counter open,
+      `AERODATABOX_API_KEY=<key> node scripts/probe-adb-boards.mjs --date <the same date> --out docs/increments/18-probe-findings.json`,
+      typing the counter at each prompt once it has moved. Format the file with Prettier, copy
+      the answers into the verification file's "Unverified" section, and commit both.
+- [ ] Act on the answers as the verification file says (U2 at 4 units, U1 by revised time, U5
+      refused); none blocks the staging check below.
+- [ ] Staging runs this branch (step 10) with `AERODATABOX_API_KEY` and `ADB_PLAN=growth` (step 6)
+      and `BOARD_RL` in its bindings (the dry run lists `env.BOARD_RL (30 requests/60s)`).
+- [ ] The three boards: a development build against staging, signed in with a real account (a
+      guest opens only its own flights' airports), opens KATL, EGLL and KJFK from the add sheet's
+      **Airport board** field; each shows an "As of" time, and reopening within 5 minutes shows
+      the same one. `/admin`'s boards section lists the three airports as refreshed in the last
+      hour, with one `ok` board call per bucket and none for the reopenings.
+- [ ] AeroDataBox's written answer on End Use (R3 O2, plan section 10 item 3): in-app boards for
+      any airport and route search, share pages and MCP. Boards stay out of share pages, public
+      tokens and MCP until it arrives, and boards reach no real user before it does.

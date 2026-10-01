@@ -111,6 +111,11 @@ export interface AddFlightRequest {
   readonly designator: string;
   /** Origin-local departure date `YYYY-MM-DD`. */
   readonly date: string;
+  /**
+   * The departure airport (IATA or ICAO), when the add comes from a board or a route search
+   * (increment 18): it picks the leg of a flight number that flies more than one that day.
+   */
+  readonly origin?: string;
 }
 
 export type AddFlightErrors = Partial<Record<keyof AddFlightInput, string>>;
@@ -240,7 +245,8 @@ export function findTracked(db: SqliteLike, request: AddFlightRequest): string |
 }
 
 /**
- * Writes the optimistic row and queues `POST /v1/flights { subscriptionId, number, date }` in one
+ * Writes the optimistic row and queues `POST /v1/flights { subscriptionId, number, date }` (and
+ * `origin`, for an add from a board or a route search: the row's `add`, increment 18) in one
  * immediate transaction (see the header). A flight the store already tracks is not queued again.
  */
 export function addFlight(
@@ -260,6 +266,7 @@ export function addFlight(
     subscriptionId,
     number: request.designator,
     date: request.date,
+    ...(request.origin === undefined ? {} : { origin: request.origin }),
   });
   const item = commitWrite(db, ['flight_subscriptions', 'outbox'], (): OutboxItem => {
     db.run(

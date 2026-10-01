@@ -98,10 +98,14 @@ jest.mock('../src/lib/config', () => ({
   }),
 }));
 
+/** The session the sheet reads (increment 18: the airport field is for signed-in users only). */
+const mockSession: { current: unknown } = { current: null };
+
 jest.mock('../src/lib/auth-client', () => ({
   authClient: {
     getCookie: () => 'better-auth.session_token=session-abc',
     signOut: jest.fn(() => Promise.resolve()),
+    useSession: () => ({ data: mockSession.current, isPending: false }),
   },
 }));
 
@@ -197,6 +201,7 @@ beforeEach(() => {
   jest.spyOn(Date, 'now').mockReturnValue(NOW);
   mockEdge.db = createMemorySqlite();
   mockEdge.network = scriptedFetch();
+  mockSession.current = { user: { id: 'user-1', isAnonymous: false } };
   useFlightNotices.getState().clear();
   useSettings.getState().reset();
 });

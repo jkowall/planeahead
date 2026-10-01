@@ -1,0 +1,210 @@
+/**
+ * scripts/probe-adb-boards.mjs (increment 18, ruling B13): the AeroDataBox boards probe. Its dry
+ * run prints the planned calls and their units with no key and no network call (every child here
+ * runs with `fetch` replaced by a tripwire that exits 97); without a key it refuses before any
+ * call; the plan covers R3 U1 to U7 at about 40 units. One run against a stubbed gateway (never
+ * the real one) checks the findings file: measurements only, never the key.
+ */
+
+import { spawnSync } from 'node:child_process';
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { pathToFileURL } from 'node:url';
+import { afterAll, describe, expect, it } from 'vitest';
+import { estimateUnits, findingsOf, planProbe } from '../../scripts/probe-adb-boards.mjs';
+
+const repoRoot = join(import.meta.dirname, '..', '..');
+const script = join(repoRoot, 'scripts', 'probe-adb-boards.mjs');
+const scratch = mkdtempSync(join(tmpdir(), 'probe-adb-boards-'));
+const tripwire = join(scratch, 'no-network.mjs');
+writeFileSync(
+  tripwire,
+  "globalThis.fetch = () => { process.stderr.write('NETWORK CALLED\\n'); process.exit(97); };\n",
+);
+
+afterAll(() => {
+  rmSync(scratch, { recursive: true, force: true });
+});
+
+/** Runs the script with `preload` imported first and no AeroDataBox key unless `env` sets one. */
+function run(args, { env = {}, preload = tripwire } = {}) {
+  const childEnv = { ...process.env };
+  delete childEnv.AERODATABOX_API_KEY;
+  const result = spawnSync(
+    process.execPath,
+    ['--import', pathToFileURL(preload).href, script, ...args],
+    { env: { ...childEnv, ...env }, encoding: 'utf8', input: '' },
+  );
+  return { status: result.status, stdout: result.stdout, stderr: result.stderr };
+}
+
+describe('the dry run', () => {
+  it('prints every planned call and its units, with no key and no network call', () => {
+    const result = run(['--dry-run', '--date', '2026-10-02']);
+    expect(result.stderr).toBe('');
+    expect(result.status).toBe(0);
+    expect(result.stdout).toMatch(/^AeroDataBox boards probe, dry run: no network call is made\./);
+    for (const expected of [
+      'GET health/services/airports/KATL/feeds',
+      'flights/airports/Icao/KJFK/2026-10-02T06:00/2026-10-02T18:00?direction=Both&withLeg=false',
+      '&withLocation=true',
+      'flights/airports/Icao/EGPU/2026-10-02T02:00/2026-10-02T03:00',
+      'flights/airports/Icao/KJFK/2026-10-02T00:00/2026-10-03T06:00',
+      'flights/airports/Icao/KATL/2026-10-02T00:00/2026-10-03T00:00',
+      'flights/airports/Icao/KJFK/2027-03-31T06:00/2027-03-31T18:00',
+      'flights/airports/Icao/EGLL/2026-10-02T12:00/2026-10-02T23:59?direction=Both&withLeg=true',
+      '(chosen at run time from the u2-departure answer)',
+      'then read the unit counter (after-u6-too-wide)',
+    ]) {
+      expect(result.stdout).toContain(expected);
+    }
+    expect(result.stdout).toContain(
+      'Planned: 24 calls, 42 units expected (38 if 204 and 400 are free, 62 if direction=Both bills both directions).',
+    );
+  });
+
+  it('calls nothing even with a key set', () => {
+    const result = run(['--dry-run'], { env: { AERODATABOX_API_KEY: 'dummy-key-123' } });
+    expect(result.status).toBe(0);
+    expect(result.stderr).toBe('');
+    expect(result.stdout).not.toContain('dummy-key-123');
+  });
+
+  it('refuses to run for real without a key, before any call', () => {
+    const result = run(['--no-prompt']);
+    expect(result.status).toBe(1);
+    expect(result.stderr).toContain('AERODATABOX_API_KEY is not set');
+    expect(result.stderr).not.toContain('NETWORK CALLED');
+  });
+
+  it.each([
+    [['--dry-run', '--date', '2026-13-45'], '--date must be YYYY-MM-DD'],
+    [['--dry-run', '--page-hours', '0'], '--page-hours must be a whole number'],
+    [['--dry-run', '--empty-airport', 'XX'], '--empty-airport must be an ICAO code'],
+  ])('refuses %j', (args, message) => {
+    const result = run(args);
+    expect(result.status).toBe(1);
+    expect(result.stderr).toContain(message);
+  });
+});
+
+describe('the plan', () => {
+  it('covers R3 U1 to U7 at about 40 units, one FIDS call at a time', () => {
+    const plan = planProbe({ date: '2026-10-02' });
+    expect(new Set(plan.map((planned) => planned.item))).toEqual(
+      new Set(['B6', 'U1', 'U2', 'U3', 'U4', 'U5', 'U6', 'U7']),
+    );
+    expect(estimateUnits(plan)).toEqual({
+      calls: 24,
+      expected: 42,
+      ifErrorsAreFree: 38,
+      ifBothBillsTwice: 62,
+    });
+  });
+
+  it('follows a smaller page: no 24-hour windows, and "too wide" is page plus 6 hours', () => {
+    const plan = planProbe({ date: '2026-10-02', pageHours: 12 });
+    expect(plan.some((planned) => planned.id.endsWith('-24h'))).toBe(false);
+    expect(plan.find((planned) => planned.id === 'u6-too-wide')?.path).toContain(
+      '/2026-10-02T00:00/2026-10-02T18:00?',
+    );
+  });
+});
+
+describe('the findings', () => {
+  const row = (number, scheduled, revised) => ({
+    number,
+    movement: {
+      scheduledTime: { local: `2026-10-02 ${scheduled}-04:00` },
+      ...(revised === undefined ? {} : { revisedTime: { local: `2026-10-02 ${revised}-04:00` } }),
+    },
+  });
+
+  it('reads units from the counter readings and settles U1 and U7 from the answers', () => {
+    const late = { number: 'AA 1', scheduled: '2026-10-02T10:00', revised: '2026-10-02T12:00' };
+    const findings = findingsOf({
+      calls: [{ id: 'u6-empty', status: 204 }],
+      bodies: new Map([
+        ['u1-revised-window', { departures: [row('AA 1', '10:00', '12:00')] }],
+        ['u1-scheduled-window', { departures: [] }],
+        ['u4-KATL-24h', { departures: [row('DL 100', '12:00'), row('DL 7', '12:00', '12:40')] }],
+        ['u7-to-1200', { departures: [row('DL 100', '12:00')] }],
+      ]),
+      readings: { before: 1000, 'after-u2-both': 998, 'after-u2-departure': 996 },
+      delayed: late,
+    });
+    expect(findings.U1).toEqual({
+      settled: true,
+      flight: late,
+      inRevisedWindow: true,
+      inScheduledWindow: false,
+    });
+    expect(findings.U2).toEqual({ bothUnits: 2, departureUnits: 2 });
+    expect(findings.U3).toEqual({ withLegUnits: null, withLocationUnits: null });
+    expect(findings.U6.emptyStatus).toBe(204);
+    // DL 7 was revised past 12:00, so it says nothing about the bound.
+    expect(findings.U7).toMatchObject({
+      departuresAt1200: ['DL100'],
+      at1200InTo1200: ['DL100'],
+      toLocalInclusive: true,
+    });
+  });
+});
+
+describe('a run against a stubbed gateway', () => {
+  /** Answers like the gateway would: free coverage, a 204, a 400 and FIDS rows; never the key. */
+  const stub = join(scratch, 'stub-gateway.mjs');
+  writeFileSync(
+    stub,
+    `const json = (status, body, headers = {}) =>
+  new Response(JSON.stringify(body), { status, headers: { 'content-type': 'application/json', ...headers } });
+const leg = (scheduled, revised) => ({
+  scheduledTime: { local: '2026-10-02 ' + scheduled + '-04:00' },
+  ...(revised === undefined ? {} : { revisedTime: { local: '2026-10-02 ' + revised + '-04:00' } }),
+});
+globalThis.fetch = async (url, init) => {
+  const href = String(url);
+  if (new Headers(init?.headers).get('X-Api-Key') !== 'dummy-key-123') return json(401, {});
+  if (href.includes('/health/')) return json(200, { flightSchedulesFeed: { status: 'OK' } });
+  if (href.includes('/EGPU/')) return new Response(null, { status: 204 });
+  if (href.includes('/2026-10-03T06:00')) return json(400, { message: 'range too wide' });
+  return json(
+    200,
+    {
+      departures: [
+        { number: 'DL 100', movement: leg('12:00') },
+        { number: 'AA 1', movement: leg('09:00', '11:00') },
+      ],
+      arrivals: [{ number: 'BA 117', movement: leg('13:00') }],
+    },
+    { 'x-ratelimit-remaining': '9', 'x-request-id': 'r-1' },
+  );
+};
+`,
+  );
+
+  it('writes measurements only, never the key', () => {
+    const out = join(scratch, 'findings.json');
+    const result = run(['--date', '2026-10-02', '--out', out, '--no-prompt', '--pause-ms', '0'], {
+      env: { AERODATABOX_API_KEY: 'dummy-key-123' },
+      preload: stub,
+    });
+    expect(result.stderr).toBe('');
+    expect(result.status).toBe(0);
+    const text = readFileSync(out, 'utf8');
+    expect(text).not.toContain('dummy-key-123');
+    // No body: row counts and the times U1 and U7 compare, never a row as the gateway sent it.
+    expect(text).not.toContain('movement');
+    expect(text).not.toContain('scheduledTime');
+    const findings = JSON.parse(text);
+    expect(findings.calls).toHaveLength(24);
+    expect(findings.counterReadings.before).toBeNull();
+    expect(findings.answers.U6).toMatchObject({ emptyStatus: 204, tooWideStatus: 400 });
+    expect(findings.answers.U1).toMatchObject({ settled: true, inRevisedWindow: true });
+    expect(findings.answers.U4.EGLL.am).toMatchObject({ status: 200, rows: 3, chunksOf1Mb: 1 });
+    expect(findings.answers.U7.toLocalInclusive).toBe(true);
+    const measured = findings.calls.find((entry) => entry.id === 'u2-both');
+    expect(measured.quotaHeaders).toEqual({ 'x-ratelimit-remaining': '9' });
+  });
+});

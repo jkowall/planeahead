@@ -585,3 +585,31 @@ describe('the detail in light and dark', () => {
     expect(compactTree(screen.toJSON())).toMatchSnapshot();
   });
 });
+
+describe('the airport boards (increment 18, ruling B12)', () => {
+  it("opens the origin's departures and the destination's arrivals", async () => {
+    const { db } = harness();
+    await renderDetail(db);
+    expect(screen.getByTestId('detail-origin-board').props.accessibilityLabel).toBe(
+      'Open the departures board at JFK',
+    );
+    await fireEvent.press(screen.getByTestId('detail-origin-board'));
+    expect(mockRouter.push).toHaveBeenLastCalledWith({
+      pathname: '/airport/[code]',
+      params: { code: 'JFK', direction: 'departures' },
+    });
+    await fireEvent.press(screen.getByTestId('detail-destination-board'));
+    expect(mockRouter.push).toHaveBeenLastCalledWith({
+      pathname: '/airport/[code]',
+      params: { code: 'LHR', direction: 'arrivals' },
+    });
+  });
+
+  it('offers no board while an add is still being looked up', async () => {
+    const { db } = harness();
+    const added = addFlight(db, { designator: 'UA901', date: '2026-09-24' });
+    await renderDetail(db, added.kind === 'queued' ? added.subscriptionId : '');
+    expect(screen.getByTestId('detail-pending')).toBeTruthy();
+    expect(screen.queryByTestId('detail-boards')).toBeNull();
+  });
+});
