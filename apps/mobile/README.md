@@ -301,9 +301,10 @@ subscribe without `entityId` loses its row on the next first pull, 410 reset or 
 change (`__tests__/sync-apply.test.ts`, "a row a queued subscribe names").
 
 **Flight writes go through `src/lib/flights.ts`, never a component.** Adding a flight writes the
-optimistic row (placeholder key `pending:<DESIGNATOR>:<DATE>`, client-minted uuidv7 id) and the
-queued `POST /v1/flights` in one `commitWrite`; the outbox's `onSent` and `onRefused` hooks
-reconcile the row inside the transaction that settles the item. The one direct call is the
+optimistic row (placeholder key `pending:<DESIGNATOR>:<DATE>`, ending `:<ORIGIN ICAO>` for an add
+from a board or a route search, client-minted uuidv7 id) and the queued `POST /v1/flights` in one
+`commitWrite`; the outbox's `onSent` and `onRefused` hooks reconcile the row inside the
+transaction that settles the item. The one direct call is the
 detail's refresh, at most once per gesture. Screens read through `src/lib/flight-queries.ts`
 (the increment 9 live query) and style through `useTheme()`, never a colour literal.
 

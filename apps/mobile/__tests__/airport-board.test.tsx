@@ -16,17 +16,20 @@
 import { onlineManager, QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import { act, fireEvent, render, screen, waitFor } from '@testing-library/react-native';
 import type { ReactElement } from 'react';
-import { Alert } from 'react-native';
+import { Alert, View } from 'react-native';
 import AddFlightSheet from '../src/app/(app)/add';
 import AirportBoardScreen from '../src/app/(app)/airport/[code]';
+import { BoardRow } from '../src/components/BoardRow';
 import type { SqliteLike } from '../src/lib/db/sqlite-like';
+import { displayPrefsOf } from '../src/lib/display-prefs';
 import { useFlightNotices } from '../src/lib/flight-notices';
+import * as format from '../src/lib/format';
 import { useSettings } from '../src/lib/settings';
 import { DARK, LIGHT } from '../src/theme/tokens';
 import { compactTree } from './support/compact-tree';
 import { createMemorySqlite, type MemorySqlite } from './support/memory-sqlite';
 import { NOW, json, scriptedFetch } from './support/flight-fixtures';
-import { boardAnswer, departedRow, unaddableRow } from './support/board-fixtures';
+import { boardAnswer, boardRow, departedRow, unaddableRow } from './support/board-fixtures';
 
 const mockRouter = { push: jest.fn(), back: jest.fn(), replace: jest.fn() };
 const mockParams: { code: string; direction?: string } = { code: 'JFK' };
@@ -207,10 +210,13 @@ describe('the board, from the route', () => {
     expect(requestLine(0)).toBe(
       'GET https://api.planeahead.test/v1/airports/KJFK/board?direction=arrivals',
     );
-    // On an arrivals board the counterpart is where the flight comes from, and it has landed.
+    // On an arrivals board the counterpart is where the flight comes from, and its actual time
+    // is the in-block time: it arrived, not landed (R15).
     expect(
       screen.getByTestId('board-row-dep:DL1:2026-09-23T15:00:00Z').props.accessibilityLabel,
-    ).toMatch(/^DL1, from LAX, scheduled 11:00 AM, landed 11:05 AM,/);
+    ).toMatch(/^DL1, from LAX, scheduled 11:00 AM, arrived 11:05 AM,/);
+    expect(screen.getByText('Arrived 11:05 AM')).toBeTruthy();
+    expect(screen.queryByText(/Landed/)).toBeNull();
 
     mockEdge.network.answer(() => json(200, boardAnswer({ rows: [] })));
     await fireEvent.press(screen.getByTestId('board-departures'));
@@ -468,6 +474,146 @@ describe("the route's refusals", () => {
     await openBoard();
     expect(await screen.findByText(text)).toBeTruthy();
     expect(mockEdge.network.requests).toHaveLength(1);
+  });
+});
+
+describe('while boards are off (R8)', () => {
+  it('says boards are not available yet, as news and not as an error', async () => {
+    mockEdge.network.answer(() =>
+      json(404, {
+        error: 'boards_disabled',
+        message: 'airport boards are not available yet',
+        requestId: 'r',
+      }),
+    );
+    await openBoard();
+    const notice = await screen.findByTestId('board-disabled');
+    expect(screen.getByText('Airport boards are not available yet.')).toBeTruthy();
+    expect(notice.props.style).toEqual(
+      expect.arrayContaining([expect.objectContaining({ borderColor: LIGHT.color.accent })]),
+    );
+    expect(screen.queryByTestId('board-error')).toBeNull();
+    expect(screen.queryByTestId('board-rows')).toBeNull();
+    expect(mockEdge.network.requests).toHaveLength(1);
+  });
+});
+
+/** `count` departures a minute apart from 9:00 AM in New York, AA1000 onwards. */
+function hubRows(count: number) {
+  const start = Date.parse('2026-09-23T13:00:00Z');
+  return Array.from({ length: count }, (_, index) => {
+    const designator = `AA${String(1000 + index)}`;
+    const scheduled = new Date(start + index * 60_000).toISOString().replace('.000Z', 'Z');
+    return boardRow({
+      id: `dep:${designator}:${scheduled}`,
+      designator,
+      codeshares: [],
+      scheduled,
+      estimated: scheduled,
+      add: { number: designator, date: '2026-09-23', origin: 'KJFK' },
+    });
+  });
+}
+
+describe('a hub board (R13)', () => {
+  it('renders a 700-row board as a list that mounts only the rows near the screen', async () => {
+    const rows = hubRows(700);
+    mockEdge.network.answer(() => json(200, boardAnswer({ rows })));
+    await openBoard('ATL');
+    await screen.findByTestId('board-rows');
+    // The rows (not their status pills), in the board's order, from the first.
+    const mounted = screen.getAllByTestId(/^board-row-dep:AA\d+:\S+Z$/);
+    expect(mounted.length).toBeGreaterThanOrEqual(10);
+    expect(mounted.length).toBeLessThan(100);
+    expect(mounted.map((row) => row.props.testID as string)).toEqual(
+      rows.slice(0, mounted.length).map((row) => `board-row-${row.id}`),
+    );
+    expect(screen.getByText('AA1000  to LHR')).toBeTruthy();
+    expect(screen.queryByText('AA1699  to LHR')).toBeNull();
+  });
+
+  it('renders no row again when the screen renders for something else', async () => {
+    mockEdge.network.answer(() => json(200, boardAnswer()));
+    await openBoard();
+    await screen.findByTestId('board-rows');
+    // Going offline renders the screen again (the freshness says so); no row's props change, so
+    // the screen's `onAdd` and display preferences must be the same objects as before.
+    const label = jest.spyOn(format, 'statusLabel');
+    await act(() => {
+      onlineManager.setOnline(false);
+    });
+    expect(screen.getByTestId('board-offline-copy')).toBeTruthy();
+    expect(label).not.toHaveBeenCalled();
+    label.mockRestore();
+  });
+
+  it('renders a row again only when its own props change: it is memoised', async () => {
+    // Each render of a row reads its status label; a parent's render with equal props must not.
+    const label = jest.spyOn(format, 'statusLabel');
+    const prefs = displayPrefsOf({ timeFormat: '12h', distanceUnit: 'km', showLocalTimes: true });
+    const row = boardRow();
+    const onAdd = jest.fn();
+    const element = (adding: boolean) => (
+      <View>
+        <BoardRow
+          row={row}
+          direction="departures"
+          tz="America/New_York"
+          prefs={prefs}
+          adding={adding}
+          disabled={false}
+          onAdd={onAdd}
+        />
+      </View>
+    );
+    const { rerender } = await render(element(false));
+    const first = label.mock.calls.length;
+    expect(first).toBeGreaterThan(0);
+    await rerender(element(false));
+    expect(label.mock.calls.length).toBe(first);
+    await rerender(element(true));
+    expect(label.mock.calls.length).toBeGreaterThan(first);
+    label.mockRestore();
+  });
+});
+
+describe('what a row says (R15)', () => {
+  it('draws a row that cannot be added muted, and a cancelled one with no expected time', async () => {
+    const cancelled = boardRow({
+      id: 'dep:AA200:2026-09-23T20:00:00Z',
+      designator: 'AA200',
+      codeshares: [],
+      status: 'cancelled',
+      scheduled: '2026-09-23T20:00:00Z',
+      estimated: '2026-09-23T20:30:00Z',
+      add: { number: 'AA200', date: '2026-09-23', origin: 'KJFK' },
+    });
+    mockEdge.network.answer(() =>
+      json(200, boardAnswer({ rows: [unaddableRow(), cancelled, boardRow()] })),
+    );
+    await openBoard();
+    await screen.findByTestId('board-rows');
+    const colorOf = (text: string) =>
+      (screen.getByText(text).props.style as { color?: string }[]).find(
+        (part) => part.color !== undefined,
+      )?.color;
+    expect([colorOf('12:00 PM'), colorOf('ZZ999  to KBOS')]).toEqual([
+      LIGHT.color.textMuted,
+      LIGHT.color.textMuted,
+    ]);
+    expect([colorOf('6:00 PM'), colorOf('AA100  to LHR')]).toEqual([
+      LIGHT.color.text,
+      LIGHT.color.text,
+    ]);
+    expect(screen.getByTestId(`board-row-${unaddableRow().id}-unaddable`).props.children).toBe(
+      'Cannot be added here. Add it by its flight number.',
+    );
+    expect(screen.queryByTestId(`board-row-${boardRow().id}-unaddable`)).toBeNull();
+    // The cancelled flight kept an estimate of 4:30 PM; it is not shown or said.
+    expect(screen.queryByText('Expected 4:30 PM')).toBeNull();
+    expect(screen.getByTestId(`board-row-${cancelled.id}`).props.accessibilityLabel).toBe(
+      'AA200, to LHR, scheduled 4:00 PM, status Cancelled, Terminal 8, gate 12',
+    );
   });
 });
 

@@ -16,16 +16,20 @@
  * origin, the outbox and the optimistic row as for a typed add). The board itself is server data
  * only: TanStack Query, never the offline store. Offline with nothing loaded, the screen says so
  * instead of showing an empty list.
+ *
+ * The rows are a virtualised list (src/components/BoardList.tsx, R13): a hub's board is hundreds
+ * of rows. While boards are off (404 `boards_disabled`, R8) the screen says they are not available
+ * yet, as news rather than as an error.
  */
 
 import type { BoardDirection, BoardViewRow } from '@planeahead/shared';
 import { onlineManager } from '@tanstack/react-query';
 import { useLocalSearchParams, useRouter } from 'expo-router';
-import { useState } from 'react';
+import { useCallback, useState } from 'react';
 import { ActivityIndicator, RefreshControl, StyleSheet, Text, View } from 'react-native';
 import { BoardFreshness } from '../../../components/BoardFreshness';
-import { BoardRow } from '../../../components/BoardRow';
-import { Body, Button, Notice, Screen, Section, Title } from '../../../components/ui';
+import { BoardList } from '../../../components/BoardList';
+import { Body, Button, Notice, Title } from '../../../components/ui';
 import {
   BoardLoadError,
   boardFailureMessage,
@@ -96,26 +100,23 @@ export default function AirportBoardScreen() {
         ? 'The board could not be loaded right now. Pull down to try again later.'
         : boardFailureMessage(failure, shownCode);
   const needsAccount = failure?.failure === 'requires_account';
+  // Boards are off until they launch (R8): said as news, not as an error.
+  const disabled = failure?.failure === 'boards_disabled';
   // Offline with nothing loaded, the offline state says it all.
   const shownFailure = online || data !== undefined ? failureText : null;
   const nowMs = Date.now();
   const clockIn = (tz: string) => (iso: string) =>
     formatClock(iso, { timeFormat: prefs.timeFormat, timeZone: prefs.zoneFor(tz) });
+  const { confirm } = rowAdd;
+  const onAdd = useCallback(
+    (picked: BoardViewRow) => {
+      confirm(picked, addSummary(picked, direction, shownCode));
+    },
+    [confirm, direction, shownCode],
+  );
 
-  return (
-    <Screen
-      testID="airport-board"
-      refreshControl={
-        <RefreshControl
-          refreshing={pull.refreshing}
-          onRefresh={() => {
-            pull.onRefresh();
-          }}
-          tintColor={theme.color.accent}
-          colors={[theme.color.accent]}
-        />
-      }
-    >
+  const header = (
+    <>
       <Button
         testID="board-back"
         title="Back"
@@ -158,7 +159,10 @@ export default function AirportBoardScreen() {
         </Notice>
       )}
       {shownFailure === null ? null : (
-        <Notice tone="danger" testID="board-error">
+        <Notice
+          tone={disabled ? 'info' : 'danger'}
+          testID={disabled ? 'board-disabled' : 'board-error'}
+        >
           {shownFailure}
         </Notice>
       )}
@@ -172,58 +176,71 @@ export default function AirportBoardScreen() {
           }}
         />
       ) : null}
-
-      {data !== undefined ? (
-        <>
-          <BoardFreshness
-            fetchedAt={data.fetchedAt}
-            stale={data.stale}
-            partial={data.partial}
-            coverage={data.coverage}
-            tz={data.airport.tz}
-            prefs={prefs}
-            offline={!online}
-            nowMs={nowMs}
-            testID="board"
-          />
-          <Section
-            title={windowTitle(direction, data.from, data.to, clockIn(data.airport.tz))}
-            testID="board-rows"
-          >
-            {data.rows.length === 0 ? (
-              <Body muted testID="board-empty">
-                {`No ${direction} in this time range.`}
-              </Body>
-            ) : (
-              data.rows.map((row) => (
-                <BoardRow
-                  key={row.id}
-                  row={row}
-                  direction={direction}
-                  tz={data.airport.tz}
-                  prefs={prefs}
-                  adding={rowAdd.addingId === row.id}
-                  disabled={rowAdd.addingId !== null}
-                  onAdd={(picked) => {
-                    rowAdd.confirm(picked, addSummary(picked, direction, shownCode));
-                  }}
-                />
-              ))
-            )}
-          </Section>
-        </>
-      ) : !online ? (
-        <Notice tone="warning" testID="board-offline">
-          You are offline. The board loads when the phone is back online.
-        </Notice>
-      ) : board.isFetching ? (
-        <ActivityIndicator
-          testID="board-loading"
-          accessibilityLabel="Loading the board"
-          color={theme.color.accent}
+      {data === undefined ? null : (
+        <BoardFreshness
+          fetchedAt={data.fetchedAt}
+          stale={data.stale}
+          partial={data.partial}
+          coverage={data.coverage}
+          tz={data.airport.tz}
+          prefs={prefs}
+          offline={!online}
+          nowMs={nowMs}
+          invitePull
+          testID="board"
         />
-      ) : null}
-    </Screen>
+      )}
+    </>
+  );
+
+  return (
+    <BoardList
+      testID="airport-board"
+      header={header}
+      section={
+        data === undefined
+          ? null
+          : {
+              title: windowTitle(direction, data.from, data.to, clockIn(data.airport.tz)),
+              testID: 'board-rows',
+              rows: data.rows,
+              empty: (
+                <Body muted testID="board-empty">
+                  {`No ${direction} in this time range.`}
+                </Body>
+              ),
+            }
+      }
+      placeholder={
+        !online ? (
+          <Notice tone="warning" testID="board-offline">
+            You are offline. The board loads when the phone is back online.
+          </Notice>
+        ) : board.isFetching ? (
+          <ActivityIndicator
+            testID="board-loading"
+            accessibilityLabel="Loading the board"
+            color={theme.color.accent}
+          />
+        ) : null
+      }
+      direction={direction}
+      // Rows exist only with an answer, which names its airport's zone.
+      tz={data?.airport.tz ?? 'UTC'}
+      prefs={prefs}
+      addingId={rowAdd.addingId}
+      onAdd={onAdd}
+      refreshControl={
+        <RefreshControl
+          refreshing={pull.refreshing}
+          onRefresh={() => {
+            pull.onRefresh();
+          }}
+          tintColor={theme.color.accent}
+          colors={[theme.color.accent]}
+        />
+      }
+    />
   );
 }
 

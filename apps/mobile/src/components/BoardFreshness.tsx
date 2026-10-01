@@ -5,6 +5,9 @@
  * (part of the range could not be read), and the schedules-only badge (the provider has no live
  * data for the airport: the times are the published schedule). Offline with an answer already on
  * screen, it says the answer is the last one loaded.
+ *
+ * Only the board's notices ask for a pull: each search the route-search screen asks takes one of
+ * the day's slots, so its notices never invite one (increment 18, R10).
  */
 
 import type { BoardCoverage } from '@planeahead/shared';
@@ -24,12 +27,15 @@ export interface BoardFreshnessProps {
   readonly prefs: DisplayPrefs;
   readonly offline: boolean;
   readonly nowMs: number;
+  /** Whether the stale and partial notices may ask for a pull (the board, not the route search). */
+  readonly invitePull: boolean;
   /** `board` or `route-search`: the test id prefix. */
   readonly testID: string;
 }
 
 export function BoardFreshness(props: BoardFreshnessProps) {
-  const { fetchedAt, stale, partial, coverage, tz, prefs, offline, nowMs, testID } = props;
+  const { fetchedAt, stale, partial, coverage, tz, prefs, offline, nowMs, invitePull, testID } =
+    props;
   const theme = useTheme();
   const clock =
     fetchedAt === null
@@ -58,12 +64,16 @@ export function BoardFreshness(props: BoardFreshnessProps) {
         </Notice>
       ) : stale ? (
         <Notice tone="warning" testID={`${testID}-stale`}>
-          These times may be out of date. Pull down in a minute to check for newer ones.
+          {invitePull
+            ? 'These times may be out of date. Pull down in a minute to check for newer ones.'
+            : 'These times may be out of date.'}
         </Notice>
       ) : null}
       {partial ? (
         <Notice tone="info" testID={`${testID}-partial`}>
-          Part of this time range could not be loaded. Pull down to try again.
+          {invitePull
+            ? 'Part of this time range could not be loaded. Pull down to try again.'
+            : 'Part of this time range could not be loaded, so some flights may be missing.'}
         </Notice>
       ) : null}
     </View>

@@ -8,7 +8,9 @@
  * Neither query retries on its own (`retry: false`): every refusal the routes give is final for
  * the moment (403, 404, 422, 429), a 503 asks for 30 s, and each route search takes one of the
  * day's `route_searches` slots, so only a pull or a new search asks again. The route search is
- * also never refetched on focus or reconnect, for the same reason.
+ * also never refetched on focus or reconnect, for the same reason, and a pull or the same search
+ * asks again only for a failed or aged answer (`routeSearchAsksAgain`, R10). A 404
+ * `boards_disabled` (boards are off until they launch, R8) is said as such, not as an error.
  *
  * Adding a row's flight is the app's one add path: `addFlight` (the optimistic row and the queued
  * `POST /v1/flights` with the row's `add`: designator, origin-local date, origin) and the same
@@ -28,7 +30,7 @@ import {
   type RouteSearchResponse,
 } from '@planeahead/shared';
 import { onlineManager, useQuery } from '@tanstack/react-query';
-import { useEffect, useRef, useState, useSyncExternalStore } from 'react';
+import { useCallback, useEffect, useRef, useState, useSyncExternalStore } from 'react';
 import { Alert } from 'react-native';
 import * as z from 'zod';
 import type { ApiClient } from './api-client';
@@ -37,13 +39,17 @@ import { addFlight, drainFor, normaliseDateInput, validateAddFlight } from './fl
 import { formatIsoDate } from './format';
 import { services } from './services';
 
-/** Why a board or a route search could not be shown, from the route's status and code. */
+/**
+ * Why a board or a route search could not be shown, from the route's status and code.
+ * `boards_disabled` is not a fault: boards are off until they launch (404, increment 18 R8).
+ */
 export type BoardFailure =
   | 'offline'
   | 'signed_out'
   | 'requires_account'
   | 'cap_exceeded'
   | 'rate_limited'
+  | 'boards_disabled'
   | 'airport_not_found'
   | 'not_covered'
   | 'out_of_range'
@@ -51,6 +57,9 @@ export type BoardFailure =
   | 'unavailable'
   | 'timeout'
   | 'other';
+
+/** Whose allowance a 403 `cap_exceeded` names: the account's, or its network's (R11). */
+export type CapScope = 'user' | 'ip';
 
 export class BoardLoadError extends Error {
   override readonly name = 'BoardLoadError';
@@ -60,6 +69,8 @@ export class BoardLoadError extends Error {
   /** The cap's limit (403 `cap_exceeded`) or the lookahead (422), when the answer gave one. */
   readonly limit: number | undefined;
   readonly maxDaysAhead: number | undefined;
+  /** The cap's scope (403 `cap_exceeded`), when the answer gave one this build knows. */
+  readonly scope: CapScope | undefined;
   /** `Retry-After` in seconds (429, 503). */
   readonly retryAfterSeconds: number | undefined;
 
@@ -69,6 +80,7 @@ export class BoardLoadError extends Error {
     details: {
       readonly limit?: number | undefined;
       readonly maxDaysAhead?: number | undefined;
+      readonly scope?: CapScope | undefined;
       readonly retryAfterSeconds?: number | undefined;
     } = {},
   ) {
@@ -77,6 +89,7 @@ export class BoardLoadError extends Error {
     this.status = status;
     this.limit = details.limit;
     this.maxDaysAhead = details.maxDaysAhead;
+    this.scope = details.scope;
     this.retryAfterSeconds = details.retryAfterSeconds;
   }
 }
@@ -85,6 +98,8 @@ const RefusalSchema = z.looseObject({
   error: z.string(),
   limit: z.number().optional(),
   maxDaysAhead: z.number().optional(),
+  // A scope this build does not know reads as none: the account's own message.
+  scope: z.enum(['user', 'ip']).optional().catch(undefined),
 });
 
 function retryAfter(header: string | null): number | undefined {
@@ -102,6 +117,7 @@ export function failureOf(status: number, body: unknown, retryAfterHeader: strin
   const details = {
     limit: envelope.data?.limit,
     maxDaysAhead: envelope.data?.maxDaysAhead,
+    scope: envelope.data?.scope,
     retryAfterSeconds: retryAfter(retryAfterHeader),
   };
   const failure = ((): BoardFailure => {
@@ -117,7 +133,11 @@ export function failureOf(status: number, body: unknown, retryAfterHeader: strin
             ? 'cap_exceeded'
             : 'other';
       case 404:
-        return code === 'board_not_covered' ? 'not_covered' : 'airport_not_found';
+        return code === 'board_not_covered'
+          ? 'not_covered'
+          : code === 'boards_disabled'
+            ? 'boards_disabled'
+            : 'airport_not_found';
       case 422:
         return code === 'date_out_of_range' ? 'out_of_range' : 'invalid';
       case 429:
@@ -213,6 +233,8 @@ export function boardFailureMessage(error: BoardLoadError, airport: string): str
       return 'Without an account, boards open only for the airports of your flights. Sign in to open any airport’s board.';
     case 'rate_limited':
       return `Too many boards opened in a short time. ${waitPhrase(error.retryAfterSeconds)} and pull down to try again.`;
+    case 'boards_disabled':
+      return 'Airport boards are not available yet.';
     case 'airport_not_found':
       return `No airport has the code ${airport}.`;
     case 'not_covered':
@@ -237,10 +259,17 @@ export function routeSearchFailureMessage(error: BoardLoadError, search: RouteSe
       return 'Could not reach PlaneAhead. Check your connection and search again.';
     case 'signed_out':
       return 'Sign in again to search by route.';
-    case 'cap_exceeded':
-      return `Route searches are limited to ${String(error.limit ?? FREE_TIER_LIMITS.routeSearchesPerDay)} a day, and today’s are used up. Search again tomorrow, or add the flight by its number.`;
+    case 'cap_exceeded': {
+      const limit = String(error.limit ?? FREE_TIER_LIMITS.routeSearchesPerDay);
+      // The network's allowance, which an anonymous account shares and signing in lifts (R11).
+      return error.scope === 'ip'
+        ? `Without an account, route searches are limited to ${limit} a day per network, and this network’s are used up today. Sign in to keep searching, or add the flight by its number.`
+        : `Route searches are limited to ${limit} a day, and today’s are used up. Search again tomorrow, or add the flight by its number.`;
+    }
     case 'rate_limited':
       return `Too many searches in a short time. ${waitPhrase(error.retryAfterSeconds)} and search again.`;
+    case 'boards_disabled':
+      return 'Finding a flight by route is not available yet. Add the flight by its number instead.';
     case 'airport_not_found':
       return `No airport was found for ${search.origin} or ${search.destination}. Check the codes.`;
     case 'not_covered':
@@ -271,6 +300,29 @@ export function useIsOnline(): boolean {
 
 /** A route search answer stays usable this long before a pull asks again. */
 export const ROUTE_SEARCH_STALE_MS = 5 * 60_000;
+
+/**
+ * Whether a pull, or the same search tapped again, asks the route again (increment 18, R10): only
+ * for an answer that failed or is older than `ROUTE_SEARCH_STALE_MS`, since each search the route
+ * answers takes one of the day's slots; never while a search runs or before any answer (offline,
+ * it waits). Read when the pull or the tap happens, from the clock and `dataUpdatedAt`.
+ */
+export function routeSearchAsksAgain(
+  query: {
+    readonly status: 'pending' | 'error' | 'success';
+    readonly isFetching: boolean;
+    readonly dataUpdatedAt: number;
+  },
+  nowMs: number,
+): boolean {
+  if (query.isFetching) {
+    return false;
+  }
+  if (query.status === 'error') {
+    return true;
+  }
+  return query.status === 'success' && nowMs - query.dataUpdatedAt >= ROUTE_SEARCH_STALE_MS;
+}
 
 export const boardQueryKey = (code: string, direction: BoardDirection) =>
   ['airport-board', code, direction] as const;
@@ -384,7 +436,7 @@ export function useRowAdd(): RowAdd {
     };
   }, []);
 
-  const run = async (row: BoardViewRow) => {
+  const run = useCallback(async (row: BoardViewRow) => {
     running.current = true;
     setOutcome(null);
     setAddingId(row.id);
@@ -394,31 +446,31 @@ export function useRowAdd(): RowAdd {
       setAddingId(null);
       setOutcome(result);
     }
-  };
+  }, []);
 
-  const confirm = (row: BoardViewRow, summary: string) => {
-    if (row.add === undefined || running.current) {
-      return;
-    }
-    Alert.alert(`Add ${row.designator}?`, summary, [
-      { text: 'Cancel', style: 'cancel' },
-      {
-        text: 'Add',
-        onPress: () => {
-          void run(row);
+  // Stable across renders, so a screen's `onAdd` can be too and the memoised rows skip (R13).
+  const confirm = useCallback(
+    (row: BoardViewRow, summary: string) => {
+      if (row.add === undefined || running.current) {
+        return;
+      }
+      Alert.alert(`Add ${row.designator}?`, summary, [
+        { text: 'Cancel', style: 'cancel' },
+        {
+          text: 'Add',
+          onPress: () => {
+            void run(row);
+          },
         },
-      },
-    ]);
-  };
-
-  return {
-    addingId,
-    outcome,
-    dismiss: () => {
-      setOutcome(null);
+      ]);
     },
-    confirm,
-  };
+    [run],
+  );
+  const dismiss = useCallback(() => {
+    setOutcome(null);
+  }, []);
+
+  return { addingId, outcome, dismiss, confirm };
 }
 
 const AIRPORT_CODE_HELP = 'Use a 3-letter IATA or 4-letter ICAO airport code, e.g. JFK or KJFK.';

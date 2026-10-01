@@ -5,24 +5,30 @@
  * it returns there), and open to anonymous accounts: every install starts anonymous and finding a
  * flight by route is the onboarding path. Each search takes one of the day's `route_searches`
  * (30 per account, and per network for an anonymous one); the 403 `cap_exceeded` answer is said
- * plainly with the limit from the payload, as is a 429.
+ * plainly with the limit from the payload, as is a 429. When the network's allowance ran out
+ * (`scope: 'ip'`, R11), the anonymous user is told to sign in, with the way to.
  *
  * The results are server data only (TanStack Query, never the offline store), with the same "as
- * of", stale, partial and schedules-only states as the board. Tapping a result asks to confirm,
- * then adds the flight through the app's one add path (src/lib/boards.ts `addBoardRow`). A search
- * made offline waits for the network and says so instead of showing an empty list.
+ * of", stale, partial and schedules-only states as the board, in the same virtualised list (R13).
+ * Tapping a result asks to confirm, then adds the flight through the app's one add path
+ * (src/lib/boards.ts `addBoardRow`). A search made offline waits for the network and says so
+ * instead of showing an empty list. A pull, or the same search again, asks the route only for a
+ * failed or aged answer, and nothing on the screen invites a pull (R10): every search the route
+ * answers costs a slot. While boards are off (404 `boards_disabled`, R8) the screen says route
+ * search is not available yet, as news rather than as an error.
  */
 
-import type { BoardViewRow } from '@planeahead/shared';
+import type { BoardViewRow, RouteSearchResponse } from '@planeahead/shared';
 import { onlineManager } from '@tanstack/react-query';
 import { useRouter } from 'expo-router';
-import { useState } from 'react';
+import { useCallback, useState } from 'react';
 import { ActivityIndicator, RefreshControl, StyleSheet, View } from 'react-native';
 import { BoardFreshness } from '../../components/BoardFreshness';
-import { BoardRow } from '../../components/BoardRow';
-import { Body, Button, Notice, Screen, Section, TextField, Title } from '../../components/ui';
+import { BoardList } from '../../components/BoardList';
+import { Body, Button, Notice, TextField, Title } from '../../components/ui';
 import {
   BoardLoadError,
+  routeSearchAsksAgain,
   routeSearchFailureMessage,
   useIsOnline,
   useRouteSearch,
@@ -40,6 +46,12 @@ function codeOf(airport: { readonly iata: string | null; readonly icao: string }
   return airport.iata ?? airport.icao;
 }
 
+/** The confirmation's second line: `Wed 23 Sep, JFK to LHR`. */
+function addSummary(row: BoardViewRow, answer: RouteSearchResponse): string {
+  const date = row.add === undefined ? answer.date : row.add.date;
+  return `${formatIsoDate(date)}, ${codeOf(answer.origin)} to ${codeOf(answer.destination)}`;
+}
+
 export default function RouteSearchScreen() {
   const router = useRouter();
   const theme = useTheme();
@@ -54,7 +66,8 @@ export default function RouteSearchScreen() {
   const results = useRouteSearch(search);
   const rowAdd = useRowAdd();
   const pull = useRefreshGesture(async () => {
-    if (search !== null && onlineManager.isOnline()) {
+    // A fresh answer is kept: a pull asks again only when the answer failed or has aged (R10).
+    if (search !== null && onlineManager.isOnline() && routeSearchAsksAgain(results, Date.now())) {
       await results.refetch();
     }
   });
@@ -83,7 +96,7 @@ export default function RouteSearchScreen() {
       search.date === next.date;
     if (!same) {
       setSearch(next);
-    } else if (results.error !== null || results.isStale) {
+    } else if (routeSearchAsksAgain(results, Date.now())) {
       // The same search again: asked only when the last answer failed or has gone stale, since
       // each search the route answers takes one of the day's slots.
       void results.refetch();
@@ -99,30 +112,23 @@ export default function RouteSearchScreen() {
         ? 'The search could not be answered right now. Try again later.'
         : routeSearchFailureMessage(failure, search);
   const shownFailure = online || data !== undefined ? failureText : null;
+  // Route search is off until boards launch (R8): said as news, not as an error.
+  const disabled = failure?.failure === 'boards_disabled';
+  // The network's allowance ran out, which signing in lifts (R11).
+  const needsAccount = failure?.failure === 'cap_exceeded' && failure.scope === 'ip';
   const nowMs = Date.now();
-  const routeText =
-    data === undefined
-      ? ''
-      : `${codeOf(data.origin)} to ${codeOf(data.destination)} on ${formatIsoDate(data.date)}`;
-  const summary = (row: BoardViewRow) =>
-    data === undefined
-      ? ''
-      : `${row.add === undefined ? formatIsoDate(data.date) : formatIsoDate(row.add.date)}, ${codeOf(data.origin)} to ${codeOf(data.destination)}`;
-
-  return (
-    <Screen
-      testID="route-search"
-      refreshControl={
-        <RefreshControl
-          refreshing={pull.refreshing}
-          onRefresh={() => {
-            pull.onRefresh();
-          }}
-          tintColor={theme.color.accent}
-          colors={[theme.color.accent]}
-        />
+  const { confirm } = rowAdd;
+  const onAdd = useCallback(
+    (picked: BoardViewRow) => {
+      if (data !== undefined) {
+        confirm(picked, addSummary(picked, data));
       }
-    >
+    },
+    [confirm, data],
+  );
+
+  const header = (
+    <>
       <Title>Find a flight by route</Title>
       <Body muted>The airports it flies between and the date it departs, in local time.</Body>
       <View style={[styles.pair, { gap: theme.space.sm }]}>
@@ -218,59 +224,88 @@ export default function RouteSearchScreen() {
         </Notice>
       )}
       {shownFailure === null ? null : (
-        <Notice tone="danger" testID="route-search-error">
+        <Notice
+          tone={disabled ? 'info' : 'danger'}
+          testID={disabled ? 'route-search-disabled' : 'route-search-error'}
+        >
           {shownFailure}
         </Notice>
       )}
-
-      {search === null ? null : data !== undefined ? (
-        <>
-          <BoardFreshness
-            fetchedAt={data.fetchedAt}
-            stale={data.stale}
-            partial={data.partial}
-            coverage={data.coverage}
-            tz={data.origin.tz}
-            prefs={prefs}
-            offline={!online}
-            nowMs={nowMs}
-            testID="route-search"
-          />
-          <Section title={routeText} testID="route-search-results">
-            {data.flights.length === 0 ? (
-              <Body muted testID="route-search-empty">
-                {`No flights from ${codeOf(data.origin)} to ${codeOf(data.destination)} that day.`}
-              </Body>
-            ) : (
-              data.flights.map((row) => (
-                <BoardRow
-                  key={row.id}
-                  row={row}
-                  direction="departures"
-                  tz={data.origin.tz}
-                  prefs={prefs}
-                  adding={rowAdd.addingId === row.id}
-                  disabled={rowAdd.addingId !== null}
-                  onAdd={(picked) => {
-                    rowAdd.confirm(picked, summary(picked));
-                  }}
-                />
-              ))
-            )}
-          </Section>
-        </>
-      ) : !online ? (
-        <Notice tone="warning" testID="route-search-offline">
-          You are offline. The search runs when the phone is back online.
-        </Notice>
-      ) : results.isFetching ? (
-        <ActivityIndicator
-          testID="route-search-loading"
-          accessibilityLabel="Searching"
-          color={theme.color.accent}
+      {needsAccount ? (
+        <Button
+          testID="route-search-sign-in"
+          title="Sign in or create an account"
+          variant="secondary"
+          onPress={() => {
+            router.push('/sign-in');
+          }}
         />
       ) : null}
-    </Screen>
+      {search === null || data === undefined ? null : (
+        <BoardFreshness
+          fetchedAt={data.fetchedAt}
+          stale={data.stale}
+          partial={data.partial}
+          coverage={data.coverage}
+          tz={data.origin.tz}
+          prefs={prefs}
+          offline={!online}
+          nowMs={nowMs}
+          invitePull={false}
+          testID="route-search"
+        />
+      )}
+    </>
+  );
+
+  return (
+    <BoardList
+      testID="route-search"
+      header={header}
+      section={
+        search === null || data === undefined
+          ? null
+          : {
+              title: `${codeOf(data.origin)} to ${codeOf(data.destination)} on ${formatIsoDate(data.date)}`,
+              testID: 'route-search-results',
+              rows: data.flights,
+              empty: (
+                <Body muted testID="route-search-empty">
+                  {`No flights from ${codeOf(data.origin)} to ${codeOf(data.destination)} that day.`}
+                </Body>
+              ),
+            }
+      }
+      placeholder={
+        search === null ? null : !online ? (
+          <Notice tone="warning" testID="route-search-offline">
+            You are offline. The search runs when the phone is back online.
+          </Notice>
+        ) : results.isFetching ? (
+          <ActivityIndicator
+            testID="route-search-loading"
+            accessibilityLabel="Searching"
+            color={theme.color.accent}
+          />
+        ) : null
+      }
+      direction="departures"
+      // Rows exist only with an answer, which names its origin's zone.
+      tz={data?.origin.tz ?? 'UTC'}
+      prefs={prefs}
+      addingId={rowAdd.addingId}
+      onAdd={onAdd}
+      refreshControl={
+        <RefreshControl
+          refreshing={pull.refreshing}
+          onRefresh={() => {
+            pull.onRefresh();
+          }}
+          tintColor={theme.color.accent}
+          colors={[theme.color.accent]}
+        />
+      }
+    />
   );
 }
 

@@ -4,10 +4,16 @@
  * (labelled cautiously: the provider's revised time may be a gate or a runway time, R3 F8 and
  * D13), the designator and the other designators it is sold as, the other airport, the status, and
  * the terminal and gate. As FlightCard's rows, each row is one button whose label carries all of
- * it; a row without an origin-local date (no `add`) cannot be added and is disabled.
+ * it; a row without an origin-local date (no `add`) cannot be added: it is disabled, drawn muted
+ * and says so (increment 18, R15). An arrival's actual time is its in-block time ("Arrived"), and
+ * a cancelled flight shows no expected time, whatever estimate the provider kept.
+ *
+ * Memoised (R13): a hub's board is hundreds of rows in a FlatList, and a row renders again only
+ * when its own props change (the screens keep `onAdd` and the display preferences stable).
  */
 
 import type { BoardDirection, BoardViewRow } from '@planeahead/shared';
+import { memo } from 'react';
 import { Pressable, StyleSheet, Text, View } from 'react-native';
 import type { DisplayPrefs } from '../lib/display-prefs';
 import { formatClock, statusLabel } from '../lib/format';
@@ -18,7 +24,7 @@ import { StatusPill } from './StatusPill';
 export interface BoardRowText {
   /** `14:05`: the home leg's scheduled time. */
   readonly scheduled: string;
-  /** `Expected 14:20`, `Departed 14:22`, `Landed 06:58`, or null when there is nothing else. */
+  /** `Expected 14:20`, `Departed 14:22`, `Arrived 06:58`, or null when there is nothing else. */
   readonly later: string | null;
   /** The best time is after the scheduled one. */
   readonly late: boolean;
@@ -50,9 +56,12 @@ export function boardRowText(
   const clock = (iso: string) =>
     formatClock(iso, { timeFormat: prefs.timeFormat, timeZone: prefs.zoneFor(tz) });
   const scheduledMinute = minuteOf(row.scheduled);
-  const actualWord = direction === 'departures' ? 'Departed' : 'Landed';
+  // An arrival's actual time is its in-block time: it arrived, which is after it landed (R15).
+  const actualWord = direction === 'departures' ? 'Departed' : 'Arrived';
   const estimatedDiffers =
-    row.estimated !== undefined && minuteOf(row.estimated) !== scheduledMinute;
+    row.status !== 'cancelled' &&
+    row.estimated !== undefined &&
+    minuteOf(row.estimated) !== scheduledMinute;
   const best = row.actual ?? (estimatedDiffers ? row.estimated : undefined);
   const laterWord = row.actual !== undefined ? actualWord : 'Expected';
   const later = best === undefined ? null : `${laterWord} ${clock(best)}`;
@@ -95,16 +104,27 @@ export interface BoardRowProps {
   readonly onAdd: (row: BoardViewRow) => void;
 }
 
-export function BoardRow({ row, direction, tz, prefs, adding, disabled, onAdd }: BoardRowProps) {
+export const BoardRow = memo(function BoardRow({
+  row,
+  direction,
+  tz,
+  prefs,
+  adding,
+  disabled,
+  onAdd,
+}: BoardRowProps) {
   const theme = useTheme();
   const text = boardRowText(row, direction, tz, prefs);
-  const inert = row.add === undefined || disabled || adding;
+  const addable = row.add !== undefined;
+  const inert = !addable || disabled || adding;
+  // A row that cannot be added does not look like one that can (R15).
+  const strong = addable ? theme.color.text : theme.color.textMuted;
   return (
     <Pressable
       testID={`board-row-${row.id}`}
       accessibilityRole="button"
       accessibilityLabel={text.label}
-      {...(row.add === undefined ? {} : { accessibilityHint: 'Adds this flight to your list' })}
+      {...(addable ? { accessibilityHint: 'Adds this flight to your list' } : {})}
       accessibilityState={{ disabled: inert, ...(adding ? { busy: true } : {}) }}
       disabled={inert}
       onPress={() => {
@@ -121,10 +141,10 @@ export function BoardRow({ row, direction, tz, prefs, adding, disabled, onAdd }:
       ]}
     >
       <View style={[styles.line, { gap: theme.space.md }]}>
-        <Text style={[styles.time, { color: theme.color.text, fontSize: theme.font.heading }]}>
+        <Text style={[styles.time, { color: strong, fontSize: theme.font.heading }]}>
           {text.scheduled}
         </Text>
-        <Text style={[styles.strong, { color: theme.color.text, fontSize: theme.font.body }]}>
+        <Text style={[styles.strong, { color: strong, fontSize: theme.font.body }]}>
           {`${row.designator}  ${text.counterpart}`}
         </Text>
         <StatusPill status={row.status} testID={`board-row-${row.id}-status`} />
@@ -145,9 +165,17 @@ export function BoardRow({ row, direction, tz, prefs, adding, disabled, onAdd }:
           {text.detail}
         </Text>
       )}
+      {addable ? null : (
+        <Text
+          testID={`board-row-${row.id}-unaddable`}
+          style={{ color: theme.color.textMuted, fontSize: theme.font.small + 1 }}
+        >
+          Cannot be added here. Add it by its flight number.
+        </Text>
+      )}
     </Pressable>
   );
-}
+});
 
 const styles = StyleSheet.create({
   row: { borderBottomWidth: StyleSheet.hairlineWidth },
