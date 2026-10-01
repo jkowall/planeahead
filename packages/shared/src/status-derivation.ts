@@ -115,6 +115,16 @@ export function adbFlags(status: AdbStatus): { cancelled: boolean; diverted: boo
   return { cancelled: status === 'Canceled', diverted: status === 'Diverted' };
 }
 
+/**
+ * Whether AeroDataBox marks its own status as uncertain: `CanceledUncertain`, and `Unknown`
+ * (which is also what a status this build does not know parses as). The adapter sets
+ * `FlightStatus.statusUncertain` from it, and the notification policy reads such an answer as
+ * inconclusive: it neither confirms nor clears a suspicion (increment 15, review ruling Q11).
+ */
+export function adbStatusUncertain(status: AdbStatus): boolean {
+  return status === 'CanceledUncertain' || status === 'Unknown';
+}
+
 /** Which end of the flight an AeroDataBox movement contract describes. */
 export type AdbMovement = 'departure' | 'arrival';
 /** `gate` is `revisedTime` (out or in); `runway` is `runwayTime` (off or on). */

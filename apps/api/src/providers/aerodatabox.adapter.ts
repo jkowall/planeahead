@@ -49,6 +49,7 @@ import {
   ICAO_CARRIER_RE,
   REGIONAL_OPERATOR_SEED,
   adbFlags,
+  adbStatusUncertain,
   deriveStatus,
   disambiguateRevisedTime,
   flightNumberToken,
@@ -424,6 +425,12 @@ export function mapAdbFlight(
   };
   if (localDate !== undefined) {
     result.scheduledDepartureDateLocal = localDate;
+  }
+  if (adbStatusUncertain(status)) {
+    // `CanceledUncertain` and `Unknown` carry no flag of their own: the derived status stays
+    // operating, and the marker makes the answer inconclusive to the notification policy
+    // (review ruling Q11), so it never clears a suspected cancellation.
+    result.statusUncertain = true;
   }
   if (departureDelaySec !== undefined) {
     result.departureDelaySec = departureDelaySec;

@@ -3,7 +3,8 @@
  * plain and factual. Every push is self-contained: it names the flight, its route, the current
  * departure and arrival times and the gate, from the intent's `flight` summary (the flight as it
  * stood when the intent was produced), so a reader who saw no earlier push still knows where to
- * be. A correction says what changed back. Times are airport-local in the user's 12 or 24 hour
+ * be. A correction states the new value and what changed back (review ruling Q15). The flight is
+ * named as the app names it (`AA100`). Times are airport-local in the user's 12 or 24 hour
  * format (UTC, marked, when the airport's zone is unknown); the text never exceeds the shared
  * `PUSH_TITLE_MAX_LENGTH` and `PUSH_BODY_MAX_LENGTH`. Pure: no clock, no I/O.
  */
@@ -36,10 +37,14 @@ const IATA_BY_ICAO: ReadonlyMap<string, string> = (() => {
   return map;
 })();
 
-/** `AA 100` when the carrier's IATA code is known, else `AAL 100`. */
+/**
+ * `AA100` when the carrier's IATA code is known, else `AAL100`: the app's own format
+ * (`displayDesignator` in apps/mobile/src/lib/flight-model.ts, review ruling Q18), so a push
+ * names the flight exactly as the flight list does.
+ */
 export function displayDesignator(flight: Flight): string {
   const carrier = IATA_BY_ICAO.get(flight.operatingCarrierIcao) ?? flight.operatingCarrierIcao;
-  return `${carrier} ${flight.flightNumber}`;
+  return `${carrier}${flight.flightNumber}`;
 }
 
 function airportCode(airport: AirportRef | undefined, icao?: string): string {
@@ -147,11 +152,21 @@ function time(context: Context, iso: string | undefined, airport: AirportRef): s
   return iso === undefined ? undefined : localTime(iso, airport.tz, context.format);
 }
 
-/** `Departs 3:05 PM from JFK, Terminal 8, gate B12.` (`Departed` once it has.) */
-function departureSentence(context: Context, withPlace = true): string {
+/**
+ * `Departs 3:05 PM from JFK, Terminal 8, gate B12.` (`Departed` once it has.) `scheduled` words a
+ * flight without an actual out as `Scheduled to depart` at its scheduled time, for a push about a
+ * flight that has left whatever the provider's times say (a diversion, review ruling Q18).
+ */
+function departureSentence(context: Context, withPlace = true, scheduled = false): string {
   const { flight } = context;
-  const at = time(context, departureAt(flight), flight.origin);
-  const verb = flight.times.actualOut === undefined ? 'Departs' : 'Departed';
+  const departed = flight.times.actualOut !== undefined;
+  const wordAsScheduled = scheduled && !departed;
+  const at = time(
+    context,
+    wordAsScheduled ? flight.times.scheduledOut : departureAt(flight),
+    flight.origin,
+  );
+  const verb = departed ? 'Departed' : wordAsScheduled ? 'Scheduled to depart' : 'Departs';
   const where = withPlace ? place(flight.originTerminal, flight.originGate) : '';
   const head =
     at === undefined ? `${verb} from ${context.origin}` : `${verb} ${at} from ${context.origin}`;
@@ -190,22 +205,34 @@ function renderDelay(context: Context, intent: Intent): RenderedPush {
     before === null || before < DELAY_THRESHOLD_MINUTES
       ? ''
       : ` Earlier reported ${duration(before)} late.`;
+  // Review ruling Q15: a correction's title states the new value, never only that the old one
+  // went away; at or before the scheduled time it is on time.
+  const onTime = minutes <= 0;
   if (intent.subject === 'arrival') {
     const scheduled = time(context, flight.times.scheduledIn, flight.destination);
     const at = time(context, arrivalAt(flight), flight.destination);
-    const title = intent.correction
-      ? `${designator} no longer arriving late`
-      : `${designator} arriving ${duration(minutes)} late`;
+    // Review ruling Q18: an intent produced on the observation that saw in says it arrived.
+    const arrived = flight.times.actualIn !== undefined;
+    const title = arrived
+      ? `${designator} arrived ${onTime ? 'on time' : `${duration(minutes)} late`}`
+      : intent.correction
+        ? onTime
+          ? `${designator} now arriving on time`
+          : `${designator} arrival delay now ${duration(minutes)}`
+        : `${designator} arriving ${duration(minutes)} late`;
+    const verb = arrived ? 'Arrived' : 'Arrives';
     const head =
       at === undefined
         ? `Arrival at ${context.destination} ${lateness(minutes)}.`
-        : `Arrives ${at} at ${context.destination}, ${lateness(minutes)}${scheduled === undefined ? '' : ` (scheduled ${scheduled})`}.`;
+        : `${verb} ${at} at ${context.destination}, ${lateness(minutes)}${scheduled === undefined ? '' : ` (scheduled ${scheduled})`}.`;
     return { title, body: `${head}${earlier} ${departureSentence(context)}` };
   }
   const scheduled = time(context, flight.times.scheduledOut, flight.origin);
   const at = time(context, departureAt(flight), flight.origin);
   const title = intent.correction
-    ? `${designator} no longer delayed`
+    ? onTime
+      ? `${designator} now on time`
+      : `${designator} delay now ${duration(minutes)}`
     : `${designator} delayed ${duration(minutes)}`;
   const gate = place(flight.originTerminal, flight.originGate);
   const head =
@@ -281,7 +308,7 @@ function renderDiversion(context: Context, intent: Intent): RenderedPush {
   }
   return {
     title: named ? `${designator} diverted to ${to}` : `${designator} diverted`,
-    body: `${designator} from ${context.origin}, planned to arrive at ${context.destination}, is diverting${named ? ` to ${to}` : ''}. ${departureSentence(context, false)}`,
+    body: `${designator} from ${context.origin}, planned to arrive at ${context.destination}, is diverting${named ? ` to ${to}` : ''}. ${departureSentence(context, false, true)}`,
   };
 }
 
