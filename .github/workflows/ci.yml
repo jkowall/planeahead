@@ -179,10 +179,18 @@ jobs:
         env:
           BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.before }}
         run: node scripts/mobile-migrations-guard.mjs --base "${BASE_SHA}"
+      # Offline, the check compares the installed packages with the manifest of the installed
+      # `expo` (expo/bundledNativeModules.json), which only moves when this repository moves it.
+      # Online it fetches Expo's newest patch list for the SDK, so every PR failed the morning
+      # Expo published patch releases (2026-10-01: nine packages one or two patches behind).
+      # Offline still fails a package outside the manifest's range (a planted expo-constants
+      # 56.0.3 against ~57.0.19 did). Taking Expo's patch releases is a deliberate change made
+      # before a store build, not something an upstream release forces onto an unrelated PR.
       - name: SDK packages match the Expo SDK 57 manifest
         working-directory: apps/mobile
         env:
           EXPO_NO_GIT_STATUS: '1'
+          EXPO_OFFLINE: '1'
           APP_VARIANT: development
         run: pnpm exec expo install --check
       - run: pnpm turbo run test --filter=@planeahead/mobile
