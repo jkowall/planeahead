@@ -10,10 +10,12 @@ staging boards, and what stays unverified until staging and the AeroDataBox Grow
 spec is [18-boards-route-search.md](18-boards-route-search.md); the research behind it is
 `docs/research/phase1/R3-boards-and-route-search.md` (R3).
 
-The review round (two lenses on c5d7b3f, rulings R0 to R15, applied the same day in parts S1,
-S2a, S3, S2b and S4) is recorded at the end, under [Review round](#review-round). Where a ruling
-changed what a section above says, that section says so; the tables of what ran and of the
-acceptance items stay as the build ran them.
+The review round (two lenses on c5d7b3f, rulings R0 to R15, applied the same day in parts S1, S2a,
+S3, S2b and S4) is recorded under [Review round](#review-round), and the re-review of those parts
+with its close-out (parts K1 and K2) at the end, under
+[Re-review and close-out](#re-review-and-close-out). Where a ruling or the close-out changed what a
+section above says, that section says so; the tables of what ran and of the acceptance items stay as
+the build ran them.
 
 The machine: macOS 27.0, Node 24.21.0, pnpm 12.5.1, wrangler 4.135.0. No Cloudflare account and
 no AeroDataBox key: every FIDS and coverage call in this increment went to a stubbed provider or
@@ -90,9 +92,11 @@ runs.
 - **A long delay leaves the board.** The window keeps rows by the home leg's scheduled time (the
   bucket basis, part 2), and the default window starts an hour before now, so a departure
   scheduled more than an hour ago that has not left yet (a long delay) is not on the board. The
-  route search, which reads whole dates, still finds it. Fixed in the review round (ruling R14):
-  a flight is also kept by its best time, and one scheduled before the window stays while live
-  data says it has not yet departed or arrived.
+  route search, which reads whole dates, still finds it. Fixed in the review round (ruling R14): a
+  flight is also kept by its best time, and one scheduled before the window stays while live data
+  says it has not yet departed or arrived. The close-out keeps that last clause for a row with no
+  best time only (the re-review's N2), in effect an arrival that has left its origin with no
+  estimate.
 - **The phone's HTTP cache may hold a board.** The routes answer `Cache-Control: private,
   no-cache` with an ETag, which lets a private cache store the answer and revalidate it. React
   Native's iOS networking uses an `NSURLSession` default configuration, whose shared URL cache has
@@ -105,8 +109,10 @@ runs.
   React Native's networking, and its platform stacks do send `If-None-Match` from a stored ETag;
   a request-side policy would not work either (`expo/fetch` drops the `cache` option).
 - **Starter's 5 calls a second (part 2).** A user opening several cold boards within a second can
-  get 503 `board_unavailable` on Starter (Growth allows 10 a second). The tests raise the limit
-  with `openBoardBudget`.
+  get 503 `board_unavailable` on Starter (Growth allows 10 a second). The tests raise the limit with
+  `openBoardBudget`. Since ruling R2's floor (1 of Starter's burst of 2) a board call there needs a
+  full bucket, so even one cold open usually loses a bucket; production is Growth, and the
+  re-review's M3 c is left to the owner (`docs/open-decisions.md` section 9).
 - **Daylight saving (part 1).** On a change day a bucket is 11 or 13 real hours; a 13-hour window
   may be refused on Starter's 12-hour page (unverified; Growth's page is 24 hours).
 - **The migration hash (part 2)** changed after Prettier reformatted the journal and snapshot
@@ -135,7 +141,9 @@ runs.
   nothing could be shown (404, 422, 503, 504); a 304 counts as a search. Since the review round
   both routes first answer 404 `boards_disabled` while boards are off (R8), then require a
   session principal with the user scope (R15), then take `BOARD_RL` by user and `BOARD_IP_RL` by
-  the client's /64 (R11); the route search then reads the session row and validates as before.
+  the client's /64 (R11); the route search then reads the session row and validates as before. Since
+  the close-out the caps are also given back for a `partial` answer whose missing buckets the
+  per-second bucket alone refused (the re-review's M3).
 - **Counterpart airports by code (part 2).** Rows name the other airport by ICAO and IATA code
   only; names are not resolved, and the registration is never sent.
 - **Tap to add confirms first (part 3).** The spec says "tap to add"; a tap asks `Add AA100?` with
@@ -154,7 +162,11 @@ runs.
   (the app default; the route's KV `cacheTtl` is 30 s too). The route search is never refetched on
   focus or reconnect, and the same search pressed again is asked only when its answer failed or
   is older than 5 minutes, because each answered search takes one of the day's 30. Since ruling
-  R10 the same gate holds a pull on the route search, and nothing there invites one.
+  R10 the same gate holds a pull on the route search, and nothing there invites one. Since the
+  close-out a 503 asks for 2 s when the per-second bucket alone refused (30 s otherwise), and a
+  route search `partial` for that reason alone takes none of the 30; the app reads neither yet (its
+  503 notices say "in a minute", and the gate holds that answer 5 minutes), a follow-up in
+  `docs/open-decisions.md` section 9.
 - **Offline with a board on screen (part 3).** A board or result already loaded stays on screen
   offline with a notice that it is the last answer loaded (from the query cache, in memory);
   with nothing loaded, the screen says it is offline instead of showing an empty list, and the
@@ -328,11 +340,13 @@ OkHttp client uses (as the skeptic read its sources), the iOS file the shared `U
   build's "either answer works"; the fix is in the owner's step 5). Probe: `u7-exact-page`,
   `u7-to-1159`, `u7-to-1200`.
 - **Codeshare keys days ahead (ruling R12).** Days ahead the aircraft is rarely known, so a
-  codeshare row without a callsign or a registration joins the only `IsOperator` row of its
-  direction, minute and counterpart, or stays alone; how often that happens is unmeasured.
-  Probe: `b7-days-ahead` (KATL's 00:00 to 11:59 bucket 3 days out, production query), with the
-  same counts for `u4-KATL-am` (the run's date) and `u5-180-days`; each also counts the rows of
-  unknown codeshare status (`unknownStatus`, the re-review's M5).
+  codeshare row without a callsign or a registration joins its slot's operator (same direction,
+  minute and counterpart) only when the slot holds exactly one row not marked `IsCodeshared` and
+  that row is `IsOperator` (the re-review's M5), or stays alone; how often that happens is
+  unmeasured. Probe: `b7-days-ahead` (KATL's 00:00 to 11:59 bucket 3 days out, production query),
+  with the same counts for `u4-KATL-am` (the run's date) and `u5-180-days`; each also counts the
+  rows of unknown codeshare status (`unknownStatus`), any of which keeps a keyless codeshare of its
+  slot alone.
 - **R3 U8, the live layer's latency.** How soon a gate change or a revised time reaches FIDS:
   a week of staging observation against airline and airport sites, not part of the probe.
 - **R3 U9 and AeroDataBox's written End Use answer (R3 O2, plan section 10 item 3).** Not asked
@@ -365,7 +379,7 @@ probes, and one second skeptic across all four on severity, a recorded departure
 skeptics on every serious finding" (below). The orchestrator accepted every finding, as rulings
 R0 to R15, applied in five parts: S1 (dd22c94: the routes and access), S2a (f47eabd: the budget
 and storage), S3 (4201f31, merged as bd74ca9: the mobile app), S2b (f3a918f: coverage and the
-board view) and S4 (this commit: the probe and these documents); increment 15's final state and
+board view) and S4 (caa8007: the probe and these documents); increment 15's final state and
 `main` were merged in after S1 (3c644bb, 94f1248). Names: MA1 or m4 is a review finding, R1 a
 ruling of this round, B5 a ruling of the spec. The research document keeps its prefix on its
 items (R3 D5, R3 U7), so "ruling R3" always means this round's.
@@ -569,7 +583,9 @@ coverage path), MA1 apart (MA2's bound lowers its exposure).
   schedules OK with live Degraded is `live` with one check in 23 hours; Unavailable twice is a
   404 with no FIDS call and one check a day; a refused check stores nothing (at +1 s the check
   runs: `not_covered`, 0 FIDS calls); 70 checks take no airport slot; checks keep the floor at
-  Growth's 10 a second; the fixtures' `'NoData'` (not in the spec) became `'Unavailable'`.
+  Growth's 10 a second; the fixtures' `'NoData'` (not in the spec) became `'Unavailable'`. The
+  close-out added a wait after a refused check and the `unavailable` answer when nothing is stored
+  (the re-review's M2, below).
 - **R6 (review A's ma1): a billed 200 whose items all fail mapping is stored, empty.** Finding:
   it was refetched and billed again every minute and never stored, and `not_a_fids_contract`
   and deterministic 4xx answers looped the same way. Changed, part S2a: the empty bucket is
@@ -577,8 +593,10 @@ coverage path), MA1 apart (MA2's bound lowers its exposure).
   answers (an error record below HTTP 500 other than 429, and `not_a_fids_contract`) wait for
   the bucket's fresh time on the ladder, with the share's multiplier; transport errors, 5xx,
   push-backs and thrown calls keep the 60-second retry. Proven: one all-skipped bucket stored
-  empty, two ladder waits (a 400, a 200 that is not a FIDS contract), two minute retries (a 429,
-  a transport error).
+  empty, two ladder waits (a 400, a 200 that is not a FIDS contract), two minute retries (a 429, a
+  transport error). The re-review found the ladder wait held in memory only, so eviction or a deploy
+  lifted it and the next view billed the same failure again (M1: R6 partly applied); the close-out
+  stores it in `bucket_failures` and makes a 408 transient, with the 5xx (below).
 - **R7 (review A's ma2 and two nits): the probe measures the production fetch shape.** Finding:
   the probe never measured the bill of the call production makes (U2 used `Both` without
   `withLeg`, U3 `withLeg` with one direction, U4 had no reading, and there was no final
@@ -618,8 +636,9 @@ coverage path), MA1 apart (MA2's bound lowers its exposure).
   entry points stay. Proven: absent and `"false"` give 404 with no brake taken, `"true"` reaches
   the routes, the config test expects `"false"` in production, the production dry run shows
   `env.BOARDS_ENABLED ("false")` with no warning, and the app's board and route-search suites
-  show the notices. The flip is runbook step 20's, after the written answer and the per-user
-  caps (R3).
+  show the notices. The flip is runbook step 20's, after the written answer and the per-user caps
+  (R3). The close-out made the comparison exact (the re-review's N6): the build also read `TRUE`,
+  and `true` padded with spaces, as on; a test now holds both off.
 - **R9 (review B's m1): a second leg of the same flight number can be added from a board.**
   Finding: `findTracked` ignored `origin`, so the KLAX leg of AA100 and the KBNA leg of WN1234
   answered `already_tracked`. Changed, part S3 (in `apps/mobile/src/lib/`): `pendingFlightKey`
@@ -637,8 +656,9 @@ coverage path), MA1 apart (MA2's bound lowers its exposure).
   at least `ROUTE_SEARCH_STALE_MS`, 5 minutes, old, and never while a fetch runs) gates the pull
   and a repeated tap; the notices no longer mention pulling ("These times may be out of date.";
   "Part of this time range could not be loaded, so some flights may be missing."). Proven: at
-  the lookahead's edge a 200 with `partial` false and one FIDS call; the app's route-search
-  suite.
+  the lookahead's edge a 200 with `partial` false and one FIDS call; the app's route-search suite.
+  Since the close-out a search `partial` only because the per-second bucket refused is not charged
+  at all (the re-review's M3, below).
 - **R11 (review B's m3): shared addresses are not starved.** Finding: `BOARD_RL`'s IP key was the
   raw address (three addresses of one /64 counted apart) and everyone behind one NAT shared 30 a
   minute; the anonymous per-IP search cap's 403 named no scope, so an anonymous user held by the
@@ -651,8 +671,9 @@ coverage path), MA1 apart (MA2's bound lowers its exposure).
   network, and this network's are used up today. Sign in to keep searching, or add the flight by
   its number." with a sign-in button. Proven: both bindings' config; each refusing with its own
   `limiter` and `Retry-After` 60; three addresses in one /64 answer 404, 404, 429 while another
-  /64 has its own allowance; `scope` in the cap tests and the shared parse; the app's
-  route-search suite.
+  /64 has its own allowance; `scope` in the cap tests and the shared parse; the app's route-search
+  suite. Since the close-out the shared envelope reads a `scope` or a `cap` it does not know as
+  absent (the re-review's N7).
 - **R12 (review B's m4): codeshares group without aircraft keys, and rows are unique.** Finding:
   AA100 (`IsOperator`) with BA1511 and IB4218 (`IsCodeshared`) at the same time and counterpart
   came out as three rows, since days ahead the aircraft is usually unknown, and one flight
@@ -666,7 +687,10 @@ coverage path), MA1 apart (MA2's bound lowers its exposure).
   review B's three rows as one, on the board and in the route search; keyless codeshares alone
   with no operator and with several; dedup across buckets with unique ids; the previous and next
   days' flights dropped from a route search; the probe's counts (`codeshareKeys`) and the stubbed
-  run, keyed on the run's date and keyless days ahead.
+  run, keyed on the run's date and keyless days ahead. The close-out changed both rules (the
+  re-review's N1 and M5, below): the dedup keeps the most recently fetched bucket's copy, and a
+  keyless codeshare joins only when its slot holds exactly one row not marked `IsCodeshared` and
+  that row is `IsOperator`.
 - **R13 (review B's m5): hub boards render as a list.** Changed, part S3:
   `apps/mobile/src/components/BoardList.tsx` (a FlatList, `keyExtractor` on the row id),
   `BoardRow` memoised, stable callbacks (`useRowAdd`, `onAdd`) and a memoised `useDisplayPrefs`.
@@ -676,9 +700,10 @@ coverage path), MA1 apart (MA2's bound lowers its exposure).
   the window by its home leg's scheduled time or its best time (actual, else estimated), or,
   scheduled before the window, while it has not yet departed or arrived with live data behind
   that status (an estimate, or for an arrival its departure); only the buckets already read are
-  searched. Proven: `board-view.test.ts`, "keeps a delayed flight: its best time in the window,
-  or earlier and not yet moved", and B7's window test unchanged. Narrower than the ruling's
-  words, a departure (below).
+  searched. Proven: `board-view.test.ts`, "keeps a delayed flight: its best time in the window, or
+  earlier and not yet moved", and B7's window test unchanged. Narrower than the ruling's words, a
+  departure (below). The close-out narrowed it to a row with no best time (the re-review's N2,
+  below), and that test now reads "..., or with none, in the air".
 - **R15 (nits).** Part S1: `AuthenticatedUser.kind` (`'session' | 'api_token'`, only `session`
   issued) and `requireSession()` (401 with no principal, 403 `insufficient_scope` for any other
   kind) on both routes, before the user scope and the brakes; proven with an `api_token`
@@ -692,7 +717,8 @@ coverage path), MA1 apart (MA2's bound lowers its exposure).
 - **Not ruled, unchanged.** Review A's nit that concurrent misses of one `ref:airport` KV key
   write it at once (a KV 429 swallowed): the writes carry the same answer, and a lost one costs
   one more Postgres lookup later. Review B's optional release of route-search slots on a
-  `partial` answer: R10 stopped the charged pulls instead.
+  `partial` answer: R10 stopped the charged pulls instead, and the close-out releases them when only
+  the per-second bucket made the answer `partial` (the re-review's M3).
 
 ### Where the rulings were silent
 
@@ -717,8 +743,10 @@ Part S2a (the budget and storage):
 - The board test harness's ProviderBudget clock follows the harness clock, and `uniqueDay` steps
   16 days (the floor exposed wall-clock refills and budget days shared between tests); the
   AirportState tests run at Growth's real 10 a second.
-- `store_failed` waits the 60-second retry, like a transport error; 408 is not special-cased
-  (only 429 and 5xx are retryable, the repository's convention).
+- `store_failed` waits the 60-second retry, like a transport error; 408 was not special-cased (only
+  429 and 5xx are retryable, the repository's convention) until the close-out made it transient,
+  with the 5xx: under a ladder-length wait a gateway timeout would hold a far bucket unavailable for
+  hours (the re-review's M1).
 - R15 allowed reading the `adb:coverage` KV copy or dropping its write; nothing read it, so the
   write and `adbCoverageKvKey` are gone.
 
@@ -739,11 +767,12 @@ Part S3 (the mobile app):
 
 Part S2b (coverage and the board view):
 
-- R5: a check the budget refuses stores nothing, and that one request uses the last stored
-  answer (`unknown` if none). The board-triggered `health` call skips the boards share and the
-  airports cap but keeps the per-second floor (keyed on `isBoardTrigger`). `FEED_STATES` is a
-  `Map`; the adapter keeps `z.string()` for the statuses, so a value outside the enum reaches
-  the mapping and is logged.
+- R5: a check the budget refuses stores nothing, and that one request uses the last stored answer
+  (`unknown` if none; since the close-out, with none the bucket answers `unavailable` and reserves
+  no FIDS call, and the budget is not asked again until the refusal can lift, the re-review's M2).
+  The board-triggered `health` call skips the boards share and the airports cap but keeps the
+  per-second floor (keyed on `isBoardTrigger`). `FEED_STATES` is a `Map`; the adapter keeps
+  `z.string()` for the statuses, so a value outside the enum reaches the mapping and is logged.
 - R10: a bucket state this build does not know counts as partial; out of range never does.
 - R12: dedup and grouping compare the scheduled UTC minute; dedup ignores the counterpart (the
   row id has none); a keyed `IsCodeshared` row whose key matches nothing stays alone.
@@ -777,11 +806,14 @@ Part S4 (the probe and these documents):
 - **R8's production value is `"false"`, not absent** (the orchestrator's amendment after S1):
   absent, wrangler warns on every production deploy that a top-level var is missing from
   `env.production.vars`, and the obvious fix, copying `"true"` there, would switch boards on.
-- **R14 keeps an earlier flight only with live data behind its status**, and only when it was
-  scheduled before the window. A schedules-only airport's rows read `boarding` from the
-  timetable alone, so the literal "not yet departed or arrived" would keep about 12 hours of
-  long-gone flights at the top of those boards (it broke B7's window test); a delayed flight
-  with no revised time still drops off.
+- **R14 keeps an earlier flight only with live data behind its status**, only when it was scheduled
+  before the window, and since the close-out only when it has no best time (the re-review's N2). A
+  schedules-only airport's rows read `boarding` from the timetable alone, so the literal "not yet
+  departed or arrived" would keep about 12 hours of long-gone flights at the top of those boards (it
+  broke B7's window test); a delayed flight with no revised time still drops off. With no estimate
+  the only live data left is an arrival's departure from its origin, so the clause now keeps an
+  arrival en route with no estimate; a row with a best time is placed by it, so a stale estimate
+  before the window no longer keeps a long-gone flight at the top for hours.
 - **One second skeptic across MA1 to MA4, not two per finding.** The spec's header promised two
   skeptics on every serious finding; the second opinion on MA1 to MA4 was one agent reading all
   four for severity, while M1 had two of its own.
@@ -790,7 +822,7 @@ Part S4 (the probe and these documents):
 
 The same machine as the build. Each part ran the files its changes touch one at a time and
 reverted its mutants after each run; S1 to S2b are recorded from their reports, S4's are its own
-runs on this commit's tree, and the orchestrator's full checks cover everything else.
+runs on caa8007's tree, and the orchestrator's full checks cover everything else.
 
 | Part | Check | Result |
 | --- | --- | --- |
@@ -812,3 +844,148 @@ runs on this commit's tree, and the orchestrator's full checks cover everything 
 | S4 | Mutants of the probe, each reverted after its run | 10, all killed: the redirect followed (1 test failed), the old query order (1), no reading before the production call, in the run (1) and in the plan (3), no last reading (1), U1 keeping the flight (2), calls keeping their path (1), U7 listing numbers (2), the days-ahead answer not kept (1), the registration read from the wrong field (2) |
 | S4 | The em dash scans over the changed documents and the probe: `test/style.test.ts` (packages/shared, `docs/architecture.md`), `test/schema-contracts.test.ts` (packages/db, `docs/schema-review.md`), `__tests__/house-style.test.ts` (apps/mobile: this file, the runbook, the probe) | passed: 71, 104 and 182 tests |
 | S4 | `pnpm run lint:root` (eslint over scripts and tools); `pnpm exec prettier --check` on every changed file | clean |
+
+## Re-review and close-out
+
+An Opus 5.5 re-review of the fix round (`git diff c5d7b3f dd22c94` for S1 and
+`git diff 94f1248 caa8007` for S2a, S3, S2b and S4), on 2026-10-01, found no blocker and no major:
+every ruling is applied as ruled or as its accepted interpretation, except R6, whose
+deterministic-failure wait did not survive the object leaving memory. It found five minors (M1 to
+M5) and seven nits (N1 to N7), most of them claims in the documents the code did not quite meet. Its
+probes ran in a detached checkout of caa8007: R11's key over IPv4, IPv6 and IPv4-mapped addresses
+(one key per IPv4 address and per /64; nothing to fix), the board view (M5, N1, N2), ten views under
+the kill switch (M2), an eviction inside a ladder wait (M1), the `no-store` default outside the
+`/v1` chain (N3) and a simulation of `take` with the floor on Starter and Growth (M3); the suites it
+reran passed (shared `boards` 19, `board-view` 18, `boards.routes` 12, `airport-state` 31, the
+probe's 13), and the dry run planned 25 calls and 44 units. The orchestrator ruled on every finding
+the same day: part K1 (1edd4f1) fixed the code's, part K2 (dca5d9d and 0e4cf49, merged as 77f4053)
+the probe's and the documents' wording, an orchestrator commit (f96cf32) the error envelope's `cap`,
+and the close-out's documents commit the statements K1 had made stale; M3 (c) is recorded for the
+owner. Findings and what the close-out did:
+
+- **M1 (R6 partly applied): the deterministic-failure wait lived in memory only, so an evicted or
+  redeployed object billed the same failure again.** The probe: a FIDS 400, a view a minute later
+  making no call, then `ctx.abort()` (eviction's stand-in) and a view inside the 5-minute wait
+  calling FIDS again. Fixed, part K1: AirportState migration 002 adds `bucket_failures` (the bucket,
+  `retry_at_ms`, `purge_at_ms` and `reason`; `SCHEMA_VERSION` 2). A deterministic failure (a billed
+  4xx other than 408, or a 200 that is not a FIDS contract) sets the in-memory wait, keeps its
+  records, then writes the row and arms the alarm; `#refresh` reads memory, then the table, before
+  fetching; a successful fetch deletes the row in the bucket's transaction; the alarm deletes a row
+  at its `purge_at_ms` (the purge a copy fetched at the failure would have had, ruling R4) and
+  counts the rows before `deleteAll()`. Transient waits (transport, 408, 5xx, push-backs, refusals)
+  stay in memory, and a 408 is now transient, with the 5xx: under a ladder-length wait a gateway
+  timeout would hold a far bucket unavailable for hours. Proven (`airport-state.test.ts`): the probe
+  as a regression (a 400, `ctx.abort()`, a view at +2 minutes makes no call; after the wait one
+  call, and the row is gone); an alarm inside the wait, then eviction, still makes no call; a 408
+  retried after 60 s; `do-ping` and `health` expect AirportState at version 2. A rollback to a build
+  before K1 would find every migrated AirportState refusing to open (`version_ahead`); nothing is
+  deployed yet.
+- **M2: a refused coverage check was asked again on every view**: one ProviderBudget call, one
+  denied `health` record and one outbox send per view while the budget refuses, which after the
+  daily cap trips lasts the rest of the UTC day (the probe: 10 views in 45 s under the kill switch,
+  10 `health` records). Fixed, part K1: after a refusal `#coverageRetryAt` holds the check until the
+  refusal can lift (at least a second for the rate and the floor, a minute otherwise), the last
+  stored answer serving meanwhile; refused with no answer stored, the bucket answers `unavailable`
+  with the refusal's reason (or serves its copy) and reserves no FIDS call, which closes the edge of
+  review A's ma4 the re-review found narrowed but open. Proven: ten views over 45 s under the kill
+  switch give one `health` record and no `fids` record, each answer `unavailable` with the kill
+  switch's reason, and the budget is asked again a minute later.
+- **M3: the floor cuts a board's capacity at an instant, and R10 made the resulting `partial` route
+  search a charged answer the app does not re-ask for 5 minutes.** (a) and (b) fixed, part K1:
+  `refusedPerSecondOnly` (`src/boards/view.ts`) holds when every bucket missing was refused by the
+  per-second bucket (`provider_rate_limit` or `board_rate_floor`); a `partial` route search of that
+  kind gives its slots back, and the board's and the route search's 503 then say `Retry-After: 2`,
+  else 30. Proven (`boards.routes.test.ts`, on Growth's burst of 5 with 3 tokens already taken): the
+  board's 503 says 2, and a second later the board is there with one FIDS call; a route search
+  `partial` that way leaves the user's `route_searches` at 0, and the same search a second later
+  reads both buckets and counts 1. A unit test pins the rule. (c) is the owner's (below). Recorded,
+  outside the rulings: the app reads neither change (its 503 notices say "in a minute", and
+  `routeSearchAsksAgain` holds any `partial` 200 for 5 minutes), a follow-up in
+  `docs/open-decisions.md` section 9.
+- **M4: R7's production-call reading followed four unread billed calls**, so a lagging counter could
+  fold their units into the figure the runbook writes into `ADB_UNITS.fids` (one 2-unit straggler
+  reads as the plausible 4). Fixed, part K2 with the orchestrator's amendment (0e4cf49):
+  `u5-180-days` has its own reading (`after-u5-180-days`), so `before-production` follows a settled
+  one; the dry run prints each reading's running total with its range (2 at `after-u2-both` up to 44
+  at `end`, the run 40 to 66); each prompt asks for a counter that has stopped moving; `findingsOf`
+  adds `bill.impliedByU2AndU3` and `bill.productionCallSettled`, true only at the implied figure
+  when it is known and above 0, else at 2 or 4; the owner's step 5 and runbook step 20 say to leave
+  `ADB_UNITS.fids` alone and run the probe again when it is false. Proven: the probe's tests (15, 13
+  before); 12 mutants, then 3 of the amended rule, all killed.
+- **M5: a keyless `IsCodeshared` row joined the only `IsOperator` row of its slot even beside an
+  `Unknown` row that might be the real operator**, and the merged row's add tracked another aircraft
+  (the probe: AA100 `IsOperator`, DL5 `Unknown` and keyless VS3, operated by DL, showed VS3 under
+  AA100). Fixed, part K1: every row of the slot not marked `IsCodeshared` is a candidate operator,
+  and a keyless codeshare attaches only when there is exactly one and it is `IsOperator`; part K2:
+  `codeshareKeys` counts `unknownStatus` rows, so the probe sizes the case. Proven: the probe as a
+  test (three rows), and `unknownStatus` in the probe's tests.
+- **N1: the dedup kept the first bucket's copy, not the freshest.** Fixed, part K1: `combineBuckets`
+  lists the most recently fetched bucket's rows first, so the copy `uniqueRows` keeps is the
+  freshest; a test in both input orders.
+- **N2: R14's third clause kept a row whose own estimate had passed**, at the top of the board for
+  up to about 13 hours. Fixed, part K1: the clause applies only to a row with no best time (no
+  actual, no estimate), keeping S2b's live-data rule, so with no estimate it keeps only an arrival
+  `departed` or `en_route`. Proven: a stale estimate before the window drops; an arrival en route
+  with no estimate stays. One earlier expectation changed: DL4 (scheduled 10:00, estimated 16:00,
+  window 13:00 to 15:00) now drops, as does any flight scheduled before the window and estimated
+  past its end (under the app's default window, more than about 11 hours from now); an en-route
+  arrival with a stale estimate drops too. Reverting `notYetMoved` alone survives as an equivalent
+  mutant (dead code under the new gate); reverting the whole change is killed.
+- **N3: "every `/v1` answer carries `no-store`" overstated R1**: the root chain's per-IP limiter's
+  429 (`PUBLIC_RL`) and an error the root middleware raises carry none; neither holds user data.
+  Fixed in wording, part K2 and f96cf32: "every answer the `/v1` chain produces", those two named as
+  outside it, in `routes/v1.ts`'s comment, the no-store middleware's header, `docs/architecture.md`,
+  `docs/open-decisions.md` and this file.
+- **N4: "before the session is read" was not what the gate order does**: the root chain's
+  `authMiddleware` resolves a presented session before the `/v1` chain runs. Fixed in wording:
+  "before the route's session checks, brakes and lookups", in the code comments (part K1:
+  `boards/access.ts`, `routes/airports.ts`) and wherever the documents made the claim (part K2: the
+  threat model, architecture, the spec, the runbook and this file).
+- **N5: the exit test's "no new call" held only before 13:00 New York time.** Fixed, part K2: steps
+  1 to 4 run before then, or step 6 expects one more `route_search` call, for KJFK's morning bucket;
+  step 4 runs within 5 minutes of opening KJFK.
+- **N6: `boardsEnabled` accepted more than `"true"`**: it trimmed and lower-cased, so a dashboard
+  value of `TRUE` turned boards on. Fixed, part K1: an exact comparison; a test holds `TRUE`, and
+  `true` padded with spaces, off.
+- **N7: the envelope's new `scope` was a strict enum**, so a third scope added later would make a
+  shipped app reject the whole error body and lose its `cap_exceeded`. Fixed, part K1: a `scope` the
+  app does not know reads as absent; a test with a future scope keeps the body and its
+  `cap_exceeded`. K1 noted that `cap` carried the same hazard; f96cf32 makes it tolerant too, with a
+  test that fails on the strict enum.
+- **The re-review's two wordings.** A floor refusal waits "at least a second", not "only for the
+  refill" (this file and spec B5); threat model 3.5's purge sentence names a bucket and its
+  `board:v2` KV copy, not the coverage row, which each check replaces and `deleteAll()` removes.
+  Fixed, part K2.
+- **What K1 made stale.** The close-out's documents commit brought the statements that described the
+  code before K1 in line with it: the codeshare attach rule, the dedup and R14's clause
+  (`docs/architecture.md`, spec B7, the findings, Unverified, R12, R14 and the departures), the
+  stored wait and 408 (R6 and S2a's silent choices), the coverage wait (spec B6, R5 and S2b's
+  choices), the uncharged `partial` search and `Retry-After` (`docs/architecture.md`, spec B8 and
+  B12, the clarifications, R10 and the unruled items), `boardsEnabled`'s exact comparison
+  (`docs/architecture.md`, R8) and the tolerant `scope` and `cap` (`docs/architecture.md`, R11).
+
+**The owner's note (M3 c).** On Starter (a burst of 2, a floor of 1) a board call needs a full
+bucket, so a cold Starter board usually loses a bucket on its first open: the re-review's simulation
+lost both buckets when the coverage check answered in under 333 ms and one under 667 ms, a 503 or a
+`partial` answer. Production is Growth (a burst of 5, a floor of 2), and Starter is only what an
+unset or unknown `ADB_PLAN` falls back to. Recommendation: keep the floor; set `ADB_PLAN` explicitly
+in every environment (runbook step 6 already requires `growth` in both); revisit only if Starter is
+ever chosen (a floor of 0 on a burst of 2, or the free coverage check exempt from the floor).
+Recorded in `docs/open-decisions.md` section 9, beside the app's follow-up from M3.
+
+What ran for the close-out, on the same machine, one test file per command, each mutant reverted
+after its run:
+
+| Part | Check | Result |
+| --- | --- | --- |
+| K1 | Workers pool: `airport-state` 35 (4 new), `boards.routes` 14 (2 new), `boards.access` 10, `do-ping` 9, `health` 7, `admin-boards` 3, `airport-ref` 2, `flights.search` 8, `validate` 8; API unit `board-view` 22 (4 new); shared `limits` 9 (1 new) | passed |
+| K1 | Typecheck and lint (packages/shared, apps/api, apps/mobile); prettier | clean |
+| K1 | Mutants | 18 killed; one survivor, equivalent: reverting `notYetMoved` alone is dead code under the new gate (the full revert is killed) |
+| K2 | `pnpm exec vitest run tools/providers/probe-adb-boards.test.js` (root) | passed: 15 tests (13 before) |
+| K2 | `node scripts/probe-adb-boards.mjs --dry-run --date 2026-10-02` | 25 calls, 44 units expected (40 to 66), each reading with its running total; no network call |
+| K2 | `pnpm run lint:root`; prettier; typecheck and lint (apps/api); the em dash scans | clean |
+| K2 | Mutants of the probe | 12, then 3 of the amended settle rule: all killed |
+| Orchestrator | Shared `limits` with the tolerant `cap` (f96cf32) | passed; the new test fails with the strict enum restored |
+| Documents | `pnpm exec prettier --check` on the changed files; the em dash scans: `test/style.test.ts` (packages/shared, `docs/architecture.md`), `__tests__/house-style.test.ts` (apps/mobile, this file); a grep for em and en dashes over the four changed files | clean; passed: 71 and 182 tests; no dash |
+
+The full check of the final tree is recorded with increment 18 in `docs/build-log.md`.

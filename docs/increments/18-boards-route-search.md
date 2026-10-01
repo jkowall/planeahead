@@ -3,13 +3,17 @@
 Status: built (2026-10-01) in three parts and reviewed; the review round's rulings (R0 to R15)
 were applied the same day in five parts: S1 (the routes and access), S2a (the budget and
 storage), S3 (the mobile app), S2b (coverage and the board view) and S4 (the probe and these
-documents). What ran, the departures, the review round and what stays unverified are in
-`docs/increments/18-verification.md` (the rulings' changes in its Review round section).
+documents). An Opus 5.5 re-review of those parts found no blocker or major, five minors and seven
+nits; the close-out fixed them the same day in parts K1 (the code) and K2 (the probe and the
+documents' wording) and one orchestrator commit, all but Starter's per-second floor (M3 c), recorded
+for the owner in `docs/open-decisions.md` section 9. What ran, the departures, the review round, the
+re-review and its close-out, and what stays unverified are in `docs/increments/18-verification.md`
+(the rulings' changes in its Review round section, the close-out's in Re-review and close-out).
 Builder: Opus 5.5. Reviewers: two Opus 5.5 lenses (provider, budget, cache and licence posture;
-routes, caps and the mobile screens) plus the orchestrator's read; two skeptics on review B's
-M1, one on each of MA1 to MA4, and one second skeptic across those four (a departure from two
-on every serious finding). Branch `inc18-boards-route-search`, stacked on
-`inc15-notification-policy` (for the migration sequence only; nothing here depends on push).
+routes, caps and the mobile screens) plus the orchestrator's read; two skeptics on review B's M1,
+one on each of MA1 to MA4, and one second skeptic across those four (a departure from two on every
+serious finding). Branch `inc18-boards-route-search`, stacked on `inc15-notification-policy` (for
+the migration sequence only; nothing here depends on push).
 
 Review round. Neither lens found a blocker, and one major survived the skeptics: the board took
 any date of the plan's lookahead with no per-user quota, so one account could drain the boards
@@ -129,8 +133,10 @@ AeroDataBox budget that can never starve the flight trackers. No AeroAPI anywher
   `live`, for a day; down or indeterminate: `unknown`, for an hour, the board fetched anyway.
   Live updates not provided: the schedules decide the same way (`schedules_only` for a day,
   `unknown` for an hour), and `not_covered` (the 404 with no FIDS call) only when neither feed is
-  provided, for a day. The check takes no slot of the hourly airport cap, and one the budget
-  refuses stores nothing.
+  provided, for a day. The check takes no slot of the hourly airport cap, and one the budget refuses
+  stores nothing. Amended by the close-out (the re-review's M2): a refused check is not asked again
+  until the refusal can lift (at least a second for the rate and the floor, a minute otherwise), and
+  with no answer stored the bucket answers `unavailable` and reserves no FIDS call.
 - **B7. Rows, filters and codeshares (R3 D7, D8, D13).** Codeshares are grouped server-side (same
   scheduled UTC time, same opposite airport, same registration or callsign; the `IsOperator` row
   first, the others in `codeshares[]`). Filters apply after the cache and never enter a cache key:
@@ -138,15 +144,17 @@ AeroDataBox budget that can never starve the flight trackers. No AeroAPI anywher
   UI-shaped, never provider JSON; every response carries the bucket's `fetchedAt` ("as of"),
   whether it is stale, and an ETag that `If-None-Match` answers with 304.
 
-  Amended by the review round: a row repeating an earlier one's direction, designator and
-  scheduled minute (one flight returned by two buckets) is dropped before grouping, and a
-  codeshare row with neither key joins the only `IsOperator` row of its direction, minute and
-  counterpart, or stays alone (ruling R12: days ahead the aircraft is rarely known). A flight is
-  in the time range by its scheduled or its best time, and one scheduled earlier stays while
-  live data says it has not yet departed or arrived (ruling R14). `partial` marks only a bucket
-  that could not be read, never one out of range (ruling R10). Every answer, the 304 included,
-  says `Cache-Control: no-store`, the default of every answer the `/v1` chain produces (ruling
-  R1), so no board stays in the phone's HTTP cache.
+  Amended by the review round and its close-out: a row repeating an earlier one's direction,
+  designator and scheduled minute (one flight returned by two buckets) is dropped before grouping,
+  the copy kept being the most recently fetched bucket's (the re-review's N1), and a codeshare row
+  with neither key joins its slot's operator (same direction, minute and counterpart) only when the
+  slot holds exactly one row not marked `IsCodeshared` and that row is `IsOperator` (the re-review's
+  M5), else stays alone (ruling R12: days ahead the aircraft is rarely known). A flight is in the
+  time range by its scheduled or its best time, and one scheduled earlier with no best time stays
+  while live data says it has not yet arrived (ruling R14, narrowed by the re-review's N2).
+  `partial` marks only a bucket that could not be read, never one out of range (ruling R10). Every
+  answer, the 304 included, says `Cache-Control: no-store`, the default of every answer the `/v1`
+  chain produces (ruling R1), so no board stays in the phone's HTTP cache.
 - **B8. Routes.** `GET /v1/airports/{code}/board?direction=departures|arrivals&from=&to=&airline=`
   and `GET /v1/airports/{origin}/flights/to/{destination}?date=YYYY-MM-DD` (the route search: the
   origin's two buckets of that origin-local date, departures whose arrival leg is the
@@ -163,7 +171,9 @@ AeroDataBox budget that can never starve the flight trackers. No AeroAPI anywher
   brakes and lookups; the session must be a session principal, never an API token (ruling R15). A
   board window may end at most 72 hours ahead (a 422 `date_out_of_range` with `maxHoursAhead`,
   ruling R3): later dates are the route search's, which is capped. The route search keeps only
-  the departures of the searched origin-local date (ruling R12).
+  the departures of the searched origin-local date (ruling R12). Amended by the close-out (the
+  re-review's M3): a 503 says `Retry-After: 2` when the per-second bucket alone refused the buckets
+  missing (30 otherwise), and a route search `partial` for that reason alone is not charged.
 - **B9. Access and caps (plan section 3, R3 D11).** A new rate-limit binding `BOARD_RL` (30 per 60
   seconds) is taken twice per board or route-search request, keyed by the user and by the client
   IP, in every environment (wrangler.jsonc, runbook step 2 if it lists bindings). Anonymous users
@@ -211,12 +221,13 @@ AeroDataBox budget that can never starve the flight trackers. No AeroAPI anywher
   say so instead of showing an empty list.
 
   Amended by the review round: the board renders its rows as a list that mounts only what is on
-  screen, so a 700-row hub board stays fast (ruling R13); a second leg of the same flight number
-  can be added from a board (ruling R9); the route search asks again only after an error or once
-  its answer is 5 minutes old, and nothing on it invites a pull, since each search counts
-  (ruling R10); an anonymous account held by its network's search cap is asked to sign in
-  (ruling R11); and while boards are off, both screens say they are not available yet instead of
-  showing an error (ruling R8).
+  screen, so a 700-row hub board stays fast (ruling R13); a second leg of the same flight number can
+  be added from a board (ruling R9); the route search asks again only after an error or once its
+  answer is 5 minutes old, and nothing on it invites a pull, since each search counts (ruling R10;
+  since the close-out a search `partial` only through the per-second bucket does not, though the app
+  still holds it 5 minutes, a follow-up in `docs/open-decisions.md` section 9); an anonymous account
+  held by its network's search cap is asked to sign in (ruling R11); and while boards are off, both
+  screens say they are not available yet instead of showing an error (ruling R8).
 - **B13. The provider test calls (plan section 8 row 18).** No AeroDataBox key exists, so the
   about-40-unit probe of R3 U1 to U7 (`direction=Both` billing, `withLeg` and `withLocation`
   surcharges, 204 and 400 billing, the window bound's inclusivity, a date 180 days out, and a hub

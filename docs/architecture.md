@@ -162,16 +162,22 @@ Android, the shared `URLCache` on iOS) that stores any GET not marked `no-store`
 sign-out and account deletion, which wipe only SQLite and the query cache; every `/v1` route
 answers with the caller's own data.
 
-The board routes (increment 18) answer 404 `boards_disabled` while `BOARDS_ENABLED` is not `"true"`
-(it is `"false"` in production until AeroDataBox's written End Use answer and the per-user board
-limits, `docs/open-decisions.md` section 9), before the route's session checks, brakes and lookups.
-A board keeps a flight by its home leg's scheduled time or its best time (actual, else estimated)
-in the window, and one scheduled earlier while live data says it has not yet departed or arrived; a
-row repeating a direction, designator and scheduled minute (one flight in two buckets) is dropped,
-and codeshares group by registration or callsign, a keyless `IsCodeshared` row joining the only
-`IsOperator` row of its direction, minute and counterpart. `partial` marks a bucket that could not
-be read, never one out of range. Every 403 `cap_exceeded`, on any route, names its `scope` (`user`
-or `ip`), so the app can tell an anonymous account held by its network's cap to sign in.
+The board routes (increment 18) answer 404 `boards_disabled` while `BOARDS_ENABLED` is not exactly
+`"true"` (it is `"false"` in production until AeroDataBox's written End Use answer and the per-user
+board limits, `docs/open-decisions.md` section 9), before the route's session checks, brakes and
+lookups. A board keeps a flight by its home leg's scheduled time or its best time (actual, else
+estimated) in the window, and one scheduled earlier with no best time while live data says it has
+not yet arrived (in effect an arrival that has left its origin); a row repeating a direction,
+designator and scheduled minute (one flight in two buckets) is dropped, the copy kept being the most
+recently fetched bucket's, and codeshares group by registration or callsign, a keyless
+`IsCodeshared` row joining its slot's operator (same direction, minute and counterpart) only when
+the slot holds exactly one row not marked `IsCodeshared` and that row is `IsOperator`. `partial`
+marks a bucket that could not be read, never one out of range. A 503 `board_unavailable` says
+`Retry-After: 2` when the per-second bucket alone refused the buckets missing (30 otherwise), and a
+route search `partial` for that reason alone is not charged. Every 403 `cap_exceeded`, on any route,
+names its `scope` (`user` or `ip`), so the app can tell an anonymous account held by its network's
+cap to sign in; the shared envelope reads a `scope` or a `cap` it does not know as absent, so a
+later server's new value never costs a shipped app the body.
 
 ## 4. The FlightTracker lifecycle
 
