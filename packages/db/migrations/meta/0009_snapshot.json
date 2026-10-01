@@ -1,5 +1,5 @@
 {
-  "id": "9d5adf1c-fd1c-4dc7-9159-8b971745e450",
+  "id": "7a4400de-6a6d-4fe8-88d5-c963012d274d",
   "prevId": "178d530e-0d05-449f-a39c-7f97cd8de08c",
   "version": "7",
   "dialect": "postgresql",
@@ -3892,6 +3892,12 @@
           "notNull": true,
           "default": false
         },
+        "live_tracked_released_at": {
+          "name": "live_tracked_released_at",
+          "type": "timestamp with time zone",
+          "primaryKey": false,
+          "notNull": false
+        },
         "created_at": {
           "name": "created_at",
           "type": "timestamp with time zone",
@@ -6684,12 +6690,6 @@
           "primaryKey": false,
           "notNull": false
         },
-        "airport_icao": {
-          "name": "airport_icao",
-          "type": "text",
-          "primaryKey": false,
-          "notNull": false
-        },
         "created_at": {
           "name": "created_at",
           "type": "timestamp with time zone",
@@ -6768,15 +6768,11 @@
         },
         "provider_calls_trigger_check": {
           "name": "provider_calls_trigger_check",
-          "value": "\"provider_calls\".\"trigger\" in ('alarm', 'provider_alert', 'adb_alert', 'user_search', 'user_refresh', 'reconcile', 'backfill', 'cron', 'import', 'manual', 'board', 'route_search')"
+          "value": "\"provider_calls\".\"trigger\" in ('alarm', 'provider_alert', 'adb_alert', 'user_search', 'user_refresh', 'reconcile', 'backfill', 'cron', 'import', 'manual')"
         },
         "provider_calls_result_check": {
           "name": "provider_calls_result_check",
           "value": "\"provider_calls\".\"result\" in ('ok', 'not_found', 'rate_limited', 'error')"
-        },
-        "provider_calls_airport_icao_check": {
-          "name": "provider_calls_airport_icao_check",
-          "value": "\"provider_calls\".\"airport_icao\" is null or \"provider_calls\".\"airport_icao\" ~ '^[A-Z0-9]{4}$'"
         }
       },
       "isRLSEnabled": false

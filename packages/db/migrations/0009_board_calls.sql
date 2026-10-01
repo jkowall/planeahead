@@ -1,4 +1,0 @@
-ALTER TABLE "provider_calls" DROP CONSTRAINT "provider_calls_trigger_check";--> statement-breakpoint
-ALTER TABLE "provider_calls" ADD COLUMN "airport_icao" text;--> statement-breakpoint
-ALTER TABLE "provider_calls" ADD CONSTRAINT "provider_calls_airport_icao_check" CHECK ("provider_calls"."airport_icao" is null or "provider_calls"."airport_icao" ~ '^[A-Z0-9]{4}$');--> statement-breakpoint
-ALTER TABLE "provider_calls" ADD CONSTRAINT "provider_calls_trigger_check" CHECK ("provider_calls"."trigger" in ('alarm', 'provider_alert', 'adb_alert', 'user_search', 'user_refresh', 'reconcile', 'backfill', 'cron', 'import', 'manual', 'board', 'route_search'));

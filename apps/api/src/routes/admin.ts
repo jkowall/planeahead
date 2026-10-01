@@ -1,7 +1,8 @@
 /**
  * `GET /admin`: the operator page (increment 12, ruling W5), behind Cloudflare Access
- * (src/middleware/access.ts) on every `/admin` path, read-only except TWO write actions (the
- * account deletion below and, from increment 14, the test push), server-rendered HTML with no
+ * (src/middleware/access.ts) on every `/admin` path, read-only except THREE write actions (the
+ * account deletion below, from increment 14 the test push, and from increment 15 the event
+ * injector, src/routes/admin-inject.ts), server-rendered HTML with no
  * client framework and no script (src/lib/html.ts: a strict CSP, `no-store`).
  *
  * One page, one section per question, each loaded on its own so a failing source shows as
@@ -24,7 +25,8 @@
  *   - the last housekeeping `audit_log` rows;
  *   - (increment 14, ruling P9) the push transport: its configuration here, the `PushAuth`
  *     objects' last mints, and the outcomes of the last 24 hours by reason (src/routes/admin-push.ts,
- *     which also serves the second write action, "Send a test push", ruling P8).
+ *     which also serves the second write action, "Send a test push", ruling P8), with the link
+ *     to the third, "Inject a flight event" (increment 15, ruling N11).
  *
  * The first write action (ruling AA9): operator account deletion, for a request that reached the
  * support inbox the public `/account/delete` page names. `GET /admin/accounts/delete` takes a user
@@ -67,6 +69,7 @@ import {
 import { defaultTrackerFor, type TrackerFor } from '../lib/trackers';
 import { accessMiddleware, type AccessOptions } from '../middleware/access';
 import { createLogger, errorFields, type Logger } from '../observability/log';
+import { injectFormPage, injectSend, type AdminInjectOptions } from './admin-inject';
 import {
   pushTestPage,
   pushTestResult,
@@ -114,7 +117,7 @@ export function environmentQueueNames(environment: EnvironmentName): string[] {
   ]);
 }
 
-export interface AdminRoutesOptions extends AdminPushOptions {
+export interface AdminRoutesOptions extends AdminPushOptions, AdminInjectOptions {
   readonly access?: AccessOptions | undefined;
   /** The Cloudflare API's fetch (Analytics Engine SQL, Queues). */
   readonly fetch?: typeof fetch | undefined;
@@ -538,6 +541,8 @@ export function createAdminRoutes(options: AdminRoutesOptions = {}) {
   app.get('/push/test', (c) => pushTestPage(c, STYLE));
   app.post('/push/test', (c) => pushTestSend(c, options, STYLE, apiOrigin(c.env)));
   app.get('/push/test/result', (c) => pushTestResult(c, options, STYLE));
+  app.get('/push/inject', (c) => injectFormPage(c, STYLE));
+  app.post('/push/inject', (c) => injectSend(c, options, STYLE, apiOrigin(c.env)));
   app.get('/', async (c) => {
     const log = createLogger({ request_id: c.var.requestId, admin: true });
     const env = c.env;
@@ -557,7 +562,7 @@ export function createAdminRoutes(options: AdminRoutesOptions = {}) {
     const identity = c.var.accessIdentity;
     const body = [
       '<h1>PlaneAhead operations</h1>',
-      `<p class="meta">${esc(environmentName(env))}, read-only except the account deletion and the test push below. Signed in through Cloudflare Access as ${esc(
+      `<p class="meta">${esc(environmentName(env))}, read-only except the account deletion, the test push and the event injector below. Signed in through Cloudflare Access as ${esc(
         identity?.email ?? identity?.subject ?? 'unknown',
       )}. Generated ${esc(new Date().toISOString())}.</p>`,
       sectionHtml('Provider calls per flight key (last 7 days, provider_calls)', flights),

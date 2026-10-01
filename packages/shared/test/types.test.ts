@@ -109,6 +109,7 @@ import {
   type KeyReconciliation,
   type LiveActivityContentStateV1,
   type DisruptionState,
+  type FailedRereadInput,
   type GateSideState,
   type PolicyContext,
   type PolicyInput,
@@ -119,6 +120,7 @@ import {
   type PolicyResult,
   type PolicyState,
   type PolicyWants,
+  type SuspicionState,
   type PreferenceSettings,
   type UserPreferences,
   type UserPreferencesPatch,
@@ -291,6 +293,7 @@ interface TypeSurface {
   liveActivityContentStateV1: LiveActivityContentStateV1;
   // notification-policy (increment 15)
   disruptionState: DisruptionState;
+  failedRereadInput: FailedRereadInput;
   gateSideState: GateSideState;
   policyContext: PolicyContext;
   policyInput: PolicyInput;
@@ -301,6 +304,7 @@ interface TypeSurface {
   policyResult: PolicyResult;
   policyState: PolicyState;
   policyWants: PolicyWants;
+  suspicionState: SuspicionState;
   // operator
   codeshareStatus: CodeshareStatus;
   airlineCallsign: AirlineCallsign;

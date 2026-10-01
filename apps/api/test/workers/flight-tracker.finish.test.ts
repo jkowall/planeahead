@@ -338,8 +338,10 @@ describe('a refresh that learns the flight is over finishes it (L12)', () => {
       userId: 'user-cancel',
     });
 
-    // Suspected, not finished: the confirming re-read is the next alarm, 5 minutes out.
-    expect(refreshed).toMatchObject({ outcome: 'refreshed', phase: 'cancelled' });
+    // Suspected, not finished: the confirming re-read is the next alarm, 5 minutes out. Review
+    // ruling Q11 (1) changed the phase on purpose: a suspected cancellation is evidence, not
+    // state, so the refresh answers the last confirmed phase (it answered `cancelled` before).
+    expect(refreshed).toMatchObject({ outcome: 'refreshed', phase: 'scheduled' });
     expect(await tracker.alarmAt()).toBe(seen + 5 * MINUTE_MS);
     await tracker.setClock(seen + 5 * MINUTE_MS);
     expect(await tracker.runAlarm()).toBe(true);

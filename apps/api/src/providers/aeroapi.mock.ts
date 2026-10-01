@@ -595,7 +595,10 @@ function scheduledOutMs(flight: Exact<FlightStatus>): number | undefined {
  * `fa_flight_id` whose `scheduled_out` is nearest `centerMs`, if within
  * `AEROAPI_INSTANCE_MATCH_MS`, with every item sharing that id (a diversion leg). The bracket
  * holds the previous day's departure at its inclusive start, so returning everything would hand
- * a tracker the wrong day to adopt.
+ * a tracker the wrong day to adopt. Among equally near ids, an operating one wins over a
+ * cancelled one whatever the order they are listed in (review ruling Q11: on a re-key the stale
+ * cancelled record and its replacement share `scheduled_out`, and picking the stale one would
+ * confirm a false cancellation); when every candidate is cancelled, the cancelled one is returned.
  */
 export function nearestInstance(
   flights: readonly Exact<FlightStatus>[],
@@ -604,6 +607,7 @@ export function nearestInstance(
 ): Exact<FlightStatus>[] {
   let bestId: string | undefined;
   let bestDistance = Number.POSITIVE_INFINITY;
+  let bestCancelled = false;
   for (const flight of flights) {
     const ms = scheduledOutMs(flight);
     const id = flight.providerRefs['aeroapi'];
@@ -614,9 +618,11 @@ export function nearestInstance(
       continue;
     }
     const distance = Math.abs(ms - centerMs);
-    if (distance < bestDistance) {
+    const cancelled = flight.status === 'cancelled';
+    if (distance < bestDistance || (distance === bestDistance && bestCancelled && !cancelled)) {
       bestDistance = distance;
       bestId = id;
+      bestCancelled = cancelled;
     }
   }
   if (bestId === undefined || bestDistance >= AEROAPI_INSTANCE_MATCH_MS) {

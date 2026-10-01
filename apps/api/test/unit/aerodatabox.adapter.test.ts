@@ -378,6 +378,25 @@ describe('getFlight: mapping', () => {
     const { data } = await mapped('flight-cancelled');
     expect(data[0]?.status).toBe('cancelled');
     expect(data[0]?.times.actualOut).toBeUndefined();
+    expect(data[0]?.statusUncertain).toBeUndefined();
+  });
+
+  // Review ruling Q11: the two uncertain statuses stay operating but carry the marker that makes
+  // them inconclusive to the notification policy; every other status leaves it absent.
+  it.each([
+    ['CanceledUncertain', true],
+    ['Unknown', true],
+    ['Expected', undefined],
+    ['Delayed', undefined],
+  ] as const)('status %s sets statusUncertain to %s', async (adbStatus, expected) => {
+    const base = FIXTURES['flight-scheduled'] as Fixture;
+    const body = structuredClone(base.response.body) as Record<string, unknown>[];
+    body[0] = { ...body[0], status: adbStatus };
+    const fixture = { ...base, response: { ...base.response, body } } as Fixture;
+    const { ctx } = providerContext({ now: '2026-09-22T20:00:00Z', flightKey: KEY });
+    const { data } = await adapter(fixtureFetch(fixture).fetch).getFlight(AA100, ctx);
+    expect(data[0]?.statusUncertain).toBe(expected);
+    expect(data[0]?.status).toBe('scheduled');
   });
 
   it('diverted: departure times are actuals, the arrival airport is left as reported (unverified)', async () => {

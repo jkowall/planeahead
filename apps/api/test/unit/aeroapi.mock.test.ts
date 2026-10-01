@@ -478,6 +478,35 @@ describe('getFlight: the two request rules', () => {
     expect(AEROAPI_INSTANCE_MATCH_MS).toBe(12 * 3_600_000);
   });
 
+  // Review ruling Q11 (4): a re-keyed flight lists the stale cancelled `fa_flight_id` and its
+  // replacement at the same `scheduled_out`; the operating one wins in either order.
+  it.each([
+    ['the cancelled one listed first', ['stale', 'new'], 'AAL100-new', 'scheduled'],
+    ['the cancelled one listed last', ['new', 'stale'], 'AAL100-new', 'scheduled'],
+    ['only the cancelled one', ['stale'], 'AAL100-stale', 'cancelled'],
+  ] as const)('equally near instances, %s: %s', async (_label, order, id, status) => {
+    const out = Date.parse('2026-09-24T22:00:00Z');
+    const now = new Date(out - 2 * DAY + AEROAPI_STANDARD.horizonMarginMs + 1_000);
+    const listed = {
+      stale: { ...instanceOf(2 * DAY, 'AAL100-stale'), cancelled: true },
+      new: instanceOf(2 * DAY, 'AAL100-new'),
+    };
+    const stub = specFaithfulFlights(order.map((name) => listed[name]));
+    const { data, call } = await adapter(stub.fetch).getFlight(
+      {
+        carrier: { icao: 'AAL' },
+        flightNumber: '100',
+        dateLocal: '2026-09-24',
+        scheduledOut: new Date(out).toISOString(),
+      },
+      providerContext({ now }).ctx,
+    );
+    expect(call).toMatchObject({ result: 'ok' });
+    expect(data.map((flight) => [flight.providerRefs['aeroapi'], flight.status])).toEqual([
+      [id, status],
+    ]);
+  });
+
   it('a lookup by local date alone keeps only the instances departing that local day', async () => {
     const stub = specFaithfulFlights([
       instanceOf(-DAY, 'AAL100-prev'),

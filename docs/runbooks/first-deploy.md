@@ -183,7 +183,9 @@ the deploy workflows pass an EMPTY `secrets` input on purpose.
       environment's variants: production and preview against production, development against
       staging), `APPLE_TEAM_ID`, `APP_BUNDLE_IDS` and `ANDROID_SHA256_FINGERPRINTS` (step 11), and
       in production only `PUSH_INJECT_ALLOWED_USER_IDS` (step 19: the user ids whose tokens the
-      admin page's test push may reach there, comma separated; unset refuses every token).
+      admin page's test push may reach there, the only users a test intent is pushed to, and the
+      followers the event injector requires of a flight; comma separated; unset refuses every
+      token and every injection).
 - [ ] The vars in `wrangler.jsonc`: `CF_ACCOUNT_ID` (the account id of step 0) per environment,
       and `ACCESS_TEAM_DOMAIN` and `ACCESS_AUD` from step 14.
 

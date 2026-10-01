@@ -4,6 +4,7 @@ import {
   ADB_STATUSES,
   AdbStatusSchema,
   adbFlags,
+  adbStatusUncertain,
   deriveStatus,
   disambiguateRevisedTime,
   isActualAt,
@@ -152,6 +153,12 @@ describe('AeroDataBox status enum', () => {
     ['CanceledUncertain', false, false],
   ])('%s carries cancelled=%s diverted=%s', (status, cancelled, diverted) => {
     expect(adbFlags(status)).toEqual({ cancelled, diverted });
+  });
+
+  // Review ruling Q11: the two statuses AeroDataBox marks as uncertain, and only those.
+  it.each(ADB_STATUSES.map((status) => [status] as const))('%s uncertain?', (status) => {
+    const expected = status === 'CanceledUncertain' || status === 'Unknown';
+    expect(adbStatusUncertain(status)).toBe(expected);
   });
 });
 

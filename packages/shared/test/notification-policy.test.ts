@@ -1,11 +1,13 @@
 import { describe, expect, it } from 'vitest';
-import type { FlightStatus, FlightStatusValue } from '../src/flight-status';
+import type { FlightStatus, FlightStatusValue, ProviderId } from '../src/flight-status';
 import {
+  evaluateFailedReread,
   evaluatePolicy,
   evaluateReread,
   initialPolicyState,
   POLICY_STATE_VERSION,
   readPolicyState,
+  showsSuspectedChange,
   type PolicyIntent,
   type PolicyResult,
   type PolicyState,
@@ -35,6 +37,10 @@ interface Shape {
   originGate?: string;
   destinationGate?: string;
   actualDestination?: string;
+  /** Review ruling Q11: the answering provider (the fixture's `aerodatabox` by default). */
+  source?: ProviderId;
+  /** Review ruling Q11: the provider marks its own status uncertain. */
+  uncertain?: boolean;
 }
 
 function snap(shape: Shape = {}): FlightStatus {
@@ -49,10 +55,12 @@ function snap(shape: Shape = {}): FlightStatus {
   set('actualOut', shape.out, OUT);
   set('actualOff', shape.off, OUT);
   set('actualIn', shape.in, IN);
-  const { originGate, destinationGate, actualDestination } = shape;
+  const { originGate, destinationGate, actualDestination, source } = shape;
   return makeStatus({
     status: shape.status ?? 'scheduled',
     times,
+    ...(source === undefined ? {} : { source }),
+    ...(shape.uncertain === true ? { statusUncertain: true } : {}),
     ...(originGate === undefined ? {} : { originGate }),
     ...(destinationGate === undefined ? {} : { destinationGate }),
     ...(actualDestination === undefined ? {} : { actualDestination: { icao: actualDestination } }),
@@ -65,6 +73,8 @@ interface Step {
   shape: Shape;
   reread?: boolean;
   confirmed?: boolean;
+  /** The re-read produced no snapshot (`evaluateFailedReread`; `shape` is ignored). */
+  failed?: boolean;
 }
 
 interface Walk {
@@ -80,6 +90,11 @@ function walk(start: Shape, steps: Step[]): Walk {
   const intents: Walk['intents'] = [];
   let last: PolicyResult = { intents: [], state, wants: null };
   for (const step of steps) {
+    if (step.failed === true) {
+      last = evaluateFailedReread({ state, now: step.at });
+      ({ state } = last);
+      continue;
+    }
     const next = snap(step.shape);
     const input = { previous, next, state, now: step.at, context: { confirmed: step.confirmed } };
     last = step.reread === true ? evaluateReread(input) : evaluatePolicy(input);
@@ -144,14 +159,65 @@ describe('N2 the departure delay line and its settle re-read', () => {
       [{ at: t(-120), shape: { delay: 20 }, confirmed: true }],
       ['delay departure 20'],
     ],
+    // Review ruling Q10.
+    [
+      'an ordinary dropout while pending, then a measurable re-read: pushed',
+      [
+        { at: t(-120), shape: { delay: 20 } },
+        { at: t(-118), shape: {} },
+        { at: t(-115), shape: { delay: 25 }, reread: true },
+      ],
+      ['delay departure 25'],
+    ],
+    [
+      'a settled pending, then the estimate drops: cleared, and the arrival rule runs again',
+      [
+        { at: t(-120), shape: { delay: 20 } },
+        { at: t(-115), shape: { delay: 20 }, reread: true },
+        { at: t(-100), shape: { delay: 5 } },
+        { at: t(-99), shape: { delay: 30 } },
+        { at: t(-94), shape: { delay: 30 }, reread: true },
+        { at: t(-90), shape: {} },
+        { at: t(-80), shape: { arrival: 40 } },
+      ],
+      ['delay departure 20', 'delay departure 5 correction', 'delay arrival 40'],
+    ],
+    // Review ruling Q12: a pending delay is dropped once out is observed.
+    [
+      'a pending delay when the flight pushes back: dropped, nothing pushed',
+      [
+        { at: t(10), shape: { delay: 20 } },
+        { at: t(13), shape: { delay: 20, out: 12, status: 'departed' } },
+        { at: t(15), shape: { delay: 20, out: 12, status: 'departed' }, reread: true },
+      ],
+      [],
+    ],
+    // Review ruling Q3: failed settle re-reads.
+    [
+      'two failed settle re-reads, then the cadence slot is the re-read',
+      [
+        { at: t(-120), shape: { delay: 20 } },
+        { at: t(-115), shape: {}, failed: true },
+        { at: t(-110), shape: {}, failed: true },
+        { at: t(-105), shape: { delay: 25 }, reread: true },
+      ],
+      ['delay departure 25'],
+    ],
   ])('%s', (_name, steps, expected) => {
     expect(walk({}, steps).intents.map(summary)).toEqual(expected);
   });
 
   it('asks for the settle re-read no later than 5 minutes after the line', () => {
     const { last } = walk({}, [{ at: t(-120), shape: { delay: 20 } }]);
-    expect(last.wants).toEqual({ at: t(-115), reasons: ['settle'] });
-    expect(last.state.delay.pending).toEqual({ since: t(-120), settleAt: t(-115), settled: false });
+    // Review rulings Q3 and Q11: `wants` names when a read becomes the re-read (`from`), and
+    // the pending delay counts its failed re-reads.
+    expect(last.wants).toEqual({ at: t(-115), from: t(-115), reasons: ['settle'] });
+    expect(last.state.delay.pending).toEqual({
+      since: t(-120),
+      settleAt: t(-115),
+      settled: false,
+      failedReads: 0,
+    });
   });
 
   it('a settle re-read that cannot measure the delay clears it instead of asking again', () => {
@@ -162,6 +228,32 @@ describe('N2 the departure delay line and its settle re-read', () => {
     expect(result.intents).toEqual([]);
     expect(result.state.delay.pending).toBeNull();
     expect(result.wants).toBeNull();
+  });
+
+  it('an unmeasurable settle re-read with scheduled out clears the pending (review ruling Q10)', () => {
+    const steps = [
+      { at: t(-120), shape: { delay: 20 } },
+      { at: t(-115), shape: {}, reread: true },
+    ];
+    const { last } = walk({}, steps);
+    expect(last.intents).toEqual([]);
+    expect(last.state.delay.pending).toBeNull();
+    expect(last.wants).toBeNull();
+  });
+
+  it('retries a failed settle re-read 5 minutes later, then waits for the cadence (review ruling Q3)', () => {
+    const line: Step = { at: t(-120), shape: { delay: 20 } };
+    const once = walk({}, [line, { at: t(-115), shape: {}, failed: true }]);
+    expect(once.last.wants).toEqual({ at: t(-110), from: t(-110), reasons: ['settle'] });
+    expect(once.state.delay.pending?.failedReads).toBe(1);
+    const twice = walk({}, [
+      line,
+      { at: t(-115), shape: {}, failed: true },
+      { at: t(-110), shape: {}, failed: true },
+    ]);
+    // Due from now (the next cadence slot reads it), and no later than an hour.
+    expect(twice.last.wants).toEqual({ at: t(-50), from: t(-110), reasons: ['settle'] });
+    expect(twice.last.intents).toEqual([]);
   });
 
   it('owes nothing once the settle is resolved', () => {
@@ -245,6 +337,59 @@ describe('N2 after a pushed delay: moves, the rate limit and the correction', ()
       ],
       ['delay departure 10 correction', 'delay departure 20'],
     ],
+    // Review ruling Q10: an unknown delay is unknown, not zero.
+    ['a dropout of the estimate: silent', [{ at: t(-90), shape: {} }], []],
+    [
+      'a dropout, then the estimate back: still 20, silent',
+      [
+        { at: t(-90), shape: {} },
+        { at: t(-75), shape: { delay: 20 } },
+      ],
+      [],
+    ],
+    [
+      'a suspected cancellation cleared by a re-read without estimates: no delay correction',
+      [
+        { at: t(-90), shape: { status: 'cancelled' } },
+        { at: t(-85), shape: {}, reread: true },
+      ],
+      [],
+    ],
+    [
+      'a recovery after a dropout: the correction',
+      [
+        { at: t(-90), shape: {} },
+        { at: t(-75), shape: { delay: 5 } },
+      ],
+      ['delay departure 5 correction'],
+    ],
+    // Review ruling Q12: the departure rule stops once out is observed.
+    [
+      'out 2 minutes late: no correction',
+      [{ at: t(5), shape: { out: 2, status: 'departed' } }],
+      [],
+    ],
+    [
+      'runway times only after takeoff: silent',
+      [{ at: t(20), shape: { off: 15, status: 'en_route' } }],
+      [],
+    ],
+    [
+      'out 50 minutes late: no departure intent after out',
+      [{ at: t(60), shape: { out: 50, off: 60, status: 'en_route', delay: 50 } }],
+      [],
+    ],
+    // Review ruling Q13: the rate limit compares with a 60-second tolerance.
+    [
+      'a move 14 minutes 1 second after the last intent: pushed',
+      [{ at: t(-100) - 59_000, shape: { delay: 40 } }],
+      ['delay departure 40'],
+    ],
+    [
+      'a move 13 minutes 59 seconds after the last intent: held',
+      [{ at: t(-100) - 61_000, shape: { delay: 40 } }],
+      [],
+    ],
   ])('%s', (_name, steps, expected) => {
     const intents = walk({}, [...PUSHED_20, ...steps]).intents.map(summary);
     expect(intents).toEqual(['delay departure 20', ...expected]);
@@ -270,6 +415,13 @@ describe('N2 after a pushed delay: moves, the rate limit and the correction', ()
       lastIntentAt: t(-84),
       pending: null,
     });
+  });
+
+  it('a dropout after a push owes no re-read (review ruling Q10)', () => {
+    const { last } = walk({}, [...PUSHED_20, { at: t(-90), shape: {} }]);
+    expect(last.intents).toEqual([]);
+    expect(last.wants).toBeNull();
+    expect(last.state.delay.pushedMinutes).toBe(20);
   });
 
   it('a delay present when the state is seeded is the baseline, not news', () => {
@@ -337,6 +489,69 @@ describe('N2 arrival bands', () => {
         { at: t(-100), shape: { delay: 20, arrival: 31 } },
       ],
       ['delay departure 20', 'delay arrival 31'],
+    ],
+    // Review ruling Q9: hysteresis on the way down, arrival delays clamped at 0.
+    [
+      'in flight, 31/29 alternation after a departure push at 30: no arrival intent',
+      [
+        { at: t(-120), shape: { delay: 30, arrival: 30 } },
+        { at: t(-115), shape: { delay: 30, arrival: 30 }, reread: true },
+        ...[29, 31, 29, 31, 29].map((arrival, i) => ({
+          at: t(60 + 30 * i),
+          shape: { out: 30, off: 40, status: 'en_route' as const, arrival },
+        })),
+      ],
+      ['delay departure 30'],
+    ],
+    [
+      'in flight, 31 then 29/31/29: one push',
+      [31, 29, 31, 29].map((arrival, i) => ({
+        at: t(60 + 30 * i),
+        shape: { out: 0, off: 10, status: 'en_route' as const, arrival },
+      })),
+      ['delay arrival 31'],
+    ],
+    [
+      '16/14 every 15 minutes before out: one push',
+      [16, 14, 16, 14].map((arrival, i) => ({ at: t(-120 + 15 * i), shape: { arrival } })),
+      ['delay arrival 16'],
+    ],
+    [
+      '46/44 around the 45 line: one push',
+      [46, 44, 46, 44].map((arrival, i) => ({ at: t(-120 + 15 * i), shape: { arrival } })),
+      ['delay arrival 46'],
+    ],
+    [
+      'a real recovery, 20 then 8: the correction',
+      [
+        { at: t(60), shape: { out: 0, off: 10, status: 'en_route', arrival: 20 } },
+        { at: t(90), shape: { out: 0, off: 10, status: 'en_route', arrival: 8 } },
+      ],
+      ['delay arrival 20', 'delay arrival 8 correction'],
+    ],
+    [
+      'early to on time and back: silent',
+      [-10, 0, -5].map((arrival, i) => ({
+        at: t(60 + 30 * i),
+        shape: { out: 0, off: 10, status: 'en_route' as const, arrival },
+      })),
+      [],
+    ],
+    [
+      'late, then early: the correction is on time (clamped at 0)',
+      [
+        { at: t(60), shape: { out: 0, off: 10, status: 'en_route', arrival: 20 } },
+        { at: t(90), shape: { out: 0, off: 10, status: 'en_route', arrival: -12 } },
+      ],
+      ['delay arrival 20', 'delay arrival 0 correction'],
+    ],
+    [
+      're-entry after a correction, 20, 8, 18: 18 is pushed',
+      [20, 8, 18].map((arrival, i) => ({
+        at: t(60 + 30 * i),
+        shape: { out: 0, off: 10, status: 'en_route' as const, arrival },
+      })),
+      ['delay arrival 20', 'delay arrival 8 correction', 'delay arrival 18'],
     ],
   ])('%s', (_name, steps, expected) => {
     expect(walk({}, steps).intents.map(summary)).toEqual(expected);
@@ -430,6 +645,25 @@ describe('N3 gates', () => {
         { at: t(-45), shape: { originGate: 'B11' } },
       ],
       ['gate_change origin B11'],
+    ],
+    // Review ruling Q17: gates are compared after normalising case and whitespace.
+    [
+      'the same gate respelt in case or whitespace: nothing',
+      B10,
+      [
+        { at: t(-60), shape: { originGate: 'b10' } },
+        { at: t(-50), shape: { originGate: ' B 10 ' } },
+      ],
+      [],
+    ],
+    [
+      'a flap reverted in another spelling: still the correction',
+      B10,
+      [
+        { at: t(-60), shape: { originGate: 'B12' } },
+        { at: t(-50), shape: { originGate: 'b10' } },
+      ],
+      ['gate_change origin B12', 'gate_change origin b10 correction'],
     ],
     [
       'destination change before off: nothing',
@@ -598,7 +832,8 @@ describe('N4 cancellation and diversion', () => {
       {},
       [
         { at: t(120), shape: { ...AIRBORNE, actualDestination: 'EINN' } },
-        { at: t(124), shape: { ...AIRBORNE, actualDestination: 'EINN' }, reread: true },
+        // Review ruling Q11: a suspicion is decided only from its own re-read instant (was t(124)).
+        { at: t(125), shape: { ...AIRBORNE, actualDestination: 'EINN' }, reread: true },
       ],
       ['diversion flight EINN'],
     ],
@@ -623,6 +858,127 @@ describe('N4 cancellation and diversion', () => {
       ],
       ['diversion flight EINN'],
     ],
+    // Review ruling Q11: only a conclusive answer from the raising provider decides.
+    [
+      'suspected, then an unknown status on the re-read: kept, then confirmed',
+      {},
+      [
+        { at: t(-90), shape: CANCELLED },
+        { at: t(-85), shape: { status: 'unknown' }, reread: true },
+        { at: t(-80), shape: CANCELLED, reread: true },
+      ],
+      ['cancellation flight cancelled'],
+    ],
+    [
+      'suspected, then a status the provider marks uncertain: kept, then confirmed',
+      {},
+      [
+        { at: t(-90), shape: CANCELLED },
+        { at: t(-85), shape: { uncertain: true }, reread: true },
+        { at: t(-80), shape: CANCELLED, reread: true },
+      ],
+      ['cancellation flight cancelled'],
+    ],
+    [
+      'suspected, then operating from another provider: kept; the raising one confirms',
+      { originGate: 'B10' },
+      [
+        { at: t(-90), shape: { ...CANCELLED, originGate: 'B10' } },
+        { at: t(-85), shape: { source: 'aeroapi', originGate: 'B12' }, reread: true },
+        { at: t(-80), shape: CANCELLED, reread: true },
+      ],
+      ['cancellation flight cancelled'],
+    ],
+    [
+      'suspected by one provider, cancelled by another: not confirmed',
+      {},
+      [
+        { at: t(-90), shape: { ...CANCELLED, source: 'aeroapi' } },
+        { at: t(-85), shape: CANCELLED, reread: true },
+        { at: t(-80), shape: CANCELLED, reread: true },
+      ],
+      [],
+    ],
+    [
+      'three inconclusive fast re-reads, then the cadence slot says cancelled: one push',
+      {},
+      [
+        { at: t(-90), shape: CANCELLED },
+        { at: t(-85), shape: { status: 'unknown' }, reread: true },
+        { at: t(-80), shape: {}, failed: true },
+        { at: t(-75), shape: { source: 'aeroapi' }, reread: true },
+        { at: t(-60), shape: CANCELLED, reread: true },
+        { at: t(-45), shape: CANCELLED, reread: true },
+      ],
+      ['cancellation flight cancelled'],
+    ],
+    [
+      'four flaps, then cancelled twice: one push within the budget',
+      {},
+      [
+        ...[-200, -180, -160, -140].flatMap((at): Step[] => [
+          { at: t(at), shape: CANCELLED },
+          { at: t(at + 5), shape: {}, reread: true },
+        ]),
+        { at: t(-120), shape: CANCELLED },
+        { at: t(-115), shape: CANCELLED, reread: true },
+      ],
+      ['cancellation flight cancelled'],
+    ],
+    [
+      'a diversion re-read from another provider is inconclusive; the raising one confirms',
+      {},
+      [
+        { at: t(120), shape: DIVERTED },
+        {
+          at: t(125),
+          shape: { ...DIVERTED, actualDestination: 'EIDW', source: 'aeroapi' },
+          reread: true,
+        },
+        { at: t(130), shape: { ...AIRBORNE, uncertain: true }, reread: true },
+        { at: t(135), shape: DIVERTED, reread: true },
+      ],
+      ['diversion flight EINN'],
+    ],
+    [
+      'a bare diverted status after the airport was pushed: the same diversion',
+      {},
+      [
+        { at: t(120), shape: DIVERTED },
+        { at: t(125), shape: DIVERTED, reread: true },
+        { at: t(150), shape: { ...AIRBORNE, status: 'diverted' } },
+        { at: t(155), shape: { ...AIRBORNE, status: 'diverted' }, reread: true },
+      ],
+      ['diversion flight EINN'],
+    ],
+    // Review ruling Q14: a confirmed un-diversion is a correction; the destination rules resume.
+    [
+      'un-diverted after a pushed diversion: the correction once the re-read confirms it',
+      { destinationGate: 'D1' },
+      [
+        { at: t(120), shape: { ...DIVERTED, destinationGate: 'D1' } },
+        { at: t(125), shape: { ...DIVERTED, destinationGate: 'D1' }, reread: true },
+        { at: t(150), shape: { ...AIRBORNE, destinationGate: 'D2' } },
+        { at: t(155), shape: { ...AIRBORNE, destinationGate: 'D2' }, reread: true },
+      ],
+      [
+        'diversion flight EINN',
+        'diversion flight undiverted correction',
+        'gate_change destination D2',
+      ],
+    ],
+    [
+      'un-diverted, then diverted again on the re-read: the diversion stands',
+      {},
+      [
+        { at: t(120), shape: DIVERTED },
+        { at: t(125), shape: DIVERTED, reread: true },
+        { at: t(150), shape: AIRBORNE },
+        { at: t(155), shape: DIVERTED, reread: true },
+        { at: t(180), shape: DIVERTED },
+      ],
+      ['diversion flight EINN'],
+    ],
     [
       'diverted: the planned destination gate is not pushed',
       { destinationGate: 'D1' },
@@ -638,12 +994,17 @@ describe('N4 cancellation and diversion', () => {
 
   it('a suspected cancellation keeps the tracker reading, never finishing on it', () => {
     const { last } = walk({}, [{ at: t(-90), shape: CANCELLED }]);
+    // Review ruling Q11: the suspicion names its raising provider and its re-read schedule.
     expect(last.state.cancellation).toEqual({
       status: 'suspect',
       since: t(-90),
       value: 'cancelled',
+      provider: 'aerodatabox',
+      reads: 0,
+      fastLeft: 3,
+      lastReadAt: t(-90),
     });
-    expect(last.wants).toEqual({ at: t(-85), reasons: ['cancellation'] });
+    expect(last.wants).toEqual({ at: t(-85), from: t(-85), reasons: ['cancellation'] });
   });
 
   it('a suspected un-cancellation asks for the cancellation re-read, and a clear restores the push', () => {
@@ -652,13 +1013,21 @@ describe('N4 cancellation and diversion', () => {
       { at: t(-85), shape: CANCELLED, reread: true },
     ];
     const suspected = walk({}, [...pushed, { at: t(-60), shape: {} }]);
+    // Review ruling Q11: the suspicion keeps the push it would undo, and its provider.
     expect(suspected.state.cancellation).toEqual({
       status: 'suspect',
       since: t(-60),
       value: 'uncancelled',
+      provider: 'aerodatabox',
+      reads: 0,
+      fastLeft: 3,
+      lastReadAt: t(-60),
       pushedAt: t(-85),
+      pushedValue: 'cancelled',
     });
-    expect(suspected.last.wants).toEqual({ at: t(-55), reasons: ['cancellation'] });
+    expect(suspected.last.wants).toEqual({ at: t(-55), from: t(-55), reasons: ['cancellation'] });
+    // The confirming re-read of the cancellation spent one of the flight's six fast re-reads.
+    expect(suspected.state.fastRereadsLeft).toBe(5);
     const restored = walk({}, [
       ...pushed,
       { at: t(-60), shape: {} },
@@ -674,7 +1043,98 @@ describe('N4 cancellation and diversion', () => {
 
   it('a suspected diversion asks for its confirming re-read', () => {
     const { last } = walk({}, [{ at: t(120), shape: DIVERTED }]);
-    expect(last.wants).toEqual({ at: t(125), reasons: ['diversion'] });
+    expect(last.wants).toEqual({ at: t(125), from: t(125), reasons: ['diversion'] });
+  });
+
+  // Review ruling Q11 (3): three fast re-reads 5 minutes apart, then the sooner of the cadence
+  // slot (the tracker's) or 60 minutes; a failed read is inconclusive and spends one.
+  it('re-reads a suspicion 3 times 5 minutes apart, then within the hour', () => {
+    const raised: Step = { at: t(-90), shape: CANCELLED };
+    const fails = (...ats: number[]): Step[] => ats.map((at) => ({ at, shape: {}, failed: true }));
+    const one = walk({}, [raised, ...fails(t(-85))]);
+    expect(one.last.wants).toEqual({ at: t(-80), from: t(-80), reasons: ['cancellation'] });
+    expect(one.state.cancellation).toMatchObject({ status: 'suspect', reads: 1, fastLeft: 2 });
+    const three = walk({}, [raised, ...fails(t(-85), t(-80), t(-75))]);
+    expect(three.last.wants).toEqual({ at: t(-15), from: t(-70), reasons: ['cancellation'] });
+    expect(three.state.cancellation).toMatchObject({ reads: 3, fastLeft: 0, lastReadAt: t(-75) });
+    expect(three.state.fastRereadsLeft).toBe(3);
+    // A slow re-read that does not decide moves the window on by the same rule.
+    const four = walk({}, [raised, ...fails(t(-85), t(-80), t(-75), t(-60))]);
+    expect(four.last.wants).toEqual({ at: t(0), from: t(-55), reasons: ['cancellation'] });
+    expect(four.state.fastRereadsLeft).toBe(3);
+  });
+
+  it('a failed read before the re-read is due spends nothing', () => {
+    const { state } = walk({}, [
+      { at: t(-90), shape: CANCELLED },
+      { at: t(-88), shape: {}, failed: true },
+    ]);
+    expect(state.cancellation).toMatchObject({ reads: 0, fastLeft: 3, lastReadAt: t(-90) });
+    expect(state.fastRereadsLeft).toBe(6);
+  });
+
+  // Review ruling Q11 (5): beyond the budget the next regular read decides.
+  it('with the budget spent, a new suspicion has no fast re-read and the next read decides', () => {
+    const flaps = [-300, -280, -260, -240, -220, -200].flatMap((at): Step[] => [
+      { at: t(at), shape: CANCELLED },
+      { at: t(at + 5), shape: {}, reread: true },
+    ]);
+    const spent = walk({}, [...flaps, { at: t(-120), shape: CANCELLED }]);
+    expect(spent.state.fastRereadsLeft).toBe(0);
+    expect(spent.state.cancellation).toMatchObject({ status: 'suspect', fastLeft: 0 });
+    expect(spent.last.wants).toEqual({ at: t(-60), from: t(-115), reasons: ['cancellation'] });
+    const decided = walk({}, [
+      ...flaps,
+      { at: t(-120), shape: CANCELLED },
+      { at: t(-105), shape: CANCELLED, reread: true },
+    ]);
+    expect(decided.intents.map(summary)).toEqual(['cancellation flight cancelled']);
+  });
+
+  // Review ruling Q11 (6): the caller names the provider when the snapshot's source is not it.
+  it("records the caller's provider, and only that provider decides", () => {
+    const previous = snap();
+    const state = initialPolicyState(previous);
+    const alert = { context: { provider: 'aeroapi' as const } };
+    const raised = evaluatePolicy({
+      previous,
+      next: snap(CANCELLED),
+      state,
+      now: t(-90),
+      ...alert,
+    });
+    expect(raised.state.cancellation).toMatchObject({ status: 'suspect', provider: 'aeroapi' });
+    const input = { previous, next: snap(CANCELLED), state: raised.state, now: t(-85) };
+    expect(evaluateReread(input).intents).toEqual([]);
+    expect(evaluateReread({ ...input, ...alert }).intents.map(summary)).toEqual([
+      'cancellation flight cancelled',
+    ]);
+  });
+
+  // Review ruling Q11 (1): what the tracker keeps out of its stored snapshot.
+  it('says which snapshots show only a suspected change', () => {
+    const shows = (start: Shape, steps: Step[], next: Shape): boolean =>
+      showsSuspectedChange(walk(start, steps).state, snap(next));
+    const suspected = [{ at: t(-90), shape: CANCELLED }];
+    expect(shows({}, suspected, CANCELLED)).toBe(true);
+    // An operating answer is not the suspected change (adopted, the suspicion kept or cleared).
+    expect(shows({}, suspected, {})).toBe(false);
+    expect(shows({}, suspected, { uncertain: true })).toBe(false);
+    // Confirmed: no longer a suspicion, the snapshot is adopted.
+    const confirmed = [...suspected, { at: t(-85), shape: CANCELLED, reread: true }];
+    expect(shows({}, confirmed, CANCELLED)).toBe(false);
+    expect(shows({}, [], CANCELLED)).toBe(false);
+    const diverted = [{ at: t(120), shape: DIVERTED }];
+    expect(shows(AIRBORNE, diverted, DIVERTED)).toBe(true);
+    expect(shows(AIRBORNE, diverted, AIRBORNE)).toBe(false);
+    // After a pushed diversion, an un-diversion is the suspected change, the diversion is not.
+    const undiverted = [
+      ...diverted,
+      { at: t(125), shape: DIVERTED, reread: true },
+      { at: t(130), shape: AIRBORNE },
+    ];
+    expect(shows(AIRBORNE, undiverted, AIRBORNE)).toBe(true);
+    expect(shows(AIRBORNE, undiverted, DIVERTED)).toBe(false);
   });
 });
 
@@ -824,6 +1284,36 @@ describe('the policy state', () => {
     expect(readPolicyState({ v: POLICY_STATE_VERSION })).toBeNull();
   });
 
+  // Review ruling Q11: layout 1 is migrated; its suspicions, which name no provider, are dropped
+  // (an un-cancellation's restores its push) and the next observation raises them again.
+  it('migrates layout 1', () => {
+    const v1 = {
+      v: 1,
+      delay: {
+        pushedMinutes: 20,
+        lastIntentAt: t(-115),
+        arrivalBand: 1,
+        pending: { since: t(-100), settleAt: t(-95), settled: true },
+      },
+      gates: { origin: { seen: 'B10', pushed: null }, destination: { seen: null, pushed: null } },
+      cancellation: { status: 'suspect', since: t(-60), value: 'uncancelled', pushedAt: t(-85) },
+      diversion: { status: 'suspect', since: t(-60), value: 'EINN' },
+    };
+    expect(readPolicyState(v1)).toEqual({
+      ...v1,
+      v: POLICY_STATE_VERSION,
+      delay: { ...v1.delay, pending: { ...v1.delay.pending, failedReads: 0 } },
+      cancellation: { status: 'pushed', at: t(-85), value: 'cancelled' },
+      diversion: { status: 'none' },
+      fastRereadsLeft: 6,
+    });
+    const plain = { ...v1, cancellation: { status: 'suspect', since: t(-60), value: 'cancelled' } };
+    expect(readPolicyState(plain)?.cancellation).toEqual({ status: 'none' });
+    expect(readPolicyState({ ...v1, delay: { ...v1.delay, pending: null } })?.delay.pending).toBe(
+      null,
+    );
+  });
+
   it('seeds from a snapshot without pushing anything', () => {
     expect(initialPolicyState(snap({ delay: 30, arrival: 31, originGate: 'B10' }))).toEqual({
       v: POLICY_STATE_VERSION,
@@ -834,6 +1324,8 @@ describe('the policy state', () => {
       },
       cancellation: { status: 'none' },
       diversion: { status: 'none' },
+      // Review ruling Q11 (5): the flight's budget of fast re-reads.
+      fastRereadsLeft: 6,
     });
   });
 

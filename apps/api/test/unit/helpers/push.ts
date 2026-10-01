@@ -254,9 +254,10 @@ export function capturingQueue(fail = false): CapturingQueue {
  * A liveness read (review ruling R1) that finds every target of these jobs live and still its
  * subject's, for the tests whose targets have no `push_tokens` row.
  */
-export function everyTargetLive(
-  jobs: readonly unknown[],
-): (ids: readonly string[]) => Promise<ReadonlyMap<string, string>> {
+export function everyTargetLive(jobs: readonly unknown[]): (ids: readonly string[]) => Promise<{
+  readonly tokens: ReadonlyMap<string, string>;
+  readonly superseded: ReadonlySet<string>;
+}> {
   const owners = new Map<string, string>();
   for (const body of jobs) {
     const parsed = PushJobV1.safeParse(body);
@@ -265,12 +266,14 @@ export function everyTargetLive(
     }
   }
   return (ids) =>
-    Promise.resolve(
-      new Map(
+    Promise.resolve({
+      tokens: new Map(
         ids.flatMap((id) => {
           const owner = owners.get(id);
           return owner === undefined ? [] : [[id, owner] as const];
         }),
       ),
-    );
+      // No notification of these tests has a newer row (increment 15 ruling Q16).
+      superseded: new Set<string>(),
+    });
 }

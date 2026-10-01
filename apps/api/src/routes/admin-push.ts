@@ -58,10 +58,12 @@ import {
 } from '@planeahead/shared';
 import { environmentName, type AppBindings, type Env } from '../env';
 import { esc, renderPage, table } from '../lib/html';
+import { allowedTestPushUserIds } from '../lib/push-allow-list';
 import { createLogger } from '../observability/log';
 import { pushConfiguration } from '../push/config';
 import type { PushCredentialStatus } from '../push/credentials';
 import { APNS_HOSTS } from '../push/payload';
+import { ADMIN_INJECT_PATH } from './admin-inject';
 
 export const ADMIN_PUSH_TEST_PATH = '/admin/push/test';
 export const ADMIN_PUSH_RESULT_PATH = '/admin/push/test/result';
@@ -72,7 +74,6 @@ export const TEST_PUSH_TTL_MS = 10 * 60_000;
  * this id exists, Android shows the push on the manifest's default channel (R1 F33).
  */
 export const TEST_PUSH_CHANNEL_ID = 'test_push';
-const UUID_SHAPE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
 
 /** The `status` RPC of a `PushAuth` object, narrowed so a test can hand in a fake. */
 export interface PushAuthStatusStub {
@@ -86,16 +87,6 @@ export interface AdminPushOptions {
   /** The `PushAuth` object of a credential; the default is `PUSH_AUTH.getByName` at `enam`. */
   readonly pushAuth?: ((env: Env) => (name: PushCredentialName) => PushAuthStatusStub) | undefined;
   readonly now?: (() => number) | undefined;
-}
-
-/** The user ids a production test push may target (`PUSH_INJECT_ALLOWED_USER_IDS`). */
-export function allowedTestPushUserIds(env: Env): ReadonlySet<string> {
-  return new Set(
-    (env.PUSH_INJECT_ALLOWED_USER_IDS ?? '')
-      .split(',')
-      .map((id) => id.trim().toLowerCase())
-      .filter((id) => UUID_SHAPE.test(id)),
-  );
 }
 
 function iso(ms: number | null): string {
@@ -225,7 +216,8 @@ export async function pushTransportSection(
   return `${configurationHtml(env)}
 <h3>Credentials (PushAuth)</h3>${credentials}
 <h3>Outcomes, last 24 hours</h3>${outcomes}
-<p><a href="${ADMIN_PUSH_TEST_PATH}">Send a test push</a> through the real push queue and consumer.</p>`;
+<p><a href="${ADMIN_PUSH_TEST_PATH}">Send a test push</a> through the real push queue and consumer.</p>
+<p><a href="${ADMIN_INJECT_PATH}">Inject a flight event</a> (a gate change, a delay, a cancellation, a diversion) through the tracker's notification policy, notify and the push queue, as a test.</p>`;
 }
 
 async function pushPage(

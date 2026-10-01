@@ -17,98 +17,26 @@
 import { runInDurableObject } from 'cloudflare:test';
 import { afterEach, describe, expect, it } from 'vitest';
 import { RPC_SCHEMA_VERSION, readPolicyState, type FlightStatusInput } from '@planeahead/shared';
-import { POLICY_REREAD_RETRY_MS, type FlightTracker } from '../../src/do/flight-tracker';
+import type { FlightTracker } from '../../src/do/flight-tracker';
 import {
   HOUR_MS,
   MINUTE_MS,
   adbCalls,
-  adbDateTime,
-  adbFlightContract,
   drainTouched,
-  ofKind,
-  openBudgetFor,
-  resolverHarness,
   scriptAdb,
-  trackerHarness,
   uniqueFlight,
-  type AdbFlightOptions,
-  type TestFlight,
-  type TrackerHarness,
 } from './helpers/flights';
+import {
+  answer,
+  flightRow,
+  eventsOf,
+  instancesOf,
+  intentsOf,
+  nextAlarm,
+  seeded,
+} from './helpers/policy';
 
 afterEach(drainTouched);
-
-/** A scripted AeroDataBox answer: the on-time contract with fields replaced. */
-function answer(
-  flight: TestFlight,
-  options: AdbFlightOptions,
-  patch: {
-    status?: string;
-    departureRevisedMs?: number;
-    departureRunwayMs?: number;
-    arrivalRevisedMs?: number;
-  } = {},
-) {
-  const body = adbFlightContract(flight, options) as Record<string, unknown>;
-  const departure = { ...(body['departure'] as Record<string, unknown>) };
-  const arrival = { ...(body['arrival'] as Record<string, unknown>) };
-  const at = (ms: number, tz: string) => adbDateTime(new Date(ms), tz);
-  if (patch.departureRevisedMs !== undefined) {
-    departure['revisedTime'] = at(patch.departureRevisedMs, flight.originTz);
-  }
-  if (patch.departureRunwayMs !== undefined) {
-    departure['runwayTime'] = at(patch.departureRunwayMs, flight.originTz);
-  }
-  if (patch.arrivalRevisedMs !== undefined) {
-    arrival['revisedTime'] = at(patch.arrivalRevisedMs, 'Europe/London');
-  }
-  const status = patch.status ?? body['status'];
-  return { status: 200, body: [{ ...body, departure, arrival, status }] };
-}
-
-/** Creates the tracker through the resolver at `clock`, the gateway answering `first`. */
-async function seeded(
-  flight: TestFlight,
-  clock: number,
-  first = answer(flight, { phase: 'expected' }),
-): Promise<TrackerHarness> {
-  await scriptAdb(flight, [first]);
-  const tracker = await trackerHarness(flight.flightKey, clock);
-  await openBudgetFor(flight, clock);
-  const resolver = await resolverHarness(flight, clock);
-  const resolved = await resolver.stub.resolve({
-    rpcVersion: RPC_SCHEMA_VERSION,
-    designator: flight.designator,
-    dateLocal: flight.dateLocal,
-  });
-  expect(resolved.outcome).toBe('resolved');
-  return tracker;
-}
-
-/** Runs the pending alarm at its own time; returns that time. */
-async function nextAlarm(tracker: TrackerHarness): Promise<number> {
-  const at = await tracker.alarmAt();
-  expect(at).not.toBeNull();
-  await tracker.setClock(at ?? 0);
-  expect(await tracker.runAlarm()).toBe(true);
-  return at ?? 0;
-}
-
-interface FlightRowView {
-  phase: string;
-  finish_reason: string | null;
-  policy_state: string | null;
-}
-
-async function flightRow(tracker: TrackerHarness): Promise<FlightRowView | undefined> {
-  const rows = await tracker.rows<Record<string, unknown>>(
-    'SELECT phase, finish_reason, policy_state FROM flight',
-  );
-  return rows[0] as FlightRowView | undefined;
-}
-
-const intentsOf = (tracker: TrackerHarness) => ofKind(tracker.outbox.sent, 'notify_intent');
-const instancesOf = (tracker: TrackerHarness) => ofKind(tracker.outbox.sent, 'flight_instance');
 
 describe('N4: a cancellation is confirmed before it is pushed or finishes the tracker', () => {
   it('suspects, retries a failed re-read, then confirms: one intent, and the finish path', async () => {
@@ -118,24 +46,30 @@ describe('N4: a cancellation is confirmed before it is pushed or finishes the tr
     await scriptAdb(flight, [cancelled]);
     const seen = await nextAlarm(tracker);
     // Suspected: nothing pushed, the tracker alive, its next alarm the re-read 5 minutes out.
-    expect(await flightRow(tracker)).toMatchObject({ phase: 'cancelled', finish_reason: null });
+    // Review ruling Q11 (1) changed this on purpose: the suspicion is evidence, not state, so
+    // the stored snapshot, its phase and the instance row stay the last confirmed ones (they
+    // said `cancelled` with `cancelSuspect` before), and a `cancel_suspect` event records it.
+    expect(await flightRow(tracker)).toMatchObject({ phase: 'scheduled', finish_reason: null });
     expect(intentsOf(tracker)).toEqual([]);
     expect(await tracker.alarmAt()).toBe(seen + 5 * MINUTE_MS);
-    // The instance row says so, and persist keeps the flight's live-tracking slots meanwhile.
     expect(instancesOf(tracker).at(-1)?.payload).toMatchObject({
-      phase: 'cancelled',
+      phase: 'scheduled',
       trackingState: 'tracking',
-      cancelSuspect: true,
+      nextRefreshAt: new Date(seen + 5 * MINUTE_MS).toISOString(),
     });
+    expect(eventsOf(tracker, 'cancel_suspect')).toMatchObject([
+      { field: 'cancellation', newValue: 'cancelled', source: 'aerodatabox' },
+    ]);
 
     // The re-read fails (a provider error): the suspicion is neither trusted nor dropped, and
-    // the re-read is tried again a spacing later, never at once.
+    // the policy counts the failed re-read (review ruling Q3 as Q11 bounds it): the next one is
+    // a fast re-read 5 minutes later, never at once.
     await scriptAdb(flight, [{ status: 500, body: { message: 'unavailable' } }]);
     const failed = await nextAlarm(tracker);
     expect(failed).toBe(seen + 5 * MINUTE_MS);
-    expect(await flightRow(tracker)).toMatchObject({ phase: 'cancelled', finish_reason: null });
+    expect(await flightRow(tracker)).toMatchObject({ phase: 'scheduled', finish_reason: null });
     expect(intentsOf(tracker)).toEqual([]);
-    expect(await tracker.alarmAt()).toBe(failed + POLICY_REREAD_RETRY_MS);
+    expect(await tracker.alarmAt()).toBe(failed + 5 * MINUTE_MS);
 
     // The retried re-read confirms: one cancellation intent, then the finish path as before.
     await scriptAdb(flight, [cancelled]);
@@ -153,10 +87,8 @@ describe('N4: a cancellation is confirmed before it is pushed or finishes the tr
       phase: 'finished',
       finish_reason: 'cancelled',
     });
-    expect(instancesOf(tracker).at(-1)?.payload).toMatchObject({
-      trackingState: 'finished',
-      cancelSuspect: false,
-    });
+    expect(instancesOf(tracker).at(-1)?.payload).toMatchObject({ trackingState: 'finished' });
+    expect(instancesOf(tracker).some((m) => 'cancelSuspect' in m.payload)).toBe(false);
     expect(await adbCalls(flight)).toBe(4);
   });
 

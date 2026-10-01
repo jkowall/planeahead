@@ -305,6 +305,13 @@ export const FlightStatusSchema = z.looseObject({
   destination: AirportRefSchema,
   actualDestination: AirportRefSchema.optional(),
   status: FlightStatusValueSchema,
+  /**
+   * True when the provider itself marks its status as uncertain (AeroDataBox `CanceledUncertain`
+   * and `Unknown`). Provider-neutral: the notification policy reads such an answer as
+   * inconclusive, so it neither confirms nor clears a suspected cancellation or diversion
+   * (increment 15, review ruling Q11). Absent means not marked.
+   */
+  statusUncertain: z.boolean().optional(),
   /** How `operatingCarrierIcao` was decided (ADR 0010); absent on snapshots older than increment 6. */
   operatorSource: OperatorSourceSchema.optional(),
   /** The marketing carrier the provider was asked about, when it differs or may differ. */

@@ -959,7 +959,7 @@ describe('N8: the 15-minute band anchored on departure', () => {
     throw new Error('the walk did not finish');
   }
 
-  it('resolves the anchor: actual out, else the later of scheduled and estimated out', () => {
+  it('resolves the anchor: actual out, else actual off, else the later of scheduled and estimated out', () => {
     const departure = (overrides: Partial<CadenceContext>): number =>
       (resolveWindows(CADENCE_A2, ctx(-120, overrides)).bounds.departure - OUT) / MINUTE_MS;
     expect(departure({})).toBe(0);
@@ -967,6 +967,10 @@ describe('N8: the 15-minute band anchored on departure', () => {
     expect(departure({ estimatedOut: at(-10) })).toBe(0);
     expect(departure({ estimatedOut: at(45), actualOut: at(30) })).toBe(30);
     expect(departure({ actualOut: at(-5) })).toBe(-5);
+    // Review ruling Q7: runway times only (no actual out) anchor on actual off.
+    expect(departure({ estimatedOut: at(45), actualOff: at(20) })).toBe(20);
+    expect(departure({ actualOff: at(10) })).toBe(10);
+    expect(departure({ actualOut: at(5), actualOff: at(20) })).toBe(5);
   });
 
   it('keeps 15-minute polls through a ground delay, then 30 from out', () => {

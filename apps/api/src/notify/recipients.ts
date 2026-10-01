@@ -9,12 +9,23 @@
  * `first_gate_assignment`, off by default; the others default on). A test intent (an injection,
  * ruling N11) reaches on production only the user ids in `PUSH_INJECT_ALLOWED_USER_IDS`, and on
  * staging and locally every subscriber; the preferences apply to it as to any intent.
+ *
+ * Every subscriber left gets the `notifications` row, but only those whose subscription is
+ * `live_tracked` are pushed (the orchestrator's ruling after part 3, from increment 8's O3 and the
+ * Phase 0 free tier: the flag gates notifications and the Live Activity). A change detected
+ * outside the live window, or for a subscription the free tier's cap refused, reaches that user's
+ * inbox only; `docs/open-decisions.md` records it. The gate applies to test intents too, so an
+ * injection exercises the real path. Review ruling Q1 reads the gate at the intent's
+ * `producedAt` rather than now: a subscription whose slot persist released at or after it is
+ * pushed too (`liveTrackedAt`), and a token that already has a `notification_deliveries` row for
+ * the recipient's notification is not pushed again (`readDeliveredTargets`).
  */
 
-import { and, eq, inArray, isNull, notInArray, or } from 'drizzle-orm';
+import { and, eq, inArray, isNotNull, isNull, notInArray, or } from 'drizzle-orm';
 import {
   flightInstances,
   flightSubscriptions,
+  notificationDeliveries,
   notificationPreferences,
   notifications,
   pushTokens,
@@ -42,6 +53,13 @@ export interface SubscriberRow {
   readonly userId: string;
   readonly flightInstanceId: string;
   readonly muted: boolean;
+  /** Whether the subscription holds a live-tracking slot now. */
+  readonly liveTracked: boolean;
+  /**
+   * When persist released the slot because the flight was over (ruling Q1): the releasing row's
+   * Durable Object instant; null while held, never held, or taken again.
+   */
+  readonly liveTrackedReleasedAt: string | null;
   readonly pushEnabled: boolean | null;
   readonly events: unknown;
   readonly timeFormat: string | null;
@@ -54,6 +72,8 @@ export async function readSubscribers(db: Db, flightKey: string): Promise<Subscr
       userId: flightSubscriptions.userId,
       flightInstanceId: flightSubscriptions.flightInstanceId,
       muted: flightSubscriptions.muted,
+      liveTracked: flightSubscriptions.liveTracked,
+      liveTrackedReleasedAt: flightSubscriptions.liveTrackedReleasedAt,
       pushEnabled: notificationPreferences.pushEnabled,
       events: notificationPreferences.events,
       timeFormat: userPreferences.timeFormat,
@@ -82,7 +102,10 @@ export async function readSubscribers(db: Db, flightKey: string): Promise<Subscr
 export type DropReason = 'not_allow_listed' | 'muted' | 'push_disabled' | 'preference_off';
 
 export interface RecipientSelection {
+  /** Every subscriber who hears of the intent: each gets a `notifications` row. */
   readonly recipients: Recipient[];
+  /** Those of `recipients` live-tracked when the intent was produced: only they are pushed. */
+  readonly pushed: Recipient[];
   readonly dropped: Record<DropReason, number>;
 }
 
@@ -91,6 +114,27 @@ export interface SelectionOptions {
   readonly production: boolean;
   /** `PUSH_INJECT_ALLOWED_USER_IDS`, lower case. */
   readonly allowedTestUserIds: ReadonlySet<string>;
+}
+
+/**
+ * Whether the subscription was live-tracked when the intent was produced (ruling Q1): it holds
+ * its slot, or persist released the slot at or after `producedAt`. The confirming alarm writes a
+ * cancellation's intent and the rows that release the slot in one flush, and an arrival delay
+ * can be produced on the observation that lands the flight; persist applies the release before
+ * this consumer reads, so the flag alone would push neither. A subscription the cap refused
+ * never held a slot and is never stamped, so it stays inbox only.
+ */
+export function liveTrackedAt(
+  row: Pick<SubscriberRow, 'liveTracked' | 'liveTrackedReleasedAt'>,
+  producedAt: string,
+): boolean {
+  if (row.liveTracked) {
+    return true;
+  }
+  return (
+    row.liveTrackedReleasedAt !== null &&
+    Date.parse(row.liveTrackedReleasedAt) >= Date.parse(producedAt)
+  );
 }
 
 /** The subscribers an intent reaches (pure). */
@@ -107,6 +151,7 @@ export function selectRecipients(
   };
   const toggle = notificationEventPreferenceFor(intent.intent);
   const recipients: Recipient[] = [];
+  const pushed: Recipient[] = [];
   for (const row of rows) {
     const preferences = effectiveNotificationPreferences(
       row.pushEnabled === null ? null : { pushEnabled: row.pushEnabled, events: row.events },
@@ -129,14 +174,18 @@ export function selectRecipients(
       dropped[reason] += 1;
       continue;
     }
-    recipients.push({
+    const recipient: Recipient = {
       userId: row.userId,
       subscriptionId: row.subscriptionId,
       flightInstanceId: row.flightInstanceId,
       timeFormat: row.timeFormat === '24h' ? '24h' : '12h',
-    });
+    };
+    recipients.push(recipient);
+    if (liveTrackedAt(row, intent.producedAt)) {
+      pushed.push(recipient);
+    }
   }
-  return { recipients, dropped };
+  return { recipients, pushed, dropped };
 }
 
 /** What a `notifications` row keeps of its intent (`data`), for the inbox. */
@@ -248,4 +297,43 @@ export async function readTokens(db: Db, userIds: readonly string[]): Promise<Re
     }
   }
   return tokens;
+}
+
+/** The key of one notification's delivery to one token, lower case. */
+export function deliveryKey(notificationId: string, pushTokenId: string): string {
+  return `${notificationId.toLowerCase()}:${pushTokenId.toLowerCase()}`;
+}
+
+/**
+ * The duplicate guard (ruling Q1, review finding F6): which of these notifications already have a
+ * `notification_deliveries` row for a token, whatever its status (`deliveryKey`). A token with one
+ * was handed to the push consumer by an earlier delivery of the same intent, which persist then
+ * recorded, so the finished tracker's re-send of an intent whose confirmation was lost pushes
+ * nothing again; a retry after a failed `sendBatch` finds no row and still sends.
+ */
+export async function readDeliveredTargets(
+  db: Db,
+  notificationIds: readonly string[],
+): Promise<Set<string>> {
+  const delivered = new Set<string>();
+  for (const run of chunk(notificationIds, NOTIFY_STATEMENT_ROWS)) {
+    const rows = await db
+      .select({
+        notificationId: notificationDeliveries.notificationId,
+        pushTokenId: notificationDeliveries.pushTokenId,
+      })
+      .from(notificationDeliveries)
+      .where(
+        and(
+          inArray(notificationDeliveries.notificationId, run),
+          isNotNull(notificationDeliveries.pushTokenId),
+        ),
+      );
+    for (const row of rows) {
+      if (row.pushTokenId !== null) {
+        delivered.add(deliveryKey(row.notificationId, row.pushTokenId));
+      }
+    }
+  }
+  return delivered;
 }

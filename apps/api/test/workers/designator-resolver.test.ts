@@ -151,11 +151,14 @@ describe('DesignatorResolver', () => {
     const older = await seed(new Date(clock - HOUR_MS).toISOString());
     expect(older.status).toBe('stale');
     expect(older.version).toBe(1);
-    // A fresher status is applied as an update, on the same tracker.
+    // A fresher status is applied as an update, on the same tracker. Its instance row carries the
+    // fresher `fetchedAt` and `lastRefreshedAt`, so it goes out under a version of its own
+    // (increment 15 review ruling Q1: never two different instance payloads under one version;
+    // it reused version 1 before).
     const fresher = await seed(new Date(clock + 60_000).toISOString());
     expect(fresher.status).toBe('already');
-    expect(fresher.version).toBe(1);
-    expect((await tracker.stub.health()).version).toBe(1);
+    expect(fresher.version).toBe(2);
+    expect((await tracker.stub.health()).version).toBe(2);
     expect(await tracker.alarmAt()).toBe(clock + HOUR_MS);
   });
 
