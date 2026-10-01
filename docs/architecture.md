@@ -67,10 +67,12 @@ are in `docs/adr/`; the data model is `docs/schema-review.md`; threats are
   dead-lettered messages (`dlq/{queue}/{messageId}.json`, `dlq/persist-parked/`);
   `PUBLIC_BUCKET` is reserved for share images (Phase 5).
 - **Queues**: `persist` (tracker, resolver and budget outboxes into Postgres, plus the merge
-  job and, from increment 14, the push outcomes), `reconcile`, `housekeeping` (increment 12),
-  `push` (increment 14: the push transport's consumer, section 9), and `notify`,
-  `provider-events`, `imports` (consumers are stubs until their phases); every queue has a dead
-  letter queue whose consumer archives each message to R2 and raises an ops alert.
+  job, from increment 14 the push outcomes, and from increment 15 the forward of `notify_intent`
+  rows to `notify`), `reconcile`, `housekeeping` (increment 12), `push` (increment 14: the push
+  transport's consumer, section 9), `notify` (increment 15: intents into `notifications` rows and
+  push jobs, section 10), and `provider-events`, `imports` (consumers are stubs until their
+  phases); every queue has a dead letter queue whose consumer archives each message to R2 and
+  raises an ops alert.
 - **Analytics Engine**: `PROVIDER_CALLS` (one point per stored provider call, index = provider),
   `PRODUCT_EVENTS` (increment 12, one point per accepted app event, index = the analytics id),
   `API_METRICS` (reserved). Every sum weights rows by `_sample_interval`; Postgres stays the ledger.
@@ -167,17 +169,27 @@ error handler maps SQLSTATE 23503 on a user foreign key, for a principal whose `
   handle and on a 60 s freshness window. Cost is bounded twice: the per-flight soft cap (2x the A2
   baseline, stretches the cadence) and hard cap (4x, stops polling), and the provider-wide daily cap
   and per-second bucket in ProviderBudget.
+- **Notification policy** (increment 15, section 10). Every stored snapshot is classified against
+  the previous one and the `policy_state` column; an intent becomes a `notify_intent` outbox row
+  in the same transaction. A delay reaching the line or a suspected cancellation or diversion
+  moves the next alarm to at most 5 minutes out for its re-read. A suspected cancellation or
+  diversion is evidence, not state (review ruling Q11): the tracker stores the suspicion in its
+  policy state, keeps its snapshot, phase and times (the version moves with the schedule), and
+  holds the finish only while fast re-reads are left; then it finishes unconfirmed, without a
+  push. A cancellation supersedes an open diversion suspicion, and after a provider read the
+  policy's re-read is never at the read's own instant (review ruling Q19).
 - **Subscribers.** `subscribe` and `unsubscribe` are idempotent on the subscription id; Postgres is
   the record and the list only follows it. The nightly housekeeping reconciliation (section 7) lists
   every active tracker's subscribers and makes the list follow Postgres.
 - **Finish and deletion.** The flight finishes after the cadence's post-arrival tail poll, at the
   hard cap, or at `MAX_LIFETIME` (`min(scheduledIn + 6 h, actualOff + 2 x block)`); the object
   deletes itself 22 hours later, and never while an outbox row is unconfirmed.
-- Measured (increment 7, re-run in increment 12): 74 provider calls per A2 lifecycle, 1,203 rows
-  written per flight including the schema DDL (budget 1,600), 16.3 per alarm on average, largest
-  outbox message 1,635 bytes. Source: the line `[lifecycle] polls=74 alarms=74
-rows_written_lifetime=1203 ... per_alarm_avg=16.3 ... max_message_bytes=1635` that
-  `test/workers/flight-tracker.lifecycle.test.ts` prints.
+- Measured (increment 7, re-run in increments 12 and 15 and its review round): 74 provider calls
+  per A2 lifecycle, 1,204 rows written per flight including the schema DDL (budget 1,600; 1,203
+  before increment 15's migration 003), 16.3 per alarm on average, largest outbox message 1,635
+  bytes. Source: the line `[lifecycle] polls=74 alarms=74 rows_written_lifetime=1204 ...
+per_alarm_avg=16.3 ... max_message_bytes=1635` that `test/workers/flight-tracker.lifecycle.test.ts`
+  prints.
 
 ## 5. The outbox and the persist path
 
@@ -286,7 +298,8 @@ partial when the role lacks `pg_read_all_stats`), the queue depths, the sync hor
 the last housekeeping runs, and (increment 14) the push transport: its configuration, the
 `PushAuth` objects' last mints and failures, and every push attempt's outcome by reason over the
 last 24 hours. Its write actions are the operator account deletion (`/admin/accounts/delete`) for
-a request that reached the support inbox and the test push (`/admin/push/test`, section 9).
+a request that reached the support inbox, the test push (`/admin/push/test`, section 9) and,
+from increment 15, the event injector (`/admin/push/inject`, section 10).
 
 ## 9. The push path (increment 14)
 
@@ -326,8 +339,10 @@ a request that reached the support inbox and the test push (`/admin/push/test`, 
   before any send (review ruling R1, which amended the increment's "no Postgres": no Postgres
   connection is in use while the sends wait, and `persist` stays the only writer): one statement
   for the `push_tokens` rows of every target the batch could send, and a target is sent only when
-  its row is live and still its subject's, else it is `failed` `token_inactive` unsent; a failed
-  read sends nothing and re-enqueues after 60 s. It sends each job's targets with at most six
+  its row is live and still its subject's, else it is `failed` `token_inactive` unsent; since
+  increment 15 the same statement drops a target whose notification a newer one superseded
+  (`failed` `superseded`, section 10); a failed read sends nothing and re-enqueues after 60 s. It
+  sends each job's targets with at most six
   requests in flight (Workers' limit on connections waiting for headers), a 10-second timeout and
   every body read or cancelled, then acknowledges the job and re-enqueues only its retryable
   targets, grouped by delay in one `sendBatch` per job: FCM never sooner than 10 s, FCM 429
@@ -361,7 +376,133 @@ a request that reached the support inbox and the test push (`/admin/push/test`, 
   Notifications Console's delivery log) and stops reloading once the job's window has passed
   without an outcome.
 
+## 10. Notifications end to end (increment 15)
+
+```
+ FlightTracker: every stored snapshot     persist consumer            notify consumer
+ (alarm, refresh, reconcile, alert   -->  forwards the intent   -->  subscribers less the muted,
+ merge, re-seed) -> evaluatePolicy        to NOTIFY_QUEUE, then      push off and toggled off:
+ -> one notify_intent outbox row per      confirms the outbox row    one notifications row each;
+ intent, in the state transaction,        (only after the send)      live-tracked at producedAt:
+ guarded by notif_dedupe                                             push jobs (<= 50 targets),
+        ^                                                            no token pushed twice -->
+        |                                                            push queue (section 9)
+        | injectPolicyEvent: test intents, confirmed by construction, nothing stored
+ /admin/push/inject (Access, same origin, an audit_log row naming the operator)
+```
+
+- **The policy** (`packages/shared/src/notification-policy.ts`, pure and provider-neutral) turns a
+  pair of snapshots and the tracker's `PolicyState` into intents. A departure delay is measured
+  only from an actual or estimated out (unknown is not zero: no delay rule runs on it), and only
+  until out is observed. One reaching 15 minutes is held for a settle re-read at most 5 minutes
+  later and pushed with the re-read's value only if it still stands (after two failed settle
+  re-reads 5 minutes apart, the next cadence slot re-reads); then a move of 15 minutes or more, a
+  correction under 15 (its title states the new value), and at most one delay intent per 15
+  minutes, compared with 60 s of tolerance. The arrival delay, clamped at 0, moves up to its
+  15-minute band at once and leaves band b only below 15b minus 5 minutes
+  (`ARRIVAL_CORRECTION_MARGIN_MINUTES`); an arrival intent goes out only on a band the last
+  departure intent did not imply. Origin gate changes count from T-6 h to out, destination gates
+  from off to in, gates compared without case or whitespace; a flap reverting inside one
+  evaluation drops both halves, a return within 10 minutes of a pushed change is a correction,
+  and a first assignment is pushed only to users who opted in. A cancellation or a diversion is
+  evidence, not state: the suspicion names the provider that raised it, and only that provider's
+  conclusive answer decides, re-read by designator on the window's own provider (past the
+  cadence's last slot, the last window's). `cancelled` confirms; a positively operating answer
+  clears; `unknown`, `statusUncertain` (AeroDataBox's `CanceledUncertain` and `Unknown`), not
+  found, an error or another provider's answer keeps the suspicion. Up to 3 fast re-reads 5
+  minutes apart, then one at the sooner of the next cadence slot or 60 minutes, within a budget
+  of 6 fast re-reads per flight; alert merges never confirm. An un-cancellation or un-diversion
+  after a pushed one is confirmed the same way and pushed as a correction (the un-cancellation is
+  unreachable while a confirmed cancellation finishes the tracker). An intent is time-sensitive
+  within the hour before the departure's best estimate and before out; its `expiresAt` is the
+  departure or arrival estimate, scheduled out plus 24 hours (cancellation) or the arrival plus 6
+  hours (diversion), never less than 15 minutes after it was produced.
+- **In the tracker.** `flight.policy_state` (SQLite migration 003, `SCHEMA_VERSION` 3) rides on
+  the existing `UPDATE flight`, so the policy costs an on-time flight no row (1,204 rows a
+  lifetime, section 4). The dedupe key `{flightKey}:{kind}:{dedupeValue}:v{version}` names the
+  change sequence, so a retried alarm reproduces it and writes nothing, while a later return to a
+  value pushed before gets a new one; every instance row the tracker sends has its own version. A
+  snapshot showing only a suspected cancellation or diversion is not adopted: the tracker keeps
+  its stored snapshot, phase and times (the version moves with the schedule), writes a
+  `cancel_suspect` or `diversion_suspect` event and the policy state, and the alarm is the
+  sooner of the cadence slot and the re-read. So the
+  app never shows an unconfirmed cancellation, and the live-tracking slots stay as they were. The
+  suspicion holds the finish only while fast re-reads are left, even past the cadence's last
+  slot; then the flight finishes with the cadence's reason, without a push, and logs
+  `cancel_unconfirmed` or `diversion_unconfirmed`. The hard cap and a key drift still end it.
+- **Persist** forwards each `NotifyIntentV1` to `NOTIFY_QUEUE` and confirms its outbox row only
+  after the send, so a finished tracker still deletes only with an empty outbox (ADR 0011). An
+  instance row that ends the live window (`arrived`, `cancelled` or terminal) clears
+  `live_tracked`, and the same UPDATE stamps `flight_subscriptions.live_tracked_released_at` with
+  the releasing row's own Durable Object instant (`finishedAt`, else `lastRefreshedAt`, from the
+  same clock as the intent's `producedAt`), never persist's wall clock; whatever takes a slot
+  (persist's entering pass, the subscribe route) sets it back to null. The column is Postgres
+  migration 0009 (ten migrations, `DB_SCHEMA_VERSION` 10; 0008 added `notifications.is_test`).
+- **The `notify` consumer** (`src/queues/notify.ts`, `src/notify/`; batch 10, wait 1 s,
+  concurrency 5) reads the flight's live subscriptions with their preferences, in runs of 500,
+  and drops the muted, the users with push off and those whose toggle for the kind is off (a test
+  intent on production also every user outside `PUSH_INJECT_ALLOWED_USER_IDS`). Each user left
+  gets one `notifications` row, unique per user and dedupe key (a redelivery inserts none and
+  reads back the first rows; `is_test` for an injection; `data` keeps the intent's fields and its
+  `producedAt`). Only subscriptions live-tracked when the change happened are pushed: flagged
+  `live_tracked`, or released at or after the intent's `producedAt`, so the alarm that confirms a
+  cancellation and finishes the flight in the same flush still reaches its devices; a
+  subscription the cap refused is never stamped, so the free tier's cap holds
+  (`docs/open-decisions.md` section 8). A token that already has a `notification_deliveries` row
+  for its recipient's notification is skipped (logged `already_delivered`): the finished
+  tracker's +22 h re-send of an intent whose confirmation was lost pushes nothing again, while a
+  redelivery after a failed `sendBatch` (no delivery row yet) still sends. The rest get one
+  target per live `apns` or `fcm` token whose permission is not `denied` or
+  `undetermined`, `subjectId` the token's user, in jobs of at most 50 targets per time format,
+  each naming its kind's Android channel (`flight_changes`, or `flight_delays` for delays) and
+  the collapse id `{kind}:{flightKey}`. The text is plain and self-contained, airport-local
+  times in the user's 12 or 24 hour clock, the designator as the app writes it (`AA100`). The
+  jobs go out in as few `sendBatch` calls as 100 messages and 256 KB allow, and the intent is
+  acknowledged after the last.
+- **`notify`'s retries** are bounded by the intent's relevance (review ruling Q2): once persist
+  has confirmed the forward, the notify message is the only copy, so the queue's `max_retries` is
+  100 in every environment and a failure retries after `min(120, 2^attempts)` seconds (delivery
+  follows a recovery within two minutes; about 3.17 hours of runway). When the next attempt would
+  land past the intent's `expiresAt`, notify acknowledges and logs `notify_intent_expired`
+  instead; at attempt 6 it raises the `notify_intent_failing` ops alert once while the retries
+  continue. The dead-letter alert stays for poison; `dlq/notify/` is archived, never replayed (a
+  nightly replay would arrive 1 to 27 hours late).
+- **Superseded pushes** (review ruling Q16). The push consumer's one liveness read (section 9)
+  also answers which targets' notifications a newer row for the same user, kind and flight has
+  superseded; such a target is not requested (`failed`, reason `superseded`), so a first push
+  retried after an APNs 5xx cannot land after its correction. Newer is ordered by the intent's
+  `producedAt` from `data`, then `created_at` and the id, so an older intent that waited out an
+  outage in notify's retries never supersedes a newer one. A test row never supersedes a real
+  one, and the admin page's test push names no notification.
+- **Preferences.** `notification_preferences` holds `push_enabled` and the per-kind `events`
+  toggles (delay, gate change, first gate assignment off by default, cancellation, diversion),
+  read and written through `GET` and `PATCH /v1/me/preferences` (a nested `notifications` object
+  beside the display preferences); a tombstoned preferences row reads as the defaults there, as
+  in notify (review ruling Q18); muting is the subscription's own flag.
+- **The event injector** (`/admin/push/inject`, src/routes/admin-inject.ts) reads a tracker's
+  snapshot (`getState`), applies one event to a copy (an origin or destination gate, a departure
+  delay of N minutes, a cancellation, a diversion), and calls `injectPolicyEvent` with a fresh
+  UUIDv7 injection id: the tracker classifies the copy with the same policy, confirmed by
+  construction, writes test intents keyed `{flightKey}:{kind}:{dedupeValue}:test:{injectionId}`
+  through the same outbox, and stores neither the copy nor the policy state, so the next real poll
+  finds no change back. The answer lists each intent and whether it was written, with a button
+  replaying the same id (which writes nothing). On production only a flight a live subscriber in
+  `PUSH_INJECT_ALLOWED_USER_IDS` follows is accepted. The tracker ignores an injection, answered
+  409, while its policy state holds a suspected cancellation or diversion (an injection is
+  confirmed by construction and would decide it) or its stored snapshot is cancelled (review
+  ruling Q5). The `audit_log` row naming the operator is written `pending` before the tracker
+  call and settled after it as `written`, `ignored`, `timeout` or `error` (Q6).
+
 ## Refresh cadence
+
+Since increment 15 (ruling N8) A2's 15-minute band is anchored on the departure, not on boarding:
+it runs until actual out (else actual off, review ruling Q7), or until
+`max(scheduled out, estimated out)` while neither is observed, and the 30-minute band starts there. An on-time flight keeps its 74 polls (24 and 6 around the
+anchor instead of 22 and 8 around boarding); a ground delay of D minutes keeps the 15-minute polls
+running and costs about D/30 more polls than the boarding-anchored A2 would (`groundDelayPolls`,
+tested on the shared constants), and the landing gap widens from 10 to 30 minutes (R4's D3
+trade-off). The tracker feeds the cadence the estimated and actual out of its stored snapshot.
+A1, B and the literal brief keep the boarding anchor.
 
 <!-- cadence:start -->
 <!-- prettier-ignore-start -->
@@ -372,17 +513,17 @@ Assumptions: block 180 min, boarding at T-40 min, tail stops at in+120 min, on-t
 
 ### Windows inside 48 h (AeroAPI)
 
-| Window                             | Literal brief                        | A1 polls only                                              | A2 polls + alerts                    | B ADB webhooks + AeroAPI OOOI alerts |
-| ---------------------------------- | ------------------------------------ | ---------------------------------------------------------- | ------------------------------------ | ------------------------------------ |
-| Hourly window                      | 1 h interval, T-48h to T-3h: 45      | 1 h interval, T-48h to T-6h: 42                            | 1 h interval, T-48h to T-6h: 42      | fixed slots T-48h: 1                 |
-| Pre-boarding window                | 10 min interval, T-3h to T-40min: 14 | 15 min interval, T-6h to T-40min: 22                       | 15 min interval, T-6h to T-40min: 22 | fixed slots T-3h: 1                  |
-| In flight                          | 2 min interval, T-40min to in: 110   | 15 min interval, T-40min to in: 15                         | 30 min interval, T-40min to in: 8    | fixed slots out+15min: 1             |
-| Post-arrival tail                  | 10 min interval, in to in+120min: 12 | fixed slots in, in+15min, in+30min, in+45min, in+120min: 5 | 1 h interval, in to in+120min: 2     | fixed slots in+15min, in+120min: 2   |
-| AeroAPI polls inside 48 h          | 181                                  | 84                                                         | 74                                   | 5                                    |
-| AeroAPI alert deliveries (assumed) | 0                                    | 0                                                          | 12                                   | 8                                    |
-| AeroDataBox alert items (assumed)  | 0                                    | 0                                                          | 0                                    | 15                                   |
-| Poll-equivalents inside 48 h       | 181                                  | 84                                                         | 122                                  | 37.75                                |
-| List cost inside 48 h              | $0.905                               | $0.42                                                      | $0.61                                | $0.18875                             |
+| Window                             | Literal brief                        | A1 polls only                                              | A2 polls + alerts                | B ADB webhooks + AeroAPI OOOI alerts |
+| ---------------------------------- | ------------------------------------ | ---------------------------------------------------------- | -------------------------------- | ------------------------------------ |
+| Hourly window                      | 1 h interval, T-48h to T-3h: 45      | 1 h interval, T-48h to T-6h: 42                            | 1 h interval, T-48h to T-6h: 42  | fixed slots T-48h: 1                 |
+| Pre-boarding window                | 10 min interval, T-3h to T-40min: 14 | 15 min interval, T-6h to T-40min: 22                       | 15 min interval, T-6h to out: 24 | fixed slots T-3h: 1                  |
+| In flight                          | 2 min interval, T-40min to in: 110   | 15 min interval, T-40min to in: 15                         | 30 min interval, out to in: 6    | fixed slots out+15min: 1             |
+| Post-arrival tail                  | 10 min interval, in to in+120min: 12 | fixed slots in, in+15min, in+30min, in+45min, in+120min: 5 | 1 h interval, in to in+120min: 2 | fixed slots in+15min, in+120min: 2   |
+| AeroAPI polls inside 48 h          | 181                                  | 84                                                         | 74                               | 5                                    |
+| AeroAPI alert deliveries (assumed) | 0                                    | 0                                                          | 12                               | 8                                    |
+| AeroDataBox alert items (assumed)  | 0                                    | 0                                                          | 0                                | 15                                   |
+| Poll-equivalents inside 48 h       | 181                                  | 84                                                         | 122                              | 37.75                                |
+| List cost inside 48 h              | $0.905                               | $0.42                                                      | $0.61                            | $0.18875                             |
 
 ### Pre-48 h AeroDataBox calls and per-flight totals by lead time
 
@@ -431,7 +572,7 @@ Measured from the simulated poll sequence (one creation fetch 30 days out, then 
 | A1      | Post-arrival   | in+45min to in+120min | 75 min          | 15 min             | plan section 8: the fallback tail is five fixed polls, 15-minute cover for the first 45 minutes then a final poll |
 | A2      | > 7 d          | T-30d to T-23d        | 7 d             | 2 d                | AeroDataBox schedule layer refreshes biweekly; a weekly poll is the data source's own resolution                  |
 | A2      | 7 d to 48 h    | T-9d to T-48h         | 7 d             | 1 d                | AeroDataBox schedule layer refreshes biweekly; a weekly poll is the data source's own resolution                  |
-| A2      | 3 h to arrival | T-40min to T-10min    | 30 min          | 15 min             | plan section 8: OOOI and ETA arrive by alert; in-flight gate changes are accepted at 30-minute latency            |
+| A2      | 3 h to arrival | out to out+30min      | 30 min          | 15 min             | plan section 8: OOOI and ETA arrive by alert; in-flight gate changes are accepted at 30-minute latency            |
 | A2      | Post-arrival   | in to in+60min        | 1 h             | 15 min             | plan section 8: alerts carry in; the tail only refreshes baggage claim                                            |
 | B       | > 7 d          | T-30d to T-23d        | 7 d             | 2 d                | AeroDataBox schedule layer refreshes biweekly; a weekly poll is the data source's own resolution                  |
 | B       | 7 d to 48 h    | T-9d to T-48h         | 7 d             | 1 d                | AeroDataBox schedule layer refreshes biweekly; a weekly poll is the data source's own resolution                  |
@@ -440,7 +581,7 @@ Measured from the simulated poll sequence (one creation fetch 30 days out, then 
 | B       | 3 h to arrival | T-3h to out+15min     | 195 min         | 15 min             | webhooks and alerts are assumed to carry the SLO (unverified, Phase 1 decision)                                   |
 | B       | Post-arrival   | out+15min to in+15min | 3 h             | 15 min             | webhooks and alerts are assumed to carry the SLO (unverified, Phase 1 decision)                                   |
 
-Gap across the landing instant, from the last poll before `in` to the first at or after it: literal 2 min (out+178min to in); A1 10 min (out+170min to in); A2 10 min (out+170min to in); B 3 h (out+15min to in+15min).
+Gap across the landing instant, from the last poll before `in` to the first at or after it: literal 2 min (out+178min to in); A1 10 min (out+170min to in); A2 30 min (out+150min to in); B 3 h (out+15min to in+15min).
 
 <!-- prettier-ignore-end -->
 <!-- cadence:end -->

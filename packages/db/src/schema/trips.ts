@@ -129,6 +129,16 @@ export const flightSubscriptions = pgTable(
      * sync row (`liveTracked`).
      */
     liveTracked: boolean('live_tracked').notNull().default(false),
+    /**
+     * When the persist consumer last released this subscription's live-tracking slot because the
+     * flight was over (migration 0009, increment 15 ruling Q1): the releasing instance row's own
+     * Durable Object instant (`finishedAt`, else `lastRefreshedAt`), written in the UPDATE that
+     * clears `live_tracked`. Null while the slot is held and wherever a slot is taken again. The
+     * notify consumer pushes to a subscription that is live-tracked or was released at or after
+     * the intent's `producedAt`, so the intent and the release of one alarm cannot drop the push.
+     * A subscription the cap refused is never stamped. Server-only: not in the sync row.
+     */
+    liveTrackedReleasedAt: instant('live_tracked_released_at'),
     ...timestamps(),
     ...softDelete(),
   },

@@ -4,7 +4,8 @@
  * scope, so the 403 branch is exercised directly).
  */
 
-import { DEFAULT_USER_PREFERENCES } from '@planeahead/shared';
+import { sql } from 'drizzle-orm';
+import { DEFAULT_NOTIFICATION_PREFERENCES, DEFAULT_USER_PREFERENCES } from '@planeahead/shared';
 import { env } from 'cloudflare:workers';
 import { Hono } from 'hono';
 import { describe, expect, it } from 'vitest';
@@ -17,6 +18,7 @@ import {
   uniqueEmail,
   worker,
 } from './helpers/auth';
+import { db } from './helpers/routes';
 
 interface MeBody {
   readonly user?: {
@@ -107,6 +109,28 @@ describe('PATCH /v1/me/preferences', () => {
     });
   });
 
+  it('GET ignores a tombstoned row, as notify does (review ruling Q18)', async () => {
+    const session = await signInAnonymously();
+    const client = { ip: session.ip, cookie: session.cookie };
+    const patch = await worker(
+      jsonRequest('/v1/me/preferences', 'PATCH', { distanceUnit: 'km', timeFormat: '24h' }, client),
+    );
+    expect(patch.status).toBe(200);
+    const read = async (path: string) => {
+      const response = await worker(jsonRequest(path, 'GET', undefined, client));
+      expect(response.status).toBe(200);
+      return (await response.json<MeBody>()).preferences;
+    };
+    expect(await read('/v1/me/preferences')).toMatchObject({ distanceUnit: 'km' });
+
+    await db().execute(
+      sql`update user_preferences set deleted_at = now() where user_id = ${session.userId}::uuid`,
+    );
+
+    expect(await read('/v1/me/preferences')).toEqual(DEFAULT_USER_PREFERENCES);
+    expect(await read('/v1/me')).toEqual(DEFAULT_USER_PREFERENCES);
+  });
+
   it('rejects an empty patch, an unknown field, a bad value and an oversized settings bag', async () => {
     const session = await signInAnonymously();
     const client = { ip: session.ip, cookie: session.cookie };
@@ -181,5 +205,113 @@ describe('requireScope and requireUser', () => {
     expect((await wrong.json<{ error: string }>()).error).toBe('insufficient_scope');
     expect(right.status).toBe(200);
     expect(anyPrincipal.status).toBe(200);
+  });
+});
+
+interface PreferencesBody {
+  readonly preferences?: Record<string, unknown>;
+  readonly notifications?: { pushEnabled: boolean; events: Record<string, boolean> };
+  readonly error?: string;
+}
+
+describe('notification preferences on /v1/me/preferences (increment 15, N10)', () => {
+  it('reads the defaults: push on, every toggle on except the first gate assignment', async () => {
+    const session = await signInAnonymously();
+    const client = { ip: session.ip, cookie: session.cookie };
+    const response = await worker(jsonRequest('/v1/me/preferences', 'GET', undefined, client));
+    expect(response.status).toBe(200);
+    expect(await response.json<PreferencesBody>()).toEqual({
+      preferences: DEFAULT_USER_PREFERENCES,
+      notifications: DEFAULT_NOTIFICATION_PREFERENCES,
+    });
+    expect(DEFAULT_NOTIFICATION_PREFERENCES.events).toEqual({
+      delay: true,
+      gate_change: true,
+      first_gate_assignment: false,
+      cancellation: true,
+      diversion: true,
+    });
+  });
+
+  it('merges a partial patch into the stored toggles, records each write, and GET agrees', async () => {
+    const session = await signInAnonymously();
+    const client = { ip: session.ip, cookie: session.cookie };
+    const patch = (body: unknown) =>
+      worker(jsonRequest('/v1/me/preferences', 'PATCH', body, client));
+
+    const first = await patch({ notifications: { events: { first_gate_assignment: true } } });
+    expect(first.status).toBe(200);
+    expect(await first.json<PreferencesBody>()).toEqual({
+      preferences: DEFAULT_USER_PREFERENCES,
+      notifications: {
+        pushEnabled: true,
+        events: { ...DEFAULT_NOTIFICATION_PREFERENCES.events, first_gate_assignment: true },
+      },
+    });
+    // A second patch changes other fields; the first's toggle stays.
+    const second = await patch({
+      distanceUnit: 'km',
+      notifications: { pushEnabled: false, events: { delay: false } },
+    });
+    const expected = {
+      preferences: { ...DEFAULT_USER_PREFERENCES, distanceUnit: 'km' },
+      notifications: {
+        pushEnabled: false,
+        events: {
+          ...DEFAULT_NOTIFICATION_PREFERENCES.events,
+          first_gate_assignment: true,
+          delay: false,
+        },
+      },
+    };
+    expect(await second.json<PreferencesBody>()).toEqual(expected);
+    const read = await worker(jsonRequest('/v1/me/preferences', 'GET', undefined, client));
+    expect(await read.json<PreferencesBody>()).toEqual(expected);
+
+    const changes = await db().execute<{ push: boolean; events: Record<string, boolean> }>(sql`
+      select (row->>'pushEnabled')::boolean as push, row->'events' as events from user_sync_changes
+      where user_id = ${session.userId}::uuid and entity = 'notification_preferences'
+      order by xid, seq
+    `);
+    expect(changes.map((change) => change.push)).toEqual([true, false]);
+    expect(changes[1]?.events).toEqual({ first_gate_assignment: true, delay: false });
+  });
+});
+
+describe('notification preferences validation', () => {
+  it('refuses an empty, unknown or mistyped notifications patch with the envelope', async () => {
+    const session = await signInAnonymously();
+    const client = { ip: session.ip, cookie: session.cookie };
+    const patch = (body: unknown) =>
+      worker(jsonRequest('/v1/me/preferences', 'PATCH', body, client));
+    const refused = [
+      { notifications: {} },
+      { notifications: { events: {} } },
+      { notifications: { events: { boarding: true } } },
+      { notifications: { pushEnabled: 'yes' } },
+      { notifications: { events: { delay: 1 } } },
+      { notifications: { quietHours: true } },
+      // The toggles live under `notifications`, never beside the display fields.
+      { pushEnabled: false },
+    ];
+    for (const body of refused) {
+      const response = await patch(body);
+      expect(response.status, JSON.stringify(body)).toBe(400);
+      expect((await response.json<PreferencesBody>()).error).toBe('validation_failed');
+    }
+    // Nothing was written by any of them.
+    const read = await worker(jsonRequest('/v1/me/preferences', 'GET', undefined, client));
+    expect((await read.json<PreferencesBody>()).notifications).toEqual(
+      DEFAULT_NOTIFICATION_PREFERENCES,
+    );
+  });
+
+  it('answers 401 without a session', async () => {
+    const read = await worker(jsonRequest('/v1/me/preferences', 'GET', undefined));
+    const write = await worker(
+      jsonRequest('/v1/me/preferences', 'PATCH', { notifications: { pushEnabled: false } }),
+    );
+    expect(read.status).toBe(401);
+    expect(write.status).toBe(401);
   });
 });

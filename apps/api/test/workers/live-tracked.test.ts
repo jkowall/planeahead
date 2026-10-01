@@ -24,6 +24,7 @@ import { signInAnonymously } from './helpers/auth';
 import { drainTouched, testEnv, type TestFlight } from './helpers/flights';
 import {
   HOUR,
+  authed,
   counterValue,
   db,
   seedTracker,
@@ -108,6 +109,46 @@ async function flags(userId: string): Promise<{ key: FlightKey; live: boolean }[
     where s.user_id = ${userId}::uuid and s.deleted_at is null
     order by s.created_at
   `);
+}
+
+/** Each subscription's flag and release stamp (ruling Q1), the stamp in epoch ms or null. */
+async function releases(
+  userId: string,
+): Promise<{ key: FlightKey; live: boolean; releasedMs: number | null }[]> {
+  const rows = await db().execute<{
+    key: FlightKey;
+    live: boolean;
+    released_ms: number | null;
+  }>(sql`
+    select fi.flight_key as key, s.live_tracked as live,
+           (extract(epoch from s.live_tracked_released_at) * 1000)::float8 as released_ms
+    from flight_subscriptions s join flight_instances fi on fi.id = s.flight_instance_id
+    where s.user_id = ${userId}::uuid and s.deleted_at is null
+    order by s.created_at
+  `);
+  return rows.map((row) => ({ key: row.key, live: row.live, releasedMs: row.released_ms }));
+}
+
+/** The tracker's terminal row for a landed flight, finished at `finishedAt`. */
+function landedRow(
+  flight: TestFlight,
+  version: number,
+  payload: Partial<FlightInstanceOutboxPayloadV1>,
+): PersistMessageV1Input {
+  return instanceMessage(
+    flight,
+    version,
+    {
+      status: 'arrived',
+      times: {
+        scheduledOut: flight.scheduledOut.toISOString(),
+        actualOut: flight.scheduledOut.toISOString(),
+        scheduledIn: flight.scheduledIn.toISOString(),
+        actualIn: flight.scheduledIn.toISOString(),
+      },
+    },
+    { phase: 'arrived', trackingState: 'landed', ...payload },
+  );
 }
 
 async function liveTrackedChanges(userId: string): Promise<boolean[]> {
@@ -230,5 +271,88 @@ describe('live_tracked where the flight enters and leaves its window (ruling O3)
     const third = await subscribe(session, { flightKey: c.flightKey });
     expect(third.status).toBe(201);
     expect(await counterValue('user', session.userId, 'live_tracked')).toBe(1);
+  });
+
+  it("stamps the release with the releasing row's own instant, never the consumer's clock, and never a refused subscription (Q1)", async () => {
+    const session = await signInAnonymously();
+    const [a, b] = [6, 7].map((hours) => seededFlightFor(hours * HOUR));
+    const refused = seededFlightFor(49 * HOUR);
+    if (a === undefined || b === undefined) {
+      throw new Error('two flights expected');
+    }
+    for (const flight of [a, b, refused]) {
+      await seedTracker(flight);
+      expect((await subscribe(session, { flightKey: flight.flightKey })).status).toBe(201);
+    }
+    // The third enters its window two hours on, with both slots taken: the cap refuses it.
+    const consumerClock = Date.now() + 2 * HOUR;
+    await deliver([instanceMessage(refused, 100)], consumerClock);
+    expect((await releases(session.userId)).map((row) => row.live)).toEqual([true, true, false]);
+
+    const refreshedAt = new Date(Date.now() - 20 * 60_000).toISOString();
+    const finishedAt = new Date(Date.now() - 10 * 60_000).toISOString();
+    await deliver(
+      [
+        // Landed, not finished: the row's `lastRefreshedAt`.
+        landedRow(a, 101, { lastRefreshedAt: refreshedAt }),
+        // Finished: the row's `finishedAt`, not its `lastRefreshedAt`.
+        landedRow(b, 101, {
+          phase: 'finished',
+          trackingState: 'finished',
+          lastRefreshedAt: refreshedAt,
+          finishedAt,
+        }),
+        landedRow(refused, 101, { lastRefreshedAt: refreshedAt }),
+      ],
+      consumerClock,
+    );
+    expect(await releases(session.userId)).toEqual([
+      { key: a.flightKey, live: false, releasedMs: Date.parse(refreshedAt) },
+      { key: b.flightKey, live: false, releasedMs: Date.parse(finishedAt) },
+      { key: refused.flightKey, live: false, releasedMs: null },
+    ]);
+
+    // A later over row finds no flag to clear: the first release's stamp stays.
+    await deliver(
+      [landedRow(a, 102, { lastRefreshedAt: new Date().toISOString() })],
+      consumerClock,
+    );
+    expect((await releases(session.userId))[0]?.releasedMs).toBe(Date.parse(refreshedAt));
+  });
+
+  it('clears the stamp wherever a slot is taken again: the entering pass and a subscribe (Q1)', async () => {
+    const session = await signInAnonymously();
+    const [reentered, restored] = [6, 7].map((hours) => seededFlightFor(hours * HOUR));
+    if (reentered === undefined || restored === undefined) {
+      throw new Error('two flights expected');
+    }
+    const ids: string[] = [];
+    for (const flight of [reentered, restored]) {
+      await seedTracker(flight);
+      const created = await subscribe(session, { flightKey: flight.flightKey });
+      ids.push((await created.json<SubscribeBody>()).subscription.id);
+    }
+    const refreshedAt = new Date(Date.now() - 5 * 60_000).toISOString();
+    await deliver([landedRow(reentered, 100, { lastRefreshedAt: refreshedAt })], Date.now());
+    expect((await releases(session.userId))[0]).toMatchObject({
+      live: false,
+      releasedMs: Date.parse(refreshedAt),
+    });
+
+    // The provider takes the landing back: the next row puts the flight inside its window again.
+    await deliver([instanceMessage(reentered, 101)], Date.now());
+    expect((await releases(session.userId))[0]).toMatchObject({ live: true, releasedMs: null });
+
+    // A tombstoned subscription carrying an old stamp, restored by a subscribe inside the window.
+    const restoredId = ids[1] ?? '';
+    expect((await authed(session, `/v1/flights/${restoredId}`, 'DELETE')).status).toBe(200);
+    await db().execute(sql`
+      update flight_subscriptions set live_tracked_released_at = ${refreshedAt}::timestamptz
+      where id = ${restoredId}::uuid
+    `);
+    const again = await subscribe(session, { flightKey: restored.flightKey });
+    expect(again.status).toBe(201);
+    expect((await again.json<SubscribeBody>()).subscription.id).toBe(restoredId);
+    expect((await releases(session.userId))[1]).toMatchObject({ live: true, releasedMs: null });
   });
 });

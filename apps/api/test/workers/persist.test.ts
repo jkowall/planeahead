@@ -20,6 +20,7 @@ import {
 } from '@planeahead/db';
 import { afterEach, describe, expect, it } from 'vitest';
 import {
+  NotifyIntentV1,
   RPC_SCHEMA_VERSION,
   flightTrackerOrigin,
   uuidv7,
@@ -29,6 +30,7 @@ import {
   type ProviderCallRecord,
 } from '@planeahead/shared';
 import { createLogger } from '../../src/observability/log';
+import { handleNotifyBatch } from '../../src/queues/notify';
 import { handlePersistBatch, type ConfirmingTracker } from '../../src/queues/persist';
 import { makeStatus } from '../../../../packages/shared/test/fixtures';
 import {
@@ -126,6 +128,7 @@ async function run(
     env?: typeof testEnv;
     capture?: (text: string, context: unknown) => void;
     trackerFor?: (flightKey: FlightKey) => ConfirmingTracker;
+    notifyQueue?: { send(body: unknown): Promise<unknown> };
   } = {},
 ) {
   const batch = createMessageBatch(
@@ -141,9 +144,44 @@ async function run(
   await handlePersistBatch(
     batch,
     { env: options.env ?? testEnv, ctx, log: quietLog },
-    { capture: options.capture, trackerFor: options.trackerFor },
+    { capture: options.capture, trackerFor: options.trackerFor, notifyQueue: options.notifyQueue },
   );
   return getQueueResult(batch, ctx);
+}
+
+/** A FlightTracker's `notify_intent` outbox row (increment 15), as the tracker sends it. */
+function notifyIntentMessage(flight: TestFlight, seq: number): PersistMessageV1Input {
+  const flightKey = flight.flightKey;
+  return message(flight, seq, {
+    kind: 'notify_intent',
+    flightKey,
+    payload: {
+      kind: 'notify_intent',
+      flightKey,
+      dedupeKey: `${flightKey}:gate_change:origin:B12:v7`,
+      intent: {
+        kind: 'gate_change',
+        subject: 'origin',
+        value: 'B12',
+        previousValue: 'B10',
+        correction: false,
+        firstAssignment: false,
+        timeSensitive: true,
+        expiresAt: flight.scheduledOut.toISOString(),
+        dedupeValue: 'origin:B12',
+      },
+      flight: {
+        operatingCarrierIcao: 'AAL',
+        flightNumber: flight.number,
+        origin: { icao: 'KJFK', iata: 'JFK' },
+        destination: { icao: 'EGLL', iata: 'LHR' },
+        status: 'scheduled',
+        times: { scheduledOut: flight.scheduledOut.toISOString() },
+        originGate: 'B12',
+      },
+      producedAt: new Date(flight.scheduledOut.getTime() - HOUR_MS).toISOString(),
+    },
+  });
 }
 
 describe('persist consumer', () => {
@@ -299,6 +337,70 @@ describe('persist consumer', () => {
         input: { rpcVersion: RPC_SCHEMA_VERSION, epochMs: EPOCH, seqs: [1] },
       },
     ]);
+  });
+
+  it('forwards a notify_intent to the notify queue, and confirms it only after the send (N7)', async () => {
+    const flight = uniqueFlight();
+    const order: string[] = [];
+    const trackerFor = (): ConfirmingTracker => ({
+      confirmPersisted: (input) => {
+        order.push(`confirm:${(input as { seqs: number[] }).seqs.join(',')}`);
+        return Promise.resolve({
+          rpcVersion: RPC_SCHEMA_VERSION,
+          deleted: 1,
+          remaining: 0,
+          matched: true,
+        });
+      },
+    });
+    const intent = notifyIntentMessage(flight, 7);
+
+    // A failed forward: the message is retried and nothing is confirmed.
+    const failing = { send: () => Promise.reject(new Error('notify unavailable')) };
+    const failed = await run([intent], { trackerFor, notifyQueue: failing });
+    expect(failed.retryMessages.map((m) => m.msgId)).toEqual(['m-0']);
+    expect(order).toEqual([]);
+
+    // The redelivery: forwarded as it is, then confirmed.
+    const forwarded: unknown[] = [];
+    const working = {
+      send: (body: unknown) => {
+        order.push('send');
+        forwarded.push(body);
+        return Promise.resolve();
+      },
+    };
+    const delivered = await run([intent], { trackerFor, notifyQueue: working });
+    expect(delivered.retryMessages).toEqual([]);
+    expect(delivered.explicitAcks).toEqual(['m-0']);
+    expect(order).toEqual(['send', 'confirm:7']);
+    expect(NotifyIntentV1.parse(forwarded[0])).toMatchObject({
+      notifyVersion: 1,
+      flightKey: flight.flightKey,
+      intent: { kind: 'gate_change', value: 'B12' },
+      test: false,
+    });
+
+    // The notify consumer reads the forwarded intent: nobody follows this flight in Postgres, so it
+    // writes and sends nothing, and acknowledges (test/workers/notify.test.ts covers the work).
+    const batch = createMessageBatch(
+      'planeahead-notify-local',
+      forwarded.map((body, index) => ({
+        id: `n-${String(index)}`,
+        timestamp: new Date(),
+        attempts: 1,
+        body,
+      })),
+    );
+    const ctx = createExecutionContext();
+    await handleNotifyBatch(batch, {
+      env: testEnv,
+      ctx,
+      log: quietLog,
+    });
+    const notified = await getQueueResult(batch, ctx);
+    expect(notified.retryMessages).toEqual([]);
+    expect(notified.explicitAcks).toEqual(['n-0']);
   });
 
   it('confirms the seqs it wrote back to the tracker, which deletes them from its outbox', async () => {

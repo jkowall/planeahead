@@ -1,6 +1,7 @@
 /**
  * `persist` queue consumer (increment 7; increment 8 adds the `live_tracked` bookkeeping and the
- * `merge` message; increment 14 the `push_outcome` message, src/queues/push-outcomes.ts).
+ * `merge` message; increment 14 the `push_outcome` message, src/queues/push-outcomes.ts;
+ * increment 15 the `notify_intent` forward to the `notify` queue, confirmed only once sent).
  *
  * This is the only path from a Durable Object to Postgres (ADR 0007): a tracker appends outbox
  * rows, flushes them here, and this consumer writes `flight_instances`, `flight_events` and
@@ -125,6 +126,8 @@ export interface PersistDeps {
   readonly mergeTrackerFor?: TrackerFor | undefined;
   /** The clock the live-window decision reads (ruling O3); `Date.now` by default. */
   readonly now?: (() => number) | undefined;
+  /** Where `notify_intent` rows are forwarded (increment 15); `NOTIFY_QUEUE` by default. */
+  readonly notifyQueue?: { send(body: unknown): Promise<unknown> } | undefined;
 }
 
 const AIRCRAFT_TYPE_RE = /^[A-Z0-9]{2,4}$/;
@@ -262,13 +265,26 @@ export function liveWindowStage(
  * the Live Activity). OVER: every flagged live subscription is cleared and its slot released,
  * never below zero. Both are idempotent through the flag, and each decided row gets its upsert in
  * `user_sync_changes`, so the client can show whether the flight is live-tracked.
+ *
+ * Increment 15, ruling Q1: the OVER clear stamps `live_tracked_released_at` with the releasing
+ * row's own Durable Object instant (`finishedAt`, else `lastRefreshedAt`, which the tracker sets
+ * from the same clock reading as the `producedAt` of the alarm's intents), never this consumer's
+ * clock, in the same UPDATE; a take clears it. The notify consumer pushes to a subscription that
+ * is live-tracked or was released at or after the intent's `producedAt`, so an intent and the
+ * release of one flush reach the devices whatever order the two queues run in.
  */
 async function applyLiveWindow(
   tx: Tx,
   instanceId: string,
   flightKey: FlightKey,
   stored: StoredInstance | null,
-  next: { status: string; trackingState: string; scheduledOut: string | null },
+  next: {
+    status: string;
+    trackingState: string;
+    scheduledOut: string | null;
+    /** The row's own Durable Object instant (`finishedAt`, else `lastRefreshedAt`; Q1). */
+    instant: string | null;
+  },
   nowMs: number,
 ): Promise<void> {
   const now = new Date(nowMs);
@@ -276,7 +292,7 @@ async function applyLiveWindow(
   if (stage === 'over') {
     const cleared = await tx
       .update(flightSubscriptions)
-      .set({ liveTracked: false })
+      .set({ liveTracked: false, liveTrackedReleasedAt: next.instant })
       .where(
         and(
           eq(flightSubscriptions.flightInstanceId, instanceId),
@@ -321,7 +337,7 @@ async function applyLiveWindow(
     if (await takeCap(tx, userCap('live_tracked', row.userId, now))) {
       const [flagged] = await tx
         .update(flightSubscriptions)
-        .set({ liveTracked: true })
+        .set({ liveTracked: true, liveTrackedReleasedAt: null })
         .where(eq(flightSubscriptions.id, row.id))
         .returning();
       decided = flagged ?? row;
@@ -435,6 +451,7 @@ async function upsertFlightInstanceIn(
         status: mutable.status,
         trackingState: mutable.trackingState,
         scheduledOut: mutable.scheduledOut,
+        instant: p.finishedAt ?? p.lastRefreshedAt,
       },
       nowMs,
     );
@@ -760,6 +777,19 @@ export async function handlePersistBatch(
           log.info('provider_budget_daily', {
             origin: body.origin,
             ...payloadFields(body.payload),
+          });
+          break;
+        case 'notify_intent':
+          // Increment 15, ruling N7: forwarded to `notify` as it is. A send that throws fails
+          // the message, which is retried and NOT confirmed, so the tracker's row stays (and a
+          // finished tracker stays undeleted) until the intent has reached the notify queue.
+          await (deps.notifyQueue ?? env.NOTIFY_QUEUE).send(body.payload);
+          log.info('notify_intent_forwarded', {
+            flight_key: body.flightKey,
+            kind: body.payload.intent.kind,
+            test: body.payload.test,
+            origin: body.origin,
+            seq: body.seq,
           });
           break;
       }

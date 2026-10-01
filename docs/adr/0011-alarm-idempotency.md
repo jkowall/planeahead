@@ -150,7 +150,11 @@ We will make the alarm handler idempotent per cadence slot with these mechanisms
    archive the events to R2 under a per-lifetime key (`events/{key}@{epochMs}.json`, written with
    `onlyIf: { etagDoesNotMatch: '*' }`, never overwritten), set phase `finished`, write the final
    KV snapshot itself (after the in-flight write and the one-second per-key gap), and arm one
-   alarm 22 hours out. That alarm re-reads the phase and the outbox in one synchronous block and
+   alarm 22 hours out. A suspected cancellation or diversion (N4, increment 15's review ruling
+   Q11) is evidence, not state, so it is not a way of learning the flight is done: the tracker
+   holds the finish only while fast re-reads are left, even past the cadence's last slot, and
+   after them finishes unconfirmed, with the cadence's reason and without a push. The +22 h
+   alarm re-reads the phase and the outbox in one synchronous block and
    calls `deleteAll()` ONLY once the outbox is empty, every row confirmed; while rows remain it
    re-arms hourly (`FINISH_RETRY_MS`), bounded by nothing but the rows draining, and raises the
    `flight_tracker_outbox_stuck` ops alert once after the sixth deferral. The DesignatorResolver's
@@ -177,17 +181,23 @@ We will make the alarm handler idempotent per cadence slot with these mechanisms
    `flight_lifetime_rejected` alert (a reborn finished flight is a bug, not data), and the archive
    key above is per lifetime.
 
-Rows written are a budgeted number: every statement runs through one helper that sums the
-cursor's `rowsWritten`, each `setAlarm` counts one, the migration DDL an object pays for at
-creation is added from the runner, the totals are stored on the attempt row, and the lifecycle
-test holds a full A2 walk under `ROWS_WRITTEN_BUDGET_PER_FLIGHT` (1,600). Measured on 2026-09-23
-after the final re-review round: 1,203 rows for the whole life of an on-time flight created at
-T-48 h (1,200 before migration 002's two `ALTER TABLE` statements and its id row; 1,173 before the
-DDL was counted at all), 13 per alarm when nothing changed, 16.3 per alarm on average with
-the seed, the subscribes, the persist confirmations (charged to the tracker: they are its rows),
-the finish path and the +22 h deletion spread over the 74 alarms; the largest `sendBatch` the walk
-produced carried 7 messages and the largest message 1,635 bytes (a `flight_instance` row is about
-1.3 KB), so the 100-message and 240 KB chunk limits are not reached on an ordinary flight.
+Rows written are a budgeted number: every statement runs through one helper that sums the cursor's
+`rowsWritten`, each `setAlarm` counts one, the migration DDL an object pays for at creation is added
+from the runner, the totals are stored on the attempt row, and the lifecycle test holds a full A2
+walk under `ROWS_WRITTEN_BUDGET_PER_FLIGHT` (1,600). Measured on 2026-10-01 with increment 15's
+review round: 1,204 rows for the whole life of an on-time flight created at T-48 h (1,205 at
+increment 15's build, before an observation that moves the schedule wrote the flight row once, the
+schedule included; 1,203 before migration 003's `ALTER TABLE` adding `flight.policy_state` and its
+id row, measured on 2026-09-23 after increment 7's final re-review round; 1,200 before migration
+002's two `ALTER TABLE` statements and its id row; 1,173 before the DDL was counted at all). The
+policy state rides on the existing `UPDATE flight`, so an alarm writes no extra row for it: 13 per
+alarm when nothing changed, 16.3 per alarm on average with the seed, the subscribes, the persist
+confirmations (charged to the tracker: they are its rows), the finish path and the +22 h deletion
+spread over the 74 alarms; the largest `sendBatch` the walk produced carried 7 messages and the
+largest message 1,635 bytes (1,657 while increment 15's build put `cancelSuspect` on every instance
+row, which its review round removed; a `flight_instance` row is about 1.3 KB), so the 100-message
+and 240 KB chunk limits are not reached on an ordinary flight. An on-time flight writes no
+`notify_intent` row.
 
 Accepted deviations from the increment 7 spec text, stated here so they are not relitigated:
 the finish reason `arrived` means the cadence's post-arrival tail poll ran (the cadence module is

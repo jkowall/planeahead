@@ -322,11 +322,12 @@ describe('a refresh that learns the flight is over finishes it (L12)', () => {
     expect(await tracker.alarmAt()).toBe(late + FINISH_ALARM_MS + FINISH_RETRY_MS);
   });
 
-  it('finishes from a cancellation seen by a user refresh', async () => {
+  it('finishes from a cancellation seen by a user refresh once its re-read confirms it (N4)', async () => {
     const flight = uniqueFlight();
     const clock = flight.scheduledOut.getTime() - 2 * HOUR_MS;
     const tracker = await seeded(flight, clock);
-    await tracker.setClock(clock + 10 * MINUTE_MS);
+    const seen = clock + 10 * MINUTE_MS;
+    await tracker.setClock(seen);
     const cancelled = adbOk(flight, { phase: 'expected' });
     const body = (cancelled.body as Record<string, unknown>[])[0] ?? {};
     await scriptAdb(flight, [{ status: 200, body: [{ ...body, status: 'Canceled' }] }]);
@@ -337,11 +338,17 @@ describe('a refresh that learns the flight is over finishes it (L12)', () => {
       userId: 'user-cancel',
     });
 
-    expect(refreshed).toMatchObject({ outcome: 'refreshed', phase: 'finished' });
+    // Suspected, not finished: the confirming re-read is the next alarm, 5 minutes out. Review
+    // ruling Q11 (1) changed the phase on purpose: a suspected cancellation is evidence, not
+    // state, so the refresh answers the last confirmed phase (it answered `cancelled` before).
+    expect(refreshed).toMatchObject({ outcome: 'refreshed', phase: 'scheduled' });
+    expect(await tracker.alarmAt()).toBe(seen + 5 * MINUTE_MS);
+    await tracker.setClock(seen + 5 * MINUTE_MS);
+    expect(await tracker.runAlarm()).toBe(true);
     const [row] = await tracker.rows<{ finish_reason: string }>('SELECT finish_reason FROM flight');
     expect(row).toEqual({ finish_reason: 'cancelled' });
-    expect(await tracker.alarmAt()).toBe(clock + 10 * MINUTE_MS + FINISH_ALARM_MS);
-    expect(await adbCalls(flight)).toBe(2);
+    expect(await tracker.alarmAt()).toBe(seen + 5 * MINUTE_MS + FINISH_ALARM_MS);
+    expect(await adbCalls(flight)).toBe(3);
   });
 });
 
@@ -513,11 +520,21 @@ describe('an alarm delivered while another path finishes the flight', () => {
     const clock = flight.scheduledOut.getTime() - 2 * HOUR_MS;
     const tracker = await seeded(flight, clock);
     expect(await tracker.alarmAt()).not.toBeNull();
-    const at = clock + 10 * MINUTE_MS;
-    await tracker.setClock(at);
     const expected = adbOk(flight, { phase: 'expected' });
     const body = (expected.body as Record<string, unknown>[])[0] ?? {};
     await scriptAdb(flight, [{ status: 200, body: [{ ...body, status: 'Canceled' }] }]);
+    // A first refresh only suspects the cancellation (N4); the cadence alarm moves to its
+    // confirming re-read, and the refresh at that instant is the one that finishes the flight.
+    const suspected = clock + 10 * MINUTE_MS;
+    await tracker.setClock(suspected);
+    await tracker.stub.forceRefresh({
+      rpcVersion: RPC_SCHEMA_VERSION,
+      reason: 'user_refresh',
+      userId: 'user-suspect',
+    });
+    const at = suspected + 5 * MINUTE_MS;
+    expect(await tracker.alarmAt()).toBe(at);
+    await tracker.setClock(at);
     // The archive put parks on a latch the test holds, so the finish stays in progress for
     // exactly as long as the test needs (no sleep: rr8-early-alarm-test-timing). Once released,
     // the put counts whether the alarm handler had been entered meanwhile: the pool's runner,
@@ -584,7 +601,7 @@ describe('an alarm delivered while another path finishes the flight', () => {
       finished_at_ms: at,
     });
     expect(await tracker.alarmAt()).toBe(at + FINISH_ALARM_MS);
-    expect(await adbCalls(flight)).toBe(2);
+    expect(await adbCalls(flight)).toBe(3);
   });
 });
 

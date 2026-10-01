@@ -7,7 +7,7 @@
 
 import type { InferRequestType, InferResponseType } from 'hono/client';
 import { describe, expect, expectTypeOf, it } from 'vitest';
-import type { FlightView } from '@planeahead/shared';
+import type { FlightView, NotificationPreferences } from '@planeahead/shared';
 import packageJsonText from '../../package.json?raw';
 import { hcWithType, type Client } from '../../src/client';
 
@@ -39,6 +39,23 @@ describe('AppType', () => {
     type Subscribe = InferRequestType<typeof client.v1.flights.$post>['json'];
     expectTypeOf<Subscribe>().toHaveProperty('flightKey');
     expectTypeOf<Subscribe>().toHaveProperty('number');
+  });
+
+  it('carries the preferences routes with the shared notification contract (increment 15)', () => {
+    expectTypeOf(client.v1.me.preferences.$get).toBeFunction();
+    expectTypeOf(client.v1.me.preferences.$patch).toBeFunction();
+    expect(client.v1.me.preferences.$url().pathname).toBe('/v1/me/preferences');
+    type Patch = InferRequestType<typeof client.v1.me.preferences.$patch>['json'];
+    type NotificationsPatch = NonNullable<Patch['notifications']>;
+    expectTypeOf<NotificationsPatch['pushEnabled']>().toEqualTypeOf<boolean | undefined>();
+    expectTypeOf<
+      NonNullable<NotificationsPatch['events']>['first_gate_assignment']
+    >().toEqualTypeOf<boolean | undefined>();
+    type Patched = InferResponseType<typeof client.v1.me.preferences.$patch, 200>;
+    expectTypeOf<Patched['notifications']>().toEqualTypeOf<NotificationPreferences>();
+    expectTypeOf<Patched['preferences']['timeFormat']>().toEqualTypeOf<'12h' | '24h'>();
+    type Read = InferResponseType<typeof client.v1.me.preferences.$get, 200>;
+    expectTypeOf<Read['notifications']['events']['delay']>().toEqualTypeOf<boolean>();
   });
 
   it('types a validation failure as the PlaneAhead envelope, never the raw Zod result', () => {

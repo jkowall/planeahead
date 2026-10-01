@@ -20,6 +20,8 @@ export * from './flight-status';
 export * from './ids';
 export * from './limits';
 export * from './live-activity';
+export * from './notification-policy';
+export * from './notify';
 export * from './operator';
 export * from './outbox';
 export * from './preferences';

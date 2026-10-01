@@ -148,6 +148,9 @@ function edgeMinutesAfterOut(edge: CadenceEdge): number {
   switch (edge) {
     case 'boarding':
       return -DEFAULT_CADENCE_PARAMS.boardingMinutesBefore;
+    case 'departure':
+      // On time, the departure anchor (N8) is scheduled out.
+      return 0;
     case 'arrival':
       return BLOCK_MINUTES;
     case 'stop':

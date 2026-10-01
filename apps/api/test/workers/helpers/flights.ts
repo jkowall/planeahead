@@ -123,6 +123,9 @@ function dateTime(instant: Date, tz: string): { utc: string; local: string } {
   return { utc: adbUtc(instant), local: adbLocal(instant, tz) };
 }
 
+/** An AeroDataBox `DateTime` contract (`.utc` and `.local`) for a scripted answer. */
+export const adbDateTime = dateTime;
+
 export type OnTimePhase = 'expected' | 'en_route' | 'arrived';
 
 /** The phase an on-time flight is in at `now`, as the fake gateway should answer. */

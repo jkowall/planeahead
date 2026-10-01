@@ -24,6 +24,12 @@
  *      account switch keeps the row's id and moves the row to the new user (src/routes/devices.ts).
  *      Otherwise it is not requested: `failed`, reason `token_inactive`, its attempt count
  *      unchanged, which `persist` records like any failed delivery and which invalidates nothing.
+ *      The same statement answers which of the targets' notifications a newer `notifications`
+ *      row for the same user, kind and flight has superseded (increment 15 ruling Q16; newer by
+ *      the intent's `producedAt`, then the row's `created_at` and id): such a
+ *      target is not requested either (`failed`, reason `superseded`), so a retried first push
+ *      cannot land after its correction. A target with no notification (the admin page's test
+ *      push) is never superseded.
  *      If the read fails, NOTHING in the batch is sent: every target that needed it is re-enqueued
  *      unsent after `LIVENESS_RETRY_DELAY_SECONDS` (`retry`, reason `liveness_unavailable`), or
  *      dropped as `expired` when that would land past its window, and `push_liveness_failed` is
@@ -66,8 +72,9 @@
  * A job that exhausts the queue's retries goes to `push-dlq`, archived to R2 with an ops alert.
  */
 
-import { and, inArray, isNull } from 'drizzle-orm';
-import { openDb, pushTokens, type Db } from '@planeahead/db';
+import { and, eq, exists, inArray, isNull, or, sql } from 'drizzle-orm';
+import { alias } from 'drizzle-orm/pg-core';
+import { notifications, openDb, pushTokens, type Db } from '@planeahead/db';
 import {
   PushJobV1,
   PushOutcomeMessageV1,
@@ -106,6 +113,16 @@ export const LIVENESS_RETRY_DELAY_SECONDS = 60;
  */
 export type LiveTokens = ReadonlyMap<string, string>;
 
+/**
+ * What the batch's one liveness read answers: the live tokens (ruling R1) and, of the targets'
+ * `notifications.id`s, those a newer row for the same user, kind and flight has superseded
+ * (increment 15 ruling Q16), all in lower case.
+ */
+export interface LivenessAnswer {
+  readonly tokens: LiveTokens;
+  readonly superseded: ReadonlySet<string>;
+}
+
 export interface PushConsumerDeps {
   /** The transports per platform; the defaults are built from the environment. */
   readonly transports?: Partial<Record<PushTargetKind, PushTransport>>;
@@ -123,10 +140,14 @@ export interface PushConsumerDeps {
   /** The in-flight bound; 6 unless a test asks otherwise. */
   readonly maxInFlight?: number;
   /**
-   * The liveness read (ruling R1): which of these `push_tokens` ids are live, and whose. The
-   * default is `readLiveTokens` on this environment's database.
+   * The liveness read (ruling R1): which of these `push_tokens` ids are live, and whose, and which
+   * of these `notifications` ids are superseded (Q16). The default is `readLiveTokens` on this
+   * environment's database.
    */
-  readonly liveTokens?: (ids: readonly string[]) => Promise<LiveTokens>;
+  readonly liveTokens?: (
+    ids: readonly string[],
+    notificationIds: readonly string[],
+  ) => Promise<LivenessAnswer>;
   /** The Sentry call behind the `push_not_configured` ops alert; the default is Sentry's. */
   readonly capture?: CaptureMessage | undefined;
 }
@@ -167,13 +188,65 @@ export async function mapWithConcurrency<T, R>(
  * closed.") on every batch, which the review round's test run showed. So, like persist and
  * housekeeping, the client is left to Hyperdrive, which closes it when the invocation ends.
  */
-export async function readLiveTokens(env: Env, ids: readonly string[]): Promise<LiveTokens> {
+export async function readLiveTokens(
+  env: Env,
+  ids: readonly string[],
+  notificationIds: readonly string[] = [],
+): Promise<LivenessAnswer> {
   const db: Db = openDb(env);
-  const rows = await db
-    .select({ id: pushTokens.id, userId: pushTokens.userId })
+  const live = db
+    .select({ what: sql<string>`'token'`.as('what'), id: pushTokens.id, userId: pushTokens.userId })
     .from(pushTokens)
     .where(and(inArray(pushTokens.id, [...ids]), isNull(pushTokens.invalidatedAt)));
-  return new Map(rows.map((row) => [row.id.toLowerCase(), row.userId.toLowerCase()]));
+  const rows =
+    notificationIds.length === 0
+      ? await live
+      : await live.unionAll(supersededNotifications(db, notificationIds));
+  const tokens = new Map<string, string>();
+  const superseded = new Set<string>();
+  for (const row of rows) {
+    if (row.what === 'token') {
+      tokens.set(row.id.toLowerCase(), row.userId.toLowerCase());
+    } else {
+      superseded.add(row.id.toLowerCase());
+    }
+  }
+  return { tokens, superseded };
+}
+
+/**
+ * Ruling Q16: the rows among `ids` that a newer `notifications` row for the same user, kind and
+ * flight has superseded. Newer is ordered by the intent's `producedAt` (kept in `data`), then
+ * `created_at`, then the uuidv7 id: notify inserts an intent when it gets to it, so an older
+ * intent that waited out an outage in notify's retries is inserted after a newer one, and must
+ * never supersede it (the orchestrator's ruling on part A2's caveat). A row without `producedAt`
+ * (none since that ruling) is placed at its `created_at`. A test row never supersedes a real one,
+ * so an injection cannot cancel a user's pending real push.
+ */
+function supersededNotifications(db: Db, ids: readonly string[]) {
+  const newer = alias(notifications, 'newer');
+  const newerAt = sql`coalesce((${newer.data} ->> 'producedAt')::timestamptz, ${newer.createdAt})`;
+  const rowAt = sql`coalesce((${notifications.data} ->> 'producedAt')::timestamptz, ${notifications.createdAt})`;
+  const correction = db
+    .select({ one: sql`1` })
+    .from(newer)
+    .where(
+      and(
+        eq(newer.userId, notifications.userId),
+        eq(newer.kind, notifications.kind),
+        eq(newer.flightInstanceId, notifications.flightInstanceId),
+        or(eq(newer.isTest, false), eq(notifications.isTest, true)),
+        sql`(${newerAt}, ${newer.createdAt}, ${newer.id}) > (${rowAt}, ${notifications.createdAt}, ${notifications.id})`,
+      ),
+    );
+  return db
+    .select({
+      what: sql<string>`'superseded'`.as('what'),
+      id: notifications.id,
+      userId: notifications.userId,
+    })
+    .from(notifications)
+    .where(and(inArray(notifications.id, [...ids]), exists(correction)));
 }
 
 function defaultTransports(
@@ -237,6 +310,19 @@ const TOKEN_INACTIVE: TransportOutcome = {
   outcome: 'failed',
   requested: false,
   reason: 'token_inactive',
+  httpStatus: null,
+  fcmErrorDetail: null,
+};
+
+/**
+ * A newer notification for the same user, kind and flight exists (increment 15 ruling Q16): this
+ * one, a retry or a first attempt behind a backlog, would land after its correction and put the
+ * old value back on screen, so it is not sent. The newer row's own targets carry the news.
+ */
+const SUPERSEDED: TransportOutcome = {
+  outcome: 'failed',
+  requested: false,
+  reason: 'superseded',
   httpStatus: null,
   fcmErrorDetail: null,
 };
@@ -328,20 +414,22 @@ export function decideTarget(
 }
 
 /** The liveness read's answer for the batch; `null` when the read failed. */
-type Liveness = LiveTokens | null;
+type Liveness = LivenessAnswer | null;
 
 /**
- * Step 2 of the header: the ids of every target the batch could send, read once. A batch with
- * nothing to send (every target past its window or held) reads nothing.
+ * Step 2 of the header: the ids of every target the batch could send, and of their notifications
+ * (Q16), read once. A batch with nothing to send (every target past its window or held) reads
+ * nothing.
  */
 async function readLiveness(
   jobs: readonly PushJobV1[],
   configuration: PushConfiguration,
   nowMs: number,
-  liveTokens: (ids: readonly string[]) => Promise<LiveTokens>,
+  liveTokens: NonNullable<PushConsumerDeps['liveTokens']>,
   log: Logger,
 ): Promise<Liveness> {
   const ids = new Set<string>();
+  const notificationIds = new Set<string>();
   for (const job of jobs) {
     if (nowMs >= Date.parse(job.expiresAt)) {
       continue;
@@ -349,14 +437,17 @@ async function readLiveness(
     for (const target of job.targets) {
       if (configuration[target.kind].configured) {
         ids.add(target.pushTokenId);
+        if (target.notificationId !== undefined) {
+          notificationIds.add(target.notificationId);
+        }
       }
     }
   }
   if (ids.size === 0) {
-    return new Map();
+    return { tokens: new Map(), superseded: new Set() };
   }
   try {
-    return await liveTokens([...ids]);
+    return await liveTokens([...ids], [...notificationIds]);
   } catch (error) {
     // Nothing in the batch is sent: a token that might have signed out must not get a push.
     log.error('push_liveness_failed', {
@@ -409,8 +500,15 @@ async function sendJob(
     let outcome: TransportOutcome;
     if (liveness === null) {
       outcome = LIVENESS_UNAVAILABLE;
-    } else if (liveness.get(target.pushTokenId.toLowerCase()) !== target.subjectId.toLowerCase()) {
+    } else if (
+      liveness.tokens.get(target.pushTokenId.toLowerCase()) !== target.subjectId.toLowerCase()
+    ) {
       outcome = TOKEN_INACTIVE;
+    } else if (
+      target.notificationId !== undefined &&
+      liveness.superseded.has(target.notificationId.toLowerCase())
+    ) {
+      outcome = SUPERSEDED;
     } else {
       outcome = await transports[target.kind].send(job, target);
     }
@@ -443,7 +541,8 @@ export async function handlePushBatch(
   const pushQueue = deps.pushQueue ?? env.PUSH_QUEUE;
   const persistQueue = deps.persistQueue ?? env.PERSIST_QUEUE;
   const maxInFlight = deps.maxInFlight ?? PUSH_MAX_IN_FLIGHT;
-  const liveTokens = deps.liveTokens ?? ((ids) => readLiveTokens(env, ids));
+  const liveTokens =
+    deps.liveTokens ?? ((ids, notificationIds) => readLiveTokens(env, ids, notificationIds));
   const production = environmentName(env) === 'production';
   /** Platforms already alerted as not configured in this batch (ruling R3). */
   const alerted = new Set<PushTargetKind>();

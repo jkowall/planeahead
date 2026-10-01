@@ -35,17 +35,25 @@ import { afterEach, describe, expect, it } from 'vitest';
 import {
   A2_EXPECTED_POLLS,
   CADENCE_A2,
+  NotifyIntentV1,
   RPC_SCHEMA_VERSION,
   expectedCalls,
   parseFlightTrackerOrigin,
+  type ConfirmPersistedRequestV1,
 } from '@planeahead/shared';
-import { ROWS_WRITTEN_BUDGET_PER_FLIGHT, type FlightTracker } from '../../src/do/flight-tracker';
+import {
+  FINISH_ALARM_MS,
+  FINISH_RETRY_MS,
+  ROWS_WRITTEN_BUDGET_PER_FLIGHT,
+  type FlightTracker,
+} from '../../src/do/flight-tracker';
 import { createLogger } from '../../src/observability/log';
-import { handlePersistBatch } from '../../src/queues/persist';
+import { handlePersistBatch, type ConfirmingTracker } from '../../src/queues/persist';
 import { eventsArchiveKey } from '../../src/r2/archive';
 import {
   HOUR_MS,
   adbCalls,
+  adbFlightContract,
   adbOk,
   drainTouched,
   ofKind,
@@ -346,5 +354,108 @@ describe('FlightTracker lifecycle (A2, created at T-48 h)', () => {
     console.log(
       `[lifecycle] attempts rows_written: ${attempts.map((a) => a.rows_written).join(',')}`,
     );
+  });
+});
+
+describe('a notify intent through the outbox (increment 15, N7)', () => {
+  it('is written once under alarm retries, and the finished tracker deletes only once it is confirmed', async () => {
+    const flight = uniqueFlight();
+    const creation = flight.scheduledOut.getTime() - 2 * HOUR_MS;
+    await scriptAdb(flight, [adbOk(flight, { phase: 'expected' })]);
+    const tracker = await trackerHarness(flight.flightKey, creation);
+    await openBudgetFor(flight, creation);
+    const resolver = await resolverHarness(flight, creation);
+    await resolver.stub.resolve({
+      rpcVersion: RPC_SCHEMA_VERSION,
+      designator: flight.designator,
+      dateLocal: flight.dateLocal,
+    });
+    const contract = adbFlightContract(flight, { phase: 'expected' }) as Record<string, unknown>;
+    await scriptAdb(flight, [{ status: 200, body: [{ ...contract, status: 'Canceled' }] }]);
+    // The suspicion and then its confirming re-read, each alarm delivered again by the platform
+    // at once and past the resend grace: neither retry reads the provider or writes an intent.
+    let confirmedAt = 0;
+    for (let alarm = 0; alarm < 2; alarm += 1) {
+      confirmedAt = (await tracker.alarmAt()) ?? 0;
+      await tracker.setClock(confirmedAt);
+      expect(await tracker.runAlarm()).toBe(true);
+      await tracker.retryAlarm(1);
+      await tracker.setClock(confirmedAt + 20_000);
+      await tracker.retryAlarm(2);
+    }
+    expect(await adbCalls(flight)).toBe(3);
+    expect((await tracker.stub.health()).phase).toBe('finished');
+    const intents = ofKind(tracker.outbox.sent, 'notify_intent');
+    expect(new Set(intents.map((m) => m.seq)).size).toBe(1);
+    expect(await tracker.rows('SELECT dedupe_key FROM notif_dedupe')).toHaveLength(1);
+    const intentSeq = intents[0]?.seq;
+
+    // The persist consumer, its notify forward failing: every other row is written and
+    // confirmed, the intent is retried and confirmed by nobody.
+    const db = openDb(testEnv);
+    const forwarded: unknown[] = [];
+    let notifyUp = false;
+    const notifyQueue = {
+      send: (body: unknown): Promise<void> => {
+        if (!notifyUp) {
+          return Promise.reject(new Error('notify unavailable'));
+        }
+        forwarded.push(body);
+        return Promise.resolve();
+      },
+    };
+    const confirmations: ConfirmPersistedRequestV1[] = [];
+    const trackerFor = (): ConfirmingTracker => ({
+      confirmPersisted: (input) => {
+        confirmations.push(input as ConfirmPersistedRequestV1);
+        return tracker.stub.confirmPersisted(input);
+      },
+    });
+    const persistSent = async () => {
+      const pending = tracker.outbox.sent.splice(0);
+      const batch = createMessageBatch(
+        'planeahead-persist-local',
+        pending.map((body, index) => ({
+          id: `n-${String(index)}-${crypto.randomUUID()}`,
+          timestamp: new Date(),
+          attempts: 1,
+          body,
+        })),
+      );
+      const ctx = createExecutionContext();
+      const env = { env: testEnv, ctx, log: quietLog };
+      await handlePersistBatch(batch, env, { db, notifyQueue, trackerFor });
+      const result = await getQueueResult(batch, ctx);
+      const byId = new Map(batch.messages.map((m) => [m.id, m.body as { kind: string }]));
+      return result.retryMessages.map((m) => byId.get(m.msgId)?.kind);
+    };
+    const retried = await persistSent();
+    expect(retried.length).toBeGreaterThan(0);
+    expect(new Set(retried)).toEqual(new Set(['notify_intent']));
+    expect((await tracker.stub.health()).unconfirmedOutbox).toBe(1);
+    expect(confirmations.flatMap((c) => c.seqs)).not.toContain(intentSeq);
+
+    // The +22 h alarm finds the intent unconfirmed: it defers, it does not delete.
+    await tracker.setClock(confirmedAt + FINISH_ALARM_MS);
+    expect(await tracker.runAlarm()).toBe(true);
+    expect((await tracker.tables()).length).toBeGreaterThan(0);
+    expect(await tracker.alarmAt()).toBe(confirmedAt + FINISH_ALARM_MS + FINISH_RETRY_MS);
+
+    // The notify queue is back: the re-sent row is forwarded, then confirmed, once.
+    notifyUp = true;
+    expect(await persistSent()).toEqual([]);
+    expect(forwarded).toHaveLength(1);
+    expect(NotifyIntentV1.parse(forwarded[0])).toMatchObject({
+      flightKey: flight.flightKey,
+      intent: { kind: 'cancellation', value: 'cancelled' },
+      test: false,
+    });
+    expect(confirmations.flatMap((c) => c.seqs).filter((seq) => seq === intentSeq)).toHaveLength(1);
+    expect((await tracker.stub.health()).unconfirmedOutbox).toBe(0);
+
+    // The deferred finish alarm now deletes everything.
+    await tracker.setClock(confirmedAt + FINISH_ALARM_MS + FINISH_RETRY_MS);
+    expect(await tracker.runAlarm()).toBe(true);
+    expect(await tracker.tables()).toEqual([]);
   });
 });

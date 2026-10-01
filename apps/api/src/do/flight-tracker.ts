@@ -39,7 +39,18 @@
  *      cost; only a storage error throws (and is retried by the platform).
  *   4. A second `transactionSync` applies the result: `reconcileFlightKey` (drift is an event,
  *      never a rename; `different_flight` stops polling), the snapshot with a monotonically
- *      increasing `version`, the events rows, the outbox rows.
+ *      increasing `version`, the events rows, the outbox rows, and (increment 15) the
+ *      notification policy's state with one `notify_intent` outbox row per intent, each guarded
+ *      by `notif_dedupe`. A re-read the policy owes (a delay's settle, a cancellation's or a
+ *      diversion's confirmation) moves the next alarm to at most `wants.at`, and a failed one
+ *      is counted by the policy rather than retried in a loop, and a re-read still due at a
+ *      provider read is next tried `CONFIRM_REREAD_MINUTES` later, never at the read's own
+ *      instant. A suspected cancellation or
+ *      diversion is evidence, not state: the snapshot, phase and times stay the last confirmed
+ *      ones until the raising provider's conclusive re-read (the version moves with the
+ *      schedule), and its fast re-reads hold the finish past the cadence's last slot (rulings
+ *      N2, N4, N7; review rulings Q1, Q3, Q4, Q11, Q19; `#applyStatus`, `#policySchedule`).
+ *      Every instance row goes out under a new version.
  *   5. After the commit: send the outbox to the `persist` queue in byte-chunked batches, and
  *      write the debounced KV snapshot off the critical path. A write the debounce suppressed is
  *      marked pending and performed by the next entry point once the gap has passed.
@@ -99,6 +110,7 @@ import {
   FlightStatusSchema,
   FREE_TIER_LIMITS,
   INFLIGHT_STALE_MS,
+  InjectPolicyEventRequestV1,
   ListSubscribersRequestV1,
   ProviderEventV1,
   RPC_SCHEMA_VERSION,
@@ -107,15 +119,25 @@ import {
   SubscribeRequestV1,
   USER_REFRESH_FRESHNESS_MS,
   UnsubscribeRequestV1,
+  CONFIRM_REREAD_MINUTES,
   deadLetterResendSpacingMs,
+  evaluateFailedReread,
+  evaluatePolicy,
+  evaluateReread,
   flightTrackerOrigin,
+  initialPolicyState,
   isIntervalWindow,
   parseDesignator,
   parseFlightKey,
   parseRpcRequest,
+  policyWants,
   pollEquivalents,
+  REREAD_TOLERANCE_MS,
+  readPolicyState,
   reconcileFlightKey,
   refreshIntervalFor,
+  resolveWindows,
+  showsSuspectedChange,
   windowAt,
   type CadenceContext,
   type CadenceDefinition,
@@ -132,7 +154,14 @@ import {
   type GetStateResponseV1,
   type HealthResponseV1,
   type IngestProviderEventResponseV1,
+  type InjectPolicyEventResponseV1,
   type ListSubscribersResponseV1,
+  type NotifyFlightSummaryV1,
+  type NotifyIntentV1Input,
+  type PolicyIntent,
+  type PolicyResult,
+  type PolicyState,
+  type PolicyWants,
   type ProviderCallContext,
   type ProviderCallRecord,
   type ProviderCallTrigger,
@@ -176,6 +205,7 @@ import {
 } from './migrate';
 import { FLIGHT_TRACKER_MIGRATION_001 } from './migrations/flight-tracker/001';
 import { FLIGHT_TRACKER_MIGRATION_002 } from './migrations/flight-tracker/002';
+import { FLIGHT_TRACKER_MIGRATION_003 } from './migrations/flight-tracker/003';
 import { chunkOutbox, forEachBindChunk, markOutboxSent, sendOutboxChunks } from './outbox';
 
 // ---------------------------------------------------------------------------------------------
@@ -194,7 +224,12 @@ import { chunkOutbox, forEachBindChunk, markOutboxSent, sendOutboxChunks } from 
  * migration 002's two `ALTER TABLE` statements and its id row, and 1,173 before the DDL was
  * counted at all). The budget is that with about a third of headroom for a delayed flight's extra
  * events (two rows each), and it moves only deliberately: rows written are 70 to 85 percent of
- * the per-flight Durable Object cost.
+ * the per-flight Durable Object cost. Increment 15 measured 1,205 for the same walk: migration
+ * 003's `ALTER TABLE` and its id row; the policy state rides on the flight row's existing writes,
+ * so an alarm writes no more rows than before, and a notify intent costs three (its
+ * `notif_dedupe` row, its outbox row and the confirmation that deletes it). Its review round
+ * measured 1,204 (2026-10-01): an observation that moves the schedule now writes the flight row
+ * once, the schedule included.
  */
 export const ROWS_WRITTEN_BUDGET_PER_FLIGHT = 1_600;
 
@@ -207,8 +242,17 @@ export const FINISH_ALARM_MS = 22 * 60 * 60_000;
 export const FINISH_RETRY_MS = 60 * 60_000;
 /** The deferral after which the finished object raises the ops alert, once (L2). */
 export const FINISH_ALERT_AFTER_ATTEMPTS = 6;
-/** An alarm that fires more than this early is a duplicate delivery and only re-arms. */
-const EARLY_ALARM_TOLERANCE_MS = 5_000;
+/**
+ * An alarm that fires more than this early is a duplicate delivery and only re-arms. The policy's
+ * re-read tolerance is the same instant (review ruling Q19): a read the tracker makes as the
+ * re-read is one the policy counts as it.
+ */
+const EARLY_ALARM_TOLERANCE_MS = REREAD_TOLERANCE_MS;
+/**
+ * Review ruling Q19 (c): a policy re-read still due at or before a provider read is next tried
+ * this long after it (`#policySchedule`), never at the read's own instant.
+ */
+const POLICY_REREAD_FLOOR_MS = CONFIRM_REREAD_MINUTES * 60_000;
 /**
  * A sent row is re-sent by the next flush when it has been unconfirmed this long. Confirmation
  * normally lands within seconds; the grace keeps a burst of coalesced user refreshes from
@@ -267,6 +311,8 @@ interface FlightRow extends Row {
   finish_alarm_attempts: number;
   events_r2_key: string | null;
   created_at_ms: number;
+  /** The notification policy's `PolicyState` as JSON (migration 003); NULL before it. */
+  policy_state: string | null;
 }
 
 interface BudgetRow extends Row {
@@ -348,7 +394,48 @@ export interface PerFlightCaps {
 type OutboxDraft =
   | { kind: 'flight_instance'; flightKey: FlightKey; payload: FlightInstanceOutboxPayloadV1 }
   | { kind: 'flight_event'; flightKey: FlightKey; payload: FlightEventOutboxPayloadV1 }
-  | { kind: typeof PROVIDER_CALL_OUTBOX_KIND; flightKey: FlightKey; payload: ProviderCallRecord };
+  | { kind: typeof PROVIDER_CALL_OUTBOX_KIND; flightKey: FlightKey; payload: ProviderCallRecord }
+  | { kind: 'notify_intent'; flightKey: FlightKey; payload: NotifyIntentV1Input };
+
+/** Where a stored observation came from: the tracker's own provider read, an alert merge, a seed. */
+type ObservationSource = 'read' | 'merge' | 'seed';
+
+/** One intent as written (or, for a replayed key, not written) through the outbox (N7). */
+interface WrittenIntent {
+  readonly intent: PolicyIntent;
+  readonly dedupeKey: string;
+  readonly written: boolean;
+}
+
+/** The optional `FlightStatus` fields a push renders (`NotifyFlightSummaryV1`). */
+const SUMMARY_OPTIONAL_FIELDS = [
+  'marketingCarrierIcao',
+  'marketingFlightNumber',
+  'actualDestination',
+  'originTerminal',
+  'originGate',
+  'destinationTerminal',
+  'destinationGate',
+  'baggageClaim',
+] as const;
+
+/** The flight as an intent's push renders it: the observed snapshot, trimmed (N9). */
+function flightSummary(status: FlightStatus): NotifyFlightSummaryV1 {
+  const summary: Record<string, unknown> = {
+    operatingCarrierIcao: status.operatingCarrierIcao,
+    flightNumber: status.flightNumber,
+    origin: status.origin,
+    destination: status.destination,
+    status: status.status,
+    times: status.times,
+  };
+  for (const field of SUMMARY_OPTIONAL_FIELDS) {
+    if (status[field] !== undefined) {
+      summary[field] = status[field];
+    }
+  }
+  return summary as NotifyFlightSummaryV1;
+}
 
 interface EventDraft {
   readonly type: string;
@@ -473,6 +560,49 @@ function deadLetterResendDue(row: OutboxRow, now: number): boolean {
   return now - since >= deadLetterResendSpacingMs(row.dead_letter_count);
 }
 
+/**
+ * The cadence source of the window at `ctx.now`; past the last window's end (a finish held for
+ * a confirming re-read, review ruling Q4) the last window's, so that re-read goes to the
+ * provider that raised the suspicion; AeroDataBox when no window resolves at all.
+ */
+function windowSourceAt(cadence: CadenceDefinition, ctx: CadenceContext): CadenceSource {
+  const window = windowAt(cadence, ctx);
+  if (window !== null) {
+    return window.source;
+  }
+  const last = resolveWindows(cadence, ctx).windows.at(-1);
+  return last !== undefined && ctx.now.getTime() >= last.end ? last.window.source : 'aerodatabox';
+}
+
+/**
+ * Review rulings Q4 and Q11 (3): a suspected cancellation or diversion with fast re-reads left
+ * holds the tracker's finish, so its confirmation is not lost to the cadence's last slot. Q19
+ * (b): only a suspicion `policyWants` lists holds, so a diversion holds while the cancellation
+ * is `none` and a pushed cancellation finishes `cancelled` whatever a stored diversion
+ * suspicion says (the policy drops it, Q19 (a)).
+ */
+function holdsFinish(state: PolicyState, wants: PolicyWants): boolean {
+  return wants.reasons.some((reason) => {
+    const suspicion =
+      reason === 'cancellation'
+        ? state.cancellation
+        : reason === 'diversion'
+          ? state.diversion
+          : null;
+    return suspicion?.status === 'suspect' && suspicion.fastLeft > 0;
+  });
+}
+
+/** The provider read at `now` a schedule follows: none, the one step 1 plans, the one made. */
+type ReadAtNow = 'none' | 'planning' | 'made';
+
+/** The policy's entry points as the tracker calls them (a test seam, see `policy`). */
+interface NotificationPolicy {
+  readonly evaluateFailedReread: typeof evaluateFailedReread;
+  readonly evaluatePolicy: typeof evaluatePolicy;
+  readonly evaluateReread: typeof evaluateReread;
+}
+
 /** JSON with object keys sorted at every level, so key order never reads as a change. */
 function canonicalJson(value: unknown): string {
   if (Array.isArray(value)) {
@@ -587,12 +717,13 @@ function lookupDesignator(
 
 export class FlightTracker extends DurableObject<Env> {
   /** Schema version this build expects. Reported by `GET /health` without touching an object. */
-  static readonly SCHEMA_VERSION = 2;
+  static readonly SCHEMA_VERSION = 3;
 
   /** Append only, in order. Index 0 is migration id 1. */
   static readonly MIGRATIONS: SqlMigrations = [
     FLIGHT_TRACKER_MIGRATION_001,
     FLIGHT_TRACKER_MIGRATION_002,
+    FLIGHT_TRACKER_MIGRATION_003,
   ];
 
   /**
@@ -603,6 +734,12 @@ export class FlightTracker extends DurableObject<Env> {
    */
   outboxSink: Pick<Queue, 'sendBatch'>;
   kv: Pick<KVNamespace, 'put'>;
+  /**
+   * The notification policy's entry points (review ruling Q19 (c)'s backstop test replaces one
+   * with a policy that leaves a re-read due at the read's own instant; `#policySchedule` must
+   * still never loop the alarm).
+   */
+  policy: NotificationPolicy = { evaluateFailedReread, evaluatePolicy, evaluateReread };
   bucket: Pick<R2Bucket, 'put'>;
   providerDeps: RouterDeps = {};
   caps: PerFlightCaps = { softCapPe: A2_SOFT_CAP_PE, hardCapPe: A2_HARD_CAP_PE };
@@ -627,6 +764,14 @@ export class FlightTracker extends DurableObject<Env> {
   #deleted = false;
   #cleanupArmed = false;
   #kvInFlight: Promise<void> | null = null;
+  /** `#outInstants`' memo: the snapshot text it last parsed and the out instants in it. */
+  #outMemo: { snapshot: string; estimatedOutMs: number | null; actualOutMs: number | null } | null =
+    null;
+  /**
+   * `#storedPolicyState`'s memo (review ruling Q8): the stored text it last parsed and the state
+   * read from it, never mutated (the policy copies the state it is given).
+   */
+  #policyMemo: { text: string; state: PolicyState | null } | null = null;
   /** Configuration errors already alerted by this in-memory instance (once each). */
   readonly #configAlerted = new Set<string>();
 
@@ -704,7 +849,7 @@ export class FlightTracker extends DurableObject<Env> {
           now,
           request.trigger,
           undefined,
-          true,
+          'seed',
         );
         finishAfter = applied.finish;
         const updated = this.#flight();
@@ -715,8 +860,8 @@ export class FlightTracker extends DurableObject<Env> {
         `INSERT INTO flight (id, key, cadence, phase, version, snapshot, search_designator,
                              scheduled_out_ms, scheduled_in_ms, estimated_in_ms, actual_off_ms,
                              actual_on_ms, actual_in_ms, operator_source, created_at_ms,
-                             updated_at_ms)
-         VALUES (1, ?, ?, ?, 1, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+                             updated_at_ms, policy_state)
+         VALUES (1, ?, ?, ?, 1, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
         key,
         cadence.id,
         status.status,
@@ -731,6 +876,8 @@ export class FlightTracker extends DurableObject<Env> {
         status.operatorSource ?? null,
         now,
         now,
+        // Seeded, never evaluated: the creation snapshot is what the subscribers already know.
+        JSON.stringify(initialPolicyState(status)),
       );
       this.#exec(
         'INSERT INTO budget (id, flight_id, soft_cap_pe, hard_cap_pe) VALUES (1, 1, ?, ?)',
@@ -1025,6 +1172,8 @@ export class FlightTracker extends DurableObject<Env> {
         const current = this.#requireFlight();
         const snapshot = this.#snapshotOf(current);
         const merged = mergeAeroApiAlert(snapshot, patch as AeroApiAlertPatch, new Date(now));
+        // The merged snapshot keeps the stored one's `source`; the policy is told who answered
+        // (a suspicion the alert raises is AeroAPI's, and a merge never decides one: Q11 (6)).
         return this.#applyStatus(
           current,
           snapshot,
@@ -1032,7 +1181,9 @@ export class FlightTracker extends DurableObject<Env> {
           now,
           'provider_alert',
           undefined,
-          false,
+          'merge',
+          0,
+          event.provider,
         );
       });
       if (applied.finish !== null) {
@@ -1057,6 +1208,74 @@ export class FlightTracker extends DurableObject<Env> {
       await this.#finish(this.#now(), outcome.finish);
     }
     return { rpcVersion: RPC_SCHEMA_VERSION, outcome: 'refreshed', version: outcome.version };
+  }
+
+  /**
+   * The event injector (ruling N11): classifies a synthetic next snapshot against the stored
+   * snapshot and policy state with the same policy, confirmed by construction (no settle re-read,
+   * no cancellation confirmation), and writes the intents through the same outbox as tests, the
+   * injection id in their dedupe key. It stores NEITHER the synthetic snapshot NOR the state the
+   * evaluation returns, so the next real poll diffs against real data and finds no change back;
+   * the only rows it writes are its intents' dedupe and outbox rows. A replayed injection id
+   * writes nothing. It is ignored (`suspected`, `cancelled`) while the stored policy state holds a
+   * suspected cancellation or diversion, or the stored snapshot is cancelled (review ruling Q5).
+   * The Access-protected admin route that calls it is src/routes/admin-inject.ts.
+   */
+  async injectPolicyEvent(input: unknown): Promise<Exact<InjectPolicyEventResponseV1>> {
+    const request = parseRpcRequest(InjectPolicyEventRequestV1, input);
+    this.#ensureSchema();
+    await this.#awaitFinishing();
+    await this.#awaitInflight();
+    const now = this.#now();
+    const row = this.#flight();
+    if (row === null || row.phase === 'finished') {
+      if (row === null) {
+        this.#armAbsentCleanup(now);
+      }
+      const reason = row === null ? 'absent' : 'finished';
+      return { rpcVersion: RPC_SCHEMA_VERSION, outcome: 'ignored', reason, intents: [] };
+    }
+    // Review ruling Q5: an injection is confirmed by construction, so one into a suspected
+    // cancellation or diversion would decide the suspicion on synthetic data; and a stored
+    // snapshot that is cancelled has nothing left to change. Checked with no await before the
+    // transaction below, so no alarm can slip between the check and the evaluation.
+    const stored = this.#storedPolicyState(row);
+    const suspected =
+      stored?.cancellation.status === 'suspect' || stored?.diversion.status === 'suspect';
+    if (suspected || this.#snapshotOf(row).status === 'cancelled') {
+      const reason = suspected ? 'suspected' : 'cancelled';
+      this.#log.info('flight_tracker_policy_injection_refused', {
+        injection_id: request.injectionId,
+        reason,
+      });
+      return { rpcVersion: RPC_SCHEMA_VERSION, outcome: 'ignored', reason, intents: [] };
+    }
+    const written = this.#tx((): WrittenIntent[] => {
+      const current = this.#requireFlight();
+      const previous = this.#snapshotOf(current);
+      const next: FlightStatus = { ...request.status, key: current.key as FlightKey };
+      const state = this.#storedPolicyState(current) ?? initialPolicyState(previous);
+      const context = { confirmed: true };
+      const result = this.policy.evaluatePolicy({ previous, next, state, now, context });
+      return this.#appendIntents(current, now, result.intents, next, request.injectionId);
+    });
+    await this.#flushOutbox(now);
+    this.#log.info('flight_tracker_policy_injected', {
+      injection_id: request.injectionId,
+      intents: written.length,
+      written: written.filter((entry) => entry.written).length,
+    });
+    return {
+      rpcVersion: RPC_SCHEMA_VERSION,
+      outcome: 'injected',
+      intents: written.map(({ intent, dedupeKey, written: wrote }) => ({
+        kind: intent.kind,
+        subject: intent.subject,
+        value: intent.value,
+        dedupeKey,
+        written: wrote,
+      })),
+    };
   }
 
   /**
@@ -1353,7 +1572,9 @@ export class FlightTracker extends DurableObject<Env> {
       trigger === 'alarm' &&
       row.last_refreshed_at_ms !== null &&
       now - row.last_refreshed_at_ms < this.#tierIntervalMs(row, slot) &&
-      this.#refreshedSinceLastAttempt(row)
+      this.#refreshedSinceLastAttempt(row) &&
+      // A due policy re-read (N2, N4) is a read by definition: no refresh satisfies it.
+      !this.#rereadDue(row, now)
     ) {
       // Ruling L14: a refresh outside the cadence (a user's, a reconcile's, a merged alert's)
       // inside this slot's tier interval already answered it. Reschedule without a call; the
@@ -1449,7 +1670,7 @@ export class FlightTracker extends DurableObject<Env> {
         soft_cap_pe: budget.soft_cap_pe,
       });
     }
-    const next = this.#schedule(row, now, trigger === 'reconcile');
+    const next = this.#schedule(row, now, trigger === 'reconcile', 'planning');
     this.#exec(
       `INSERT INTO attempts (slot_ms, flight_id, started_at_ms, retry_count, trigger, outcome)
        VALUES (?, 1, ?, ?, ?, 'started')
@@ -1582,6 +1803,9 @@ export class FlightTracker extends DurableObject<Env> {
       log: logger,
       now: () => new Date(this.#now()),
     };
+    // Always by designator through the router, never by a provider id (`providerRef`): the
+    // policy's confirming re-read of a cancellation or diversion (ruling N4) is this same read,
+    // and a read by `fa_flight_id` would only return the record that raised the suspicion.
     const designator = lookupDesignator(row, snapshot);
     const carrier =
       designator.code.length === 3 ? { icao: designator.code } : { iata: designator.code };
@@ -1685,16 +1909,27 @@ export class FlightTracker extends DurableObject<Env> {
     }
     const current = this.#requireFlight();
     if (result.status === null) {
-      // A miss or an error changes nothing about the flight; the schedule stands. The call's
-      // cost still lands on the row (one write, the same one a change would make).
+      // A miss or an error changes nothing about the flight. The call's cost still lands on the
+      // row (one write, the same one a change would make), and a due re-read that produced no
+      // snapshot is inconclusive (review rulings Q3, Q11): the policy counts it and names the
+      // next re-read, so a failing provider costs at most the policy's bounded re-reads on top
+      // of the cadence, never a loop.
+      const due = this.#rereadDue(current, now) ? this.#storedPolicyState(current) : null;
+      const policyText =
+        due === null
+          ? current.policy_state
+          : JSON.stringify(this.policy.evaluateFailedReread({ state: due, now }).state);
       this.#exec(
-        'UPDATE flight SET provider_cost_units = provider_cost_units + ?, updated_at_ms = ? WHERE id = 1',
+        `UPDATE flight SET provider_cost_units = provider_cost_units + ?, policy_state = ?,
+                updated_at_ms = ? WHERE id = 1`,
         units,
+        policyText,
         now,
       );
-      const next = this.#schedule(current, now, false);
-      this.#reschedule(current, next, now);
-      return { version: current.version, changed: false, finish: next.finish };
+      const after = this.#requireFlight();
+      const next = this.#schedule(after, now, false, 'made');
+      this.#reschedule(after, next, now);
+      return { version: after.version, changed: false, finish: next.finish };
     }
     const reconciliation = reconcileFlightKey(row.key as FlightKey, result.status);
     if (reconciliation.drift !== 'none') {
@@ -1722,10 +1957,13 @@ export class FlightTracker extends DurableObject<Env> {
       return { version: stopped.version, changed: true, finish: 'key_drift' };
     }
     const status: FlightStatus = { ...result.status, key: row.key as FlightKey };
-    return this.#applyStatus(current, previous, status, now, result.trigger, lastId, false, units);
+    return this.#applyStatus(current, previous, status, now, result.trigger, lastId, 'read', units);
   }
 
-  /** Replaces the snapshot when it changed: events, scalars, version, outbox, schedule. */
+  /**
+   * Replaces the snapshot when it changed: events, scalars, version, outbox, schedule. `answeredBy`
+   * names the provider that answered when the snapshot's `source` is not it (an alert merge).
+   */
   #applyStatus(
     row: FlightRow,
     previous: FlightStatus,
@@ -1733,45 +1971,124 @@ export class FlightTracker extends DurableObject<Env> {
     now: number,
     trigger: ProviderCallTrigger,
     providerCallId: string | undefined,
-    fromSeed: boolean,
+    source: ObservationSource,
     units = 0,
+    answeredBy?: ProviderId,
   ): ApplyOutcome {
-    const drafts = diffSnapshots(previous, next, next.source, providerCallId);
-    const serialized = JSON.stringify(next);
+    // The notification policy (N1 to N7): classified here, on every path that stores a snapshot,
+    // so its state, its intents and the snapshot commit together, and no path can finish the
+    // flight on a cancellation the policy has not confirmed (N4).
+    const policy = this.#evaluate(row, previous, next, now, source === 'read', answeredBy);
+    // Review ruling Q11 (1): a change the policy only suspects is evidence, not state. The
+    // snapshot, its phase and its times stay the last confirmed ones (so the cadence and the
+    // window's provider stay those of the operating flight, and neither the instance row nor
+    // KV ever shows it); the version moves with the schedule, as `emit` says below. Only the
+    // policy state, the cost and the instant of this read are stored, and a new suspicion
+    // writes its event.
+    const held = showsSuspectedChange(policy.state, next);
+    const drafts = held ? [] : diffSnapshots(previous, next, next.source, providerCallId);
     // `fetchedAt` moves on every poll; a snapshot that differs in nothing else is the same
     // flight, so the version stays and no instance row goes out. The fresh `fetchedAt` is still
     // stored, on the same write the cost update needs anyway.
-    const changed = drafts.length > 0 || withoutFetchedAt(next) !== withoutFetchedAt(previous);
+    const changed =
+      !held && (drafts.length > 0 || withoutFetchedAt(next) !== withoutFetchedAt(previous));
     for (const draft of drafts) {
       this.#appendEvent(row, now, draft);
     }
+    this.#appendSuspicionEvents(row, now, policy.state, providerCallId);
+    // The row as it is about to be stored, so the schedule is known before the one write. An
+    // instance row goes out on a change, a moved schedule or a re-seed, and the version moves
+    // with every one (review ruling Q1: never two different payloads under one version; a
+    // moved alarm alone made the confirming alarm's second row reuse step 1's version).
+    const policyText = JSON.stringify(policy.state);
+    const stored: FlightRow = held
+      ? { ...row, policy_state: policyText }
+      : {
+          ...row,
+          snapshot: JSON.stringify(next),
+          phase: next.status,
+          scheduled_out_ms: ms(next.times.scheduledOut),
+          scheduled_in_ms: ms(next.times.scheduledIn),
+          estimated_in_ms: ms(next.times.estimatedIn),
+          actual_off_ms: ms(next.times.actualOff),
+          actual_on_ms: ms(next.times.actualOn),
+          actual_in_ms: ms(next.times.actualIn),
+          operator_source: next.operatorSource ?? null,
+          policy_state: policyText,
+        };
+    const read: ReadAtNow = source === 'read' ? 'made' : 'none';
+    const schedule = this.#schedule(stored, now, trigger === 'reconcile', read);
+    const at = schedule.finish === null ? schedule.at : null;
+    const rescheduled = at !== row.next_refresh_at_ms;
+    const emit = changed || rescheduled || source === 'seed';
     this.#exec(
       `UPDATE flight SET snapshot = ?, phase = ?, version = version + ?, scheduled_out_ms = ?,
               scheduled_in_ms = ?, estimated_in_ms = ?, actual_off_ms = ?, actual_on_ms = ?,
               actual_in_ms = ?, operator_source = ?, last_refreshed_at_ms = ?,
-              provider_cost_units = provider_cost_units + ?, updated_at_ms = ?
+              provider_cost_units = provider_cost_units + ?, policy_state = ?,
+              next_refresh_at_ms = ?, updated_at_ms = ?
         WHERE id = 1`,
-      serialized,
-      next.status,
-      changed ? 1 : 0,
-      ms(next.times.scheduledOut),
-      ms(next.times.scheduledIn),
-      ms(next.times.estimatedIn),
-      ms(next.times.actualOff),
-      ms(next.times.actualOn),
-      ms(next.times.actualIn),
-      next.operatorSource ?? null,
+      stored.snapshot,
+      stored.phase,
+      emit ? 1 : 0,
+      stored.scheduled_out_ms,
+      stored.scheduled_in_ms,
+      stored.estimated_in_ms,
+      stored.actual_off_ms,
+      stored.actual_on_ms,
+      stored.actual_in_ms,
+      stored.operator_source,
       now,
       units,
+      policyText,
+      at,
       now,
     );
+    if (rescheduled && at !== null) {
+      this.#setAlarm(at);
+    }
     const current = this.#requireFlight();
-    const schedule = this.#schedule(current, now, trigger === 'reconcile');
-    const rescheduled = this.#reschedule(current, schedule, now);
-    if (changed || rescheduled || fromSeed) {
-      this.#appendInstance(this.#requireFlight(), now);
+    this.#appendIntents(current, now, policy.intents, next, null);
+    if (emit) {
+      this.#appendInstance(current, now);
     }
     return { version: current.version, changed, finish: schedule.finish };
+  }
+
+  /**
+   * Review ruling Q11 (1): a suspicion the observation raised goes into the timeline as evidence
+   * (`cancel_suspect`, `diversion_suspect`; the suspected value, by the provider that raised
+   * it), whether or not its snapshot is stored. A suspicion the stored state already held (the
+   * same `since`) writes nothing more.
+   */
+  #appendSuspicionEvents(
+    row: FlightRow,
+    now: number,
+    state: PolicyState,
+    providerCallId: string | undefined,
+  ): void {
+    const before = this.#storedPolicyState(row);
+    const kinds = [
+      ['cancellation', 'cancel_suspect'],
+      ['diversion', 'diversion_suspect'],
+    ] as const;
+    for (const [key, type] of kinds) {
+      const after = state[key];
+      const prior = before?.[key];
+      if (
+        after.status !== 'suspect' ||
+        (prior?.status === 'suspect' && prior.since === after.since)
+      ) {
+        continue;
+      }
+      this.#appendEvent(row, now, {
+        type,
+        field: key,
+        newValue: after.value,
+        source: after.provider,
+        providerCallId,
+      });
+    }
   }
 
   /** Moves the alarm when the schedule changed; returns whether it did. */
@@ -1809,10 +2126,10 @@ export class FlightTracker extends DurableObject<Env> {
    * the next slower tier's interval. Polling that was stopped by the hard cap keeps whatever the
    * hard cap scheduled.
    */
-  #schedule(
+  #cadenceSchedule(
     row: FlightRow,
     now: number,
-    afterReconcilePoll = false,
+    afterReconcilePoll: boolean,
   ): { readonly at: number; readonly finish: FinishReason | null } {
     if (row.polling_stopped === 1) {
       if (row.stop_reason === 'hard_cap' && row.reconcile_poll_done === 0 && !afterReconcilePoll) {
@@ -1848,7 +2165,76 @@ export class FlightTracker extends DurableObject<Env> {
     return { at: decision.nextRefreshAt.getTime(), finish: null };
   }
 
+  /**
+   * The next alarm: the cadence's slot (`#cadenceSchedule`), moved by what the notification
+   * policy owes (`#policySchedule`) unless polling is stopped (the hard cap and a key drift end
+   * the tracking whatever the policy holds). `read` names the provider read at `now` the schedule
+   * follows: the one step 1 is planning, or the one just made (or failed).
+   */
+  #schedule(
+    row: FlightRow,
+    now: number,
+    afterReconcilePoll = false,
+    read: ReadAtNow = 'none',
+  ): { readonly at: number; readonly finish: FinishReason | null } {
+    const base = this.#cadenceSchedule(row, now, afterReconcilePoll);
+    return row.polling_stopped === 1 ? base : this.#policySchedule(row, now, base, read);
+  }
+
+  /**
+   * Rulings N2 and N4 on top of the cadence, as review rulings Q3, Q4 and Q11 bound them. The
+   * re-read the policy owes moves the next alarm to `min(the cadence's slot, wants.at)`, at once
+   * when `wants.at` has passed (an alarm that ran late). A due re-read that produced no snapshot
+   * is counted by the policy (`evaluateFailedReread`), which moves `wants.at` on, so a failing
+   * provider is never polled in a loop. Step 1 plans the read it is about to make as if it
+   * failed: the alarm it commits is that read's next re-read, never `now`, so a crash before the
+   * answer resumes there and a platform retry finds the slot committed. A suspicion with fast
+   * re-reads left holds the finish, even past the cadence's last slot (Q4, Q11 (3)): a
+   * cancellation first seen at the last slot is still confirmed. Once they are spent the flight
+   * finishes unconfirmed (`#finishBody` logs it); the hard cap ends it whatever is held.
+   * Review ruling Q19 (c), the backstop: a policy `wants.at` still at or before the provider
+   * read made (or planned) at `now` would be an alarm at the read's own instant, a read loop at
+   * the provider's expense. The policy never leaves one (Q19 (a), (b)); should it, the re-read
+   * is floored to the read plus `CONFIRM_REREAD_MINUTES`, logged `policy_wants_overdue` once
+   * the read is made, and holds no finish. The cadence's slot and a future `wants.at` are never
+   * touched, and before any read (an alert merge, a re-seed, a late alarm) an overdue re-read
+   * runs at once.
+   */
+  #policySchedule(
+    row: FlightRow,
+    now: number,
+    base: { readonly at: number; readonly finish: FinishReason | null },
+    read: ReadAtNow,
+  ): { readonly at: number; readonly finish: FinishReason | null } {
+    const stored = this.#storedPolicyState(row);
+    if (stored === null) {
+      return base;
+    }
+    const state =
+      read === 'planning' && this.#rereadDue(row, now)
+        ? this.policy.evaluateFailedReread({ state: stored, now }).state
+        : stored;
+    const wants = policyWants(state);
+    if (wants === null) {
+      return base;
+    }
+    const overdue = wants.at <= now + EARLY_ALARM_TOLERANCE_MS;
+    const frozen = overdue && read !== 'none';
+    if (overdue && read === 'made') {
+      this.#log.error('policy_wants_overdue', {
+        wants_at: new Date(wants.at).toISOString(),
+        reasons: wants.reasons,
+      });
+    }
+    const at = frozen ? now + POLICY_REREAD_FLOOR_MS : overdue ? now : wants.at;
+    if (base.finish === null) {
+      return { at: Math.min(base.at, at), finish: null };
+    }
+    return !frozen && holdsFinish(state, wants) ? { at, finish: null } : base;
+  }
+
   #cadenceContext(row: FlightRow, now: number): CadenceContext | null {
+    const out = this.#outInstants(row);
     return cadenceContextFor(
       {
         scheduledOutMs: row.scheduled_out_ms,
@@ -1857,19 +2243,49 @@ export class FlightTracker extends DurableObject<Env> {
         actualOffMs: row.actual_off_ms,
         actualOnMs: row.actual_on_ms,
         actualInMs: row.actual_in_ms,
+        estimatedOutMs: out.estimatedOutMs,
+        actualOutMs: out.actualOutMs,
         phase: row.phase as TrackerPhase,
       },
       now,
     );
   }
 
-  /** The call the current window asks for, priced before any adapter exists (ruling L17). */
+  /**
+   * Ruling N8: the departure anchor's estimated and actual out, read from the stored snapshot
+   * (the row has no columns for them, and adding two would buy nothing: the snapshot is on the
+   * row already). Parsed without the schema and memoised on the snapshot text, because the
+   * cadence context is built several times per alarm.
+   */
+  #outInstants(row: FlightRow): { estimatedOutMs: number | null; actualOutMs: number | null } {
+    if (this.#outMemo?.snapshot !== row.snapshot) {
+      let times: { estimatedOut?: unknown; actualOut?: unknown } | undefined;
+      try {
+        times = (JSON.parse(row.snapshot) as { times?: typeof times }).times;
+      } catch {
+        times = undefined;
+      }
+      const instant = (value: unknown): number | null =>
+        typeof value === 'string' ? ms(value) : null;
+      this.#outMemo = {
+        snapshot: row.snapshot,
+        estimatedOutMs: instant(times?.estimatedOut),
+        actualOutMs: instant(times?.actualOut),
+      };
+    }
+    return this.#outMemo;
+  }
+
+  /**
+   * The call the current window asks for, priced before any adapter exists (ruling L17). The
+   * window is resolved from the stored, operational phase (a suspected cancellation is never
+   * stored, review ruling Q11 (1)), so a confirming re-read goes to the window's own provider;
+   * past the cadence's last slot, where only a held finish still reads (Q4), the last window's.
+   */
   #expectedCall(row: FlightRow, now: number, context?: CadenceContext | null): ExpectedCall {
     const resolved = context === undefined ? this.#cadenceContext(row, now) : context;
     const source: CadenceSource =
-      resolved === null
-        ? 'aerodatabox'
-        : (windowAt(cadenceById(row.cadence), resolved)?.source ?? 'aerodatabox');
+      resolved === null ? 'aerodatabox' : windowSourceAt(cadenceById(row.cadence), resolved);
     const provider = expectedProviderFor(source, this.env, {
       scheduledOut: new Date(row.scheduled_out_ms ?? now),
       now: new Date(now),
@@ -1977,8 +2393,34 @@ export class FlightTracker extends DurableObject<Env> {
       this.#setAlarm(now + FINISH_ALARM_MS);
     });
     this.#log.info('flight_tracker_finished', { reason, archived: archiveKey !== null });
+    this.#logUnconfirmed(row, reason);
     await this.#flushOutbox(now);
     await this.#writeFinalKv(now);
+  }
+
+  /**
+   * Review ruling Q11 (3): a flight that finishes with a suspicion still undecided (its fast
+   * re-reads spent at the cadence's end, the hard cap, a key drift) pushed nothing for it, and
+   * says so: `cancel_unconfirmed`, or `diversion_unconfirmed` (the same shape, Q4).
+   */
+  #logUnconfirmed(row: FlightRow, reason: FinishReason): void {
+    const state = this.#storedPolicyState(row);
+    const kinds = [
+      ['cancellation', 'cancel_unconfirmed'],
+      ['diversion', 'diversion_unconfirmed'],
+    ] as const;
+    for (const [key, event] of kinds) {
+      const suspicion = state?.[key];
+      if (suspicion?.status === 'suspect') {
+        this.#log.warn(event, {
+          reason,
+          value: suspicion.value,
+          provider: suspicion.provider,
+          since: iso(suspicion.since),
+          reads: suspicion.reads,
+        });
+      }
+    }
   }
 
   /**
@@ -2400,6 +2842,67 @@ export class FlightTracker extends DurableObject<Env> {
     return FlightStatusSchema.parse(JSON.parse(row.snapshot));
   }
 
+  /**
+   * The stored policy state (migration 003), or null when there is none this build can read.
+   * Memoised on the stored text (review ruling Q8): an alarm reads it several times.
+   */
+  #storedPolicyState(row: FlightRow): PolicyState | null {
+    const text = row.policy_state;
+    if (text === null) {
+      return null;
+    }
+    if (this.#policyMemo?.text !== text) {
+      let state: PolicyState | null;
+      try {
+        state = readPolicyState(JSON.parse(text));
+      } catch {
+        state = null;
+      }
+      this.#policyMemo = { text, state };
+    }
+    return this.#policyMemo.state;
+  }
+
+  /**
+   * Whether a provider read at `now` is the policy's re-read: the state names a `wants` whose
+   * `from` is at or before it (within the early-alarm tolerance, the policy's
+   * `REREAD_TOLERANCE_MS`). `wants.at` only bounds when the alarm must run; from `wants.from`
+   * on, any read of this tracker's own is the re-read (a slow confirming re-read is the next
+   * cadence slot, review ruling Q11 (3)). Such an alarm must read, never be satisfied.
+   */
+  #rereadDue(row: FlightRow, now: number): boolean {
+    const state = this.#storedPolicyState(row);
+    const wants = state === null ? null : policyWants(state);
+    return wants !== null && wants.from <= now + EARLY_ALARM_TOLERANCE_MS;
+  }
+
+  /**
+   * Rulings N1, N2, N4: classifies one stored observation against the snapshot before it. The
+   * state is seeded from that snapshot when none is stored (a tracker created before increment
+   * 15, or a layout this build cannot read). A provider read of this tracker's own (an alarm, a
+   * user refresh, a reconcile poll, an alert's re-read), all by designator through the router,
+   * made once the re-read is due IS that re-read; an alert merge or a re-seed never is (an
+   * AeroAPI alert is keyed by `fa_flight_id` and carries the very flag a re-read must confirm).
+   * `answeredBy` names an alert merge's provider (review ruling Q11 (6)): the merged snapshot
+   * keeps the stored snapshot's `source`, and a suspicion it raises is that provider's.
+   */
+  #evaluate(
+    row: FlightRow,
+    previous: FlightStatus,
+    next: FlightStatus,
+    now: number,
+    read: boolean,
+    answeredBy?: ProviderId,
+  ): PolicyResult {
+    const state = this.#storedPolicyState(row) ?? initialPolicyState(previous);
+    const context = answeredBy === undefined ? undefined : { provider: answeredBy };
+    const input = { previous, next, state, now, context };
+    const { policy } = this;
+    return read && this.#rereadDue(row, now)
+      ? policy.evaluateReread(input)
+      : policy.evaluatePolicy(input);
+  }
+
   #debit(budget: BudgetRow, trigger: ProviderCallTrigger, pe: number): void {
     const byTrigger = JSON.parse(budget.by_trigger) as Record<
       string,
@@ -2502,6 +3005,50 @@ export class FlightTracker extends DurableObject<Env> {
       eventsR2Key: row.events_r2_key,
     };
     this.#appendOutbox(row, now, { kind: 'flight_instance', flightKey: key, payload });
+  }
+
+  /**
+   * Ruling N7: one `notify_intent` outbox row per intent, inside the caller's transaction (the
+   * one that stores the state the intent came from), each guarded by `notif_dedupe`. The key
+   * names the flight, the kind, the intent's value and the tracker's change sequence (`version`,
+   * as of the stored observation): a retried alarm reproduces it and writes nothing twice, while a
+   * later change back to a value pushed before (a delay of 20, then 10, then 20) gets a new one.
+   * An injection's id stands in for the sequence and marks the intent as a test (N11), so a
+   * replayed injection writes nothing.
+   */
+  #appendIntents(
+    row: FlightRow,
+    now: number,
+    intents: readonly PolicyIntent[],
+    observed: FlightStatus,
+    injectionId: string | null,
+  ): WrittenIntent[] {
+    const flightKey = row.key as FlightKey;
+    const sequence = injectionId === null ? `v${String(row.version)}` : `test:${injectionId}`;
+    return intents.map((intent): WrittenIntent => {
+      const dedupeKey = `${flightKey}:${intent.kind}:${intent.dedupeValue}:${sequence}`;
+      const inserted = this.#exec(
+        `INSERT INTO notif_dedupe (dedupe_key, flight_id, sent_at_ms) VALUES (?, 1, ?)
+         ON CONFLICT (dedupe_key) DO NOTHING RETURNING dedupe_key`,
+        dedupeKey,
+        now,
+      );
+      if (inserted.length === 0) {
+        return { intent, dedupeKey, written: false };
+      }
+      const payload: NotifyIntentV1Input = {
+        kind: 'notify_intent',
+        flightKey,
+        dedupeKey,
+        intent: { ...intent },
+        flight: flightSummary(observed),
+        producedAt: new Date(now).toISOString(),
+        test: injectionId !== null,
+        ...(injectionId === null ? {} : { injectionId }),
+      };
+      this.#appendOutbox(row, now, { kind: 'notify_intent', flightKey, payload });
+      return { intent, dedupeKey, written: true };
+    });
   }
 
   /** Stores the message minus `seq` and `origin`, which are added at send time. Returns the seq. */

@@ -711,6 +711,9 @@ export function createFlightRoutes(options: FlightRoutesOptions = {}) {
                 muted: body.muted ?? false,
                 notificationOverrides: body.notificationOverrides ?? {},
                 liveTracked: ledger.has('live_tracked'),
+                // Ruling Q1: a subscribe starts with no recorded release, so a restored row's
+                // old stamp cannot make notify push it an intent produced before this subscribe.
+                liveTrackedReleasedAt: null,
               };
               const restore = rows.find((row) => row.id === subscriptionId);
               let written: FlightSubscriptionRecord | undefined;

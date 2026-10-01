@@ -1,14 +1,21 @@
 /**
- * `GET /v1/me`, `PATCH /v1/me/preferences` and `POST /v1/me/delete`.
+ * `GET /v1/me`, `GET` and `PATCH /v1/me/preferences`, and `POST /v1/me/delete`.
  *
  * `me` returns the user and their preferences (the defaults when no row exists yet; a row is
  * only written by a PATCH, so a user who never changed anything has no row to sync). An
  * anonymous user's email is a Better Auth placeholder and is reported as null.
  *
- * The PATCH body is validated with the shared `UserPreferencesPatchSchema` so the mobile client
+ * The PATCH body is validated with the shared `PreferencesPatchSchema` so the mobile client
  * and the API agree on one contract; `settings` is replaced as a whole when present. The row and
  * its `user_sync_changes` row are written in one transaction (increment 8, ruling K4), so the
  * sync feed carries every preference change.
+ *
+ * Increment 15 (ruling N10): the body may also carry `notifications`, the shared
+ * `NotificationPreferencesPatchSchema` (`pushEnabled` and the per-kind toggles), merged into the
+ * user's `notification_preferences` row in the same transaction
+ * (src/lib/notification-preferences.ts). Both the PATCH and `GET /v1/me/preferences` answer the
+ * effective display and notification preferences, defaults filled in; a part a patch leaves out
+ * is read, not written.
  *
  * `POST /v1/me/delete` (increment 8, ruling K8) deletes the account synchronously and accepts an
  * anonymous session (Apple requires guest accounts to be deletable); src/lib/account-deletion.ts
@@ -16,20 +23,25 @@
  * user gets 401 `account_deleted` on its next call.
  */
 
-import { eq } from 'drizzle-orm';
+import { and, eq, isNull } from 'drizzle-orm';
 import { Hono } from 'hono';
 import { userPreferences, users } from '@planeahead/db';
 import {
   DEFAULT_USER_PREFERENCES,
   DO_CALL_DEADLINE_MS,
+  PreferencesPatchSchema,
   type UserPreferences,
-  UserPreferencesPatchSchema,
   UserPreferencesSchema,
   uuidv7,
 } from '@planeahead/shared';
 import { authRuntime } from '../auth/runtime';
 import type { AppBindings } from '../env';
 import { deleteAccount } from '../lib/account-deletion';
+import type { DbOrTx } from '../lib/flight-registry';
+import {
+  patchNotificationPreferences,
+  readNotificationPreferences,
+} from '../lib/notification-preferences';
 import { appendUserChange, preferencesSyncRow } from '../lib/sync-rows';
 import { defaultTrackerFor } from '../lib/trackers';
 import { validate } from '../lib/validate';
@@ -38,7 +50,7 @@ import { idempotencyGate } from '../middleware/idempotency';
 import { withoutNul } from '../validation/nul';
 
 /** The shared contract plus the NUL refinement (`settings` is a jsonb bag Postgres would 500 on). */
-const PreferencesPatchBody = withoutNul(UserPreferencesPatchSchema);
+const PreferencesPatchBody = withoutNul(PreferencesPatchSchema);
 
 function toPreferences(row: {
   distanceUnit: string;
@@ -51,6 +63,20 @@ function toPreferences(row: {
   // A row that fails the shared schema (a value added by migration but not yet to the
   // contract) degrades to the defaults for that field rather than failing the read.
   return parsed.success ? parsed.data : { ...DEFAULT_USER_PREFERENCES };
+}
+
+/**
+ * The user's display preferences as `GET /v1/me/preferences` reports them (`GET /v1/me` reads
+ * the same through its own join): the defaults without a live row. A tombstoned row is ignored,
+ * as notify ignores it (review ruling Q18).
+ */
+async function readUserPreferences(db: DbOrTx, userId: string): Promise<UserPreferences> {
+  const [row] = await db
+    .select()
+    .from(userPreferences)
+    .where(and(eq(userPreferences.userId, userId), isNull(userPreferences.deletedAt)))
+    .limit(1);
+  return row === undefined ? { ...DEFAULT_USER_PREFERENCES } : toPreferences(row);
 }
 
 export const meRoutes = new Hono<AppBindings>()
@@ -76,7 +102,10 @@ export const meRoutes = new Hono<AppBindings>()
         settings: userPreferences.settings,
       })
       .from(users)
-      .leftJoin(userPreferences, eq(userPreferences.userId, users.id))
+      .leftJoin(
+        userPreferences,
+        and(eq(userPreferences.userId, users.id), isNull(userPreferences.deletedAt)),
+      )
       .where(eq(users.id, principal.id))
       .limit(1);
     if (row === undefined) {
@@ -120,6 +149,17 @@ export const meRoutes = new Hono<AppBindings>()
       200,
     );
   })
+  .get('/preferences', requireScope('user'), async (c) => {
+    const principal = currentUser(c.var.user);
+    const { db } = authRuntime(c);
+    return c.json(
+      {
+        preferences: await readUserPreferences(db, principal.id),
+        notifications: await readNotificationPreferences(db, principal.id),
+      },
+      200,
+    );
+  })
   .patch(
     '/preferences',
     requireScope('user'),
@@ -127,18 +167,18 @@ export const meRoutes = new Hono<AppBindings>()
     idempotencyGate({ required: false }),
     async (c) => {
       const principal = currentUser(c.var.user);
-      const patch = c.req.valid('json');
+      const { notifications: notificationsPatch, ...patch } = c.req.valid('json');
       const { db } = authRuntime(c);
 
-      const changes = {
+      const display = {
         ...(patch.distanceUnit === undefined ? {} : { distanceUnit: patch.distanceUnit }),
         ...(patch.temperatureUnit === undefined ? {} : { temperatureUnit: patch.temperatureUnit }),
         ...(patch.timeFormat === undefined ? {} : { timeFormat: patch.timeFormat }),
         ...(patch.showLocalTimes === undefined ? {} : { showLocalTimes: patch.showLocalTimes }),
         ...(patch.settings === undefined ? {} : { settings: patch.settings }),
-        deletedAt: null,
       };
-      const row = await db.transaction(async (tx) => {
+      const changes = { ...display, deletedAt: null };
+      const writeDisplay = async (tx: DbOrTx): Promise<UserPreferences> => {
         const [written] = await tx
           .insert(userPreferences)
           .values({ id: uuidv7(), userId: principal.id, ...changes })
@@ -154,9 +194,20 @@ export const meRoutes = new Hono<AppBindings>()
           op: 'upsert',
           row: preferencesSyncRow(written),
         });
-        return written;
-      });
-      return c.json({ preferences: toPreferences(row) }, 200);
+        return toPreferences(written);
+      };
+      // One transaction for both rows and their sync changes; a part the patch leaves out is read.
+      const body = await db.transaction(async (tx) => ({
+        preferences:
+          Object.keys(display).length === 0
+            ? await readUserPreferences(tx, principal.id)
+            : await writeDisplay(tx),
+        notifications:
+          notificationsPatch === undefined
+            ? await readNotificationPreferences(tx, principal.id)
+            : await patchNotificationPreferences(tx, principal.id, notificationsPatch),
+      }));
+      return c.json(body, 200);
     },
   )
   .post('/delete', requireScope('user'), async (c) => {

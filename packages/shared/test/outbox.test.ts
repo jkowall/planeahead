@@ -70,7 +70,7 @@ describe('outbox origins', () => {
 });
 
 describe('PersistMessageV1', () => {
-  it('is at outbox schema version 1 and names five kinds', () => {
+  it('is at outbox schema version 1 and names six kinds', () => {
     expect(OUTBOX_SCHEMA_VERSION).toBe(1);
     expect(OUTBOX_KINDS).toEqual([
       'flight_instance',
@@ -78,6 +78,7 @@ describe('PersistMessageV1', () => {
       'provider_call',
       'provider_budget_kill_switch',
       'provider_budget_daily',
+      'notify_intent',
     ]);
     expect(FLIGHT_TRACKING_STATES).toEqual([
       'pending',

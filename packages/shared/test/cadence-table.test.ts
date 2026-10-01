@@ -48,8 +48,9 @@ describe('docs/architecture.md cadence block', () => {
     expect(rendered).toContain('the fallback tail is five fixed polls');
     // No A1 row for 3 h to arrival: the pre-boarding grid runs to T-45, so there is no hole.
     expect(rendered).not.toMatch(/\| A1 +\| 3 h to arrival/);
+    // N8: A2's 30-minute in-flight grid opens at out, so its relaxed leg starts there.
     expect(rendered).toMatch(
-      /\| A2 +\| 3 h to arrival +\| T-40min to T-10min +\| 30 min +\| 15 min/,
+      /\| A2 +\| 3 h to arrival +\| out to out\+30min +\| 30 min +\| 15 min/,
     );
     // A gap that crosses T-6 h is charged to both SLO windows (R10); the span column names the gap.
     expect(rendered).toMatch(/\| B +\| 48 h to 6 h +\| T-48h to T-3h +\| 45 h +\| 1 h/);
@@ -57,7 +58,7 @@ describe('docs/architecture.md cadence block', () => {
     // Every relaxation row carries a recorded decision; nothing prints as OPEN.
     expect(rendered).not.toContain('OPEN:');
     expect(rendered).toContain(
-      'literal 2 min (out+178min to in); A1 10 min (out+170min to in); A2 10 min (out+170min to in); B 3 h (out+15min to in+15min)',
+      'literal 2 min (out+178min to in); A1 10 min (out+170min to in); A2 30 min (out+150min to in); B 3 h (out+15min to in+15min)',
     );
     // Increment 6: the weekly pre-48 h window and its recorded relaxation on every cadence.
     expect(rendered).toContain('weekly from creation to T-48h, end-anchored on T-48h');
