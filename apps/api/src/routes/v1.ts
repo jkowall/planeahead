@@ -19,9 +19,12 @@
  * scope and the store only; each keyed route reserves through `idempotencyGate()` after its
  * validator, because the request hash covers the validated body.
  *
- * `noStoreByDefault` is FIRST, so it sees every `/v1` answer last, the limiter's 429 and the error
- * handler's included, and adds `no-store` to each that names no `Cache-Control` of its own: no
- * `/v1` answer may sit in the phone's HTTP disk cache past sign-out (src/middleware/no-store.ts).
+ * `noStoreByDefault` is FIRST, so it sees every answer this chain produces last, the limiter's 429
+ * and the error handler's included, and adds `no-store` to each that names no `Cache-Control` of
+ * its own: no `/v1` route's answer may sit in the phone's HTTP disk cache past sign-out
+ * (src/middleware/no-store.ts). An answer given before this chain runs carries none: the 429 of
+ * the root chain's per-IP limiter (`PUBLIC_RL`) and an error its middleware raises (a 500);
+ * neither holds user data.
  *
  * `createV1Routes` exists for tests that inject a slow tracker or a failing transaction into the
  * flight routes, a purge horizon into the sync route, a dataset into the events route, or a clock

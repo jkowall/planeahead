@@ -76,7 +76,8 @@ runs.
   quota; nothing reports the units a call spent. So U2, U3 and U6 are read from the dashboard: the
   probe stops at each checkpoint and asks for the counter (Enter skips), and it records every
   response header that looks like a quota counter in case the gateway sends one. How soon the
-  dashboard counter moves after a call is unknown; the prompt says to wait for it.
+  dashboard counter moves after a call is unknown: each prompt asks for it once it has stopped
+  moving, and the dry run prints each reading's running total (the re-review's M4).
 - **A screen pushed from the add sheet would open beneath it.** In react-native-screens' native
   stack, pushed screens live in the navigation controller underneath any presented modal, so a
   board pushed from the sheet would land behind the sheet. The sheet therefore replaces itself
@@ -173,7 +174,9 @@ Run from the repository root on your own machine, never in CI. It spends about 4
 400,000.
 
 1. `node scripts/probe-adb-boards.mjs --dry-run --date <today in New York>` prints every call,
-   its units and the counter readings, with no network call.
+   its units, and each counter reading with its running total (the units the counter should have
+   moved since `before`: as planned, then from 204 and 400 billing nothing to `direction=Both`
+   billing twice), with no network call. Keep it beside the run.
 2. Open the AeroDataBox dashboard on the page that shows the API units used this period.
 3. Run the probe:
 
@@ -181,22 +184,29 @@ Run from the repository root on your own machine, never in CI. It spends about 4
    AERODATABOX_API_KEY=<the Growth key> node scripts/probe-adb-boards.mjs --date <the same date> --out docs/increments/18-probe-findings.json
    ```
 
-   At each prompt (`before`, after each billing call of U2, U3 and U6, `before-production` and
-   `after-production` around the production call, and `end` after the last call), wait until the
-   dashboard's counter has moved, then type it; Enter skips one. Skipping either production
-   reading loses the one figure step 5 needs first.
+   At each prompt (`before`, after each billing call of U2, U3 and U6, `after-u5-180-days` after
+   the U7 and U5 calls, `before-production` and `after-production` around the production call,
+   and `end` after the last call), wait until the dashboard's counter has stopped moving and
+   has moved at least the low end of that reading's running total, then type it; Enter skips one.
+   `after-u5-180-days` and `before-production` have no call between them, so they should match; a
+   difference means the counter was still moving. Skipping either production reading loses the one
+   figure step 5 needs first.
 4. The file is written indented (`docs/increments/` is outside Prettier) and holds booleans and
    counts only: no flight number, time or path (ruling R7). The script also prints the answers.
    Copy each into [Unverified](#unverified) below, item by item, and commit both.
 5. Act on the answers:
-   - `bill.productionCallUnits` is what one production call costs: set `ADB_UNITS.fids`
-     (`packages/shared/src/cost.ts`, and its test in `packages/shared/test/cost.test.ts`) to it
-     in the change that commits the findings (ruling R7). Left at 2 while AeroDataBox bills 4,
-     the ledger would count every board fetch at half its cost (review A: the 35 percent share
-     would really spend 70 percent of the day's units, and the month would run out around day
-     22); set to 4, the share buys half as many fetches, so revisit the share in `config.ts`
-     with R3 O4. `bill.runUnits` against the plan's 44 (40 if errors are free, 66 if `Both`
-     bills twice) says whether the readings can be trusted.
+   - `bill.productionCallUnits` is what one production call costs when `bill.productionCallSettled`
+     is true: it is 2, 4 or what U2 and U3 imply (`bill.impliedByU2AndU3`, the `Both` call plus
+     what `withLeg` added). Set `ADB_UNITS.fids` (`packages/shared/src/cost.ts`, and its test in
+     `packages/shared/test/cost.test.ts`) to it in the change that commits the findings (ruling
+     R7). When it is false, a reading was skipped or a lagging counter folded another call's units
+     in (the re-review's M4): leave `ADB_UNITS.fids` alone and run the probe again (about 44
+     units), waiting longer at each prompt. Left at 2 while AeroDataBox bills 4, the ledger would
+     count every board fetch at half its cost (review A: the 35 percent share would really spend 70
+     percent of the day's units, and the month would run out around day 22); set to 4, the share
+     buys half as many fetches, so revisit the share in `config.ts` with R3 O4. `bill.runUnits`
+     against the plan's 44 (40 if errors are free, 66 if `Both` bills twice) says whether the
+     readings can be trusted.
    - U1: the board keeps a row by its scheduled or its best time from the buckets a request reads
      (ruling R14), so whichever way FIDS selects, only a delayed flight sitting in a bucket the
      request does not read is missed: by schedule, one scheduled in the bucket before the window
@@ -213,7 +223,9 @@ Run from the repository root on your own machine, never in CI. It spends about 4
      ruling R15 corrected.
    - B7: the share of codeshare rows days ahead with neither a callsign nor a registration
      (`codeshares.daysAhead.codeshared.withNeither` of `rows`) is how often ruling R12's keyless
-     rule decides the grouping.
+     rule decides the grouping, and `unknownStatus.rows` how many rows are of unknown codeshare
+     status (`Unknown`, or a value outside the enum), any of which keeps a keyless codeshare of
+     its direction, minute and counterpart alone (the re-review's M5).
 
 ### The three boards from cache on staging (the exit test)
 
@@ -223,16 +235,22 @@ at staging, signed in with a real account (a guest opens only its own flights' a
 `BOARDS_ENABLED` is `"true"` in staging's vars (`apps/api/wrangler.jsonc`); production's says
 `"false"`, and there both routes answer 404 `boards_disabled` (ruling R8).
 
+Run steps 1 to 4 before 13:00 New York time (the re-review's N5): the board's default window, an
+hour ago for 12 hours, reaches KJFK's morning bucket only until then, and the route search reads
+both of the date's buckets, so a later run shows one more call in steps 4 to 6, a `route_search`
+call for that bucket.
+
 1. Add sheet, **Airport board**: `KATL`, **Open the board**. Departures show with an "As of" time
    within a minute or two of now, and no "Schedules only" badge.
 2. **Arrivals**: the same "As of" time (one `direction=Both` fetch fills both directions).
 3. Back, then open KATL again within 5 minutes (the current bucket's freshness): the same "As of"
    time, served from the cache.
-4. The same for `EGLL` and `KJFK`; then **Search by route** from JFK to LHR today: results, and
-   no new call (the route search reads the KJFK buckets the board filled).
+4. The same for `EGLL` and `KJFK`; then, within 5 minutes of opening KJFK (as in step 3),
+   **Search by route** from JFK to LHR today: results, and no new call (the route search reads the
+   KJFK buckets the board filled, still fresh).
 5. `/admin`, boards section: the airports refreshed in the last hour are KATL, EGLL and KJFK;
    board calls today by result show one `ok` per bucket fetched (the default window usually
-   spans two buckets), and none for steps 2 to 4.
+   spans two buckets), and none for steps 2 to 4 (no `route_search` row).
 6. On the staging branch:
 
    ```sql
@@ -244,16 +262,17 @@ at staging, signed in with a real account (a guest opens only its own flights' a
    order by 1;
    ```
 
-   At most two `ok` calls per airport (one per bucket), however many views. The free coverage
-   checks are the `health` operation, once per airport per day (hourly while a feed is down or
-   of unknown status, ruling R5).
+   At most two `ok` `board` calls per airport (one per bucket), however many views, and no
+   `route_search` call (one at KJFK, for its morning bucket, if steps 1 to 4 ran after 13:00
+   New York time). The free coverage checks are the `health` operation, once per airport per day
+   (hourly while a feed is down or of unknown status, ruling R5).
 7. Record the times, the counts and anything unexpected under [Unverified](#unverified).
 
 ### The phone's HTTP cache stays empty (ruling R1)
 
-Every `/v1` answer carries `Cache-Control: no-store` since the review round, and both platform
-stacks honour it; this check proves it on a device. The header stops new entries only: entries
-an earlier build wrote stay on a development device until the app's data is cleared. The
+Every answer the `/v1` chain produces carries `Cache-Control: no-store` since the review round, and
+both platform stacks honour it; this check proves it on a device. The header stops new entries only:
+entries an earlier build wrote stay on a development device until the app's data is cleared. The
 commands are the documented forms, not run here: the Android directory is the one `expo/fetch`'s
 OkHttp client uses (as the skeptic read its sources), the iOS file the shared `URLCache`'s.
 
@@ -290,7 +309,8 @@ OkHttp client uses (as the skeptic read its sources), the iOS file the shared `U
   share, the ledger (`ADB_UNITS.fids`) and the cost estimate assume one Tier 2 call; at 4 units
   every board fetch costs double. Probe: `u2-both` against `u2-departure`, and
   `bill.productionCallUnits`, the units of `u4-KATL-am` alone (the adapter's exact query on a
-  12-hour bucket) between the readings `before-production` and `after-production`.
+  12-hour bucket) between the readings `before-production` and `after-production`, settled only
+  at 2, 4 or what U2 and U3 imply (`bill.productionCallSettled`, the re-review's M4).
 - **R3 U3, no surcharge for `withLeg` or `withLocation`.** `withLeg` is in the production shape;
   `withLocation` is never sent by the app (only by the probe, once). Probe: `u3-withleg`,
   `u3-withlocation`.
@@ -310,7 +330,8 @@ OkHttp client uses (as the skeptic read its sources), the iOS file the shared `U
   codeshare row without a callsign or a registration joins the only `IsOperator` row of its
   direction, minute and counterpart, or stays alone; how often that happens is unmeasured.
   Probe: `b7-days-ahead` (KATL's 00:00 to 11:59 bucket 3 days out, production query), with the
-  same counts for `u4-KATL-am` (the run's date) and `u5-180-days`.
+  same counts for `u4-KATL-am` (the run's date) and `u5-180-days`; each also counts the rows of
+  unknown codeshare status (`unknownStatus`, the re-review's M5).
 - **R3 U8, the live layer's latency.** How soon a gate change or a revised time reaches FIDS:
   a week of staging observation against airline and airport sites, not part of the probe.
 - **R3 U9 and AeroDataBox's written End Use answer (R3 O2, plan section 10 item 3).** Not asked
@@ -323,8 +344,8 @@ OkHttp client uses (as the skeptic read its sources), the iOS file the shared `U
   board or the route search. Unverified there: the sheet replacing itself with the board, the
   route search as a sheet over a sheet on iOS and Android, VoiceOver and TalkBack reading a row's
   label and hint, long rows at large text sizes, and pull to refresh on both platforms.
-- **The phone's HTTP cache** (see the findings): the Workers pool proves every `/v1` answer
-  carries `no-store` (ruling R1); that neither platform's disk cache then keeps one is the device
+- **The phone's HTTP cache** (see the findings): the Workers pool proves the `/v1` chain's answers
+  carry `no-store` (ruling R1); that neither platform's disk cache then keeps one is the device
   check above. Entries written before R1 on development devices stay until the app's data is
   cleared.
 - **A 13-hour bucket on Starter** (a daylight saving change day); irrelevant on Growth.
@@ -472,15 +493,17 @@ coverage path), MA1 apart (MA2's bound lowers its exposure).
   the designator search were stored too, past sign-out and account deletion (the skeptics,
   above). Changed, part S1: `src/middleware/no-store.ts` (`noStoreByDefault`), first in the `/v1`
   chain (`routes/v1.ts`), adds `no-store` after the route and the error handler have run to every
-  answer that names no `Cache-Control` of its own, so the limiter's 429, a 401, a 404 and a 500
-  carry it; the board routes' 200 and 304 send `no-store` themselves (were `private, no-cache`)
-  and keep the ETag and the 304 (B7's contract). Proven: `boards.routes.test.ts` (the board's 200,
-  304 and changed tag; the route search's 200 and an `If-None-Match` 304), `sync.test.ts` (200
-  and 401), `flights.search.test.ts` (200), `chain.test.ts` (through the deployed Worker: a `/v1`
-  401 and 404 carry it, `/health` does not, a route's own value is kept). Not purged by the
-  header: entries the earlier builds wrote on development devices, until the app's data is
-  cleared; the device check in the owner's steps confirms the caches stay empty. A departure:
-  it changes Phase 0 routes (below).
+  answer of that chain that names no `Cache-Control` of its own, so the `/v1` limiter's 429
+  (`USER_RL`), a 401, a 404 and a 500 raised there carry it; an answer given before the chain
+  runs, the per-IP limiter's 429 (`PUBLIC_RL`) or an error the root chain's middleware raises,
+  carries none and holds no user data (the re-review's N3); the board routes' 200 and 304 send
+  `no-store` themselves (were `private, no-cache`) and keep the ETag and the 304 (B7's contract).
+  Proven: `boards.routes.test.ts` (the board's 200, 304 and changed tag; the route search's 200
+  and an `If-None-Match` 304), `sync.test.ts` (200 and 401), `flights.search.test.ts` (200),
+  `chain.test.ts` (through the deployed Worker: a `/v1` 401 and 404 carry it, `/health` does not,
+  a route's own value is kept). Not purged by the header: entries the earlier builds wrote on
+  development devices, until the app's data is cleared; the device check in the owner's steps
+  confirms the caches stay empty. A departure: it changes Phase 0 routes (below).
 - **R2 (MA1, minor after its skeptics): board calls leave the trackers a floor of tokens.**
   Finding: board calls took the per-second tokens tracker polls need, and a refused poll loses
   its slot; B5 and `boards-budget.ts` claimed trackers never meet board limits, true for the
@@ -491,8 +514,8 @@ coverage path), MA1 apart (MA2's bound lowers its exposure).
   Growth 2, Scale 5); `ProviderBudget.reserve` applies it to `board` and `route_search` calls,
   the free coverage check included; a floor-only refusal is the new denial reason
   `board_rate_floor` (shared `providers.ts`), its call record reads `rate_limited`, and
-  AirportState waits only for the refill. The burst rationale in `token-bucket.ts`, the
-  `boards-budget.ts` header and spec B5 are corrected. Proven at the real per-second limits:
+  AirportState waits for the refill, at least a second. The burst rationale in `token-bucket.ts`,
+  the `boards-budget.ts` header and spec B5 are corrected. Proven at the real per-second limits:
   review A's probe on Growth (two cold opens, then tracker alarms: 3 board calls allowed, 3
   refused `board_rate_floor` with a 200 ms wait, 2 tracker reservations allowed, a board call
   passing again at +600 ms, refusals spending no units), the same on Starter and Scale, six more
@@ -583,8 +606,8 @@ coverage path), MA1 apart (MA2's bound lowers its exposure).
   answer.** Finding: `/v1/airports` was mounted unconditionally, so any production deploy
   exposed boards to every signed-in user, and the only stop, the provider kill switch, stops the
   trackers too. Changed, part S1: `BOARDS_ENABLED` (`boardsEnabled(env)` in `src/env.ts`;
-  anything but `"true"` is off) and `requireBoardsEnabled()` first on both routes, before any
-  session read, brake or lookup: off, they answer 404 `boards_disabled` (a new
+  anything but `"true"` is off) and `requireBoardsEnabled()` first on both routes, before the
+  route's session checks, brakes and lookups: off, they answer 404 `boards_disabled` (a new
   `API_ERROR_CODES` entry); `"true"` in the local and staging vars. Amended by the orchestrator
   after S1 and applied in part S2a: `"false"` in `env.production.vars` rather than absent
   (absent, wrangler warns on every production deploy, and copying `"true"` there would switch
@@ -679,7 +702,7 @@ Part S1 (the routes and access):
 - The 72-hour bound answers the designator search's 422 `date_out_of_range`, with
   `maxHoursAhead: 72`, checked before the airport lookup; it replaces the board's plan-lookahead
   check, which it subsumes; exactly 72 hours is allowed.
-- The boards gate runs before authentication: a disabled deployment answers 404
+- The boards gate runs before the route's session checks: a disabled deployment answers 404
   `boards_disabled` even to a request with no session.
 - `scope` rides on every 403 `cap_exceeded` (an added field), typed inline so the typed client
   does not import the database package.
@@ -746,7 +769,7 @@ Part S4 (the probe and these documents):
 ### Departures
 
 - **R1 changes Phase 0 routes**, as the ruling itself records: `no-store` is the default of
-  every `/v1` answer (the sync feed, the designator search, `/v1/me` and the devices routes
+  every `/v1` route (the sync feed, the designator search, `/v1/me` and the devices routes
   included), not only this increment's two routes. Nothing in the app relied on the platform
   cache; what is lost is the bandwidth of the 304s the platform stacks earned on their own by
   revalidating stored copies.

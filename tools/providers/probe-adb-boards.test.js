@@ -4,9 +4,12 @@
  * runs with `fetch` replaced by a tripwire that exits 97); without a key it refuses before any
  * call; the plan covers R3 U1 to U7 at about 44 units, with the review round's two additions: one
  * call in the adapter's exact production query between two counter readings and a last reading
- * at the end (ruling R7), and the codeshare keys of a bucket days ahead (ruling R12). One run
- * against a stubbed gateway (never the real one) checks the findings file: booleans and counts
- * only, no flight number, time or path, never the key, and no redirect followed.
+ * at the end (ruling R7), and the codeshare keys of a bucket days ahead (ruling R12). The
+ * re-review's M4 and M5 added a reading after the last billed call before the production call,
+ * the running total each reading should reach, a bill settled only at a figure one call can
+ * bill, and the count of rows of unknown codeshare status. One run against a stubbed gateway
+ * (never the real one) checks the findings file: booleans and counts only, no flight number, time
+ * or path, never the key, and no redirect followed.
  */
 
 import { spawnSync } from 'node:child_process';
@@ -19,6 +22,7 @@ import {
   BOARD_SHAPE,
   PRODUCTION_CALL,
   codeshareKeys,
+  counterQuestion,
   estimateUnits,
   findingsOf,
   planProbe,
@@ -65,18 +69,36 @@ describe('the dry run', () => {
       'flights/airports/Icao/KJFK/2027-03-31T06:00/2027-03-31T18:00',
       'flights/airports/Icao/EGLL/2026-10-02T12:00/2026-10-02T23:59?direction=Both&withLeg=true',
       '(chosen at run time from the u2-departure answer)',
-      'then read the unit counter (after-u6-too-wide)',
       `GET flights/airports/Icao/KATL/2026-10-02T00:00/2026-10-02T11:59?${BOARD_SHAPE}\n` +
         '    the 00:00 to 11:59 bucket at KATL, the production call: its bill alone is ADB_UNITS.fids\n' +
-        '    read the unit counter before this call (before-production)\n' +
-        '    then read the unit counter (after-production)\n',
+        '    read the unit counter before this call (before-production), running total 20 units (16 to 22)\n' +
+        '    then read the unit counter (after-production), running total 22 units (18 to 26)\n',
       `B7  b7-days-ahead        2 units  GET flights/airports/Icao/KATL/2026-10-05T00:00/2026-10-05T11:59?${BOARD_SHAPE}`,
     ]) {
       expect(result.stdout).toContain(expected);
     }
+    // Every prompt in the run's order, with the units the counter should have moved by then since
+    // `before` (the re-review's M4): as planned, then 204 and 400 free to Both billed twice.
+    expect(
+      result.stdout.split('\n').filter((line) => line.includes('read the unit counter')),
+    ).toEqual([
+      '    read the unit counter before this call (before)',
+      '    then read the unit counter (after-u2-both), running total 2 units (2 to 4)',
+      '    then read the unit counter (after-u2-departure), running total 4 units (4 to 6)',
+      '    then read the unit counter (after-u3-withleg), running total 6 units (6 to 8)',
+      '    then read the unit counter (after-u3-withlocation), running total 8 units (8 to 10)',
+      '    then read the unit counter (after-u6-empty), running total 10 units (8 to 12)',
+      '    then read the unit counter (after-u6-too-wide), running total 12 units (8 to 14)',
+      '    then read the unit counter (after-u5-180-days), running total 20 units (16 to 22)',
+      '    read the unit counter before this call (before-production), running total 20 units (16 to 22)',
+      '    then read the unit counter (after-production), running total 22 units (18 to 26)',
+      'Last, read the unit counter (end), running total 44 units (40 to 66)',
+    ]);
     expect(result.stdout).toContain(
       'Planned: 25 calls, 44 units expected (40 if 204 and 400 are free, 66 if direction=Both bills both directions).\n' +
-        'Counter readings: before the first billed call (before), at each checkpoint above, and after the last call (end).\n',
+        'Counter readings: before the first billed call (before), at each checkpoint above, and after the last call (end).\n' +
+        'A running total counts the units spent since (before): as planned, then the range from 204 and 400 billing nothing to direction=Both billing both directions. ' +
+        'At each prompt, type the counter once it has stopped moving; one still short of the range has not caught up.\n',
     );
   });
 
@@ -154,6 +176,22 @@ describe('the plan', () => {
     ]);
   });
 
+  it('reads the counter after the last billed call before the production call (M4)', () => {
+    // So `before-production` follows a counter that has settled after every earlier call, not
+    // one still taking in the calls since the last reading (the re-review's M4).
+    const plan = planProbe({ date: '2026-10-02' });
+    const production = plan.findIndex((planned) => planned.id === PRODUCTION_CALL);
+    const billedBefore = plan.slice(0, production).filter((planned) => planned.units > 0);
+    expect(billedBefore.at(-1)).toMatchObject({
+      id: 'u5-180-days',
+      checkpoint: 'after-u5-180-days',
+    });
+    // And every reading asks for a counter that has stopped moving.
+    expect(counterQuestion('before-production')).toBe(
+      '[before-production] the API unit counter on the AeroDataBox dashboard, once it has stopped moving (Enter skips): ',
+    );
+  });
+
   it('reads codeshare keys in the production query days ahead (R12)', () => {
     const ahead = planProbe({ date: '2026-12-30' }).find(
       (planned) => planned.id === 'b7-days-ahead',
@@ -214,9 +252,67 @@ describe('the findings', () => {
       at1200InTo1200: 1,
       toLocalInclusive: true,
     });
-    // One production call billed 4 units here: `ADB_UNITS.fids` would become 4.
-    expect(findings.bill).toEqual({ productionCallUnits: 4, runUnits: 46 });
+    // One production call billed 4 units here, a figure one call can bill: `ADB_UNITS.fids` would
+    // become 4.
+    expect(findings.bill).toEqual({
+      productionCallUnits: 4,
+      productionCallSettled: true,
+      impliedByU2AndU3: null,
+      runUnits: 46,
+    });
     expect(JSON.stringify(findings)).not.toMatch(/AA ?1\b|DL ?100|DL ?7\b|\d{2}:\d{2}/);
+  });
+
+  it('settles the production bill only at 2, 4 or what U2 and U3 imply (M4)', () => {
+    const bill = (readings) =>
+      findingsOf({ calls: [], bodies: new Map(), readings, delayed: null }).bill;
+    // Both 2 units, a single direction 2, with `withLeg` 3: U2 and U3 imply 3 for the production
+    // query (Both plus withLeg's surcharge of 1).
+    const u2u3 = {
+      before: 1000,
+      'after-u2-both': 998,
+      'after-u2-departure': 996,
+      'after-u3-withleg': 993,
+    };
+    const production = (units) =>
+      bill({ ...u2u3, 'before-production': 950, 'after-production': 950 - units });
+    expect(production(3)).toMatchObject({
+      productionCallUnits: 3,
+      productionCallSettled: true,
+      impliedByU2AndU3: 3,
+    });
+    expect(production(2).productionCallSettled).toBe(true);
+    expect(production(4).productionCallSettled).toBe(true);
+    // A straggler of the calls before it, folded in by a counter that lagged: not a figure.
+    expect(production(6)).toMatchObject({ productionCallUnits: 6, productionCallSettled: false });
+    expect(production(5).productionCallSettled).toBe(false);
+    // Without U2 and U3 only 2 and 4 settle it.
+    expect(bill({ 'before-production': 950, 'after-production': 947 })).toMatchObject({
+      productionCallUnits: 3,
+      productionCallSettled: false,
+      impliedByU2AndU3: null,
+    });
+    // A counter that never moved settles nothing, even where U2 and U3 imply 0 too.
+    const still = Object.fromEntries(
+      [
+        'before',
+        'after-u2-both',
+        'after-u2-departure',
+        'after-u3-withleg',
+        'before-production',
+        'after-production',
+      ].map((name) => [name, 1000]),
+    );
+    expect(bill(still)).toMatchObject({
+      productionCallUnits: 0,
+      productionCallSettled: false,
+      impliedByU2AndU3: 0,
+    });
+    // A skipped reading leaves no figure, and nothing settled.
+    expect(bill({ ...u2u3, 'before-production': null, 'after-production': 947 })).toMatchObject({
+      productionCallUnits: null,
+      productionCallSettled: false,
+    });
   });
 
   it('counts the codeshare rows that carry a callsign or a registration (R12)', () => {
@@ -232,13 +328,17 @@ describe('the findings', () => {
         flight('IsCodeshared', 'AAL100', undefined),
         flight('IsCodeshared', ' ', ' '),
         flight('IsCodeshared'),
+        // A status outside the enum reads as `Unknown` (M5); a row with none never parses.
+        flight('IsWetLeased', undefined, 'N202NN'),
+        { number: 'XX 2' },
       ],
       arrivals: [flight('IsCodeshared', undefined, 'G-EUPT'), flight('Unknown', 'BAW1')],
     });
     expect(keys).toEqual({
-      rows: 6,
+      rows: 8,
       operator: { rows: 1, withCallSign: 1, withRegistration: 1, withNeither: 0 },
       codeshared: { rows: 4, withCallSign: 1, withRegistration: 1, withNeither: 2 },
+      unknownStatus: { rows: 2, withCallSign: 1, withRegistration: 1, withNeither: 0 },
       codesharedCarryCallSign: true,
       codesharedCarryRegistration: true,
     });
@@ -248,15 +348,16 @@ describe('the findings', () => {
     });
     expect(codeshareKeys({ departures: [] })).toMatchObject({ codesharedCarryCallSign: null });
     expect(codeshareKeys(null)).toBeNull();
-    expect(JSON.stringify(keys)).not.toMatch(/AAL100|N101NN|G-EUPT|BAW1|XX ?1/);
+    expect(JSON.stringify(keys)).not.toMatch(/AAL100|N101NN|N202NN|G-EUPT|BAW1|XX ?[12]/);
   });
 });
 
 describe('a run against a stubbed gateway', () => {
   /**
    * Answers like the gateway would: free coverage, a 204, a 400 and FIDS rows with a codeshare
-   * (keyed by callsign and registration on the run's date, keyless days ahead); never the key.
-   * A fetch that would follow a redirect exits 96 instead (R7: the key must not follow one).
+   * (keyed by callsign and registration on the run's date, keyless days ahead) and an arrival of
+   * unknown codeshare status; never the key. A fetch that would follow a redirect exits 96
+   * instead (R7: the key must not follow one).
    */
   const stub = join(scratch, 'stub-gateway.mjs');
   writeFileSync(
@@ -286,7 +387,10 @@ globalThis.fetch = async (url, init) => {
         { number: 'KL 6100', codeshareStatus: 'IsCodeshared', ...keys, movement: leg('12:00') },
         { number: 'AA 1', codeshareStatus: 'IsOperator', movement: leg('09:00', '11:00') },
       ],
-      arrivals: [{ number: 'BA 117', codeshareStatus: 'IsOperator', movement: leg('13:00') }],
+      arrivals: [
+        { number: 'BA 117', codeshareStatus: 'IsOperator', movement: leg('13:00') },
+        { number: 'VS 3', codeshareStatus: 'Unknown', movement: leg('13:00') },
+      ],
     },
     { 'x-ratelimit-remaining': '9', 'x-request-id': 'r-1' },
   );
@@ -308,7 +412,9 @@ globalThis.fetch = async (url, init) => {
     // No body, no flight number, callsign or registration, no path (U1's are cut around a flight).
     expect(text).not.toContain('movement');
     expect(text).not.toContain('scheduledTime');
-    expect(text).not.toMatch(/DL ?100|KL ?6100|AA ?1\b|BA ?117|DAL100|N100DN|flights\/airports/);
+    expect(text).not.toMatch(
+      /DL ?100|KL ?6100|AA ?1\b|BA ?117|VS ?3\b|DAL100|N100DN|flights\/airports/,
+    );
     const { ranAt, ...findings } = JSON.parse(text);
     // The run's own timestamp is the only clock time in the file.
     expect(ranAt).toMatch(/^\d{4}-\d{2}-\d{2}T/);
@@ -325,7 +431,8 @@ globalThis.fetch = async (url, init) => {
       'quotaHeaders',
       'status',
     ]);
-    // Every reading is taken, in order: the production call's two, then the last one.
+    // Every reading is taken, in the dry run's order: U5's (M4), the production call's two, then
+    // the last one.
     expect(Object.keys(findings.counterReadings)).toEqual([
       'before',
       'after-u2-both',
@@ -334,18 +441,26 @@ globalThis.fetch = async (url, init) => {
       'after-u3-withlocation',
       'after-u6-empty',
       'after-u6-too-wide',
+      'after-u5-180-days',
       'before-production',
       'after-production',
       'end',
     ]);
     expect(Object.values(findings.counterReadings).every((value) => value === null)).toBe(true);
-    expect(findings.answers.bill).toEqual({ productionCallUnits: null, runUnits: null });
+    // No reading, no figure: the bill is not settled.
+    expect(findings.answers.bill).toEqual({
+      productionCallUnits: null,
+      productionCallSettled: false,
+      impliedByU2AndU3: null,
+      runUnits: null,
+    });
     expect(findings.answers.U6).toMatchObject({ emptyStatus: 204, tooWideStatus: 400 });
     expect(findings.answers.U1).toMatchObject({ settled: true, inRevisedWindow: true });
-    expect(findings.answers.U4.EGLL.am).toMatchObject({ status: 200, rows: 4, chunksOf1Mb: 1 });
+    expect(findings.answers.U4.EGLL.am).toMatchObject({ status: 200, rows: 5, chunksOf1Mb: 1 });
     expect(findings.answers.U7).toMatchObject({ departuresAt1200: 2, toLocalInclusive: true });
     expect(findings.answers.codeshares.sameDay).toMatchObject({
       codeshared: { rows: 1, withCallSign: 1, withRegistration: 1, withNeither: 0 },
+      unknownStatus: { rows: 1, withCallSign: 0, withRegistration: 0, withNeither: 1 },
       codesharedCarryCallSign: true,
     });
     expect(findings.answers.codeshares.daysAhead).toMatchObject({

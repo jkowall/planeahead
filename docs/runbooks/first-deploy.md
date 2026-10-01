@@ -582,16 +582,18 @@ The exact steps, and where each answer is recorded, are in `docs/increments/18-v
 - [ ] The day the Growth key arrives (step 0), before boards reach staging users: from the
       repository root on your machine (never CI),
       `node scripts/probe-adb-boards.mjs --dry-run --date <today in New York>` to see the 25
-      calls and their units, then with the dashboard's unit counter open,
+      calls, their units and each counter reading's running total, then with the dashboard's
+      unit counter open,
       `AERODATABOX_API_KEY=<key> node scripts/probe-adb-boards.mjs --date <the same date> --out docs/increments/18-probe-findings.json`,
-      typing the counter at each prompt once it has moved (the two around the production call,
-      `before-production` and `after-production`, matter most). The file holds booleans and
-      counts only; copy the answers into the verification file's "Unverified" section and
-      commit both.
+      typing the counter at each prompt once it has stopped moving and is not short of that
+      reading's running total (the two around the production call, `before-production` and
+      `after-production`, matter most). The file holds booleans and counts only; copy the answers
+      into the verification file's "Unverified" section and commit both.
 - [ ] Set `ADB_UNITS.fids` (`packages/shared/src/cost.ts`, and its test in
       `packages/shared/test/cost.test.ts`) to the findings' `bill.productionCallUnits`, the units
-      one production FIDS call billed, in the change that commits them. At 4, every board fetch
-      costs double, so revisit `ADB_BOARDS_SHARE` (`apps/api/src/providers/config.ts`).
+      one production FIDS call billed, in the change that commits them, if
+      `bill.productionCallSettled` is true (if false, run the probe again). At 4, every board
+      fetch costs double, so revisit `ADB_BOARDS_SHARE` (`apps/api/src/providers/config.ts`).
 - [ ] Act on the other answers as the verification file says (U1, U5 refused, U7 exclusive);
       none blocks the staging checks below.
 - [ ] Staging runs this branch (step 10) with `AERODATABOX_API_KEY` and `ADB_PLAN=growth` (step 6);
@@ -602,10 +604,10 @@ The exact steps, and where each answer is recorded, are in `docs/increments/18-v
       **Airport board** field; each shows an "As of" time, and reopening within 5 minutes shows
       the same one. `/admin`'s boards section lists the three airports as refreshed in the last
       hour, with one `ok` board call per bucket and none for the reopenings.
-- [ ] The phone's HTTP cache (review ruling R1): every `/v1` answer says `no-store`, which stops
-      new entries but purges none, so first clear the app's data on each development device
-      that ran a build from before the review round; then the device check in the verification
-      file finds no `/v1` answer on disk.
+- [ ] The phone's HTTP cache (review ruling R1): every answer the `/v1` chain produces says
+      `no-store`, which stops new entries but purges none, so first clear the app's data on each
+      development device that ran a build from before the review round; then the device check in
+      the verification file finds no `/v1` answer on disk.
 - [ ] AeroDataBox's written answer on End Use (R3 O2, plan section 10 item 3): in-app boards for
       any airport and route search, share pages and MCP. Boards stay out of share pages, public
       tokens and MCP until it arrives, and boards reach no real user before it does.

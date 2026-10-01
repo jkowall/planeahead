@@ -544,8 +544,8 @@ session, anonymous ones included, so their gates, brakes and caps are the surfac
 
 - **Off until licensed.** Both answer 404 `boards_disabled` unless `BOARDS_ENABLED` is `"true"`
   (locally and on staging); production says `"false"` until AeroDataBox's written End Use answer
-  and the per-user limits below exist (review ruling R8). The check runs before the session is
-  read.
+  and the per-user limits below exist (review ruling R8). The check runs before the route's
+  session checks, brakes and lookups.
 - **Who.** A session principal with the user scope (`requireSession`: an API token, once those
   exist, is refused whatever its scopes, ruling R15). An anonymous account opens only the boards
   of airports on its live subscriptions, and searches routes within the `route_searches` caps
@@ -562,9 +562,9 @@ session, anonymous ones included, so their gates, brakes and caps are the surfac
   drain the day's boards share in about 2 hours and fill the hour's airport cap, leaving every
   board stale and new airports' boards answering 503 until the hour or the day turns; trackers
   keep their own units and tokens.
-- **Caches.** Board answers are `no-store`, like every `/v1` answer (section 5), and the
-  airport's coverage and buckets live only in its `AirportState` and the `board:v2` KV copies,
-  all purged at the sooner of 48 hours after a bucket ends and 7 days after its fetch.
+- **Caches.** Board answers are `no-store`, like every answer the `/v1` chain produces (section 5),
+  and a bucket lives only in its airport's `AirportState` and its `board:v2` KV copy, both purged at
+  the sooner of 48 hours after the bucket ends and 7 days after its fetch.
 
 ## 4. Encryption and tokens, in one view
 
@@ -593,8 +593,10 @@ tombstones; then an unsubscribe of any subscription that committed while the del
   deletion committed and then failed a `users` foreign key (SQLSTATE 23503 on a `*_user_id` key):
   the global error handler re-reads `users` for the principal and answers the same 401 instead of
   a 500 (`error-handler.test.ts` drives it through the idempotency lease insert).
-- **The phone's HTTP cache** (increment 18, review ruling R1). Every `/v1` answer carries
-  `Cache-Control: no-store` unless its route names its own (`src/middleware/no-store.ts`).
+- **The phone's HTTP cache** (increment 18, review ruling R1). Every answer the `/v1` chain
+  produces carries `Cache-Control: no-store` unless its route names its own
+  (`src/middleware/no-store.ts`); one given before the chain runs (the per-IP limiter's 429, an
+  error the root chain's middleware raises) carries none and holds no user data.
   `expo/fetch`'s platform caches (OkHttp's disk cache on Android, the shared `URLCache` on iOS)
   had stored `/v1` GET answers, the sync feed's pages included, and the wipe on sign-out or
   deletion (`forgetAccount`) clears SQLite and the query cache, not that cache, so the copies

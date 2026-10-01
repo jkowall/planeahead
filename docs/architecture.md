@@ -41,9 +41,9 @@ are in `docs/adr/`; the data model is `docs/schema-review.md`; threats are
   `src/app.ts`, in the order request-id, Sentry, CORS, the per-IP limiter (`PUBLIC_RL`),
   idempotency (the global slot for non-`/v1` paths), auth (Better Auth session into `c.var.user`);
   under `/v1` the `Cache-Control: no-store` default (increment 18, `src/middleware/no-store.ts`:
-  first, so it sees every `/v1` answer last and adds `no-store` to each that names no
-  `Cache-Control` of its own), the per-principal limiter (`USER_RL`) and the `/v1` idempotency
-  instance follow.
+  first, so it sees every answer the `/v1` chain produces last and adds `no-store` to each that
+  names no `Cache-Control` of its own), the per-principal limiter (`USER_RL`) and the `/v1`
+  idempotency instance follow.
 - **Durable Objects**, SQLite-backed, declared with `exports` (so plain deploys only, never
   gradual ones), each with a `_sql_schema_migrations` runner under `blockConcurrencyWhile`:
   - **FlightTracker**, one per flight key (`AAL-100-2026-09-19-KJFK`, ADR 0003): polls the
@@ -153,23 +153,25 @@ Every non-2xx JSON answer under `/v1` is the envelope `{ error, message, request
 error handler maps SQLSTATE 23503 on a user foreign key, for a principal whose `users` row is gone
 (an account deleted while the request was in flight), to that 401 as well.
 
-Every `/v1` answer, errors included, carries `Cache-Control: no-store` unless its route names its
-own (increment 18's review ruling R1; only the board routes do, with `no-store` on their 200 and
-304). The app's `expo/fetch` keeps a disk cache on each platform (OkHttp's on Android, the
-shared `URLCache` on iOS) that stores any GET not marked `no-store` and outlives sign-out and
-account deletion, which wipe only SQLite and the query cache; every `/v1` answer is the caller's
-own data.
+Every answer the `/v1` chain produces, errors included, carries `Cache-Control: no-store` unless
+its route names its own (increment 18's review ruling R1; only the board routes do, with
+`no-store` on their 200 and 304). An answer given before that chain runs carries none: the
+per-IP limiter's 429 (`PUBLIC_RL`) and an error the root chain's middleware raises (a 500), and
+neither holds user data. The app's `expo/fetch` keeps a disk cache on each platform (OkHttp's on
+Android, the shared `URLCache` on iOS) that stores any GET not marked `no-store` and outlives
+sign-out and account deletion, which wipe only SQLite and the query cache; every `/v1` route
+answers with the caller's own data.
 
-The board routes (increment 18) answer 404 `boards_disabled` while `BOARDS_ENABLED` is not
-`"true"` (it is `"false"` in production until AeroDataBox's written End Use answer and the
-per-user board limits, `docs/open-decisions.md` section 9), before the session is read. A board
-keeps a flight by its home leg's scheduled time or its best time (actual, else estimated) in the
-window, and one scheduled earlier while live data says it has not yet departed or arrived; a row
-repeating a direction, designator and scheduled minute (one flight in two buckets) is dropped,
+The board routes (increment 18) answer 404 `boards_disabled` while `BOARDS_ENABLED` is not `"true"`
+(it is `"false"` in production until AeroDataBox's written End Use answer and the per-user board
+limits, `docs/open-decisions.md` section 9), before the route's session checks, brakes and lookups.
+A board keeps a flight by its home leg's scheduled time or its best time (actual, else estimated)
+in the window, and one scheduled earlier while live data says it has not yet departed or arrived; a
+row repeating a direction, designator and scheduled minute (one flight in two buckets) is dropped,
 and codeshares group by registration or callsign, a keyless `IsCodeshared` row joining the only
-`IsOperator` row of its direction, minute and counterpart. `partial` marks a bucket that could
-not be read, never one out of range. Every 403 `cap_exceeded`, on any route, names its `scope`
-(`user` or `ip`), so the app can tell an anonymous account held by its network's cap to sign in.
+`IsOperator` row of its direction, minute and counterpart. `partial` marks a bucket that could not
+be read, never one out of range. Every 403 `cap_exceeded`, on any route, names its `scope` (`user`
+or `ip`), so the app can tell an anonymous account held by its network's cap to sign in.
 
 ## 4. The FlightTracker lifecycle
 
