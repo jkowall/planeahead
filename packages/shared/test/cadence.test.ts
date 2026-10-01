@@ -75,6 +75,7 @@ function ctx(minutesFromOut: number, overrides: Partial<CadenceContext> = {}): C
     scheduledOut,
     scheduledIn,
     phase,
+    actualOut: minutesFromOut >= 0 ? scheduledOut : undefined,
     actualOff: minutesFromOut >= 0 ? scheduledOut : undefined,
     actualIn: minutesFromOut >= BLOCK ? scheduledIn : undefined,
   };
@@ -346,13 +347,14 @@ describe('SLO table', () => {
     expect(tail?.relaxedLegs).toEqual([{ fromMinutes: BLOCK + 45, toMinutes: BLOCK + 120 }]);
   });
 
-  it('leaves no hole before boarding: the 15-minute grid runs to T-45 and the in-flight grid opens at T-40', () => {
-    // 320 minutes of 15-minute slots ceil to 22 (a round() rule gave 21 and a 20-minute hole from
-    // T-60 to T-40, which a 15-minute gate SLO does not allow on a polls-only cadence).
+  it('leaves no hole before departure: A1 polls to T-45 then T-40, A2 every 15 minutes to out', () => {
+    // A1: 320 minutes of 15-minute slots ceil to 22 (a round() rule gave 21 and a 20-minute hole
+    // from T-60 to T-40, which a 15-minute gate SLO does not allow on a polls-only cadence).
+    // A2 (N8): the 15-minute grid runs to the departure anchor and the 30-minute one opens there.
     const around = (c: CadenceDefinition): number[] =>
       expectedCalls(c, { leadTimeDays: 2 }).pollInstants.filter((m) => m >= -120 && m <= 0);
     expect(around(CADENCE_A1)).toEqual([-120, -105, -90, -75, -60, -45, -40, -25, -10]);
-    expect(around(CADENCE_A2)).toEqual([-120, -105, -90, -75, -60, -45, -40, -10]);
+    expect(around(CADENCE_A2)).toEqual([-120, -105, -90, -75, -60, -45, -30, -15, 0]);
     expect(sloRelaxations(CADENCE_A1).some((r) => r.sloWindow === '3h_to_arrival')).toBe(false);
   });
 
@@ -363,7 +365,8 @@ describe('SLO table', () => {
     };
     // Before R2 was revised, A1's first tail slot at in+15 left 25 minutes from the in-10 poll.
     expect(across(CADENCE_A1)).toEqual([BLOCK - 10, BLOCK]);
-    expect(across(CADENCE_A2)).toEqual([BLOCK - 10, BLOCK]);
+    // N8 moved A2's in-flight grid to out, so its last slot is in-30 (R4 D3's stated trade-off).
+    expect(across(CADENCE_A2)).toEqual([BLOCK - 30, BLOCK]);
     expect(across(CADENCE_LITERAL)).toEqual([BLOCK - 2, BLOCK]);
     expect(across(CADENCE_B)).toEqual([15, BLOCK + 15]);
     expect(gapAcross([10, 20], 30)).toBeNull();
@@ -494,21 +497,20 @@ describe('refreshIntervalFor (A2 unless stated)', () => {
     expect(nextMinutes(decide(CADENCE_A2, -hours(6) + 1))).toBe(-hours(6) + 15);
   });
 
-  it('switches to the in-flight interval at boarding', () => {
-    const last = decide(CADENCE_A2, -60);
-    expect(nextMinutes(last)).toBe(-45);
+  it('switches to the in-flight interval at the departure anchor, not at boarding (N8)', () => {
+    const last = decide(CADENCE_A2, -30);
+    expect(nextMinutes(last)).toBe(-15);
     expect(last.tier).toBe('pre_boarding');
-    const d = decide(CADENCE_A2, -45);
-    expect(nextMinutes(d)).toBe(-40);
+    const d = decide(CADENCE_A2, -15);
+    expect(nextMinutes(d)).toBe(0);
     expect(d.tier).toBe('in_flight');
     expect(d.nominalIntervalMinutes).toBe(30);
-    expect(d.intervalMs).toBe(5 * MINUTE_MS);
-    expect(nextMinutes(decide(CADENCE_A2, -40))).toBe(-10);
-    expect(nextMinutes(decide(CADENCE_A2, -10))).toBe(20);
-    expect(nextMinutes(decide(CADENCE_A2, 140))).toBe(170);
+    expect(d.intervalMs).toBe(15 * MINUTE_MS);
+    expect(nextMinutes(decide(CADENCE_A2, 0))).toBe(30);
+    expect(nextMinutes(decide(CADENCE_A2, 140))).toBe(150);
     expect(decide(CADENCE_A2, 140).tier).toBe('in_flight');
-    expect(nextMinutes(decide(CADENCE_A2, 170))).toBe(180);
-    expect(decide(CADENCE_A2, 170).tier).toBe('post_arrival');
+    expect(nextMinutes(decide(CADENCE_A2, 150))).toBe(180);
+    expect(decide(CADENCE_A2, 150).tier).toBe('post_arrival');
   });
 
   it('runs the tail from arrival and stops at in + 2 h', () => {
@@ -579,7 +581,7 @@ describe('refreshIntervalFor (A2 unless stated)', () => {
 
   it('keeps the in-flight cadence while a late flight has not reported in', () => {
     const late = decide(CADENCE_A2, 200, { phase: 'en_route', actualIn: undefined });
-    expect(nextMinutes(late)).toBe(230);
+    expect(nextMinutes(late)).toBe(210);
     expect(late.tier).toBe('in_flight');
     const landed = decide(CADENCE_A2, 200, {
       phase: 'landed',
@@ -587,7 +589,7 @@ describe('refreshIntervalFor (A2 unless stated)', () => {
       actualIn: undefined,
     });
     expect(landed.tier).toBe('in_flight');
-    expect(nextMinutes(landed)).toBe(230);
+    expect(nextMinutes(landed)).toBe(210);
   });
 
   it('B polls a late flight every 15 minutes from the planned arrival until the lifetime', () => {
@@ -621,29 +623,41 @@ describe('refreshIntervalFor (A2 unless stated)', () => {
 
   it('lets a provider arrival estimate move the tail', () => {
     const d = decide(CADENCE_A2, 140, { estimatedIn: at(210) });
-    expect(nextMinutes(d)).toBe(170);
+    expect(nextMinutes(d)).toBe(150);
     expect(d.tier).toBe('in_flight');
+    // On time the slot at in belongs to the tail; a later estimate keeps it in flight.
+    expect(decide(CADENCE_A2, 160).tier).toBe('post_arrival');
+    const later = decide(CADENCE_A2, 160, { estimatedIn: at(210) });
+    expect([nextMinutes(later), later.tier]).toEqual([180, 'in_flight']);
     const early = decide(CADENCE_A2, 140, { estimatedIn: at(150) });
     expect(nextMinutes(early)).toBe(150);
     expect(early.tier).toBe('post_arrival');
   });
 
   it('stops at the hard lifetime', () => {
+    // Lifetime min(in + 6 h, off + 2 x block) = 360; the in-flight grid from out lands on it.
     expect(nextMinutes(decide(CADENCE_A2, 340, { phase: 'en_route', actualIn: undefined }))).toBe(
-      350,
+      360,
     );
     expect(
-      refreshIntervalFor(CADENCE_A2, ctx(350, { phase: 'en_route', actualIn: undefined })),
+      refreshIntervalFor(CADENCE_A2, ctx(360, { phase: 'en_route', actualIn: undefined })),
     ).toBeNull();
-    const lateOff = { phase: 'en_route' as const, actualOff: at(60), actualIn: undefined };
+    // Out at +50 anchors the grid (+50, +80, ... +410); off at +60 moves the lifetime to 420.
+    const lateOff = {
+      phase: 'en_route' as const,
+      actualOut: at(50),
+      actualOff: at(60),
+      actualIn: undefined,
+    };
     expect(nextMinutes(decide(CADENCE_A2, 400, lateOff))).toBe(410);
     expect(refreshIntervalFor(CADENCE_A2, ctx(410, lateOff))).toBeNull();
   });
 
   it('honours custom boarding and stop parameters', () => {
     const params = { boardingMinutesBefore: 30, postArrivalStopMinutes: 60 };
-    const d = refreshIntervalFor(CADENCE_A2, ctx(-45), params);
-    expect(d !== null && nextMinutes(d)).toBe(-30);
+    // A1 still opens its in-flight grid at boarding; A2 no longer does (N8).
+    const d = refreshIntervalFor(CADENCE_A1, ctx(-45), params);
+    expect(d !== null && [nextMinutes(d), d.tier]).toEqual([-30, 'in_flight']);
     expect(refreshIntervalFor(CADENCE_A2, ctx(240), params)).toBeNull();
   });
 });
@@ -668,7 +682,8 @@ describe('expectedCalls', () => {
       expectedCalls(c, { leadTimeDays: 2 }).byWindow.map((w) => w.polls);
     expect(polls(CADENCE_LITERAL)).toEqual([0, 45, 14, 110, 12]);
     expect(polls(CADENCE_A1)).toEqual([0, 42, 22, 15, 5]);
-    expect(polls(CADENCE_A2)).toEqual([0, 42, 22, 8, 2]);
+    // N8: 24 + 6 around the departure anchor instead of 22 + 8 around boarding; still 74.
+    expect(polls(CADENCE_A2)).toEqual([0, 42, 24, 6, 2]);
     expect(polls(CADENCE_B)).toEqual([0, 1, 1, 1, 2]);
   });
 
@@ -764,8 +779,12 @@ describe('expectedCalls', () => {
 
   it('responds to the block, boarding and stop assumptions', () => {
     expect(expectedCalls(CADENCE_A2, { leadTimeDays: 2, blockMinutes: 120 }).polls).toBe(72);
+    // A2 is anchored on departure since N8, so only A1 still responds to the boarding assumption.
     expect(expectedCalls(CADENCE_A2, { leadTimeDays: 2, boardingMinutesBefore: 30 }).polls).toBe(
-      73,
+      74,
+    );
+    expect(expectedCalls(CADENCE_A1, { leadTimeDays: 2, boardingMinutesBefore: 30 }).polls).toBe(
+      83,
     );
     expect(expectedCalls(CADENCE_A2, { leadTimeDays: 2, postArrivalStopMinutes: 60 }).polls).toBe(
       73,
@@ -784,7 +803,10 @@ describe('window helpers', () => {
     expect(windowAt(CADENCE_A2, ctx(-hours(48) - 1))?.tier).toBe('pre48h');
     expect(windowAt(CADENCE_A2, ctx(-hours(48)))?.tier).toBe('hourly');
     expect(windowAt(CADENCE_A2, ctx(-hours(6)))?.tier).toBe('pre_boarding');
-    expect(windowAt(CADENCE_A2, ctx(-40))?.tier).toBe('in_flight');
+    expect(windowAt(CADENCE_A2, ctx(-40))?.tier).toBe('pre_boarding');
+    expect(windowAt(CADENCE_A2, ctx(-1))?.tier).toBe('pre_boarding');
+    expect(windowAt(CADENCE_A2, ctx(0))?.tier).toBe('in_flight');
+    expect(windowAt(CADENCE_A1, ctx(-40))?.tier).toBe('in_flight');
     expect(windowAt(CADENCE_A2, ctx(180))?.tier).toBe('post_arrival');
     expect(windowAt(CADENCE_A2, ctx(300))?.tier).toBe('post_arrival');
     expect(windowAt(CADENCE_A2, ctx(301))).toBeNull();
@@ -809,6 +831,7 @@ describe('window helpers', () => {
     expect(normal.bounds).toEqual({
       scheduledOut: OUT,
       boarding: OUT - 40 * MINUTE_MS,
+      departure: OUT,
       arrival: IN,
       stop: IN + 120 * MINUTE_MS,
     });
@@ -892,5 +915,86 @@ describe('window helpers', () => {
     expect(() =>
       refreshIntervalFor(endAnchoredInFlight, ctx(200, { phase: 'en_route', actualIn: undefined })),
     ).toThrow(CadenceError);
+  });
+});
+
+describe('N8: the 15-minute band anchored on departure', () => {
+  /** A2 as it was before increment 15: the 30-minute band opened at boarding. */
+  const A2_BOARDING_ANCHORED: CadenceDefinition = {
+    ...CADENCE_A2,
+    windows: CADENCE_A2.windows.map((w) =>
+      w.to === 'departure'
+        ? { ...w, to: 'boarding' }
+        : w.from === 'departure'
+          ? { ...w, from: 'boarding' }
+          : w,
+    ),
+  };
+
+  /** AeroAPI polls inside 48 h for a flight held D minutes on the ground (out and in both late). */
+  function groundDelayPolls(cadence: CadenceDefinition, delay: number): number {
+    const outAt = delay;
+    const inAt = BLOCK + delay;
+    const context = (m: number): CadenceContext => ({
+      now: at(m),
+      scheduledOut,
+      scheduledIn,
+      phase: m < outAt ? 'scheduled' : m < inAt ? 'en_route' : 'arrived',
+      estimatedOut: at(outAt),
+      estimatedIn: at(inAt),
+      actualOut: m >= outAt ? at(outAt) : undefined,
+      actualOff: m >= outAt ? at(outAt) : undefined,
+      actualIn: m >= inAt ? at(inAt) : undefined,
+    });
+    let m = -hours(48);
+    let polls = 1; // the creation fetch at T-48 h
+    for (let i = 0; i < 500; i += 1) {
+      const decision = refreshIntervalFor(cadence, context(m));
+      if (decision === null) {
+        return polls;
+      }
+      m = nextMinutes(decision);
+      polls += 1;
+    }
+    throw new Error('the walk did not finish');
+  }
+
+  it('resolves the anchor: actual out, else the later of scheduled and estimated out', () => {
+    const departure = (overrides: Partial<CadenceContext>): number =>
+      (resolveWindows(CADENCE_A2, ctx(-120, overrides)).bounds.departure - OUT) / MINUTE_MS;
+    expect(departure({})).toBe(0);
+    expect(departure({ estimatedOut: at(45) })).toBe(45);
+    expect(departure({ estimatedOut: at(-10) })).toBe(0);
+    expect(departure({ estimatedOut: at(45), actualOut: at(30) })).toBe(30);
+    expect(departure({ actualOut: at(-5) })).toBe(-5);
+  });
+
+  it('keeps 15-minute polls through a ground delay, then 30 from out', () => {
+    const held = { phase: 'boarding' as const, estimatedOut: at(60), estimatedIn: at(240) };
+    const onHold = decide(CADENCE_A2, 15, { ...held, actualOut: undefined, actualOff: undefined });
+    expect([nextMinutes(onHold), onHold.tier, onHold.nominalIntervalMinutes]).toEqual([
+      30,
+      'pre_boarding',
+      15,
+    ]);
+    const opening = decide(CADENCE_A2, 45, { ...held, actualOut: undefined, actualOff: undefined });
+    expect([nextMinutes(opening), opening.tier]).toEqual([60, 'in_flight']);
+    const airborne = decide(CADENCE_A2, 60, { ...held, phase: 'en_route', actualOut: at(60) });
+    expect([nextMinutes(airborne), airborne.tier]).toEqual([90, 'in_flight']);
+  });
+
+  it('keeps 74 polls on time and costs about D/30 more on a D-minute ground delay', () => {
+    expect(groundDelayPolls(CADENCE_A2, 0)).toBe(A2_EXPECTED_POLLS);
+    expect(A2_EXPECTED_POLLS).toBe(74);
+    expect(groundDelayPolls(A2_BOARDING_ANCHORED, 0)).toBe(74);
+    expect(groundDelayPolls(CADENCE_A2, 60)).toBe(78);
+    expect(groundDelayPolls(A2_BOARDING_ANCHORED, 60)).toBe(76);
+    expect(groundDelayPolls(CADENCE_A2, 120)).toBe(82);
+    expect(groundDelayPolls(A2_BOARDING_ANCHORED, 120)).toBe(78);
+    for (const delay of [15, 30, 45, 90, 180]) {
+      const extra =
+        groundDelayPolls(CADENCE_A2, delay) - groundDelayPolls(A2_BOARDING_ANCHORED, delay);
+      expect(Math.abs(extra - delay / 30)).toBeLessThanOrEqual(1);
+    }
   });
 });

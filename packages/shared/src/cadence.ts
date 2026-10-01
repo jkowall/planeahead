@@ -42,9 +42,10 @@ export type CadenceTier = 'pre48h' | 'hourly' | 'pre_boarding' | 'in_flight' | '
 
 /**
  * A window edge: minutes before scheduled departure (`Infinity` = unbounded past), or a
- * named anchor resolved from the tracker context.
+ * named anchor resolved from the tracker context. `departure` is actual out when known, else
+ * the later of scheduled and estimated out (increment 15, ruling N8).
  */
-export type CadenceEdge = number | 'boarding' | 'arrival' | 'stop';
+export type CadenceEdge = number | 'boarding' | 'departure' | 'arrival' | 'stop';
 
 interface CadenceWindowBase {
   tier: CadenceTier;
@@ -340,7 +341,14 @@ export const CADENCE_A1: CadenceDefinition = {
   aerodataboxAlerts: null,
 };
 
-/** Phase 0 constant: polls plus AeroAPI alerts. In-flight polls only need to catch gates. */
+/**
+ * Phase 0 constant: polls plus AeroAPI alerts. In-flight polls only need to catch gates. Since
+ * increment 15 (ruling N8, research R4 D3) the 15-minute band runs until the departure anchor
+ * (actual out, else the later of scheduled and estimated out) and the 30-minute band starts
+ * there, instead of at boarding: an origin gate change or a delay during a ground delay is seen
+ * within 15 minutes. On time it stays 74 polls (24 + 6 slots instead of 22 + 8); a ground delay
+ * of D minutes costs about D/30 polls more than the boarding anchor did.
+ */
 export const CADENCE_A2: CadenceDefinition = {
   id: 'A2',
   label: 'A2 polls + alerts',
@@ -357,14 +365,14 @@ export const CADENCE_A2: CadenceDefinition = {
     {
       tier: 'pre_boarding',
       from: hours(6),
-      to: 'boarding',
+      to: 'departure',
       intervalMinutes: 15,
       source: 'aeroapi',
       alerts: true,
     },
     {
       tier: 'in_flight',
-      from: 'boarding',
+      from: 'departure',
       to: 'arrival',
       intervalMinutes: 30,
       source: 'aeroapi',
@@ -457,6 +465,10 @@ export interface CadenceContext {
   now: Date;
   scheduledOut: Date;
   scheduledIn: Date;
+  /** Latest provider estimate of out; a later one moves the departure anchor (N8). */
+  estimatedOut?: Date | undefined;
+  /** Actual out; once known it is the departure anchor (N8). */
+  actualOut?: Date | undefined;
   /** Latest provider estimate; moves the planned arrival anchor when known. */
   estimatedIn?: Date | undefined;
   actualOff?: Date | undefined;
@@ -489,6 +501,7 @@ export interface RefreshDecision {
 interface Bounds {
   scheduledOut: number;
   boarding: number;
+  departure: number;
   arrival: number;
   stop: number;
 }
@@ -510,6 +523,8 @@ function resolveEdge(edge: CadenceEdge, bounds: Bounds): number {
   switch (edge) {
     case 'boarding':
       return bounds.boarding;
+    case 'departure':
+      return bounds.departure;
     case 'arrival':
       return bounds.arrival;
     case 'stop':
@@ -520,9 +535,12 @@ function resolveEdge(edge: CadenceEdge, bounds: Bounds): number {
 function boundsOf(ctx: CadenceContext, params: CadenceParams): Bounds {
   const scheduledOut = ctx.scheduledOut.getTime();
   const arrival = (ctx.actualIn ?? ctx.estimatedIn ?? ctx.scheduledIn).getTime();
+  const departure =
+    ctx.actualOut?.getTime() ?? Math.max(scheduledOut, ctx.estimatedOut?.getTime() ?? scheduledOut);
   return {
     scheduledOut,
     boarding: scheduledOut - params.boardingMinutesBefore * MINUTE_MS,
+    departure,
     arrival,
     stop: arrival + params.postArrivalStopMinutes * MINUTE_MS,
   };
@@ -814,6 +832,7 @@ function onTimeContext(
     t < boardingMs ? 'scheduled' : t < out ? 'boarding' : t < inAt ? 'en_route' : 'arrived';
   const ctx: CadenceContext = { now: new Date(t), scheduledOut, scheduledIn, phase };
   if (t >= out) {
+    ctx.actualOut = scheduledOut;
     ctx.actualOff = scheduledOut;
   }
   if (t >= inAt) {

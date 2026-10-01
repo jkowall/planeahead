@@ -99,6 +99,17 @@ import {
   type KeyDrift,
   type KeyReconciliation,
   type LiveActivityContentStateV1,
+  type DisruptionState,
+  type GateSideState,
+  type PolicyContext,
+  type PolicyInput,
+  type PolicyIntent,
+  type PolicyIntentKind,
+  type PolicyIntentSubject,
+  type PolicyRereadReason,
+  type PolicyResult,
+  type PolicyState,
+  type PolicyWants,
   type PreferenceSettings,
   type UserPreferences,
   type UserPreferencesPatch,
@@ -269,6 +280,18 @@ interface TypeSurface {
   uuidv7Generator: Uuidv7Generator;
   // live-activity
   liveActivityContentStateV1: LiveActivityContentStateV1;
+  // notification-policy (increment 15)
+  disruptionState: DisruptionState;
+  gateSideState: GateSideState;
+  policyContext: PolicyContext;
+  policyInput: PolicyInput;
+  policyIntent: PolicyIntent;
+  policyIntentKind: PolicyIntentKind;
+  policyIntentSubject: PolicyIntentSubject;
+  policyRereadReason: PolicyRereadReason;
+  policyResult: PolicyResult;
+  policyState: PolicyState;
+  policyWants: PolicyWants;
   // operator
   codeshareStatus: CodeshareStatus;
   airlineCallsign: AirlineCallsign;
