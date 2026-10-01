@@ -15,21 +15,24 @@
  * `airport_not_found` and never reaches an object. An airport AeroDataBox covers neither live nor
  * by schedule is 404 `board_not_covered`; a window or date out of range is 422
  * `date_out_of_range` (the designator search's answer); nothing readable is 503
- * `board_unavailable`.
+ * `board_unavailable`, with a `Retry-After` of 2 seconds when the per-second bucket alone refused
+ * the buckets missing, else 30 (M3).
  *
  * The board: an anonymous account may open only an airport of its live subscriptions (403
  * `board_requires_account`). `from` and `to` are instants (`Z` or an offset), at most 12 hours
  * apart; without them the window starts an hour before now, rounded down to 5 minutes, and runs
  * 12 hours. Rows are kept by the home leg's scheduled time or best time in `[from, to)`, and an
- * earlier flight of the buckets read stays while it has not yet departed or arrived (R14,
- * `filterGroups`). Each flight appears once, codeshares grouped (R12). The window may end at
+ * earlier flight of the buckets read with no best time stays while live data says it has not yet
+ * arrived (R14 as narrowed by the re-review's N2, `filterGroups`). Each flight appears once,
+ * codeshares grouped (R12). The window may end at
  * most 72 hours ahead (R3; 422 with `maxHoursAhead`, a range the app never asks for, since it
  * sends no `from` or `to`): later dates are the route search's, which is capped. A bucket that
  * ended too long ago to be fetched is 422 as well, with the plan's `maxDaysAhead`.
  *
  * The route search: open to anonymous accounts within the `route_searches` caps (403
  * `cap_exceeded`; a search that answers no flights because nothing could be read gives its slots
- * back). It reads the origin's two buckets of the origin-local date and keeps the departures
+ * back, and so does a `partial` one whose missing buckets the per-second bucket alone refused,
+ * M3). It reads the origin's two buckets of the origin-local date and keeps the departures
  * of that date (`scheduledDepartureDateLocal`, R12) whose arrival leg is the destination,
  * grouped as on the board. `partial` never marks a bucket out of range, which no pull can fill
  * (R10). `GET /v1/flights/search` stays the designator search. Adding a flight from either list
@@ -81,6 +84,7 @@ import {
   etagMatches,
   filterGroups,
   groupCodeshares,
+  refusedPerSecondOnly,
 } from '../boards/view';
 import type { AppBindings } from '../env';
 import { CapLedger, capExceededBody } from '../lib/caps';
@@ -265,8 +269,12 @@ const BOARD_CACHE_CONTROL = 'no-store';
 const BOARD_MAX_HOURS_AHEAD = 72;
 const BOARD_MAX_AHEAD_MS = BOARD_MAX_HOURS_AHEAD * 3_600_000;
 
-/** Seconds a client should wait after a 503 before asking again. */
+/**
+ * Seconds a client should wait after a 503 before asking again: 2 when only the per-second bucket
+ * refused (it lifts within a second or so, M3), else 30.
+ */
 const BOARD_RETRY_AFTER_SECONDS = 30;
+const BOARD_RETRY_AFTER_PER_SECOND_SECONDS = 2;
 
 function airportNotFound(c: Ctx, code: string) {
   const named = code.trim().toUpperCase().slice(0, 16);
@@ -306,7 +314,7 @@ function dateOutOfRange(c: Ctx, maxDaysAhead: number) {
 function bucketFailure(
   c: Ctx,
   kind: 'not_covered' | 'unavailable' | 'out_of_range',
-  allTimedOut: boolean,
+  read: BucketReads,
   maxDaysAhead: number,
 ) {
   if (kind === 'not_covered') {
@@ -318,10 +326,13 @@ function bucketFailure(
   if (kind === 'out_of_range') {
     return dateOutOfRange(c, maxDaysAhead);
   }
-  if (allTimedOut) {
+  if (read.allTimedOut) {
     return c.json(errorBody(c, 'upstream_timeout', 'the board did not load in time; retry'), 504);
   }
-  c.header('Retry-After', String(BOARD_RETRY_AFTER_SECONDS));
+  const retryAfter = refusedPerSecondOnly(read.answers)
+    ? BOARD_RETRY_AFTER_PER_SECOND_SECONDS
+    : BOARD_RETRY_AFTER_SECONDS;
+  c.header('Retry-After', String(retryAfter));
   return c.json(errorBody(c, 'board_unavailable', 'the board is temporarily unavailable'), 503);
 }
 
@@ -363,7 +374,8 @@ export function createAirportRoutes(options: AirportRoutesOptions = {}) {
       // ---------------------------------------------------------------------------------------
       .get(
         '/:code/board',
-        // Off first (no session read, no brake), then a session principal with the user scope.
+        // Off first, before the route's session checks, brakes and lookups; then a session
+        // principal with the user scope.
         requireBoardsEnabled(),
         requireSession(),
         requireScope('user'),
@@ -408,7 +420,7 @@ export function createAirportRoutes(options: AirportRoutesOptions = {}) {
           );
           const combined = combineBuckets(read.answers);
           if (combined.kind !== 'ok') {
-            return bucketFailure(c, combined.kind, read.allTimedOut, maxDaysAhead);
+            return bucketFailure(c, combined.kind, read, maxDaysAhead);
           }
           const direction = query.direction ?? 'departures';
           const groups = filterGroups(groupCodeshares(combined.rows), {
@@ -497,7 +509,12 @@ export function createAirportRoutes(options: AirportRoutesOptions = {}) {
           if (combined.kind !== 'ok') {
             // Nothing was shown, so the search is not charged.
             await ledger.releaseAll();
-            return bucketFailure(c, combined.kind, read.allTimedOut, maxDaysAhead);
+            return bucketFailure(c, combined.kind, read, maxDaysAhead);
+          }
+          if (refusedPerSecondOnly(read.answers)) {
+            // Partial only because the per-second bucket refused a bucket for a moment: not
+            // charged, so asking again a second later costs the user nothing (M3).
+            await ledger.releaseAll();
           }
           // The date's own flights only (R12): a bucket may also return a delayed one of the day
           // before, or one of the next day.

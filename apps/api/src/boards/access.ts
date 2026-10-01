@@ -4,7 +4,7 @@
  *
  *   - Both routes answer 404 `boards_disabled` while `BOARDS_ENABLED` is not `true` (increment
  *     18, R8: production, until AeroDataBox's written End Use answer and the per-user budget),
- *     before the session, the brakes or the database are touched.
+ *     before the route's session checks, brakes and lookups.
  *   - Two brakes per board or route-search request: `BOARD_RL`, 30 per 60 s, keyed by the user,
  *     and `BOARD_IP_RL`, 300 per 60 s, keyed by the client's address reduced to its /64
  *     (`normaliseClientIp`, R11), so neither many accounts behind one address nor one account

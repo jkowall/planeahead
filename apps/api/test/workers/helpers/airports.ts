@@ -4,14 +4,15 @@
  * clock never reaches); AeroDataBox is a counting fake `fetch` injected into the object, whose
  * FIDS answer can be held back to keep a call in flight. No real provider is ever called. The
  * ProviderBudget of the day the harness clock is on reads that clock too, so its token bucket
- * refills on the time a test sets, at the plan's real per-second limit.
+ * refills on the time a test sets, at the plan's real per-second limit. `evict()` resets the
+ * object as eviction or a deploy does: memory lost, storage kept.
  */
 
 import { runInDurableObject } from 'cloudflare:test';
 import type { PersistMessageV1 } from '@planeahead/shared';
 import type { AirportState } from '../../../src/do/airport-state';
 import type { ProviderBudget } from '../../../src/do/provider-budget';
-import { testEnv, track } from './flights';
+import { testEnv, track, untrack } from './flights';
 
 /** A unique, well-formed ICAO name: `Q` and three base-36 characters. */
 let nextAirport = Math.floor(Math.random() * 30_000);
@@ -107,6 +108,7 @@ export function fakeAdb(body: unknown): FakeAdb {
 }
 
 export interface AirportHarness {
+  /** The object's stub; a new one after `evict()`. */
   readonly stub: DurableObjectStub<AirportState>;
   readonly icao: string;
   readonly tz: string;
@@ -124,7 +126,15 @@ export interface AirportHarness {
   untilFids(n: number): Promise<void>;
   /** Lets the held FIDS answers go, from inside the object's own context. */
   release(): Promise<void>;
+  /**
+   * Resets the object as eviction or a deploy does (`ctx.abort()`, once its background work is
+   * done): what the instance held in memory is gone, its storage stays. The fake provider, the
+   * clock and the outbox are set again on the new instance.
+   */
+  evict(): Promise<void>;
 }
+
+const EVICTED = 'evicted by the test';
 
 export async function airportHarness(
   body: unknown,
@@ -132,36 +142,60 @@ export async function airportHarness(
   tz = 'America/New_York',
   icao: string = uniqueAirport(),
 ): Promise<AirportHarness> {
-  const stub = track(testEnv.AIRPORT_STATE.getByName(icao));
+  let stub = track(testEnv.AIRPORT_STATE.getByName(icao));
+  let clock = clockMs;
   const adb = fakeAdb(body);
   const sent: PersistMessageV1[] = [];
   const budgetDays = new Set<string>();
   await budgetClockAt(clockMs, budgetDays);
-  await runInDurableObject(stub, (instance: AirportState) => {
-    instance.providerDeps = { fetch: adb.fetch };
-    instance._setClock(clockMs);
-    instance.outboxSink = {
-      sendBatch: (messages: Iterable<MessageSendRequest<unknown>>) => {
-        for (const message of messages) {
-          sent.push(message.body as PersistMessageV1);
-        }
-        return Promise.resolve();
-      },
-    } as unknown as Pick<Queue, 'sendBatch'>;
-  });
+  const seams = () =>
+    runInDurableObject(stub, (instance: AirportState) => {
+      instance.providerDeps = { fetch: adb.fetch };
+      instance._setClock(clock);
+      instance.outboxSink = {
+        sendBatch: (messages: Iterable<MessageSendRequest<unknown>>) => {
+          for (const message of messages) {
+            sent.push(message.body as PersistMessageV1);
+          }
+          return Promise.resolve();
+        },
+      } as unknown as Pick<Queue, 'sendBatch'>;
+    });
+  await seams();
+  const settled = () => runInDurableObject(stub, (instance: AirportState) => instance.settled());
   return {
-    stub,
+    get stub() {
+      return stub;
+    },
     icao,
     tz,
     adb,
     sent,
     setClock: async (ms) => {
+      clock = ms;
       await runInDurableObject(stub, (instance: AirportState) => {
         instance._setClock(ms);
       });
       await budgetClockAt(ms, budgetDays);
     },
-    settled: () => runInDurableObject(stub, (instance: AirportState) => instance.settled()),
+    settled,
+    evict: async () => {
+      await settled();
+      const spent = stub;
+      try {
+        // `abort()` throws its reason at the caller, and leaves this stub unusable.
+        await runInDurableObject(spent, (_instance, state) => {
+          state.abort(EVICTED);
+        });
+      } catch (error) {
+        if (!String(error).includes(EVICTED)) {
+          throw error;
+        }
+      }
+      untrack(spent);
+      stub = track(testEnv.AIRPORT_STATE.getByName(icao));
+      await seams();
+    },
     untilFids: async (n) => {
       for (let i = 0; i < 1_000 && adb.fidsCalls() < n; i += 1) {
         await runInDurableObject(stub, () => undefined);

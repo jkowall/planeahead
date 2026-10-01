@@ -4,22 +4,32 @@
  *
  *   - Each flight once (ruling R12): a row repeating the direction, designator and scheduled
  *     minute of an earlier one (one flight in two buckets) is dropped first, so row ids are unique.
+ *     `combineBuckets` lists the most recently fetched bucket first, so the copy kept is the
+ *     freshest (the re-review's N1).
  *   - Codeshares are grouped server-side: rows of one direction with the same scheduled UTC
  *     minute, the same counterpart airport and the same registration or the same callsign are one
  *     operated flight. A row with neither key that the provider marks `IsCodeshared` joins the
- *     only `IsOperator` row of its direction, minute and counterpart (R12: days ahead the aircraft
- *     is rarely known); with none there, or several, it stays alone (R3 D7's trade-off: a wrong
- *     merge hides a flight, a missed one only repeats it). The `IsOperator` row is primary (else
- *     the row whose marketing carrier operates it, else the provider's first); the others become
+ *     operator of its direction, minute and counterpart (R12: days ahead the aircraft is rarely
+ *     known) only when that slot holds exactly one row not marked `IsCodeshared` and it is marked
+ *     `IsOperator` (M5: an `Unknown` row there may be the real operator, and the merged row's add
+ *     would track another aircraft); otherwise it stays alone (R3 D7's trade-off: a wrong merge
+ *     hides a flight, a missed one only repeats it). The `IsOperator` row is primary (else the row
+ *     whose marketing carrier operates it, else the provider's first); the others become
  *     `codeshares[]`.
  *   - Filters run after grouping: the direction, the time range `[from, to)` (a flight is in it by
- *     its home leg's scheduled time or its best time, and an earlier one stays while it has not
- *     yet departed or arrived, ruling R14), and an airline matched against the operating carrier
- *     or any marketing carrier of the group, by IATA or ICAO code.
+ *     its home leg's scheduled time or its best time; one with no best time, scheduled earlier,
+ *     stays while live data says it has not yet arrived, ruling R14 as narrowed by N2), and an
+ *     airline matched against the operating carrier or any marketing carrier of the group, by
+ *     IATA or ICAO code.
  *   - Rows leave as `BoardViewRow`, never as provider JSON, and every answer carries an ETag.
  */
 
-import type { BoardBucketResponseV1, BoardRow, BoardViewRow } from '@planeahead/shared';
+import type {
+  BoardBucketResponseV1,
+  BoardRow,
+  BoardViewRow,
+  BudgetDenialReason,
+} from '@planeahead/shared';
 
 /** One operated flight: its primary row and the codeshare rows grouped under it. */
 export interface BoardGroup {
@@ -49,7 +59,10 @@ function groupKeys(row: BoardRow): string[] {
   return keys;
 }
 
-/** The rows with each (direction, designator, scheduled minute) once, the first copy kept. */
+/**
+ * The rows with each (direction, designator, scheduled minute) once, the first copy kept: the
+ * freshest, since `combineBuckets` lists the most recently fetched bucket's rows first (N1).
+ */
 function uniqueRows(rows: readonly BoardRow[]): BoardRow[] {
   const seen = new Set<string>();
   return rows.filter((row) => {
@@ -91,7 +104,8 @@ export function groupCodeshares(rows: readonly BoardRow[]): BoardGroup[] {
     parent[Math.max(a, b)] = Math.min(a, b);
   };
   const firstByKey = new Map<string, number>();
-  const operatorsBySlot = new Map<string, number[]>();
+  // Every row not marked `IsCodeshared` may be the slot's operator, `Unknown` or unmarked included.
+  const candidatesBySlot = new Map<string, number[]>();
   unique.forEach((row, index) => {
     for (const key of groupKeys(row)) {
       const first = firstByKey.get(key);
@@ -101,16 +115,20 @@ export function groupCodeshares(rows: readonly BoardRow[]): BoardGroup[] {
         join(first, index);
       }
     }
-    if (row.codeshareStatus === 'IsOperator') {
+    if (row.codeshareStatus !== 'IsCodeshared') {
       const slot = slotOf(row);
-      operatorsBySlot.set(slot, [...(operatorsBySlot.get(slot) ?? []), index]);
+      candidatesBySlot.set(slot, [...(candidatesBySlot.get(slot) ?? []), index]);
     }
   });
   unique.forEach((row, index) => {
     if (row.codeshareStatus === 'IsCodeshared' && groupKeys(row).length === 0) {
-      const operators = operatorsBySlot.get(slotOf(row)) ?? [];
-      const [only] = operators;
-      if (operators.length === 1 && only !== undefined) {
+      const candidates = candidatesBySlot.get(slotOf(row)) ?? [];
+      const [only] = candidates;
+      if (
+        candidates.length === 1 &&
+        only !== undefined &&
+        unique[only]?.codeshareStatus === 'IsOperator'
+      ) {
         join(only, index);
       }
     }
@@ -144,31 +162,23 @@ function flownBy(group: BoardGroup, airline: string): boolean {
   );
 }
 
-/** The statuses short of the home movement: not yet departed, or not yet arrived. */
-const BEFORE_HOME_MOVEMENT: Readonly<
-  Record<BoardRow['direction'], ReadonlySet<BoardRow['status']>>
-> = {
-  dep: new Set(['scheduled', 'boarding']),
-  arr: new Set(['scheduled', 'boarding', 'departed', 'en_route']),
-};
-
 /**
- * Whether the provider's live data says a flight has not yet made its home movement: no actual
- * time, a status short of it, and something live behind that status, an estimate or (for an
- * arrival) its departure from the origin. A row with only its timetable says nothing either way:
- * a schedules-only airport's rows read `boarding` from the schedule alone.
+ * Whether live data says a flight with no best time (no actual, no estimate) has not yet made its
+ * home movement. Without an estimate the only live data is an arrival's departure from its origin
+ * (`departed`, `en_route`); a status short of the movement may come from the timetable alone (a
+ * schedules-only airport's rows read `boarding` from the schedule) and says nothing either way.
  */
 function notYetMoved(row: BoardRow): boolean {
-  if (row.actual !== undefined || !BEFORE_HOME_MOVEMENT[row.direction].has(row.status)) {
-    return false;
-  }
-  return row.estimated !== undefined || row.status === 'departed' || row.status === 'en_route';
+  return row.direction === 'arr' && (row.status === 'departed' || row.status === 'en_route');
 }
 
 /**
  * Whether a flight is in the window (ruling R14): by its home leg's scheduled time, by its best
- * time (actual, else estimated), or, scheduled before the window, while it has not yet departed
- * or arrived (a delayed flight stays on the board). Only the buckets already read are searched.
+ * time (actual, else estimated), or, with no best time and scheduled before the window, while live
+ * data says it has not yet arrived (a delayed flight stays on the board). A row with a best time
+ * is placed by it (the re-review's N2): a stale estimate before the window, its status never
+ * advanced, no longer keeps a long-gone flight at the top. Only the buckets already read are
+ * searched.
  */
 function inWindow(row: BoardRow, filter: BoardFilter): boolean {
   const within = (at: number): boolean => at >= filter.fromMs && at < filter.toMs;
@@ -177,7 +187,7 @@ function inWindow(row: BoardRow, filter: BoardFilter): boolean {
   return (
     within(scheduled) ||
     (best !== undefined && within(Date.parse(best))) ||
-    (scheduled < filter.fromMs && notYetMoved(row))
+    (best === undefined && scheduled < filter.fromMs && notYetMoved(row))
   );
 }
 
@@ -252,11 +262,13 @@ export type CombinedBuckets =
  * The buckets as one answer. Coverage is per airport, so one `not_covered` bucket makes the
  * whole answer `not_covered`. With no bucket readable: `out_of_range` when every bucket is out
  * of range (never fetched: ended over 24 h ago or past the lookahead), else `unavailable`. With
- * some readable: their rows, the oldest `fetchedAt`, stale if any is, and `partial` when one
- * could not be read (`unavailable`: its fetch failed or was refused, or the Worker's read failed
- * or timed out; a state this build does not know counts the same). Never for a bucket out of
- * range, which no refresh can fill, so a range past the lookahead is not partial (R10, R15).
- * One `schedules_only` bucket makes the answer `schedules_only` (the badge).
+ * some readable: their rows, the most recently fetched bucket's first (so the copy
+ * `groupCodeshares` keeps of a flight two buckets hold is the freshest, N1), the oldest
+ * `fetchedAt`, stale if any is, and `partial` when one could not be read (`unavailable`: its
+ * fetch failed or was refused, or the Worker's read failed or timed out; a state this build does
+ * not know counts the same). Never for a bucket out of range, which no refresh can fill, so a
+ * range past the lookahead is not partial (R10, R15). One `schedules_only` bucket makes the
+ * answer `schedules_only` (the badge).
  */
 export function combineBuckets(answers: readonly BoardBucketResponseV1[]): CombinedBuckets {
   if (answers.some((answer) => answer.state === 'not_covered')) {
@@ -274,7 +286,7 @@ export function combineBuckets(answers: readonly BoardBucketResponseV1[]): Combi
   const coverages = ok.map((answer) => answer.coverage);
   return {
     kind: 'ok',
-    rows: ok.flatMap((answer) => answer.rows),
+    rows: [...ok].sort((a, b) => fetchedMs(b) - fetchedMs(a)).flatMap((answer) => answer.rows),
     coverage: coverages.includes('schedules_only')
       ? 'schedules_only'
       : coverages.every((coverage) => coverage === 'live')
@@ -282,8 +294,41 @@ export function combineBuckets(answers: readonly BoardBucketResponseV1[]): Combi
         : 'unknown',
     fetchedAt: fetched[0] ?? null,
     stale: ok.some((answer) => answer.stale),
-    partial: answers.some((answer) => answer.state !== 'ok' && answer.state !== 'out_of_range'),
+    partial: answers.some(missed),
   };
+}
+
+/** Whether the answer misses a bucket: one not read, and not out of range (R10). */
+function missed(answer: BoardBucketResponseV1): boolean {
+  return answer.state !== 'ok' && answer.state !== 'out_of_range';
+}
+
+/** When a readable bucket was fetched; one without `fetchedAt` counts as the oldest. */
+function fetchedMs(answer: BoardBucketResponseV1): number {
+  return answer.fetchedAt === undefined ? 0 : Date.parse(answer.fetchedAt);
+}
+
+/**
+ * A bucket's `reason` when the per-second bucket refused its call or its coverage check: the
+ * provider's rate, or the floor board calls leave the trackers (ruling R2). Either lifts within a
+ * second or so, and AirportState asks again after a second.
+ */
+const PER_SECOND_REFUSALS: ReadonlySet<string> = new Set(
+  (['provider_rate_limit', 'board_rate_floor'] satisfies BudgetDenialReason[]).map(
+    (reason) => `budget_denied:${reason}`,
+  ),
+);
+
+/**
+ * Whether the buckets the answer misses were all refused by the per-second bucket alone, and at
+ * least one was (the re-review's M3): a route search is then not charged, and a 503 asks for a
+ * retry in seconds rather than half a minute.
+ */
+export function refusedPerSecondOnly(answers: readonly BoardBucketResponseV1[]): boolean {
+  const misses = answers.filter(missed);
+  return (
+    misses.length > 0 && misses.every((answer) => PER_SECOND_REFUSALS.has(answer.reason ?? ''))
+  );
 }
 
 /**

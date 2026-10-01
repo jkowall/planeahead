@@ -333,7 +333,8 @@ describe('BOARDS_ENABLED (R8)', () => {
   it('answers 404 boards_disabled on both routes while off, before any brake or lookup', async () => {
     const paths = ['/v1/airports/ZZZ4/board', '/v1/airports/ZZZ4/flights/to/ZZZ3?date=2101-01-01'];
     const session = await signedInSession();
-    for (const value of [null, 'false']) {
+    // Only exactly "true" is on: a dashboard's `TRUE` or ` true ` is off (the re-review's N6).
+    for (const value of [null, 'false', 'TRUE', ' true ']) {
       const app = boardApp({ nowMs: () => clockOfNewDay(), env: envWithBoards(value) });
       for (const path of paths) {
         const response = await app.get(path, session);

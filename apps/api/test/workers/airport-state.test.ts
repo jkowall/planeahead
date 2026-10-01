@@ -9,7 +9,10 @@
  * review round: a failure waits as long as its cause warrants (R6) and a copy that cannot be
  * stored keeps its record (R15); board calls leave the trackers their rate floor (R2); a copy
  * fetched weeks ahead is purged a week after its fetch (R4); coverage reads every feed status as
- * the spec defines it, and a check the budget refuses stores nothing (R5).
+ * the spec defines it, and a check the budget refuses stores nothing (R5). From the close-out: a
+ * deterministic failure's wait outlives eviction while a 408 waits a minute (the re-review's M1),
+ * and a refused check is not asked again until the refusal can lift, nor a FIDS call reserved
+ * when no answer is stored (M2).
  */
 
 import { runDurableObjectAlarm, runInDurableObject } from 'cloudflare:test';
@@ -68,13 +71,18 @@ async function currentBucket(rowsPerDirection = 3) {
   return { bucket, bounds, now, harness };
 }
 
-/** The FIDS call records the object has sent to `persist`. */
-function fidsRecords(harness: AirportHarness): ProviderCallRecord[] {
+/** The call records of one operation the object has sent to `persist`. */
+function callRecords(harness: AirportHarness, operation: 'fids' | 'health'): ProviderCallRecord[] {
   return harness.sent.flatMap((message) =>
-    message.kind === 'provider_call' && message.payload.operation === 'fids'
+    message.kind === 'provider_call' && message.payload.operation === operation
       ? [message.payload]
       : [],
   );
+}
+
+/** The FIDS call records the object has sent to `persist`. */
+function fidsRecords(harness: AirportHarness): ProviderCallRecord[] {
+  return callRecords(harness, 'fids');
 }
 
 /** The object's armed alarm, or null. */
@@ -261,13 +269,19 @@ describe('AirportState: failures never empty a board', () => {
       /^http_429/,
     ],
     [
+      // A timeout on the way says nothing about the request (the re-review's M1, with the 5xx).
+      'a request timeout (408)',
+      () => Response.json({ message: 'request timeout' }, { status: 408 }),
+      /^http_408/,
+    ],
+    [
       'a transport error',
       (): Response => {
         throw new TypeError('connection reset');
       },
       /^transport_/,
     ],
-  ])('%s is retried after a minute, as a 5xx is (R6)', async (_, answer, why) => {
+  ])('%s is retried after a minute, as a 5xx is (R6, M1)', async (_, answer, why) => {
     const { bucket, now, harness } = await currentBucket();
     harness.adb.fids = answer;
     expect((await ask(harness, bucket)).reason).toMatch(why);
@@ -279,6 +293,78 @@ describe('AirportState: failures never empty a board', () => {
     expect(await ask(harness, bucket)).toMatchObject({ state: 'ok', stale: false });
     expect(harness.adb.fidsCalls()).toBe(2);
     await harness.settled();
+  });
+});
+
+describe('AirportState: a deterministic failure outlives the instance (the re-review M1)', () => {
+  const badRequest = (): Response => Response.json({ message: 'bad request' }, { status: 400 });
+
+  /** The failure waits the object has stored. */
+  function storedWaits(harness: AirportHarness) {
+    return runInDurableObject(harness.stub, (_instance, state) =>
+      state.storage.sql
+        .exec<{ bucket_start_local: string; retry_at_ms: number }>(
+          'SELECT bucket_start_local, retry_at_ms FROM bucket_failures',
+        )
+        .toArray(),
+    );
+  }
+
+  it('a 400, then the object evicted inside its wait: the next view makes no call', async () => {
+    const { bucket, now, harness } = await currentBucket();
+    harness.adb.fids = badRequest;
+    const failed = await ask(harness, bucket);
+    expect(failed).toMatchObject({ state: 'unavailable', rows: [] });
+    expect(failed.reason).toMatch(/^http_400/);
+    expect(await storedWaits(harness)).toEqual([
+      { bucket_start_local: bucket, retry_at_ms: now + 5 * MINUTE_MS },
+    ]);
+    // The re-review's probe: a minute on, the same instance holds; then the object is reset, as
+    // eviction (70 to 140 s idle) or a deploy does, and asked inside the 5-minute wait.
+    await harness.setClock(now + MINUTE_MS);
+    expect((await ask(harness, bucket)).reason).toBe(failed.reason);
+    await harness.evict();
+    await harness.setClock(now + 2 * MINUTE_MS);
+    expect(await ask(harness, bucket)).toMatchObject({
+      state: 'unavailable',
+      reason: failed.reason,
+    });
+    expect(harness.adb.fidsCalls()).toBe(1);
+    // The wait over, one call, whose success ends the stored wait.
+    harness.adb.fids = () => Response.json(syntheticFids(1, adbUtc(now)));
+    await harness.setClock(now + 5 * MINUTE_MS);
+    expect(await ask(harness, bucket)).toMatchObject({ state: 'ok', stale: false });
+    expect(harness.adb.fidsCalls()).toBe(2);
+    expect(await storedWaits(harness)).toEqual([]);
+    await harness.settled();
+  });
+
+  it('an alarm inside the wait keeps it; the alarm at its purge deletes it with the object', async () => {
+    const { bucket, bounds, now, harness } = await currentBucket();
+    harness.adb.fids = badRequest;
+    await ask(harness, bucket);
+    await harness.settled();
+    // Armed for the purge a copy fetched then would have had: 48 hours after the bucket ends.
+    const purgeAt = bounds.endMs + 48 * HOUR_MS;
+    expect(await alarmOf(harness)).toBe(purgeAt);
+    // An alarm that finds nothing due (an outbox retry, say) neither drops the wait nor deletes
+    // the object's storage, whose only row it is: evicted after it, the object still waits.
+    await harness.setClock(now + MINUTE_MS);
+    expect(await runDurableObjectAlarm(harness.stub)).toBe(true);
+    await harness.evict();
+    await harness.setClock(now + 2 * MINUTE_MS);
+    expect((await ask(harness, bucket)).reason).toMatch(/^http_400/);
+    expect(harness.adb.fidsCalls()).toBe(1);
+    expect(await alarmOf(harness)).toBe(purgeAt);
+    // At its purge the wait goes, and with nothing else left, the whole storage.
+    await harness.setClock(purgeAt);
+    expect(await runDurableObjectAlarm(harness.stub)).toBe(true);
+    const tables = await runInDurableObject(harness.stub, (_instance, state) =>
+      state.storage.sql
+        .exec<{ name: string }>("SELECT name FROM sqlite_master WHERE name = 'bucket_failures'")
+        .toArray(),
+    );
+    expect(tables).toEqual([]);
   });
 });
 
@@ -543,17 +629,47 @@ describe('AirportState: coverage, once per airport per day (rulings B6 and R5)',
     expect(await ask(harness, bucket)).toMatchObject({ state: 'not_covered' });
     expect(harness.adb.healthCalls()).toBe(1);
     expect(harness.adb.fidsCalls()).toBe(0);
-    // The refused check's record still reaches persist, unbilled.
+    // The refused check's record still reaches persist, unbilled; refused with no answer stored,
+    // the view reserved no FIDS call at all, so none went out on a token refilled meanwhile (M2).
     await harness.settled();
-    const checks = harness.sent.flatMap((message) =>
-      message.kind === 'provider_call' && message.payload.operation === 'health'
-        ? [message.payload]
-        : [],
-    );
+    const checks = callRecords(harness, 'health');
     expect(checks.map((call) => [call.result, call.error, call.costUnits])).toEqual([
       ['rate_limited', 'budget_denied:board_rate_floor', 0],
       ['ok', undefined, 0],
     ]);
+    expect(fidsRecords(harness)).toEqual([]);
+  });
+
+  it('a refused check is not asked again until the refusal can lift: ten views, one record (M2)', async () => {
+    const { bucket, now, harness } = await currentBucket();
+    const utcDate = new Date(now).toISOString().slice(0, 10);
+    const budget = testEnv.PROVIDER_BUDGET.getByName(`aerodatabox:${utcDate}`, {
+      locationHint: 'enam',
+    });
+    await budget.setKillSwitch(true, 'test');
+    try {
+      // The re-review's probe: ten views of one cold bucket over 45 seconds.
+      for (let i = 0; i < 10; i += 1) {
+        await harness.setClock(now + i * 5_000);
+        expect(await ask(harness, bucket)).toMatchObject({
+          state: 'unavailable',
+          coverage: 'unknown',
+          reason: 'budget_denied:provider_kill_switch',
+        });
+      }
+      await harness.settled();
+      expect(callRecords(harness, 'health')).toHaveLength(1);
+      expect(fidsRecords(harness)).toEqual([]);
+      // A minute after the refusal the budget is asked again (and refuses again).
+      await harness.setClock(now + MINUTE_MS);
+      await ask(harness, bucket);
+      await harness.settled();
+      expect(callRecords(harness, 'health')).toHaveLength(2);
+      expect(harness.adb.calls).toEqual([]);
+    } finally {
+      // A manual kill is kept in CONFIG KV for the next day's object: the later tests' days.
+      await budget.setKillSwitch(false);
+    }
   });
 });
 

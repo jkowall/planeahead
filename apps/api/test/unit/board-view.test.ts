@@ -2,7 +2,9 @@
  * Ruling B7 (increment 18): codeshare grouping, the filters after the cache, the UI row, the
  * combination of a request's buckets, and the ETag. From the review round: keyless codeshares
  * and each flight once (R12), delayed flights kept (R14), `partial` never for a range out of
- * reach (R10). Pure; synthetic rows only.
+ * reach (R10). From the close-out: an `Unknown` row in the slot blocks a keyless merge (the
+ * re-review's M5), the freshest copy of a flight kept (N1), a row placed by its best time (N2),
+ * and per-second refusals told apart (M3). Pure; synthetic rows only.
  */
 
 import { describe, expect, it } from 'vitest';
@@ -14,6 +16,7 @@ import {
   etagMatches,
   filterGroups,
   groupCodeshares,
+  refusedPerSecondOnly,
 } from '../../src/boards/view';
 
 const T0 = '2026-10-02T13:00:00Z';
@@ -149,6 +152,34 @@ describe('groupCodeshares (R3 D7)', () => {
     ).toHaveLength(4);
   });
 
+  it('a keyless codeshare stays alone when an Unknown row of its slot may be the operator (M5)', () => {
+    // The re-review's probe: VS3 is DL-operated; joined to AA100, its add would track AA100.
+    const groups = groupCodeshares(
+      [
+        row('AA100', { codeshareStatus: 'IsOperator', operatingCarrierIcao: 'AAL' }),
+        row('DL5', { codeshareStatus: 'Unknown', operatingCarrierIcao: 'DAL' }),
+        row('VS3', { codeshareStatus: 'IsCodeshared', operatingCarrierIcao: 'DAL' }),
+      ].map((r) => ({ ...r, scheduledDepartureDateLocal: '2026-10-02' })),
+    );
+    const view = groups.map((g) => boardViewRow(g, 'KJFK'));
+    expect(view.map((v) => [v.designator, v.codeshares, v.add?.number])).toEqual([
+      ['AA100', [], 'AA100'],
+      ['DL5', [], 'DL5'],
+      ['VS3', [], 'VS3'],
+    ]);
+    // A row with no status at all may be the operator too.
+    const unmarked = groupCodeshares([
+      row('AA6', { codeshareStatus: 'IsOperator' }),
+      row('DL6'),
+      row('VS6', { codeshareStatus: 'IsCodeshared' }),
+    ]);
+    expect(unmarked.map((g) => [g.primary.designator, g.others.length])).toEqual([
+      ['AA6', 0],
+      ['DL6', 0],
+      ['VS6', 0],
+    ]);
+  });
+
   it('lists a flight two buckets return once, first copy kept, before grouping (R12)', () => {
     const evening = aa100().map((r) => ({ ...r, gate: 'B12' }));
     const keyless = row('DL40', { scheduled: '2026-10-02T14:00:00Z' });
@@ -204,7 +235,7 @@ describe('filterGroups (R3 D8)', () => {
     expect(by('LH')).toEqual([]);
   });
 
-  it('keeps a delayed flight: its best time in the window, or earlier and not yet moved (R14)', () => {
+  it('keeps a delayed flight: its best time in the window, or with none, in the air (R14, N2)', () => {
     const at = (hhmm: string) => `2026-10-02T${hhmm}:00Z`;
     const rows = [
       row('DL1', { scheduled: at('12:00'), estimated: at('13:30') }),
@@ -229,12 +260,35 @@ describe('filterGroups (R3 D8)', () => {
       filterGroups(groupCodeshares(rows), { ...window, direction }).map(
         (g) => g.primary.designator,
       );
-    // DL4 waits on an estimate past the window, DL2 left in it, DL1 is expected in it and DL8
-    // early into it. DL3 left before it, DL6 is airborne, and DL5's `boarding` is its timetable's
-    // word alone; DL9 is due after the window.
-    expect(kept('dep')).toEqual(['DL4', 'DL2', 'DL1', 'DL8']);
+    // DL2 left in the window, DL1 is expected in it and DL8 early into it. DL3 left before it,
+    // DL6 is airborne, and DL5's `boarding` is its timetable's word alone; DL9 is due after the
+    // window, and so is DL4, placed by its estimate (N2) however early its schedule.
+    expect(kept('dep')).toEqual(['DL2', 'DL1', 'DL8']);
     // An arrival still in the air stays; one landed or in, or with only its timetable, does not.
     expect(kept('arr')).toEqual(['BA1']);
+  });
+
+  it('places a row with a best time by it: a stale estimate before the window drops (N2)', () => {
+    const at = (hhmm: string) => `2026-10-02T${hhmm}:00Z`;
+    const rows = [
+      // The re-review's probe: scheduled and estimated 09:00, the status never advanced.
+      row('AA7', { scheduled: at('09:00'), estimated: at('09:00') }),
+      // An arrival in the air is placed by its estimate too, stale or not.
+      row('BA5', {
+        direction: 'arr',
+        scheduled: at('09:00'),
+        estimated: at('10:00'),
+        status: 'en_route',
+      }),
+      // With no best time, live data still keeps an arrival on its way.
+      row('BA6', { direction: 'arr', scheduled: at('09:00'), status: 'en_route' }),
+      row('BA7', { direction: 'arr', scheduled: at('09:00'), status: 'departed' }),
+    ];
+    const noon = { fromMs: Date.parse(at('12:00')), toMs: Date.parse(at('23:59')) };
+    const kept = (direction: 'dep' | 'arr') =>
+      filterGroups(groupCodeshares(rows), { ...noon, direction }).map((g) => g.primary.designator);
+    expect(kept('dep')).toEqual([]);
+    expect(kept('arr')).toEqual(['BA6', 'BA7']);
   });
 });
 
@@ -341,6 +395,30 @@ describe('combineBuckets', () => {
     });
   });
 
+  it('keeps the copy of a flight from the most recently fetched bucket, in either order (N1)', () => {
+    // The re-review's probe: the older copy (scheduled, gate B1) used to win as the first read.
+    const older = bucket('ok', {
+      fetchedAt: '2026-10-02T10:00:00.000Z',
+      rows: [row('AA100', { gate: 'B1' }), row('AA1')],
+    });
+    const newer = bucket('ok', {
+      bucketStartLocal: '2026-10-02T12:00',
+      fetchedAt: '2026-10-02T10:05:00.000Z',
+      rows: [row('AA100', { status: 'departed', gate: 'B7', actual: '2026-10-02T13:20:00Z' })],
+    });
+    for (const answers of [
+      [older, newer],
+      [newer, older],
+    ]) {
+      const combined = combineBuckets(answers);
+      const groups = combined.kind === 'ok' ? groupCodeshares(combined.rows) : [];
+      expect(groups.map((g) => [g.primary.designator, g.primary.status, g.primary.gate])).toEqual([
+        ['AA100', 'departed', 'B7'],
+        ['AA1', 'scheduled', undefined],
+      ]);
+    }
+  });
+
   it('is partial only for a bucket that could not be read, never for one out of range (R10)', () => {
     const morning = bucket('ok', { rows: [row('AA1')] });
     const partialWith = (other: BoardBucketResponseV1): unknown => {
@@ -355,6 +433,28 @@ describe('combineBuckets', () => {
       true,
     );
     expect(partialWith(bucket('unknown'))).toBe(true);
+  });
+
+  it('tells when the per-second bucket alone refused the buckets missing (M3)', () => {
+    const floor = bucket('unavailable', { reason: 'budget_denied:board_rate_floor' });
+    const rate = bucket('unavailable', { reason: 'budget_denied:provider_rate_limit' });
+    const morning = bucket('ok', { rows: [row('AA1')] });
+    expect(refusedPerSecondOnly([morning, floor])).toBe(true);
+    expect(refusedPerSecondOnly([floor, rate])).toBe(true);
+    expect(refusedPerSecondOnly([bucket('out_of_range'), rate])).toBe(true);
+    // Nothing missing, or anything else among the missing, is not.
+    expect(refusedPerSecondOnly([morning, bucket('out_of_range')])).toBe(false);
+    for (const reason of [
+      'budget_denied:boards_share',
+      'budget_denied:provider_kill_switch',
+      'timeout',
+      'http_500: boom',
+      undefined,
+    ]) {
+      const other = bucket('unavailable', reason === undefined ? {} : { reason });
+      expect(refusedPerSecondOnly([floor, other]), String(reason)).toBe(false);
+    }
+    expect(refusedPerSecondOnly([floor, bucket('unknown')])).toBe(false);
   });
 });
 

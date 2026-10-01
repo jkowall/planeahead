@@ -93,9 +93,11 @@ export const ApiErrorSchema = z.looseObject({
   /**
    * `cap_exceeded`: whose allowance ran out (increment 18, R11): the account's own (`user`), or
    * the network's (`ip`, an anonymous account's per-address cap, shared by every anonymous
-   * install behind that address; signing in lifts it).
+   * install behind that address; signing in lifts it). A scope this build does not know reads as
+   * absent, so a later server's third scope never costs a shipped app the whole body and its
+   * `cap_exceeded` (the re-review's N7).
    */
-  scope: z.enum(['user', 'ip']).optional(),
+  scope: z.enum(['user', 'ip']).optional().catch(undefined),
   /** `flight_not_found` from a search: the origin-local dates the provider was asked for. */
   triedDates: z.array(IsoDateSchema).optional(),
   /** `flight_not_found` from a search: reserved, always empty in Phase 0 (ruling O4). */

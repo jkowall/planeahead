@@ -66,10 +66,11 @@ const CLASSES: readonly PingCase[] = [
     version: 2,
   },
   {
-    // Increment 18: the board buckets, their chunks, coverage and the outbox.
+    // Increment 18: the board buckets, their chunks, coverage and the outbox; then the stored
+    // waits of buckets whose fetch failed deterministically (close-out, M1).
     className: 'AirportState',
     ping: (name) => track(env.AIRPORT_STATE.getByName(name)).ping(),
-    version: 1,
+    version: 2,
   },
   {
     className: 'UserInbox',

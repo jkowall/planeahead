@@ -6,7 +6,8 @@
  * carries its badge; an uncovered one is 404. The route search reads both buckets of the
  * origin-local date, keeps the departures to the destination grouped by codeshare, and answers
  * the designator search's 422 past the lookahead. A row's `add` subscribes through the existing
- * `POST /v1/flights`.
+ * `POST /v1/flights`. From the close-out (the re-review's M3): a 503 the per-second bucket alone
+ * caused says to retry in 2 seconds, and a route search partial only for that is not charged.
  */
 
 import { afterEach, describe, expect, it } from 'vitest';
@@ -17,6 +18,7 @@ import {
   type FlightKey,
   type AirportBoardResponse,
   type BoardBucketBounds,
+  type BudgetRequest,
   type RouteSearchResponse,
 } from '@planeahead/shared';
 import { providerSettings } from '../../src/providers/config';
@@ -139,6 +141,24 @@ async function boardScenario(health?: () => Response): Promise<BoardScenario> {
 
 function boardPath(s: BoardScenario, query = ''): string {
   return `/v1/airports/${s.home.iata}/board${query}`;
+}
+
+/** Spends `n` per-second tokens of `nowMs`'s day as tracker polls do (Growth: a burst of 5). */
+async function takeTrackerTokens(nowMs: number, n: number): Promise<void> {
+  const utcDate = new Date(nowMs).toISOString().slice(0, 10);
+  const budget = testEnv.PROVIDER_BUDGET.getByName(`aerodatabox:${utcDate}`, {
+    locationHint: 'enam',
+  });
+  const poll: BudgetRequest = {
+    provider: 'aerodatabox',
+    operation: 'flight_status',
+    pollEquivalents: 0.1,
+    trigger: 'alarm',
+    utcDate,
+  };
+  for (let i = 0; i < n; i += 1) {
+    expect((await budget.reserve(poll)).allowed).toBe(true);
+  }
 }
 
 describe('GET /v1/airports/{code}/board (rulings B7 and B8)', () => {
@@ -323,6 +343,22 @@ describe('GET /v1/airports/{code}/board (rulings B7 and B8)', () => {
     expect(failed.headers.get('retry-after')).toBe('30');
     expect(await failed.json()).toMatchObject({ error: 'board_unavailable' });
     expect(s.harness.adb.fidsCalls()).toBe(1);
+  });
+
+  it('says to retry a 503 in 2 seconds when only the per-second bucket refused (M3)', async () => {
+    const s = await boardScenario();
+    // Tracker polls take 3 of Growth's burst of 5: the coverage check meets the trackers' floor.
+    await takeTrackerTokens(s.now, 3);
+    const refused = await s.app.get(boardPath(s), s.session);
+    expect(refused.status).toBe(503);
+    expect(refused.headers.get('retry-after')).toBe('2');
+    expect(await refused.json()).toMatchObject({ error: 'board_unavailable' });
+    expect(s.harness.adb.calls).toEqual([]);
+    // And a second later the board is there.
+    await s.harness.setClock(s.now + 1_000);
+    expect((await s.app.get(boardPath(s), s.session)).status).toBe(200);
+    expect(s.harness.adb.fidsCalls()).toBe(1);
+    await s.harness.settled();
   });
 });
 
@@ -532,6 +568,29 @@ describe('GET /v1/airports/{origin}/flights/to/{destination} (ruling B8)', () =>
     expect(body.flights.map((flight) => flight.designator)).toEqual(['AA10']);
     expect(body.partial).toBe(false);
     expect(r.harness.adb.fidsCalls()).toBe(1);
+  });
+
+  it('does not charge a search partial only because the per-second bucket refused (M3)', async () => {
+    const r = await routeScenario();
+    // The board around now reads the evening before and the date's morning: the coverage check
+    // and two calls take three of Growth's burst of 5, leaving only the trackers' floor of 2.
+    expect((await r.app.get(`/v1/airports/${r.origin.iata}/board`, r.session)).status).toBe(200);
+    await r.harness.settled();
+    const response = await r.app.get(routePath(r), r.session);
+    expect(response.status).toBe(200);
+    const body = await response.json<RouteSearchResponse>();
+    // The morning from KV; the evening's call meets the floor.
+    expect(body.partial).toBe(true);
+    expect(body.flights.map((flight) => flight.designator)).toEqual(['AA10']);
+    expect(await counterValue('user', r.session.userId, 'route_searches')).toBe(0);
+    // A second on, the same search reads both buckets, and is charged.
+    await r.harness.setClock(r.now + 1_000);
+    const again = await r.app.get(routePath(r), r.session);
+    const full = await again.json<RouteSearchResponse>();
+    expect(full.partial).toBe(false);
+    expect(full.flights.map((flight) => flight.designator)).toEqual(['AA10', 'UA22', 'DL20']);
+    expect(await counterValue('user', r.session.userId, 'route_searches')).toBe(1);
+    expect(r.harness.adb.fidsCalls()).toBe(3);
   });
 
   it('answers the designator search 422 past the lookahead, and for a date long gone, charging nothing', async () => {

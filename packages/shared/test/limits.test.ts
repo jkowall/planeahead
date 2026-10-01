@@ -87,8 +87,17 @@ describe('the error envelope', () => {
       const parsed = ApiErrorSchema.safeParse({ ...body, scope });
       expect(parsed.success && parsed.data.scope).toBe(scope);
     }
-    expect(ApiErrorSchema.safeParse({ ...body, scope: 'install' }).success).toBe(false);
     expect(ApiErrorSchema.safeParse(body).success).toBe(true);
+  });
+
+  it('reads a scope it does not know as absent, keeping the body and its cap_exceeded (N7)', () => {
+    // A later server's third scope (the magic-link caps already use `install`).
+    const body = { error: 'cap_exceeded', cap: 'route_searches', limit: 30, requestId: 'r' };
+    const parsed = ApiErrorSchema.safeParse({ ...body, scope: 'install' });
+    expect(parsed.success).toBe(true);
+    expect(parsed.data).toMatchObject({ error: 'cap_exceeded', cap: 'route_searches', limit: 30 });
+    expect(parsed.data?.scope).toBeUndefined();
+    expect(isApiError({ ...body, scope: 'install' }, 'cap_exceeded')).toBe(true);
   });
 
   it('isApiError reads a body by its code', () => {
