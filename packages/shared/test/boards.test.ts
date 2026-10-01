@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import {
   BOARD_FRESHNESS_LADDER,
+  BOARD_PURGE_AFTER_FETCH_MS,
   BoardBucketRequestV1,
   BoardBucketResponseV1,
   BoardKvMetaV1,
@@ -157,6 +158,65 @@ describe('the degrade steps of the boards share (ruling B5)', () => {
     const ended = boardFreshness(bounds, bounds.endMs + 40 * HOUR, 0.9);
     expect(ended.freshUntilMs).toBe(bounds.endMs + 48 * HOUR);
     expect(ended.staleUntilMs).toBe(bounds.endMs + 48 * HOUR);
+  });
+});
+
+describe('the purge: 48 h after the end or 7 days after the fetch, whichever is sooner (ruling R4)', () => {
+  const DAY = 24 * HOUR;
+  const fetchedAt = at('2026-09-22T17:00:00Z');
+  /** A 12-hour bucket starting `leadMs` after the fetch. */
+  const ahead = (leadMs: number): BoardBucketBounds => ({
+    startMs: fetchedAt + leadMs,
+    endMs: fetchedAt + leadMs + 12 * HOUR,
+  });
+
+  it('purges copies of buckets 30 and 365 days ahead 7 days after the fetch', () => {
+    expect(BOARD_PURGE_AFTER_FETCH_MS).toBe(7 * DAY);
+    for (const days of [30, 365]) {
+      const f = boardFreshness(ahead(days * DAY), fetchedAt);
+      expect(f.position).toBe('far');
+      expect(f.purgeAtMs).toBe(fetchedAt + 7 * DAY);
+      // The far row itself is unchanged: fresh 12 h, stale until 48 h.
+      expect([f.freshUntilMs - fetchedAt, f.staleUntilMs - fetchedAt]).toEqual([
+        12 * HOUR,
+        48 * HOUR,
+      ]);
+    }
+  });
+
+  it('cuts in for a bucket starting more than 108 h after the fetch, and no sooner', () => {
+    // At 108 h both rules agree: the end is 120 h out, plus 48 h is 168 h, which is 7 days.
+    expect(boardFreshness(ahead(108 * HOUR), fetchedAt).purgeAtMs).toBe(fetchedAt + 7 * DAY);
+    expect(boardFreshness(ahead(108 * HOUR + MIN), fetchedAt).purgeAtMs).toBe(fetchedAt + 7 * DAY);
+    const sooner = ahead(108 * HOUR - MIN);
+    expect(boardFreshness(sooner, fetchedAt).purgeAtMs).toBe(boardPurgeAtMs(sooner));
+    expect(boardPurgeAtMs(sooner)).toBe(fetchedAt + 7 * DAY - MIN);
+  });
+
+  it('never keeps a copy more than 7 days after its fetch, wherever the bucket lies', () => {
+    for (let lead = -72 * HOUR; lead <= 400 * DAY; lead += 7 * HOUR) {
+      const bucket = ahead(lead);
+      for (const share of [undefined, 0.7, 0.95]) {
+        const f = boardFreshness(bucket, fetchedAt, share);
+        expect(f.purgeAtMs - fetchedAt).toBeLessThanOrEqual(7 * DAY);
+        expect(f.purgeAtMs).toBeLessThanOrEqual(boardPurgeAtMs(bucket));
+        expect(f.staleUntilMs).toBeLessThanOrEqual(f.purgeAtMs);
+      }
+    }
+  });
+
+  it('stops the far row at the purge: 168 h of stale at 95 percent, 96 h at 70 percent', () => {
+    const far = ahead(30 * DAY);
+    const at95 = boardFreshness(far, fetchedAt, 0.95);
+    expect([at95.freshUntilMs - fetchedAt, at95.staleUntilMs - fetchedAt]).toEqual([
+      48 * HOUR,
+      168 * HOUR,
+    ]);
+    const at70 = boardFreshness(far, fetchedAt, 0.7);
+    expect([at70.freshUntilMs - fetchedAt, at70.staleUntilMs - fetchedAt]).toEqual([
+      24 * HOUR,
+      96 * HOUR,
+    ]);
   });
 });
 

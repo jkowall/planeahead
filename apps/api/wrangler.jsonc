@@ -68,11 +68,10 @@
   // Cloudflare API (with the optional CF_API_TOKEN secret); empty shows those figures as
   // unavailable. SUPPORT_EMAIL is the inbox the account-deletion page names. BOARDS_ENABLED
   // (increment 18, R8) serves the airport boards and the route search when "true": here and in
-  // staging. Production leaves it out, and both routes answer 404 `boards_disabled`, until
-  // AeroDataBox confirms in writing that boards are End Use AND the per-user board budget (R3) is
-  // built (docs/runbooks/first-deploy.md, docs/open-decisions.md). A production deploy therefore
-  // warns that BOARDS_ENABLED is not on "env.production.vars": that is the off switch working; do
-  // NOT copy "true" there to quiet it before the flip.
+  // staging. Production sets "false" (anything but "true" is off), and both routes answer 404
+  // `boards_disabled`, until AeroDataBox confirms in writing that boards are End Use AND the
+  // per-user board budget (R3) is built (docs/runbooks/first-deploy.md, docs/open-decisions.md).
+  // The flip is that one word in "env.production.vars", and only then.
   "vars": {
     "ENVIRONMENT": "local",
     "API_PUBLIC_URL": "http://localhost:8787",
@@ -443,6 +442,9 @@
         "ACCESS_AUD": "",
         "CF_ACCOUNT_ID": "",
         "SUPPORT_EMAIL": "support@planeahead.app",
+        // Off until the End Use answer and the per-user board budget (R3, R8): see the top-level
+        // "vars" comment before making this "true".
+        "BOARDS_ENABLED": "false",
       },
 
       "durable_objects": {

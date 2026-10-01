@@ -85,6 +85,7 @@ import {
   type ProviderBudgetIdentity,
 } from '../providers/budget';
 import {
+  boardTokenFloor,
   boardsCapUnits,
   boardsShareSpent,
   checkBoards,
@@ -330,8 +331,10 @@ export class ProviderBudget extends DurableObject<Env> {
    * Reserves one call. Refusals: `routing_rule` (a request for another provider, or an operation
    * with no price, which would otherwise debit nothing), `provider_kill_switch`,
    * `provider_daily_cap` (which also trips the kill switch) and `provider_rate_limit` with the
-   * bucket's `retryAfterMs`. Never throws for a bad request: an exception would cross the RPC
-   * boundary into the caller's alarm.
+   * bucket's `retryAfterMs`; for board triggers also `boards_share`, `board_airports_per_hour`
+   * and `board_rate_floor` (the bucket holds the call but not the trackers' floor, with the wait
+   * until it would). Never throws for a bad request: an exception would cross the RPC boundary
+   * into the caller's alarm.
    */
   async reserve(request: BudgetRequest): Promise<BudgetDecision> {
     const identity = this.#requireIdentity();
@@ -373,15 +376,14 @@ export class ProviderBudget extends DurableObject<Env> {
         return { allowed: false, reason: boards.reason, boardsShareSpent: boards.shareSpent };
       }
       const bucket = bucketFor(config.per_second_limit);
-      const taken = take(this.#bucket(bucket, now), bucket, now);
+      // Ruling R2: a board call must leave the trackers' floor in the bucket.
+      const keep = boards === null ? 0 : boardTokenFloor(bucket);
+      const taken = take(this.#bucket(bucket, now), bucket, now, 1, keep);
       this.#saveBucket(taken.state);
       if (!taken.allowed) {
-        this.#countDenial('provider_rate_limit');
-        return {
-          allowed: false,
-          reason: 'provider_rate_limit',
-          retryAfterMs: taken.retryAfterMs,
-        };
+        const reason = taken.floored ? 'board_rate_floor' : 'provider_rate_limit';
+        this.#countDenial(reason);
+        return { allowed: false, reason, retryAfterMs: taken.retryAfterMs };
       }
       this.#debit(request.trigger, units, request.pollEquivalents);
       if (boards === null) {

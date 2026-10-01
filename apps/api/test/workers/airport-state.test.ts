@@ -5,18 +5,21 @@
  * request inside `freshUntil` makes none; one between `freshUntil` and `staleUntil` gets the
  * stale copy while one refresh runs; a failed refresh never empties a board; the boards share
  * degrades the ladder at 70 and 90 percent and leaves stale copies only at 100; coverage gates
- * the call; a hub-sized bucket is chunked, read back and purged with its KV copy.
+ * the call; a hub-sized bucket is chunked, read back and purged with its KV copy. From the
+ * review round: a failure waits as long as its cause warrants (R6) and a copy that cannot be
+ * stored keeps its record (R15); board calls leave the trackers their rate floor (R2); a copy
+ * fetched weeks ahead is purged a week after its fetch (R4).
  */
 
 import { runDurableObjectAlarm, runInDurableObject } from 'cloudflare:test';
 import { afterEach, describe, expect, it } from 'vitest';
 import {
   BoardBucketResponseV1,
-  adbCoverageKvKey,
   boardBucketBounds,
   boardKvKey,
   type BoardBucketBounds,
   type BudgetRequest,
+  type ProviderCallRecord,
 } from '@planeahead/shared';
 import { decodeBoardRows, joinChunks, readBoardKv } from '../../src/boards/cache';
 import { readBoardBucket } from '../../src/boards/read';
@@ -47,6 +50,8 @@ function adbUtc(ms: number): string {
   return `${new Date(ms).toISOString().slice(0, 16).replace('T', ' ')}Z`;
 }
 
+const iso = (ms: number): string => new Date(ms).toISOString();
+
 function ask(harness: AirportHarness, bucket: string, trigger: 'board' | 'route_search' = 'board') {
   return harness.stub
     .getBucket({ airportIcao: harness.icao, tz: harness.tz, bucketStartLocal: bucket, trigger })
@@ -60,6 +65,20 @@ async function currentBucket(rowsPerDirection = 3) {
   const now = bounds.startMs + HOUR_MS;
   const harness = await airportHarness(syntheticFids(rowsPerDirection, adbUtc(now)), now);
   return { bucket, bounds, now, harness };
+}
+
+/** The FIDS call records the object has sent to `persist`. */
+function fidsRecords(harness: AirportHarness): ProviderCallRecord[] {
+  return harness.sent.flatMap((message) =>
+    message.kind === 'provider_call' && message.payload.operation === 'fids'
+      ? [message.payload]
+      : [],
+  );
+}
+
+/** The object's armed alarm, or null. */
+function alarmOf(harness: AirportHarness): Promise<number | null> {
+  return runInDurableObject(harness.stub, (_instance, state) => state.storage.getAlarm());
 }
 
 describe('AirportState: coalescing and the read path (ruling B3)', () => {
@@ -121,8 +140,8 @@ describe('AirportState: coalescing and the read path (ruling B3)', () => {
       }),
     ]);
     expect(calls[0]?.origin).toBe(`airport_state:${harness.icao}@${String(now)}`);
-    const coverage: unknown = await testEnv.CACHE.get(adbCoverageKvKey(harness.icao), 'json');
-    expect(coverage).toMatchObject({ airportIcao: harness.icao, coverage: 'live', live: 'OK' });
+    // The coverage answer stays in the object: no Worker reads a KV copy, so none is written.
+    expect(await testEnv.CACHE.get(`adb:coverage:${harness.icao}`)).toBeNull();
   });
 
   it('between freshUntil and staleUntil serves the stale copy at once while ONE refresh runs', async () => {
@@ -189,6 +208,121 @@ describe('AirportState: failures never empty a board', () => {
     expect(await readBoardKv(testEnv.CACHE, harness.icao, bucket)).toBeNull();
     await harness.settled();
   });
+
+  it('stores a billed 200 whose items all fail mapping as an empty bucket on the ladder (R6)', async () => {
+    const { bucket, now, harness } = await currentBucket();
+    harness.adb.fids = () => Response.json({ departures: [{ number: 'AA 1' }], arrivals: [{}] });
+    const answer = await ask(harness, bucket);
+    expect(answer).toMatchObject({ state: 'ok', rows: [], stale: false });
+    expect(answer.freshUntil).toBe(new Date(now + 5 * MINUTE_MS).toISOString());
+    await harness.settled();
+    // The record keeps its error: the mapping failed, and the call was billed.
+    expect(fidsRecords(harness)).toEqual([
+      expect.objectContaining({ result: 'error', httpStatus: 200, costUnits: 2 }),
+    ]);
+    expect(fidsRecords(harness)[0]?.error).toMatch(/^skipped 2: /);
+    // Not billed again every minute: the empty copy is fresh like any other.
+    await harness.setClock(now + 4 * MINUTE_MS);
+    expect(await ask(harness, bucket)).toMatchObject({ state: 'ok', stale: false });
+    expect(harness.adb.fidsCalls()).toBe(1);
+  });
+
+  it.each([
+    ['a 400', () => Response.json({ message: 'bad range' }, { status: 400 }), /^http_400/],
+    [
+      'a 200 that is not a FIDS contract',
+      () => Response.json({ departures: 'none' }),
+      /^not_a_fids_contract$/,
+    ],
+  ])(
+    '%s is asked again only when a copy would be stale, not in a minute (R6)',
+    async (_, answer, why) => {
+      const { bucket, now, harness } = await currentBucket();
+      harness.adb.fids = answer;
+      const failed = await ask(harness, bucket);
+      expect(failed).toMatchObject({ state: 'unavailable', rows: [] });
+      expect(failed.reason).toMatch(why);
+      await harness.setClock(now + 5 * MINUTE_MS - 1);
+      expect((await ask(harness, bucket)).reason).toMatch(why);
+      expect(harness.adb.fidsCalls()).toBe(1);
+      harness.adb.fids = () => Response.json(syntheticFids(1, adbUtc(now)));
+      await harness.setClock(now + 5 * MINUTE_MS);
+      expect(await ask(harness, bucket)).toMatchObject({ state: 'ok', stale: false });
+      expect(harness.adb.fidsCalls()).toBe(2);
+      await harness.settled();
+    },
+  );
+
+  it.each([
+    [
+      'a push-back (429)',
+      () => Response.json({ message: 'slow down' }, { status: 429 }),
+      /^http_429/,
+    ],
+    [
+      'a transport error',
+      (): Response => {
+        throw new TypeError('connection reset');
+      },
+      /^transport_/,
+    ],
+  ])('%s is retried after a minute, as a 5xx is (R6)', async (_, answer, why) => {
+    const { bucket, now, harness } = await currentBucket();
+    harness.adb.fids = answer;
+    expect((await ask(harness, bucket)).reason).toMatch(why);
+    await harness.setClock(now + 59_000);
+    expect((await ask(harness, bucket)).reason).toMatch(why);
+    expect(harness.adb.fidsCalls()).toBe(1);
+    harness.adb.fids = () => Response.json(syntheticFids(1, adbUtc(now)));
+    await harness.setClock(now + 61_000);
+    expect(await ask(harness, bucket)).toMatchObject({ state: 'ok', stale: false });
+    expect(harness.adb.fidsCalls()).toBe(2);
+    await harness.settled();
+  });
+});
+
+describe('AirportState: a copy that cannot be stored (R15)', () => {
+  /** Breaks the object's storage: the bucket's chunks, and with `outbox` its records too. */
+  async function dropTables(harness: AirportHarness, tables: readonly string[]): Promise<void> {
+    await runInDurableObject(harness.stub, (_instance, state) => {
+      for (const table of tables) {
+        state.storage.sql.exec(`DROP TABLE ${table}`);
+      }
+    });
+  }
+
+  it("keeps the billed call's record and waits a minute before billing again", async () => {
+    const { bucket, now, harness } = await currentBucket();
+    await dropTables(harness, ['bucket_chunks']);
+    expect(await ask(harness, bucket)).toMatchObject({
+      state: 'unavailable',
+      rows: [],
+      reason: 'store_failed',
+    });
+    await harness.settled();
+    expect(fidsRecords(harness)).toEqual([
+      expect.objectContaining({ result: 'ok', httpStatus: 200, costUnits: 2 }),
+    ]);
+    await harness.setClock(now + 59_000);
+    expect((await ask(harness, bucket)).reason).toBe('store_failed');
+    expect(harness.adb.fidsCalls()).toBe(1);
+    await harness.setClock(now + 61_000);
+    await ask(harness, bucket);
+    await harness.settled();
+    expect(harness.adb.fidsCalls()).toBe(2);
+    expect(fidsRecords(harness)).toHaveLength(2);
+  });
+
+  it('still waits a minute when even the record cannot be kept', async () => {
+    const { bucket, now, harness } = await currentBucket();
+    await ask(harness, `${bucket.slice(0, 10)}T00:00`); // the coverage check, recorded first
+    await harness.settled();
+    await dropTables(harness, ['bucket_chunks', 'outbox']);
+    expect((await ask(harness, bucket)).reason).toBe('store_failed');
+    await harness.setClock(now + 59_000);
+    expect((await ask(harness, bucket)).reason).toBe('store_failed');
+    expect(harness.adb.fidsCalls()).toBe(2);
+  });
 });
 
 describe('AirportState: the boards share degrades the ladder (rulings B4 and B5)', () => {
@@ -252,6 +386,45 @@ describe('AirportState: the boards share degrades the ladder (rulings B4 and B5)
       reason: 'budget_denied:boards_share',
     });
     expect(harness.adb.fidsCalls()).toBe(1);
+    await harness.settled();
+  });
+});
+
+describe('AirportState: the trackers keep their rate floor (ruling R2)', () => {
+  it('a cold open of three buckets at one instant leaves a tracker its token; the third waits a refill', async () => {
+    const { bucket, now, harness } = await currentBucket();
+    const morning = `${bucket.slice(0, 10)}T00:00`;
+    const tomorrow = `${new Date(now + 24 * HOUR_MS).toISOString().slice(0, 10)}T00:00`;
+    // Growth, at its real 10 a second: a burst of 5, of which board calls leave 2. The coverage
+    // check and two buckets take three tokens; the third bucket meets the floor.
+    expect((await ask(harness, morning)).state).toBe('ok');
+    expect((await ask(harness, bucket)).state).toBe('ok');
+    expect(await ask(harness, tomorrow)).toMatchObject({
+      state: 'unavailable',
+      reason: 'budget_denied:board_rate_floor',
+    });
+    // A per-second refusal, like the rate's own: nothing sent, nothing billed.
+    await harness.settled();
+    expect(fidsRecords(harness)[2]).toMatchObject({ result: 'rate_limited', costUnits: 0 });
+    const utcDate = new Date(now).toISOString().slice(0, 10);
+    const budget = testEnv.PROVIDER_BUDGET.getByName(`aerodatabox:${utcDate}`, {
+      locationHint: 'enam',
+    });
+    const tracker: BudgetRequest = {
+      provider: 'aerodatabox',
+      operation: 'flight_status',
+      pollEquivalents: 0.1,
+      trigger: 'alarm',
+      utcDate,
+    };
+    expect((await budget.reserve(tracker)).allowed).toBe(true);
+    // The floored bucket waits for its refill (a second at least), not the failure minute.
+    await harness.setClock(now + 999);
+    expect((await ask(harness, tomorrow)).reason).toBe('budget_denied:board_rate_floor');
+    expect(harness.adb.fidsCalls()).toBe(2);
+    await harness.setClock(now + 1_000);
+    expect(await ask(harness, tomorrow)).toMatchObject({ state: 'ok', stale: false });
+    expect(harness.adb.fidsCalls()).toBe(3);
     await harness.settled();
   });
 });
@@ -427,6 +600,69 @@ describe('AirportState: the purge alarm (Terms 5.5)', () => {
     expect(await left.alarm).toBe(bounds.endMs + 48 * HOUR_MS);
     expect(await testEnv.CACHE.get(boardKvKey(harness.icao, morning))).toBeNull();
     expect(await testEnv.CACHE.get(boardKvKey(harness.icao, bucket))).not.toBeNull();
+  });
+
+  const DAY_MS = 24 * HOUR_MS;
+  const WEEK_MS = 7 * DAY_MS;
+
+  /** A fresh day's clock and its object, and the PM bucket `days` ahead (position `far`). */
+  async function farBucket(days: number) {
+    const now = Date.parse(`${uniqueDay()}T17:00:00Z`);
+    const bucket = `${new Date(now + days * DAY_MS).toISOString().slice(0, 10)}T12:00`;
+    const start = boundsOf(bucket).startMs;
+    const harness = await airportHarness(syntheticFids(2, adbUtc(start + HOUR_MS)), now);
+    return { bucket, now, harness };
+  }
+
+  it('purges a bucket fetched 30 days ahead, KV copy and all, 7 days after the fetch (ruling R4)', async () => {
+    const { bucket, now, harness } = await farBucket(30);
+    expect(await ask(harness, bucket)).toMatchObject({ state: 'ok', fetchedAt: iso(now) });
+    await harness.settled();
+    expect(await alarmOf(harness)).toBe(now + WEEK_MS);
+    // KV expires the copy then too: its TTL is relative, so about 7 days on the wall clock.
+    const { keys } = await testEnv.CACHE.list({ prefix: boardKvKey(harness.icao, bucket) });
+    const expiresInMs = (keys[0]?.expiration ?? 0) * 1_000 - Date.now();
+    expect(Math.abs(expiresInMs - WEEK_MS)).toBeLessThan(10 * MINUTE_MS);
+    await harness.setClock(now + WEEK_MS);
+    expect(await runDurableObjectAlarm(harness.stub)).toBe(true);
+    expect(await testEnv.CACHE.get(boardKvKey(harness.icao, bucket))).toBeNull();
+    const tables = await runInDurableObject(harness.stub, (_instance, state) =>
+      state.storage.sql
+        .exec<{ name: string }>("SELECT name FROM sqlite_master WHERE name = 'buckets'")
+        .toArray(),
+    );
+    expect(tables).toEqual([]);
+    // The next view costs exactly one FIDS call (and the free coverage check).
+    expect(await ask(harness, bucket)).toMatchObject({
+      state: 'ok',
+      fetchedAt: iso(now + WEEK_MS),
+    });
+    expect(harness.adb.fidsCalls()).toBe(2);
+    await harness.settled();
+  });
+
+  it('a refetch moves the purge: refetched 3 days on, the bucket outlives the first purge (ruling R4)', async () => {
+    const { bucket, now, harness } = await farBucket(30);
+    await ask(harness, bucket);
+    await harness.settled();
+    // Past the far rung's 48 hours of stale, the view waits for the refetch.
+    await harness.setClock(now + 3 * DAY_MS);
+    expect(await ask(harness, bucket)).toMatchObject({ fetchedAt: iso(now + 3 * DAY_MS) });
+    await harness.settled();
+    // The alarm armed for the first purge is never postponed; it finds nothing due and re-arms.
+    expect(await alarmOf(harness)).toBe(now + WEEK_MS);
+    await harness.setClock(now + WEEK_MS);
+    expect(await runDurableObjectAlarm(harness.stub)).toBe(true);
+    const purges = await runInDurableObject(harness.stub, (_instance, state) =>
+      state.storage.sql
+        .exec<{ purge_at_ms: number }>('SELECT purge_at_ms FROM buckets')
+        .toArray()
+        .map((row) => row.purge_at_ms),
+    );
+    expect(purges).toEqual([now + 3 * DAY_MS + WEEK_MS]);
+    expect(await alarmOf(harness)).toBe(now + 3 * DAY_MS + WEEK_MS);
+    expect(await testEnv.CACHE.get(boardKvKey(harness.icao, bucket))).not.toBeNull();
+    expect(harness.adb.fidsCalls()).toBe(2);
   });
 });
 

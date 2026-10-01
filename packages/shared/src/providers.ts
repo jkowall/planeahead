@@ -103,7 +103,10 @@ export type BudgetDenialReason =
   // Increment 18 (ruling B5), for the `board` and `route_search` triggers only: the boards
   // share of the day's AeroDataBox cap is spent, or the hour's distinct-airport cap is reached.
   | 'boards_share'
-  | 'board_airports_per_hour';
+  | 'board_airports_per_hour'
+  // Ruling R2, the same triggers: the per-second bucket holds the call but not the floor a
+  // board call must leave for the trackers. Carries `retryAfterMs` like `provider_rate_limit`.
+  | 'board_rate_floor';
 
 export type BudgetDecision =
   | {
@@ -121,7 +124,10 @@ export type BudgetDecision =
   | {
       allowed: false;
       reason: BudgetDenialReason;
-      /** For `provider_rate_limit`: when the per-second token bucket next has a token. */
+      /**
+       * For `provider_rate_limit`: when the per-second token bucket next has a token; for
+       * `board_rate_floor`, when it next has one above the trackers' floor.
+       */
       retryAfterMs?: number | undefined;
       /** Board triggers only: the fraction of the boards share spent, 0 to 1. */
       boardsShareSpent?: number | undefined;

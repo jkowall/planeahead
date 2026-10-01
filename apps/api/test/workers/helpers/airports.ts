@@ -2,12 +2,15 @@
  * AirportState test harness (increment 18). Every test gets its own airport (the object's name)
  * and its own UTC day far in the future (its own ProviderBudget object, and alarms the wall
  * clock never reaches); AeroDataBox is a counting fake `fetch` injected into the object, whose
- * FIDS answer can be held back to keep a call in flight. No real provider is ever called.
+ * FIDS answer can be held back to keep a call in flight. No real provider is ever called. The
+ * ProviderBudget of the day the harness clock is on reads that clock too, so its token bucket
+ * refills on the time a test sets, at the plan's real per-second limit.
  */
 
 import { runInDurableObject } from 'cloudflare:test';
 import type { PersistMessageV1 } from '@planeahead/shared';
 import type { AirportState } from '../../../src/do/airport-state';
+import type { ProviderBudget } from '../../../src/do/provider-budget';
 import { testEnv, track } from './flights';
 
 /** A unique, well-formed ICAO name: `Q` and three base-36 characters. */
@@ -17,11 +20,33 @@ export function uniqueAirport(): string {
   return `Q${nextAirport.toString(36).toUpperCase().padStart(3, '0')}`;
 }
 
-/** Consecutive unused UTC days from a random start in the 22nd century (`setAlarm` stops at 2189). */
+/**
+ * Unused UTC days from a random start in the 22nd century (`setAlarm` stops at 2189), 16 days
+ * apart: a test may move its clock (and so the budget day its board calls reserve on) two weeks
+ * on without reaching the next test's days, whose token bucket it would otherwise have spent.
+ */
 let nextDay = Date.UTC(2101 + Math.floor(Math.random() * 70), 0, 1);
 export function uniqueDay(): string {
-  nextDay += 86_400_000;
+  nextDay += 16 * 86_400_000;
   return new Date(nextDay).toISOString().slice(0, 10);
+}
+
+/**
+ * Points the AeroDataBox ProviderBudget of `ms`'s UTC day at `ms`. On the wall clock its bucket
+ * would refill only in the milliseconds between a test's calls, however far the test moved its
+ * own clock, and board calls keep a floor of tokens for the trackers (ruling R2): a test's
+ * fourth quick board call would meet it.
+ */
+async function budgetClockAt(ms: number, tracked: Set<string>): Promise<void> {
+  const day = new Date(ms).toISOString().slice(0, 10);
+  const budget = testEnv.PROVIDER_BUDGET.getByName(`aerodatabox:${day}`, { locationHint: 'enam' });
+  if (!tracked.has(day)) {
+    tracked.add(day);
+    track(budget);
+  }
+  await runInDurableObject(budget, (instance: ProviderBudget) => {
+    instance.clock = () => ms;
+  });
 }
 
 export interface FakeAdb {
@@ -110,6 +135,8 @@ export async function airportHarness(
   const stub = track(testEnv.AIRPORT_STATE.getByName(icao));
   const adb = fakeAdb(body);
   const sent: PersistMessageV1[] = [];
+  const budgetDays = new Set<string>();
+  await budgetClockAt(clockMs, budgetDays);
   await runInDurableObject(stub, (instance: AirportState) => {
     instance.providerDeps = { fetch: adb.fetch };
     instance._setClock(clockMs);
@@ -128,10 +155,12 @@ export async function airportHarness(
     tz,
     adb,
     sent,
-    setClock: (ms) =>
-      runInDurableObject(stub, (instance: AirportState) => {
+    setClock: async (ms) => {
+      await runInDurableObject(stub, (instance: AirportState) => {
         instance._setClock(ms);
-      }),
+      });
+      await budgetClockAt(ms, budgetDays);
+    },
     settled: () => runInDurableObject(stub, (instance: AirportState) => instance.settled()),
     untilFids: async (n) => {
       for (let i = 0; i < 1_000 && adb.fidsCalls() < n; i += 1) {

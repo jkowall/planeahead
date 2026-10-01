@@ -110,7 +110,9 @@ export interface BoardLadderRung {
  * R3 D5, normative (ruling B4). `current`: contains now, or starts within 3 h. `near`: starts
  * 3 h to 24 h ahead. `ahead`: 24 h to 72 h ahead. `far`: more than 72 h ahead. `just_ended`:
  * ended less than 3 h ago. `ended`: ended more than 3 h ago, never refreshed once it ended
- * more than 24 h ago, and served until its purge 48 h after it ended (Terms 5.5).
+ * more than 24 h ago, and served until its purge 48 h after it ended (Terms 5.5). A copy is also
+ * purged 7 days after its fetch at the latest (ruling R4); only the `far` row feels it, for a
+ * bucket starting more than 108 h after the fetch.
  */
 export const BOARD_FRESHNESS_LADDER: Readonly<Record<BoardPosition, BoardLadderRung>> =
   Object.freeze({
@@ -133,8 +135,20 @@ export const BOARD_POSITION_BOUNDS = Object.freeze({
 /** A bucket that ended this long ago is never refreshed again (R3 D5 row 6). */
 export const BOARD_NO_REFRESH_AFTER_END_MS = 24 * HOUR_MS;
 
-/** A bucket's rows, and its KV copy, are deleted this long after it ends (Terms 5.5). */
+/**
+ * A bucket's rows, and its KV copy, are deleted this long after it ends at the latest (Terms
+ * 5.5); a copy fetched long before goes sooner (`BOARD_PURGE_AFTER_FETCH_MS`).
+ */
 export const BOARD_PURGE_AFTER_END_MS = 48 * HOUR_MS;
+
+/**
+ * A bucket's copy is also deleted this long after its fetch at the latest (ruling R4). Route
+ * search reaches the plan's lookahead, and a copy fetched months ahead would otherwise live until
+ * its date, against the Terms 5.5 duty to minimise volume and duration (7 days is also what the
+ * Terms allow once a subscription ends, and Starter's term). For a 12-hour bucket it cuts in when
+ * the bucket starts more than 108 h after the fetch.
+ */
+export const BOARD_PURGE_AFTER_FETCH_MS = 7 * 24 * HOUR_MS;
 
 /** The bucket's position at `nowMs`. */
 export function boardPosition(bounds: BoardBucketBounds, nowMs: number): BoardPosition {
@@ -156,7 +170,10 @@ export function boardRefreshable(bounds: BoardBucketBounds, nowMs: number): bool
   return nowMs - bounds.endMs <= BOARD_NO_REFRESH_AFTER_END_MS;
 }
 
-/** When the bucket's rows and KV copy must be gone. */
+/**
+ * The latest the bucket's rows and KV copy may live, 48 h after it ends; a copy's own purge is
+ * sooner when it was fetched long before (`boardFreshness`, ruling R4).
+ */
 export function boardPurgeAtMs(bounds: BoardBucketBounds): number {
   return bounds.endMs + BOARD_PURGE_AFTER_END_MS;
 }
@@ -200,8 +217,9 @@ export interface BoardFreshness {
 
 /**
  * The limits of a copy fetched at `fetchedAtMs`: the rung of the bucket's position at that
- * moment, times the degrade multiplier of the boards share spent then. Neither limit passes the
- * purge, which is never degraded.
+ * moment, times the degrade multiplier of the boards share spent then. The purge is the sooner
+ * of 48 h after the bucket ends and 7 days after the fetch (ruling R4); it is never degraded, and
+ * neither limit passes it (the far row's quadrupled 192 h stale stops there, 168 h at most).
  */
 export function boardFreshness(
   bounds: BoardBucketBounds,
@@ -211,7 +229,7 @@ export function boardFreshness(
   const position = boardPosition(bounds, fetchedAtMs);
   const rung = BOARD_FRESHNESS_LADDER[position];
   const multiplier = boardDegradeMultiplier(shareSpent);
-  const purgeAtMs = boardPurgeAtMs(bounds);
+  const purgeAtMs = Math.min(boardPurgeAtMs(bounds), fetchedAtMs + BOARD_PURGE_AFTER_FETCH_MS);
   const staleUntilMs = rung.staleMs === null ? purgeAtMs : fetchedAtMs + rung.staleMs * multiplier;
   return {
     position,
@@ -230,11 +248,6 @@ export function boardKvKey(airportIcao: string, bucketStartLocal: string): strin
   return `board:v2:${airportIcao}:${bucketStartLocal}`;
 }
 
-/** An airport's AeroDataBox coverage, checked once a day (ruling B6). */
-export function adbCoverageKvKey(airportIcao: string): string {
-  return `adb:coverage:${airportIcao}`;
-}
-
 /** The Worker's airport reference, keyed by the code a request named (4-letter ICAO or 3-letter IATA). */
 export function airportRefKvKey(code: string): string {
   return `ref:airport:${code}`;
@@ -243,7 +256,10 @@ export function airportRefKvKey(code: string): string {
 /** The edge cache on a Worker's KV read of a board (`cacheTtl`, the KV minimum). */
 export const BOARD_KV_CACHE_TTL_SECONDS = 30;
 
-/** How long a coverage answer stands before the object asks again. */
+/**
+ * How long a coverage answer stands before the object asks again (ruling B6: once a day). It
+ * lives in the AirportState object only (R15: the KV copy it used to have had no reader).
+ */
 export const ADB_COVERAGE_TTL_MS = 24 * HOUR_MS;
 
 /** How long the Worker keeps an airport reference in KV. */

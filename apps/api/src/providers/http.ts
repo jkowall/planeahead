@@ -111,7 +111,8 @@ export function callRecord(input: RecordInput): ProviderCallRecord {
 
 /**
  * The record for an attempt the budget refused: nothing was sent, nothing is billed. A refusal
- * by the per-second bucket reads as `rate_limited`, any other refusal as `error`.
+ * by the per-second bucket (its rate, or the floor it keeps for the trackers against a board
+ * call) reads as `rate_limited`, any other refusal as `error`.
  */
 export function deniedRecord(
   ctx: ProviderCallContext,
@@ -120,13 +121,14 @@ export function deniedRecord(
   reason: BudgetDenialReason,
 ): ProviderCallRecord {
   const at = ctx.now();
+  const perSecond = reason === 'provider_rate_limit' || reason === 'board_rate_floor';
   return callRecord({
     ctx,
     provider,
     operation,
     startedAt: at,
     finishedAt: at,
-    result: reason === 'provider_rate_limit' ? 'rate_limited' : 'error',
+    result: perSecond ? 'rate_limited' : 'error',
     billed: false,
     error: `budget_denied:${reason}`,
   });

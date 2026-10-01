@@ -878,7 +878,8 @@ export class AeroDataBoxAdapter implements FlightDataProvider {
    * FIDS returns flights "scheduled, planned or commenced" within the range; the spec does not say
    * whether the scheduled or the revised time decides membership (R3 F9; unverified, R3 U1).
    * An item that cannot be keyed is skipped and counted on the record's `error`; a 200 whose
-   * items were all skipped is an `error`. A 204 is the billed `not_found` of an empty window.
+   * items were all skipped is an `error` (`fidsAllSkipped`: the board cache still stores it,
+   * empty). A 204 is the billed `not_found` of an empty window.
    */
   async getAirportBoard(
     airportIcao: string,
@@ -1039,6 +1040,9 @@ type BoardSkip =
   | 'no_scheduled_time'
   | 'unparseable_number';
 
+/** How a FIDS record's `error` starts when items were skipped. */
+const FIDS_SKIPPED_PREFIX = 'skipped ';
+
 /** The record with its skipped items counted (`skipped 3: no_counterpart_icao x2; ...`). */
 function withSkipped(
   call: ProviderCallRecord,
@@ -1054,8 +1058,22 @@ function withSkipped(
     total += count;
     parts.push(`${reason} x${String(count)}`);
   }
-  const error = `skipped ${String(total)}: ${parts.join('; ')}`.slice(0, 200);
+  const error = `${FIDS_SKIPPED_PREFIX}${String(total)}: ${parts.join('; ')}`.slice(0, 200);
   return kept === 0 ? { ...call, result: 'error', error } : { ...call, error };
+}
+
+/**
+ * Whether a FIDS record is a billed 200 whose every item was skipped: an answer that maps to no
+ * row. The record stays an `error`, and the board cache stores it as an empty bucket that waits
+ * out the ladder like any other (increment 18, ruling R6) instead of re-billing it every minute.
+ */
+export function fidsAllSkipped(call: ProviderCallRecord): boolean {
+  return (
+    call.operation === 'fids' &&
+    call.result === 'error' &&
+    call.httpStatus === 200 &&
+    call.error?.startsWith(FIDS_SKIPPED_PREFIX) === true
+  );
 }
 
 interface LegTimes {

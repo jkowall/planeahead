@@ -219,6 +219,25 @@ describe('composeBudgets', () => {
       'b.backoff:500',
     ]);
   });
+
+  it('keeps the boards share a guard reports, the highest when several do (R15)', async () => {
+    const log: string[] = [];
+    const composed = composeBudgets(
+      guard({ allowed: true, granted: 0.1, ladder: 'normal' }, log, 'flight'),
+      guard({ allowed: true, granted: 0.1, ladder: 'normal', boardsShareSpent: 0.75 }, log, 'p'),
+    );
+    expect(await composed.reserve(REQUEST)).toEqual({
+      allowed: true,
+      granted: 0.1,
+      ladder: 'normal',
+      boardsShareSpent: 0.75,
+    });
+    const both = composeBudgets(
+      guard({ allowed: true, granted: 0.1, ladder: 'normal', boardsShareSpent: 0.95 }, log, 'a'),
+      guard({ allowed: true, granted: 0.1, ladder: 'normal', boardsShareSpent: 0.75 }, log, 'b'),
+    );
+    expect(await both.reserve(REQUEST)).toMatchObject({ boardsShareSpent: 0.95 });
+  });
 });
 
 describe('ProviderBudgetGuard (the Worker side)', () => {

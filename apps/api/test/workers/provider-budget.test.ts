@@ -16,7 +16,7 @@
 import { runDurableObjectAlarm, runInDurableObject } from 'cloudflare:test';
 import { env } from 'cloudflare:workers';
 import { afterEach, describe, expect, it } from 'vitest';
-import type { BudgetRequest } from '@planeahead/shared';
+import type { BudgetDecision, BudgetRequest } from '@planeahead/shared';
 import {
   PERSISTENT_KILL_UNKNOWN,
   persistentKillKey,
@@ -805,4 +805,77 @@ describe('ProviderBudget: the boards share and the hourly airport cap (increment
       routing_rule: 1,
     });
   });
+});
+
+describe('ProviderBudget: board calls leave the trackers a rate floor (ruling R2)', () => {
+  const boardCall = (operation: 'health' | 'fids', airportIcao: string): BudgetRequest => ({
+    provider: 'aerodatabox',
+    operation,
+    pollEquivalents: operation === 'fids' ? 0.1 : 0,
+    trigger: 'board',
+    airportIcao,
+  });
+  const outcome = (decision: BudgetDecision): string =>
+    decision.allowed ? 'allowed' : decision.reason;
+
+  it("review A's probe on Growth: two cold opens at one instant, then a tracker alarm is allowed", async () => {
+    const { stub, setClock, nowMs } = await budget();
+    await stub.configure({ perSecondLimit: 10 }); // Growth: a burst of 5, 5 a second, a floor of 2
+    const opens: BudgetDecision[] = [];
+    for (const icao of ['KJFK', 'EGLL']) {
+      for (const operation of ['health', 'fids', 'fids'] as const) {
+        opens.push(await stub.reserve(boardCall(operation, icao)));
+      }
+    }
+    expect(opens.map(outcome)).toEqual([
+      ...Array.from({ length: 3 }, () => 'allowed'),
+      ...Array.from({ length: 3 }, () => 'board_rate_floor'),
+    ]);
+    // The wait folds the floor in: one token short at 5 a second.
+    expect(opens[3]).toEqual({ allowed: false, reason: 'board_rate_floor', retryAfterMs: 200 });
+    // Before the floor, the probe's next tracker alarm was refused. Now the trackers have 2.
+    const trackers = [];
+    for (let i = 0; i < 3; i += 1) {
+      trackers.push(await stub.reserve(ADB_STATUS));
+    }
+    expect(trackers.map(outcome)).toEqual(['allowed', 'allowed', 'provider_rate_limit']);
+    // Once three tokens are back, a board call passes again; refusals never spent a unit.
+    await setClock(nowMs + 600);
+    expect((await stub.reserve(boardCall('fids', 'EGLL'))).allowed).toBe(true);
+    const snapshot = await stub.snapshot();
+    expect(snapshot.denials).toMatchObject({ board_rate_floor: 3, provider_rate_limit: 1 });
+    expect(snapshot.byTrigger).toMatchObject({
+      board: { units: 6, calls: 4 },
+      alarm: { units: 4, calls: 2 },
+    });
+  });
+
+  it.each([
+    ['Starter', 5, 2, 1],
+    ['Scale', 20, 10, 5],
+  ] as const)(
+    'on %s (%i a second, a burst of %i) board calls stop at a floor of %i, which the trackers keep',
+    async (_plan, limit, burst, floor) => {
+      const { stub } = await budget();
+      await stub.configure({ perSecondLimit: limit });
+      // From a full bucket, board calls take it down to the floor and no further.
+      const boards: BudgetDecision[] = [];
+      for (let i = 0; i < burst - floor + 2; i += 1) {
+        boards.push(await stub.reserve(boardCall('fids', 'KJFK')));
+      }
+      expect(boards.map(outcome)).toEqual([
+        ...Array.from({ length: burst - floor }, () => 'allowed'),
+        'board_rate_floor',
+        'board_rate_floor',
+      ]);
+      const trackers: BudgetDecision[] = [];
+      for (let i = 0; i <= floor; i += 1) {
+        trackers.push(await stub.reserve(ADB_STATUS));
+      }
+      expect(trackers.map(outcome)).toEqual([
+        ...Array.from({ length: floor }, () => 'allowed'),
+        'provider_rate_limit',
+      ]);
+    },
+  );
 });

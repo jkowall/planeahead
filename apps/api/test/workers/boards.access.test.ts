@@ -309,7 +309,7 @@ describe('the deployed Worker', () => {
   });
 });
 
-/** The Worker's env with `BOARDS_ENABLED` absent (production's state), or set to `value`. */
+/** The Worker's env with `BOARDS_ENABLED` absent, or set to `value` (production's is "false"). */
 function envWithBoards(value: string | null): typeof testEnv {
   const rest = Object.fromEntries(
     Object.entries(testEnv).filter(([key]) => key !== 'BOARDS_ENABLED'),
@@ -318,12 +318,16 @@ function envWithBoards(value: string | null): typeof testEnv {
 }
 
 describe('BOARDS_ENABLED (R8)', () => {
-  it('is "true" in local and staging and absent in production', () => {
+  it('is "true" in local and staging and "false" in production', () => {
     expect(testEnv.BOARDS_ENABLED).toBe('true');
     expect([...wranglerConfig.matchAll(/"BOARDS_ENABLED": "true"/g)]).toHaveLength(2);
     const production = wranglerConfig.slice(wranglerConfig.indexOf('"production": {'));
     expect(production).toContain('"ENVIRONMENT": "production"');
-    expect(production).not.toContain('"BOARDS_ENABLED"');
+    // Explicitly off, so a production deploy does not warn that a top-level var is missing
+    // there (copying "true" would quiet that warning by switching boards on).
+    expect([...production.matchAll(/"BOARDS_ENABLED": "(\w+)"/g)].map((m) => m[1])).toEqual([
+      'false',
+    ]);
   });
 
   it('answers 404 boards_disabled on both routes while off, before any brake or lookup', async () => {

@@ -21,8 +21,11 @@
  *      because an outbound fetch lets other requests interleave (R3 F37); a handle older than
  *      `INFLIGHT_STALE_MS` is abandoned as hung (the tracker's guard, ruling L3). A refresh that
  *      fails or is refused leaves an existing copy served, stale: never an empty board while a
- *      copy exists. A failed bucket is not retried for `BOARD_REFRESH_RETRY_MS` (a refused one
- *      until the refusal can lift), so a failing provider is not called on every view.
+ *      copy exists. A failed bucket is not retried for `BOARD_REFRESH_RETRY_MS` after a transport
+ *      error, a 5xx or a push-back, a refused one until the refusal can lift, and one the
+ *      provider would answer the same way again (a 4xx, a 200 that is not a FIDS contract) for
+ *      as long as a copy would be fresh, so a failing provider is not called on every view. A
+ *      billed 200 whose items all fail mapping is stored as an empty bucket (ruling R6).
  *
  * Freshness is R3 D5's ladder (`boardFreshness` in shared), degraded by the boards share the
  * budget reports on the reservation (ruling B5): every limit doubles from 70 percent, quadruples
@@ -31,8 +34,9 @@
  * A bucket's rows are stored as one gzip stream in chunks of at most 1 MB (`boards/cache.ts`),
  * and copied to KV `board:v2:{ICAO}:{bucketStartLocal}` with `fetchedAt`, `freshUntil` and
  * `staleUntil` in the metadata, expiring at the purge. Workers read KV first and call the object
- * only on a miss or past `freshUntil`. The alarm purges every bucket 48 hours after it ends, its
- * KV copy included (Terms 5.5), and `deleteAll()`s once nothing is left.
+ * only on a miss or past `freshUntil`. The alarm purges every bucket at the sooner of 48 hours
+ * after it ends and 7 days after its fetch (ruling R4: a bucket fetched weeks ahead is not kept
+ * for weeks), its KV copy included (Terms 5.5), and `deleteAll()`s once nothing is left.
  *
  * Every provider call record leaves through this object's outbox to `persist` with
  * `airportIcao` set, under origin `airport_state:{ICAO}@{epoch}`.
@@ -45,7 +49,6 @@ import {
   INFLIGHT_STALE_MS,
   RPC_SCHEMA_VERSION,
   RpcRequestError,
-  adbCoverageKvKey,
   boardBucketBounds,
   boardBucketWindow,
   boardFreshness,
@@ -69,7 +72,7 @@ import {
 import { decodeBoardRows, gzipJson, joinChunks, splitChunks } from '../boards/cache';
 import type { Env } from '../env';
 import { createLogger, errorFields, type Logger } from '../observability/log';
-import type { AdbCoverage } from '../providers/aerodatabox.adapter';
+import { fidsAllSkipped, type AdbCoverage } from '../providers/aerodatabox.adapter';
 import { providerSettings } from '../providers/config';
 import { DurableObjectCostLogger, PROVIDER_CALL_OUTBOX_KIND } from '../providers/cost-log';
 import { callRecord } from '../providers/http';
@@ -84,7 +87,11 @@ import {
 import { AIRPORT_STATE_MIGRATION_001 } from './migrations/airport-state/001';
 import { chunkOutbox, forEachBindChunk, sendOutboxChunks } from './outbox';
 
-/** A bucket whose fetch failed is not fetched again for this long (a refusal: see below). */
+/**
+ * A bucket whose fetch failed in transport, with a 5xx or a push-back (or whose copy could not be
+ * stored) is not fetched again for this long. A refusal waits until it can lift and a
+ * deterministic answer waits the ladder (`retryDelayMs`, `deterministicFailure`; ruling R6).
+ */
 export const BOARD_REFRESH_RETRY_MS = 60_000;
 /** An unknown coverage (the free check failed) is asked again after this long. */
 export const COVERAGE_RETRY_MS = 60 * 60_000;
@@ -143,10 +150,14 @@ function observing(guard: BudgetGuard, seen: (decision: BudgetDecision) => void)
   };
 }
 
-/** How long a failed bucket waits: a refusal until it can lift, anything else a minute. */
+/**
+ * How long a bucket whose call failed in transport, with a 5xx or a push-back, or was refused,
+ * waits: a refusal until it can lift, anything else a minute. (A deterministic answer waits the
+ * ladder instead: `deterministicFailure`.)
+ */
 function retryDelayMs(decision: BudgetDecision | null, nowMs: number): number {
   if (decision !== null && !decision.allowed) {
-    if (decision.reason === 'provider_rate_limit') {
+    if (decision.reason === 'provider_rate_limit' || decision.reason === 'board_rate_floor') {
       return Math.max(1_000, decision.retryAfterMs ?? 1_000);
     }
     if (decision.reason === 'board_airports_per_hour') {
@@ -154,6 +165,16 @@ function retryDelayMs(decision: BudgetDecision | null, nowMs: number): number {
     }
   }
   return BOARD_REFRESH_RETRY_MS;
+}
+
+/**
+ * Whether a failed FIDS call is an answer the provider would give again (ruling R6): a billed
+ * 4xx (a push-back is `rate_limited`, never here) or a 200 that is not a FIDS contract. Asked
+ * again in a minute it would only be billed again, so the bucket waits as long as a copy would
+ * be fresh.
+ */
+function deterministicFailure(call: ProviderCallRecord): boolean {
+  return call.result === 'error' && call.httpStatus !== undefined && call.httpStatus < 500;
 }
 
 type Row = Record<string, string | number | ArrayBuffer | null>;
@@ -529,8 +550,8 @@ export class AirportState extends DurableObject<Env> {
 
   /**
    * The free health check (`checkCoverage`), stored for a day; a failed check is `unknown` (the
-   * board is fetched anyway) and asked again after `COVERAGE_RETRY_MS`. A known answer is also
-   * written to KV `adb:coverage:{ICAO}` for the Worker.
+   * board is fetched anyway) and asked again after `COVERAGE_RETRY_MS`. The answer lives in this
+   * object only (R15: the KV copy it used to write had no reader).
    */
   async #checkCoverage(request: BoardBucketRequestV1): Promise<BoardCoverage> {
     const buffered: ProviderCallRecord[] = [];
@@ -562,21 +583,6 @@ export class AirportState extends DurableObject<Env> {
       this.#appendRecords(buffered, at);
     });
     this.#scheduleFlush();
-    if (feeds !== null) {
-      const value = {
-        airportIcao: request.airportIcao,
-        coverage,
-        schedules: feeds.schedules,
-        live: feeds.live,
-        adsb: feeds.adsb,
-        checkedAt: new Date(at).toISOString(),
-      };
-      this.#inBackground(
-        this.kv.put(adbCoverageKvKey(request.airportIcao), JSON.stringify(value), {
-          expirationTtl: ADB_COVERAGE_TTL_MS / 1_000,
-        }),
-      );
-    }
     return coverage;
   }
 
@@ -626,9 +632,11 @@ export class AirportState extends DurableObject<Env> {
   }
 
   /**
-   * The one FIDS call for a bucket. A 200 (rows) and a 204 (an empty window, the billed
-   * `not_found`) are stored; anything else (an error, a refusal, a push-back, a throw) records
-   * its call, sets the bucket's retry time and leaves any existing copy alone.
+   * The one FIDS call for a bucket. A 200 (rows), a 204 (an empty window, the billed
+   * `not_found`) and a billed 200 whose every item was skipped (stored empty while its record
+   * keeps the error, ruling R6) are stored; anything else (an error, a refusal, a push-back, a
+   * throw) records its call, sets the bucket's retry time and leaves any existing copy alone. A
+   * copy that cannot be stored keeps its call's record and waits the same way (R15).
    */
   async #fetchBucket(
     request: BoardBucketRequestV1,
@@ -657,22 +665,40 @@ export class AirportState extends DurableObject<Env> {
     }
     buffered.push(call);
     const at = this.#now();
-    if (call.result !== 'ok' && call.result !== 'not_found') {
+    const decision = observed.decision;
+    const share = decision?.allowed === true ? decision.boardsShareSpent : undefined;
+    if (call.result !== 'ok' && call.result !== 'not_found' && !fidsAllSkipped(call)) {
       const reason = call.error ?? call.result;
-      this.#retryAt.set(key, { atMs: at + retryDelayMs(observed.decision, at), reason });
-      this.#ensureSchema();
-      this.#ensureAirport(request.airportIcao, at);
-      this.ctx.storage.transactionSync(() => {
-        this.#appendRecords(buffered, at);
-      });
-      this.#scheduleFlush();
+      const atMs = deterministicFailure(call)
+        ? boardFreshness(bounds, at, share).freshUntilMs
+        : at + retryDelayMs(decision, at);
+      this.#retryAt.set(key, { atMs, reason });
+      this.#keepRecords(request.airportIcao, buffered, at);
       return { ok: false, reason };
     }
     this.#retryAt.delete(key);
-    const decision = observed.decision;
-    const share = decision?.allowed === true ? decision.boardsShareSpent : undefined;
-    await this.#store(request, bounds, coverage, rows, at, share, buffered);
+    try {
+      await this.#store(request, bounds, coverage, rows, at, share, buffered);
+    } catch (error) {
+      // The failed transaction held the billed call's record: keep it on its own, and wait like
+      // a failed transport so the next view does not bill again at once (R15). The wait is set
+      // first, so it holds even when keeping the record fails too.
+      this.#log.error('airport_state_store_failed', { bucket: key, ...errorFields(error) });
+      this.#retryAt.set(key, { atMs: at + BOARD_REFRESH_RETRY_MS, reason: 'store_failed' });
+      this.#keepRecords(request.airportIcao, buffered, at);
+      return { ok: false, reason: 'store_failed' };
+    }
     return { ok: true };
+  }
+
+  /** Call records no stored bucket carries (a failed or unstored fetch), for the outbox. */
+  #keepRecords(airportIcao: string, records: readonly ProviderCallRecord[], now: number): void {
+    this.#ensureSchema();
+    this.#ensureAirport(airportIcao, now);
+    this.ctx.storage.transactionSync(() => {
+      this.#appendRecords(records, now);
+    });
+    this.#scheduleFlush();
   }
 
   /**
@@ -827,9 +853,11 @@ export class AirportState extends DurableObject<Env> {
   }
 
   /**
-   * Purges every bucket 48 hours after it ended, its KV copy included (Terms 5.5: cached
-   * contents are deleted once their purpose is served), retries unsent records, and deletes all
-   * storage once nothing is left and nothing is in flight.
+   * Purges every bucket at its `purge_at_ms` (48 hours after it ended, or 7 days after its last
+   * fetch when that is sooner: ruling R4), its KV copy included (Terms 5.5: cached contents are
+   * deleted once their purpose is served), retries unsent records, and deletes all storage once
+   * nothing is left and nothing is in flight. A refetch moves a bucket's purge later; an alarm
+   * armed for the old purge finds nothing due and re-arms for the next.
    */
   override async alarm(): Promise<void> {
     this.#ensureSchema();
