@@ -103,11 +103,15 @@ export function parseRpcRequest<S extends z.ZodType>(schema: S, input: unknown):
   return parsed.data;
 }
 
-/** Per-subscription notification overrides; the shape is owned by the notification domain. */
-export const NotificationOverridesSchema = z.looseObject({
+/**
+ * Per-subscription notification overrides: `muted` only (increment 16, ruling C12). Phase 1 offers
+ * no per-flight event lists, so `events` left the contract, and no other key passes either: the
+ * subscribe route (`POST /v1/flights`) and the tracker's `subscribe` refuse one.
+ */
+export const NotificationOverridesSchema = z.strictObject({
   muted: z.boolean().optional(),
-  events: z.array(z.string()).optional(),
 });
+export type NotificationOverrides = z.infer<typeof NotificationOverridesSchema>;
 
 /**
  * `subscribe` and `getState` on a tracker that holds no flight (never seeded, or finished and

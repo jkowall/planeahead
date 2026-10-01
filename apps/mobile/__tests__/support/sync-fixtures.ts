@@ -90,6 +90,27 @@ export function preferencesUpsert(
   return { entity: 'user_preferences', op: 'upsert', id: row.id, updatedAt: T0, row };
 }
 
+/** A `notification_preferences` row as the API's `notificationPreferencesSyncRow` writes it. */
+export function notificationPreferencesUpsert(
+  overrides: Record<string, unknown> = {},
+): Record<string, unknown> {
+  const row = {
+    id: id(710),
+    pushEnabled: true,
+    emailEnabled: false,
+    liveActivitiesEnabled: true,
+    quietHoursStartMinutes: null,
+    quietHoursEndMinutes: null,
+    quietHoursTz: null,
+    events: {},
+    createdAt: T0,
+    updatedAt: T0,
+    deletedAt: null,
+    ...overrides,
+  };
+  return { entity: 'notification_preferences', op: 'upsert', id: row.id, updatedAt: T0, row };
+}
+
 export function flight(
   key: FlightKey,
   overrides: Record<string, unknown> = {},

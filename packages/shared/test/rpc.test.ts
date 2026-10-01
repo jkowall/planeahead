@@ -9,6 +9,7 @@ import {
   GetStateResponseV1,
   HealthResponseV1,
   IngestProviderEventResponseV1,
+  NotificationOverridesSchema,
   ProviderEventV1,
   RPC_SCHEMA_VERSION,
   ResolveRequestV1,
@@ -86,18 +87,35 @@ describe('rpc schemas', () => {
       subscriptionId: SUBSCRIPTION_ID,
       userId: 'user-1',
       muted: true,
-      overrides: { events: ['gate_change'], extra: true },
+      overrides: { muted: true },
       futureField: 1,
     });
     expect(parsed.muted).toBe(true);
     expect(parsed).toHaveProperty('futureField', 1);
-    expect(parsed.overrides).toHaveProperty('extra', true);
+    expect(parsed.overrides).toEqual({ muted: true });
     expect(SubscribeRequestV1.safeParse({ subscriptionId: 'sub-1', userId: 'u' }).success).toBe(
       false,
     );
     expect(
       SubscribeRequestV1.safeParse({ subscriptionId: SUBSCRIPTION_ID, userId: '' }).success,
     ).toBe(false);
+  });
+
+  it('the overrides carry muted only: events and unknown keys are refused (ruling C12)', () => {
+    expect(NotificationOverridesSchema.parse({})).toEqual({});
+    expect(NotificationOverridesSchema.parse({ muted: false })).toEqual({ muted: false });
+    for (const overrides of [
+      { events: ['gate_change'] },
+      { muted: true, events: [] },
+      { muted: true, extra: true },
+      { muted: 'yes' },
+    ]) {
+      expect(NotificationOverridesSchema.safeParse(overrides).success).toBe(false);
+      expect(
+        SubscribeRequestV1.safeParse({ subscriptionId: SUBSCRIPTION_ID, userId: 'u', overrides })
+          .success,
+      ).toBe(false);
+    }
   });
 
   it('SubscribeResponseV1 constrains the status and validates the key', () => {

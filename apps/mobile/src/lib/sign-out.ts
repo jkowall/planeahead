@@ -8,8 +8,11 @@
  *    before anything forgets them. Offline, past its 5-second timeout, or on a 408, 429 or 5xx,
  *    it is queued and retried on the next launch before anything registers
  *    (src/lib/device-invalidation.ts). Sign-out never waits on it beyond that.
- * 3. `forgetAccount`, the local half, `authClient.signOut()` included (src/lib/services.ts).
- * 4. `unregisterForNotificationsAsync()` on both platforms: Android deletes the FCM token, and
+ * 3. The tray: `dismissAllNotificationsAsync()` removes every notification the app presented, so
+ *    the account's flights do not stay on the lock screen, nor open from a tap, after it. Started
+ *    and never awaited: a failure is reported and cannot hold the sign-out up.
+ * 4. `forgetAccount`, the local half, `authClient.signOut()` included (src/lib/services.ts).
+ * 5. `unregisterForNotificationsAsync()` on both platforms: Android deletes the FCM token, and
  *    Apple names logout as a reason to unregister (R2 facts 61 and 62). The next session's
  *    registration reads a token again.
  *
@@ -21,7 +24,7 @@
  */
 
 import * as Sentry from '@sentry/react-native';
-import { unregisterForNotificationsAsync } from 'expo-notifications';
+import { dismissAllNotificationsAsync, unregisterForNotificationsAsync } from 'expo-notifications';
 import { snapshotAuthCookies } from './auth-client';
 import type { Store } from './db/client';
 import { DEVICE_INVALIDATION_TIMEOUT_MS, deviceInvalidation } from './device-invalidation';
@@ -55,6 +58,9 @@ export async function signOut(store: Store | null): Promise<void> {
   } catch (error) {
     Sentry.captureException(error);
   }
+  dismissAllNotificationsAsync().catch((error: unknown) => {
+    Sentry.captureException(error);
+  });
   await forgetAccount(store);
   // Android's token deletion is a network call: the sign-out waits for it a bounded time.
   await atMost(unregisterForNotificationsAsync(), DEVICE_INVALIDATION_TIMEOUT_MS);

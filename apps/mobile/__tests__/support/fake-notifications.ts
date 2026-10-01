@@ -34,6 +34,8 @@ export interface FakeNotifications {
   /** What `getDevicePushTokenAsync` resolves with, or rejects with; `pending` never settles. */
   token: DevicePushToken | Error | 'pending';
   presented: Notification[];
+  /** How `dismissAllNotificationsAsync` ends: it empties `presented`, rejects, or never settles. */
+  dismissAll: 'ok' | Error | 'pending';
   lastResponse: NotificationResponse | null;
   /** Every call, in order: `getPermissions`, `request`, `channel:<id>`, `getToken`, ... */
   calls: string[];
@@ -72,6 +74,7 @@ function initial(): FakeNotifications {
     answer: permissionStatus({ status: 'granted', granted: true, iosStatus: 2 }),
     token: { type: 'ios', data: 'a1'.repeat(32) },
     presented: [],
+    dismissAll: 'ok',
     lastResponse: null,
     calls: [],
     requests: [],
@@ -156,6 +159,17 @@ export function fakeNotificationsModule() {
     dismissNotificationAsync: (identifier: string) => {
       f.calls.push(`dismiss:${identifier}`);
       f.presented = f.presented.filter(({ request }) => request.identifier !== identifier);
+      return Promise.resolve();
+    },
+    dismissAllNotificationsAsync: () => {
+      f.calls.push('dismissAll');
+      if (f.dismissAll === 'pending') {
+        return new Promise<never>(() => undefined);
+      }
+      if (f.dismissAll instanceof Error) {
+        return Promise.reject(f.dismissAll);
+      }
+      f.presented = [];
       return Promise.resolve();
     },
     getLastNotificationResponse: () => f.lastResponse,

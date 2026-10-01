@@ -51,6 +51,7 @@ import { callWithDeadline } from './deadline';
 import {
   isAbsentTrackerError,
   listTrackerSubscribers,
+  storedOverrides,
   subscribeTracker,
   unsubscribeTracker,
   type SubscriberListingTracker,
@@ -104,12 +105,6 @@ interface LiveRow {
   readonly muted: boolean;
   readonly notificationOverrides: unknown;
   readonly updatedAt: string;
-}
-
-function overridesOf(value: unknown): Record<string, unknown> | undefined {
-  return typeof value === 'object' && value !== null && !Array.isArray(value)
-    ? (value as Record<string, unknown>)
-    : undefined;
 }
 
 async function liveRowsFor(db: Db, instanceId: string): Promise<LiveRow[]> {
@@ -243,7 +238,7 @@ export async function reconcileTrackerSubscribers(
         });
         continue;
       }
-      const overrides = overridesOf(row.notificationOverrides);
+      const overrides = storedOverrides(row.notificationOverrides);
       if (
         await call(
           'subscribe',
@@ -272,7 +267,7 @@ export async function reconcileTrackerSubscribers(
         counts.young += 1;
         continue;
       }
-      const overrides = overridesOf(row.notificationOverrides);
+      const overrides = storedOverrides(row.notificationOverrides);
       if (
         await call(
           'subscribe',
