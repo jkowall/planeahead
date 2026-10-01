@@ -3,6 +3,9 @@
 Status: built (2026-10-01) in four parts and reviewed; the review round's rulings (Q1 to Q18)
 were applied the same day in four parts: B (the policy, the adapters and the rendering), A1 (the
 tracker), A2 (persist, `notify` and the push consumer) and C (the injector and these documents).
+A re-review found one regression (Q19: a frozen diversion suspicion looped the alarm), fixed the
+same day by a Fable 5.1 escalation round; a second re-review found no blocker or major, and the
+close-out fixed or recorded its smaller findings.
 What ran, the departures, the review round and what stays unverified are in
 `docs/increments/15-verification.md` (the rulings' changes in its Review round section). Spec
 written 2026-09-30. Builder: Opus 5.5. Reviewers: a Fable 5.1 lens on the tracker's alarm, outbox

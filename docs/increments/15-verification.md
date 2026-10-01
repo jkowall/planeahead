@@ -12,7 +12,9 @@ from the spec and why, and what stays unverified. Two reviews then read the buil
 A1 (`54b0cf7`: the tracker), A2 (`55ca02a`: persist, `notify`, the push consumer) and C (the
 injector and these documents). The [Review round](#review-round) records them; the sections before
 it describe the build, corrected where the round changed what they say, and their counts are the
-build's (the round's are under the Review round's What ran). The spec is
+build's (the round's are under the Review round's What ran). A re-review then found one
+regression (Q19), fixed by a Fable escalation round (`0725c7b`) and read by a second re-review;
+both, and the close-out, are under the [Re-review round](#re-review-round). The spec is
 [15-notification-policy.md](15-notification-policy.md); the research behind it is
 `docs/research/phase1/R4-change-detection.md` (R4) and `R2-client-push.md` (R2).
 
@@ -788,3 +790,39 @@ tracker's `suspicion` 14 (6 new), `aeroapi` 5 (1 new), `policy` 8, `finish` 13, 
 `outbox` 4, `refresh` 8, `retries` 7, `scheduler` 2; `notify.real-path` 4, `persist` 10,
 `admin-inject` 8; `prettier --check` on every changed file; the migration hash (up to date, 10
 migrations, no migration in this round).
+
+### Re-review of the escalation fix, and the close-out
+
+An Opus 5.5 re-review of `0725c7b` (2026-10-01) found no blocker or major; the fix is sound. Its
+probes: the skeptic's loop probe now takes 2 alarms and 2 AeroDataBox calls after the Diverted
+read and finishes `cancelled` at +10 minutes, never an alarm at `now`; restoring to the push pushes
+one diversion and one cancellation with no duplicate, and a cleared cancellation re-raises the
+un-diversion, its correction following; Canceled then CanceledUncertain to the end takes 20 alarms
+and 20 calls in 8 hours and finishes `lifetime` with `cancel_unconfirmed` once; the narrowed floor
+never delays a grid slot, a user refresh before `from` or an alert merge's window. The shared
+random walk catches the old bug (all 10 seeds fail on `bea247c`, on the right assertions). Q19 (a)
+to (d) and Q20 are applied, and the `policy` seam is test-only in practice (nothing in `src`
+assigns it, and RPC cannot set it). Findings and what the close-out did:
+
+- **Minor 1: the tracker-level walk would not have caught the bug.** Its seeds (11, 23, 37) never
+  answer Canceled while a diversion suspicion is open. Fixed: seeds 6 and 15, which fail on
+  `bea247c` and pass on `0725c7b`, and an assertion that the walks meet that case at least once;
+  with only the old seeds the assertion fails (0 cases met).
+- **Minor 2: an unconfirmed diversion can become state while a cancellation is suspected.** A read
+  that is not a re-read and shows `Diverted` is stored (`showsSuspectedChange` with `run()`); no
+  push is sent. It exists since Q11 and is reachable now through Q19's path. Recorded for
+  increment 17 in `docs/open-decisions.md`, section 8.
+- **Nit 3: the backstop floors the combined `wants`,** not only the overdue window; unreachable with
+  today's policy. Recorded here only.
+- **Nit 4: a doc comment had moved onto Q19's describe** in the shared policy test. Moved back to
+  `first`.
+- **Nit 5: a superseded diversion leaves no closing trace.** A `diversion_superseded` info log would
+  help; recorded for increment 17 (a tracker change) beside Minor 2.
+- **Out of scope (Q11, live mode only): a cancellation that AeroDataBox suspects before T-48 h
+  becomes undecidable** once the window switches to AeroAPI, because only the raising provider's
+  conclusive answer decides it. Recorded for increment 17 beside Minor 2.
+
+What ran for the close-out: the tracker's `suspicion` file, 14 of 14 (25 s); the mutant above
+(only the old seeds, the walk alone with `-t`: the new assertion fails); `prettier --check` on both
+changed test files and eslint on the tracker's. The full check of the final tree is in
+`docs/build-log.md`, increment 15.
