@@ -496,6 +496,32 @@ describe('the review round (rulings R1, R7 and R11)', () => {
     expect(endedHtml).toContain('push_outcome_send_failed');
   });
 
+  it('stops reloading a row still queued once its window has passed (re-review of ruling R7)', async () => {
+    const token = await registeredApnsToken();
+    const inFlight = createUuidv7Generator(() => Date.now() - TEST_PUSH_TTL_MS + 60_000)();
+    const stuck = createUuidv7Generator(() => Date.now() - TEST_PUSH_TTL_MS - 1_000)();
+    for (const job of [inFlight, stuck]) {
+      await db().execute(sql`
+        insert into notification_deliveries
+          (notification_id, subject_id, channel, push_token_id, status, attempts, is_test, attempt_log)
+        values (${job}::uuid, ${token.userId}::uuid, 'apns', ${token.pushTokenId}::uuid, 'queued', 1,
+                true, ${JSON.stringify({ '1:retry': { r: 'InternalServerError', s: 500, p: null, at: new Date().toISOString() } })}::jsonb)
+      `);
+    }
+
+    const flying = await (
+      await admin({ path: `${ADMIN_PUSH_RESULT_PATH}?job=${inFlight}` })
+    ).text();
+    const ended = await (await admin({ path: `${ADMIN_PUSH_RESULT_PATH}?job=${stuck}` })).text();
+
+    expect(flying).toContain('Still in flight');
+    expect(flying).toContain('<meta http-equiv="refresh" content="3">');
+    expect(ended).not.toContain('http-equiv="refresh"');
+    expect(ended).toContain("Still queued after the job's ten-minute window ended");
+    expect(ended).toContain('push_outcome_send_failed');
+    expect(ended).toContain('<td>InternalServerError</td>');
+  });
+
   it("shows a sandbox send's apns-unique-id beside its apns-id, and none for production (ruling R11)", async () => {
     const sandbox = await registeredApnsToken();
     const sent = await sendTest({

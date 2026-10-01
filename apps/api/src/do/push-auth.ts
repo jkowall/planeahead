@@ -12,9 +12,11 @@
  *   - FCM: the service account's RS256 assertion exchanged at Google's token endpoint for an access
  *     token, served until five minutes before it expires. An exchange that failed (Google's 4xx,
  *     429 or 5xx, or a request that never completed) is not repeated within a minute of the
- *     failure: until then `current` answers the failure `mint_failure` holds, without calling
- *     Google (review ruling R8). A service account replaced inside that minute is used once it
- *     has passed; the failure row keeps no fingerprint, and adding one would be a migration.
+ *     failed exchange's start (`at_ms` is the time taken before the request, which can run up to
+ *     the 10-second timeout): until then `current` answers the failure `mint_failure` holds,
+ *     without calling Google (review ruling R8). A service account replaced inside that minute is
+ *     used once it has passed; the failure row keeps no fingerprint, and adding one would be a
+ *     migration.
  *
  * `minted_at_ms` and the token are persisted in SQLite, so a restarted object keeps both rules: it
  * serves what it minted rather than minting early. The rules themselves are pure functions in
