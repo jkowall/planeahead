@@ -56,18 +56,19 @@ token.
 Read by `app.config.ts` at prebuild and bundle time. Nothing here is a secret: everything in
 `extra` ships inside the app.
 
-| Variable                       | Meaning                                                                                                                                     | Unset                                                                                |
-| ------------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------ |
-| `APP_VARIANT`                  | `production`, `preview` or `development`: bundle id, name, icon, App Group, API host                                                        | `production` (the package scripts pass `development`)                                |
-| `APNS_ENVIRONMENT`             | `aps-environment` and the push token's environment; set by each EAS profile (development: `development`; preview, production: `production`) | `development` (a local, development-signed build); an error on an EAS builder        |
-| `PLANEAHEAD_API_URL`           | API origin override, e.g. `http://localhost:8787` for `wrangler dev`                                                                        | production, preview: `api.planeahead.app`; development: `api-staging.planeahead.app` |
-| `GOOGLE_IOS_CLIENT_ID`         | iOS OAuth client id; its reverse is the iOS URL scheme                                                                                      | a placeholder that keeps prebuild working                                            |
-| `GOOGLE_WEB_CLIENT_ID`         | Web OAuth client id (the `aud` the API accepts from Android too)                                                                            | the Google button is hidden                                                          |
-| `GOOGLE_SERVICES_JSON`         | path to the variant's `google-services.json` (an EAS file variable; `fingerprint.config.js` keeps the file out of the runtime version)      | no FCM token on Android (spike 3)                                                    |
-| `SENTRY_DSN`                   | the mobile project's DSN                                                                                                                    | Sentry stays disabled                                                                |
-| `SENTRY_ORG`, `SENTRY_PROJECT` | for the native build phases and source maps                                                                                                 | the Sentry plugin falls back to the environment                                      |
-| `EAS_PROJECT_ID`               | from `eas init`; enables EAS Update (`updates.url`)                                                                                         | no update URL                                                                        |
-| `PLANEAHEAD_ANDROID_WIDGETS`   | `1` turns on expo-widgets' Android widgets (`enableAndroid`, ADR 0008); a trial flag, off in every EAS profile                              | off                                                                                  |
+| Variable                       | Meaning                                                                                                                                                                                                         | Unset                                                                                                                                          |
+| ------------------------------ | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------- |
+| `APP_VARIANT`                  | `production`, `preview` or `development`: bundle id, name, icon, App Group, API host                                                                                                                            | `production` (the package scripts pass `development`)                                                                                          |
+| `APNS_ENVIRONMENT`             | `aps-environment` and the push token's environment; set by each EAS profile (development: `development`; preview, production: `production`)                                                                     | `development` (a local, development-signed build); an error on an EAS builder                                                                  |
+| `PLANEAHEAD_API_URL`           | API origin override, e.g. `http://localhost:8787` for `wrangler dev`                                                                                                                                            | production, preview: `api.planeahead.app`; development: `api-staging.planeahead.app`                                                           |
+| `GOOGLE_IOS_CLIENT_ID`         | iOS OAuth client id; its reverse is the iOS URL scheme                                                                                                                                                          | a placeholder that keeps prebuild working; an error on an EAS builder for preview and production (a store build never carries the placeholder) |
+| `GOOGLE_WEB_CLIENT_ID`         | Web OAuth client id (the `aud` the API accepts from Android too)                                                                                                                                                | the Google button is hidden                                                                                                                    |
+| `GOOGLE_SERVICES_JSON`         | path to the variant's `google-services.json` (an EAS file variable; `fingerprint.config.js` keeps the file out of the runtime version)                                                                          | no FCM token on Android (spike 3)                                                                                                              |
+| `SENTRY_DSN`                   | the mobile project's DSN                                                                                                                                                                                        | Sentry stays disabled                                                                                                                          |
+| `SENTRY_ORG`, `SENTRY_PROJECT` | for the native build phases and source maps                                                                                                                                                                     | the Sentry plugin falls back to the environment                                                                                                |
+| `EAS_PROJECT_ID`               | from `eas init`; enables EAS Update (`updates.url`)                                                                                                                                                             | no update URL                                                                                                                                  |
+| `PLANEAHEAD_ANDROID_WIDGETS`   | `1` turns on expo-widgets' Android widgets (`enableAndroid`, ADR 0008); a trial flag, off in every EAS profile                                                                                                  | off                                                                                                                                            |
+| `IOS_DEVELOPMENT_TEAM`         | the ten-character Apple team id, written to `ios.appleTeamId` for a LOCAL device build; never set in an EAS environment (it enters the fingerprinted config, and EAS signs each target with its profile's team) | no `DEVELOPMENT_TEAM`; @bacons/apple-targets warns                                                                                             |
 
 On EAS, `SENTRY_DSN`, `SENTRY_ORG`, `SENTRY_PROJECT`, `GOOGLE_WEB_CLIENT_ID`,
 `GOOGLE_IOS_CLIENT_ID` and `EAS_PROJECT_ID` are EAS environment variables of the environment each
@@ -161,10 +162,10 @@ Before the first device build that signs in (copied into the build log by the or
   Secret and a GitHub secret (source maps). Until then eas.json sets `SENTRY_DISABLE_AUTO_UPLOAD`
   for every build profile, because Sentry's build steps fail a Release build whose upload fails;
   remove it when the variables exist (runbook step 18).
-- Visibility of every variable `app.config.ts` reads (`SENTRY_DSN`, `SENTRY_ORG`,
-  `SENTRY_PROJECT`, `GOOGLE_WEB_CLIENT_ID`, `GOOGLE_IOS_CLIENT_ID`, `EAS_PROJECT_ID`, and
-  `APPLE_TEAM_ID` if it is set on EAS at all, in all three environments): **Plain text or
-  Sensitive, never Secret.** `eas update --environment` reads only those two visibilities,
+- Visibility of every variable `app.config.ts` reads from an EAS environment (`SENTRY_DSN`,
+  `SENTRY_ORG`, `SENTRY_PROJECT`, `GOOGLE_WEB_CLIENT_ID`, `GOOGLE_IOS_CLIENT_ID`,
+  `EAS_PROJECT_ID`): **Plain text or Sensitive, never Secret.** `IOS_DEVELOPMENT_TEAM` is never
+  set in an EAS environment at all. `eas update --environment` reads only those two visibilities,
   so a Secret would be missing from the update's config and the update would resolve a runtime
   version no build has, and silently never apply (Build environment above). Only
   `SENTRY_AUTH_TOKEN`, which the config never reads, is a Secret.
@@ -175,9 +176,12 @@ Before the first device build that signs in (copied into the build log by the or
   the variant's group; enable Push Notifications on the three app App IDs (ActivityKit push
   updates and push-to-start tokens use APNs; Live Activities themselves need no capability, only
   `NSSupportsLiveActivities`, which the config sets); for a local device build, export
-  `APPLE_TEAM_ID` (the ten-character team id; app.config.ts writes it to `ios.appleTeamId`, which
-  @bacons/apple-targets warns about while it is missing), which EAS builds do not need because
-  each target is signed with its profile's team; and let EAS create the provisioning profiles for
+  `IOS_DEVELOPMENT_TEAM` in your shell (the ten-character team id; app.config.ts writes it to
+  `ios.appleTeamId`, which @bacons/apple-targets warns about while it is missing). Never set it in
+  an EAS environment: EAS builds sign each target with its profile's team, and `ios.appleTeamId`
+  is part of the config the fingerprint hashes, so a build carrying it would get a runtime version
+  no update matches. It is not `APPLE_TEAM_ID`, the API Worker's variable for the association
+  files (increment 13's review round renamed it). And let EAS create the provisioning profiles for
   the three extension targets it lists. The watch app
   carries the variant's icon (generated from `assets/icon-*.png` on every prebuild), which App
   Store Connect requires of every app bundle; nothing to upload separately. The first device
@@ -186,14 +190,17 @@ Before the first device build that signs in (copied into the build log by the or
 - Native smoke (`.github/workflows/native-smoke.yml`, weekly and on demand): GitHub-hosted
   runners only, never EAS. The gate leg needs a `macos-26` image with Xcode 26.6 installed (the
   Xcode of the EAS image eas.json pins) and at least one iPhone simulator runtime; since increment
-  13 it also archives the app unsigned for a device and fails any bundle without its privacy
-  manifest, with an undeclared required-reason API, or with a version other than the app's. The
-  Xcode 27 leg runs with
-  `continue-on-error` and reports "Xcode missing" until an image carries Xcode 27 (switch its
+  13 it fails any bundle without its privacy manifest, with an undeclared required-reason API, or
+  with a version other than the app's, and any framework that uses such an API without a manifest
+  of its own (React Native's prebuilt core excepted). A manual run with `release_check`, before
+  each store build (runbook step 18), also archives the app unsigned for a device and runs the
+  same checks on the archive. The Xcode 27 leg runs on manual runs only, with
+  `continue-on-error`, and reports "Xcode missing" until an image carries Xcode 27 (switch its
   `runs-on` when GitHub publishes one). The Android leg needs `ubuntu-24.04` with KVM and the
   preinstalled Android SDK (its build-tools' `aapt2` checks the manifest and the permissions, its
-  `zipalign` and the NDK's `llvm-readelf` the alignment for 16 KB pages), builds `x86_64` only, downloads an API 36 `google_apis` x86_64 image, and builds the release APK
-  as well as the debug one. No secrets are used. The minutes it costs and how to make it nightly
+  `zipalign` and the NDK's `llvm-readelf` the alignment for 16 KB pages), builds `x86_64` only
+  (and `arm64-v8a` too on a release check), downloads an API 36 `google_apis` x86_64 image, and
+  builds the release APK as well as the debug one. No secrets are used. The minutes it costs and how to make it nightly
   are in `docs/runbooks/first-deploy.md` step 15. A new Android permission from a dependency fails
   the Android leg until it is blocked in `app.config.ts` or added to the expected list in
   `scripts/native-smoke.sh` on purpose.

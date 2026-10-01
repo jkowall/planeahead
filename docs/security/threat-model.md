@@ -366,9 +366,13 @@ the dead letter consumer logs a push job whose archive failed with each token re
 length (review ruling R5).
 
 What a sign-out or a re-point guarantees (increment 14's review ruling R1): the `push` consumer
-reads every token's row before it sends, first attempts included, and sends only to a live row
-still owned by the job's user, so nothing it sends after the invalidation or the re-point commits
-reaches the phone. Two windows no server check closes: a push APNs or FCM had already accepted,
+reads every target's token row once per batch, before the batch's first send (first attempts
+included), and sends only to a live row still owned by the job's user, so nothing from a batch
+whose read starts after the invalidation or the re-point commits reaches the phone. A batch
+already past its read can still finish its sends, usually within seconds and at most about seven
+minutes (five jobs of 50 targets, six in flight, a 10-second timeout each; the re-review's probe
+showed a second job of the same batch sent after a mid-batch sign-out). Two windows no server
+check closes: a push APNs or FCM had already accepted,
 which the provider holds until the job's `expiresAt` and delivers to a phone that was offline at
 sign-out; and a sign-out made offline, until the app's invalidate call succeeds, which increment
 16 builds with its retry (`docs/open-decisions.md`, section 5, decision 1).

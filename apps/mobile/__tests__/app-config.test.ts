@@ -6,21 +6,26 @@
  * plugin, scene support in expo-build-properties, the fingerprint runtime version and the React
  * Compiler off. Also the files that must agree with it: eas.json, the preview update workflow,
  * react-native.config.js, fingerprint.config.js (the Google services file stays out of the
- * runtime version, re-review expo-correctness-1) and the package scripts.
+ * runtime version, re-review expo-correctness-1) and the package scripts. Increment 13's review
+ * round: `IOS_DEVELOPMENT_TEAM` (G6), the Google iOS client id a store build must carry (G5) and
+ * ExpoFileSystem built from source until SDK 58 (F5).
  */
 
 import type { ConfigContext, ExpoConfig } from 'expo/config';
 import appConfig, {
   apnsEnvironment,
-  appleTeamId,
   appVariant,
   BLOCKED_ANDROID_PERMISSIONS,
+  googleIosClientId,
+  iosDevelopmentTeam,
   reversedClientId,
 } from '../app.config';
 
 // Jest's CommonJS wrapper provides them; the app's tsconfig carries no Node types.
 declare const __dirname: string;
-declare const require: ((id: string) => unknown) & { resolve(id: string): string };
+declare const require: ((id: string) => unknown) & {
+  resolve(id: string, options?: { paths: string[] }): string;
+};
 
 const fs = jest.requireActual<{
   readFileSync(path: string, encoding: 'utf8'): string;
@@ -31,6 +36,14 @@ const path = jest.requireActual<{
   relative(from: string, to: string): string;
   dirname(path: string): string;
 }>('path');
+const childProcess = jest.requireActual<{
+  execFileSync(
+    file: string,
+    args: readonly string[],
+    options: { cwd: string; encoding: 'utf8' },
+  ): string;
+}>('child_process');
+const nodeBinary = (process as unknown as { execPath: string }).execPath;
 const APP_ROOT = path.resolve(__dirname, '..');
 
 const env = (process as unknown as { env: Record<string, string | undefined> }).env;
@@ -78,7 +91,12 @@ describe('app.config.ts', () => {
     ['development', 'app.planeahead.mobile.dev', 'PlaneAhead Dev', 'development'],
   ])('builds the %s variant as its EAS profile does', (variant, bundleId, name, aps) => {
     const profileEnv = easJson().build[variant]?.env ?? {};
-    const config = configFor(variant, { ...profileEnv, EAS_BUILD: 'true' });
+    // GOOGLE_IOS_CLIENT_ID comes from the EAS environment, which every store build has.
+    const config = configFor(variant, {
+      ...profileEnv,
+      EAS_BUILD: 'true',
+      GOOGLE_IOS_CLIENT_ID: '123-abc.apps.googleusercontent.com',
+    });
     expect(config.name).toBe(name);
     expect(config.ios?.bundleIdentifier).toBe(bundleId);
     expect(config.android?.package).toBe(bundleId);
@@ -196,14 +214,120 @@ describe('app.config.ts', () => {
     expect(submit['production']?.ios?.['ascAppId'] ?? null).toBeNull();
   });
 
-  it('writes ios.appleTeamId from APPLE_TEAM_ID when it is set, and nothing when it is not', () => {
-    expect(configFor('production', { APPLE_TEAM_ID: 'ABCDE12345' }).ios?.appleTeamId).toBe(
+  it('writes ios.appleTeamId from IOS_DEVELOPMENT_TEAM only, for local device builds', () => {
+    expect(configFor('production', { IOS_DEVELOPMENT_TEAM: 'ABCDE12345' }).ios?.appleTeamId).toBe(
       'ABCDE12345',
     );
-    expect(configFor('production', { APPLE_TEAM_ID: '' }).ios).not.toHaveProperty('appleTeamId');
-    expect(appleTeamId(undefined)).toBeUndefined();
-    expect(() => appleTeamId('abcde12345')).toThrow(/APPLE_TEAM_ID/);
-    expect(() => appleTeamId('ABCDE1234')).toThrow(/APPLE_TEAM_ID/);
+    expect(configFor('production', { IOS_DEVELOPMENT_TEAM: '' }).ios).not.toHaveProperty(
+      'appleTeamId',
+    );
+    // The API Worker's variable of the old name never reaches the app's (fingerprinted) config
+    // (review ruling G6).
+    expect(configFor('production', { APPLE_TEAM_ID: 'ABCDE12345' }).ios).not.toHaveProperty(
+      'appleTeamId',
+    );
+    expect(iosDevelopmentTeam(undefined)).toBeUndefined();
+    expect(() => iosDevelopmentTeam('abcde12345')).toThrow(/IOS_DEVELOPMENT_TEAM/);
+    expect(() => iosDevelopmentTeam('ABCDE1234')).toThrow(/IOS_DEVELOPMENT_TEAM/);
+  });
+
+  it("keeps EAS's build number and version out of the fingerprinted config (ruling F6)", () => {
+    // plugins/withExtensionVersions.ts reads EAS_BUILD_IOS_* at prebuild; the config itself must
+    // not, because @expo/fingerprint hashes ios.buildNumber and version by default, so routing
+    // them through the config would give every EAS build a new runtime version.
+    const local = configFor('production');
+    const onEas = configFor('production', {
+      EAS_BUILD_IOS_BUILD_NUMBER: '7',
+      EAS_BUILD_IOS_APP_VERSION: '9.9.9',
+    });
+    expect(onEas.ios?.buildNumber).toBeUndefined();
+    expect(onEas.version).toBe(local.version);
+    expect(JSON.stringify(onEas)).toBe(JSON.stringify(local));
+  });
+
+  it('refuses a preview or production build on EAS without the Google iOS client id (G5)', () => {
+    for (const variant of ['production', 'preview']) {
+      const profileEnv = easJson().build[variant]?.env ?? {};
+      expect(() => configFor(variant, { ...profileEnv, EAS_BUILD: 'true' })).toThrow(
+        `GOOGLE_IOS_CLIENT_ID must be set in the EAS ${variant} environment`,
+      );
+      // Anywhere else the placeholder keeps prebuild working.
+      expect(configFor(variant).extra?.['googleIosClientId']).toBe(
+        '000000000000-placeholder.apps.googleusercontent.com',
+      );
+    }
+    // A development build may use the placeholder on EAS too.
+    const development = easJson().build['development']?.env ?? {};
+    expect(
+      configFor('development', { ...development, EAS_BUILD: 'true' }).extra?.['googleIosClientId'],
+    ).toBe('000000000000-placeholder.apps.googleusercontent.com');
+    // The real id reaches the URL scheme.
+    const real = configFor('production', {
+      ...(easJson().build['production']?.env ?? {}),
+      EAS_BUILD: 'true',
+      GOOGLE_IOS_CLIENT_ID: '123-abc.apps.googleusercontent.com',
+    });
+    expect(real.extra?.['googleIosClientId']).toBe('123-abc.apps.googleusercontent.com');
+    expect(real.plugins).toContainEqual([
+      'react-native-nitro-google-signin',
+      { iosUrlScheme: 'com.googleusercontent.apps.123-abc' },
+    ]);
+    expect(googleIosClientId(undefined, 'production', false)).toMatch(/placeholder/);
+    expect(() => googleIosClientId(undefined, 'preview', true)).toThrow(/GOOGLE_IOS_CLIENT_ID/);
+  });
+
+  it('builds ExpoFileSystem from source until expo-file-system ships its manifest (F5)', () => {
+    // SDK 57's prebuilt ExpoFileSystem.framework lacks its privacy manifest, which App Store
+    // Connect rejects (ITMS-91053; expo/expo#50503, fixed in expo-file-system 58.0.2). The
+    // override in package.json links it into the app, under the app's aggregated manifest; drop it
+    // at SDK 58, which this test then demands.
+    const { expo } = JSON.parse(
+      fs.readFileSync(path.resolve(APP_ROOT, 'package.json'), 'utf8'),
+    ) as { expo?: { autolinking?: { ios?: { buildFromSource?: string[] } } } };
+    const fileSystem = JSON.parse(
+      fs.readFileSync(
+        require.resolve('expo-file-system/package.json', {
+          paths: [path.dirname(require.resolve('expo/package.json'))],
+        }),
+        'utf8',
+      ),
+    ) as { version: string };
+    const major = Number(fileSystem.version.split('.')[0]);
+    if (major < 58) {
+      expect(expo).toEqual({ autolinking: { ios: { buildFromSource: ['ExpoFileSystem'] } } });
+    } else {
+      expect(expo?.autolinking?.ios?.buildFromSource ?? []).not.toContain('ExpoFileSystem');
+    }
+    // What the Podfile's autolinking reads: the option, and the module it names.
+    const autolinking = path.dirname(
+      require.resolve('expo-modules-autolinking/package.json', {
+        paths: [path.dirname(require.resolve('expo/package.json'))],
+      }),
+    );
+    const resolved = JSON.parse(
+      childProcess.execFileSync(
+        nodeBinary,
+        [
+          path.resolve(autolinking, 'bin', 'expo-modules-autolinking.js'),
+          'resolve',
+          '--platform',
+          'apple',
+          '--json',
+        ],
+        { cwd: APP_ROOT, encoding: 'utf8' },
+      ),
+    ) as {
+      configuration?: { buildFromSource?: string[] };
+      modules: { packageName: string; pods: { podName: string }[] }[];
+    };
+    if (major < 58) {
+      expect(resolved.configuration?.buildFromSource).toEqual(['ExpoFileSystem']);
+      expect(
+        resolved.modules
+          .find((module) => module.packageName === 'expo-file-system')
+          ?.pods.map((pod) => pod.podName),
+      ).toEqual(['ExpoFileSystem']);
+    }
   });
 
   it('runs the development variant from the local package scripts', () => {

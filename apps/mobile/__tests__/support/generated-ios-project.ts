@@ -6,7 +6,8 @@
  * CocoaPods, no Xcode, so it runs on the Linux CI runner too.
  *
  * `edit` changes the copy before the prebuild, which is how a test plants a failure (a target
- * directory removed, a plugin entry moved). The project is read back with @bacons/xcode, the
+ * directory removed, a plugin entry moved), and `env` adds to the prebuild's environment (the
+ * build number EAS exports, review ruling F6). The project is read back with @bacons/xcode, the
  * parser @bacons/apple-targets and the increment 13 plugins edit it with, resolved through
  * apple-targets because the app does not depend on it directly.
  */
@@ -63,8 +64,15 @@ export interface GeneratedProject {
   remove(): void;
 }
 
-/** Runs the prebuild of the production variant as the production EAS profile has it. */
-export function prebuildIos(edit?: (root: string) => void): GeneratedProject {
+/**
+ * Runs the prebuild of the production variant as the production EAS profile has it, with none of
+ * the caller's own build inputs (EAS's version variables, a development team, `EAS_BUILD`)
+ * unless `env` sets them.
+ */
+export function prebuildIos(
+  edit?: (root: string) => void,
+  env: Record<string, string> = {},
+): GeneratedProject {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'planeahead-prebuild-'));
   for (const input of PREBUILD_INPUTS) {
     fs.cpSync(path.join(APP_ROOT, input), path.join(root, input), { recursive: true });
@@ -88,11 +96,15 @@ export function prebuildIos(edit?: (root: string) => void): GeneratedProject {
         ...processEnv,
         APP_VARIANT: 'production',
         APNS_ENVIRONMENT: 'production',
-        APPLE_TEAM_ID: '',
         CI: '1',
+        EAS_BUILD: '',
+        EAS_BUILD_IOS_APP_VERSION: '',
+        EAS_BUILD_IOS_BUILD_NUMBER: '',
         EXPO_NO_GIT_STATUS: '1',
         EXPO_NO_TELEMETRY: '1',
+        IOS_DEVELOPMENT_TEAM: '',
         PLANEAHEAD_ANDROID_WIDGETS: '',
+        ...env,
       },
       encoding: 'utf8',
     },

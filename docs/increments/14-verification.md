@@ -92,7 +92,8 @@ rerun on their own with the load lower, all of them passed (61 tests in the four
   the FCM exchange is not repeated within 60 seconds in two cases: after a provider refused the
   access token (FCM 401, `expire`), none within 60 seconds of the last exchange; after an exchange
   that failed (Google's 4xx, 429 or 5xx, or a request that never completed), none within 60
-  seconds of the failure, the object answering the stored failure until then. The first build
+  seconds of the failed exchange's start (so about 50 seconds after a 10-second timeout), the
+  object answering the stored failure until then. The first build
   had only the first case: every `current()` after a failed exchange called Google again, which
   ruling R8 corrected. The 20-minute floor also governs `expire`, whose answer (when a new token
   may be minted) sets the retry delay after `ExpiredProviderToken`.
@@ -208,6 +209,17 @@ deploy waits for them.
   is unchanged). Many concurrent batches queue on Hyperdrive's pool; a read that fails sends
   nothing and retries after 60 s, so the failure mode is delay, not a wrong send. Worth watching
   when increment 15 produces real jobs, where a cap like persist's may be wanted.
+- **A sign-out during a batch (re-review).** The liveness read runs once per batch, so a sign-out
+  or a re-point that commits after the read still lets the batch's later sends go out: from the
+  read to the batch's last send, seconds usually and about seven minutes at worst (five jobs of
+  50 targets, six in flight, a 10-second timeout each). The re-reviewer's probe showed a second
+  job of the same batch sent after a sign-out made during the first job's send. Reading per job
+  (at most five reads a batch) would cut the window to one job, if increment 15's volumes make it
+  matter.
+- **An attempt log entry can be overwritten (re-review).** An unsent `liveness_unavailable` retry
+  keeps its attempt count, so it writes the same `attempt_log` key (`k:retry`) as the provider
+  retry before it and replaces that entry: during a Postgres outage a 429's entry can vanish from
+  the soak's counts by reason. `credentials_unavailable` already behaved this way.
 
 ## Review round
 
@@ -432,3 +444,41 @@ R1's departure), and the first batch with the ten-round R4 test exhausted the cl
 connections (ruling R4). The whole API suite was not run, by the orchestrator's instruction: the
 files above exercise what the round changed, and the one module it touched beyond the push path,
 `src/observability/ops-alert.ts`, only gained an event name and a tag key no other caller passes.
+
+### Re-review and close-out
+
+An Opus 5.5 re-reviewer read `f9e5d53..c24d880` in full and fetched the five Cloudflare pages the
+rulings cite. It found no blocker and no major: all twelve rulings applied, and ruling R1's
+departure (the read's client is not closed before the sends) sound, since the Workers limits page
+counts a `connect()` socket toward the six only "while the initial connection is being established
+and the server has not yet responded" and Hyperdrive returns the origin connection to its pool when
+the transaction completes; were the socket to count for its whole life, the sends would have five
+slots instead of six, with no effect on correctness. Its findings and what the close-out did:
+
+- **Minor: three docs overclaimed the sign-out guarantee** (`src/routes/devices.ts`,
+  `docs/security/threat-model.md`, `docs/architecture.md`, and the weaker form in the increment's
+  R1 note): they said nothing sent after the invalidation commits reaches the phone, but the read
+  is once per batch. Reworded to "nothing from a batch whose liveness read starts after the
+  invalidation commits", naming the window; recorded under Unverified. The code is as ruled.
+- **Nit: ruling R8's minute runs from the failed exchange's start**, not its end (`at_ms` is taken
+  before a request that can take 10 s). The header of `src/do/push-auth.ts`, `docs/architecture.md`
+  and the P3 departure above now say so.
+- **Nit: the one-`sendBatch` rule was checked by message count only.** The consumer's header now
+  states Cloudflare's 256 KB cap and why an ordinary job stays far below it.
+- **Nit: an unsent retry can overwrite the attempt log entry of the provider retry before it.**
+  Recorded under Unverified.
+- **Nit: ruling R7 covered only a job with no delivery row.** A row still `queued` after the
+  window reloaded every three seconds for ever. Fixed: the result page stops reloading once the
+  window has passed whatever the row's state, and says the last retry's outcome was most likely
+  not recorded. Proven: `admin-push.test.ts` gains a queued row inside the window (reloads) and
+  one past it (does not, and names `push_outcome_send_failed`); with the old condition planted
+  back, the new test fails.
+
+The orchestrator's full check of `c24d880`, with the increment 15 builder and the re-reviewer
+running tests on the same machine:
+
+| Check | Result |
+| --- | --- |
+| `pnpm turbo run typecheck lint test --force --continue --concurrency=2` | 13 of 14 tasks passed in 709 s: typecheck and lint everywhere; tools 60, shared 605, db 191, mobile 625 in 35 suites; api 954 passed, 1 skipped and 3 failed in 76 files |
+| The three failed API files alone | `flights.refresh` 6 of 6, `flight-tracker.lifecycle` 2 of 2, `provider-budget` 22 of 22: 957 API tests pass with 1 skipped. The three are the timing-sensitive tests increment 13's runs also saw time out under load ("answers 504 refresh_timeout", "walks creation to deleteAll with exactly A2_EXPECTED_POLLS provider calls", "serialises concurrent debits") |
+| Prettier, the toolchain, exit and mobile migrations guards, the migration hash, actionlint, shellcheck, both wrangler dry runs | all passed |

@@ -332,7 +332,7 @@ from increment 15, the event injector (`/admin/push/inject`, section 10).
   it exchanges the FCM service account's RS256 assertion for an access token and serves it until
   five minutes before it expires. Isolates cache what they were given until its window ends. APNs
   `ExpiredProviderToken` and FCM 401 expire the refused token (never within the floor), and a
-  failed FCM exchange is not repeated within a minute of the failure. The
+  failed FCM exchange is not repeated within a minute of its start. The
   secrets (`APNS_KEY_P8`, `APNS_KEY_ID`, `APNS_TEAM_ID`, `FCM_SERVICE_ACCOUNT_JSON`) are required
   in production and optional in staging and locally; a platform without them is held.
 - **The `push` consumer** (`src/queues/push.ts`) first reads token liveness, once per batch and
@@ -365,8 +365,10 @@ from increment 15, the event injector (`/admin/push/inject`, section 10).
   guard's comparison) and the permission state. A registration locks its device row, then
   invalidates the device's other live rows of the same kind, so concurrent registrations leave one
   live row; `POST /v1/devices/current/invalidate` invalidates every kind of the caller's
-  installation before sign-out, and nothing the consumer sends after that commits reaches the
-  phone (a push the provider had already accepted still can, until its `expiresAt`).
+  installation before sign-out, and nothing from a batch whose liveness read starts after that
+  commits reaches the phone (a batch already past its read can finish its sends, within seconds
+  usually and about seven minutes at worst, and a push the provider had already accepted can
+  still arrive until its `expiresAt`).
 - **Visibility.** The admin page's push section and "Send a test push" (section 8); the test push
   is the plan's staging smoke, sent through the real queue, consumer, `PushAuth` and transport to a
   registered, live token (in production only one of a user id in `PUSH_INJECT_ALLOWED_USER_IDS`).

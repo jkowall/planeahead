@@ -51,7 +51,11 @@
  *      never sent again by a retry of the whole message (`retry()` is never used for an outcome).
  *      All of a job's follow-ups, every delay group and every hold, go out in ONE `sendBatch`
  *      (ruling R2), each entry with its own `delaySeconds`; a job has at most 50 targets, so at
- *      most 50 entries, under the 100 a batch takes.
+ *      most 50 entries, under the 100 a batch takes. Cloudflare also caps one `sendBatch` at
+ *      256 KB in total, and every entry repeats the job's common fields: an ordinary job's
+ *      follow-ups come to about 60 KB, so only a job near the 128 KB message limit, with heavily
+ *      escaped text and dozens of delay groups, could exceed it, and that job would throw on
+ *      every delivery and end in `push-dlq` (the re-review's nit, accepted as not reachable).
  *   6. The outcomes go to `persist` as one `push_outcome` message, so `persist` stays the only
  *      Postgres writer (it records the deliveries and invalidates dead tokens, ruling P5).
  *

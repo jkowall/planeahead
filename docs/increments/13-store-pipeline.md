@@ -1,8 +1,11 @@
 # Increment 13: store pipeline
 
-Status: built (2026-09-30); what ran, the owner's commands and what stays unverified are in
-`docs/increments/13-verification.md`. Builder: Opus 5.5. Reviewers: two Opus 5.5 lenses (store
-compliance and build system; native smoke and tests) plus the orchestrator's read. Branch
+Status: built (2026-09-30), and the review round's rulings (F1 to F13, G3 to G7) applied the same
+day; what ran, the owner's commands and what stays unverified are in
+`docs/increments/13-verification.md` (the rulings' changes in its Review round section, which
+supersedes S4's weekly device archive and S7's `APPLE_TEAM_ID`). Builder: Opus 5.5. Reviewers:
+two Opus 5.5 lenses (store compliance and build system; native smoke and tests) plus the
+orchestrator's read. Branch
 `inc13-store-pipeline`, stacked on `fix-android-nightly-disk` (PR #13), because both change the
 native smoke.
 
