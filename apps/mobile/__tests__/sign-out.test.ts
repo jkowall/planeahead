@@ -6,6 +6,7 @@
  */
 
 import { getCookie } from '@better-auth/expo/client';
+import * as Sentry from '@sentry/react-native';
 import { onlineManager } from '@tanstack/react-query';
 import type { ApiClient } from '../src/lib/api-client';
 import {
@@ -17,7 +18,11 @@ import {
 } from '../src/lib/device-invalidation';
 import { registerDevice } from '../src/lib/devices';
 import { signOut } from '../src/lib/sign-out';
-import { fakeNotifications, resetFakeNotifications } from './support/fake-notifications';
+import {
+  fakeNotifications,
+  pushNotification,
+  resetFakeNotifications,
+} from './support/fake-notifications';
 
 jest.mock('expo-notifications', () =>
   jest
@@ -320,19 +325,37 @@ describe('signOut', () => {
     onlineManager.setOnline(true);
   });
 
-  it('stops registration, invalidates with the session, forgets the account, then unregisters', async () => {
+  it('stops registration, invalidates with the session, clears the tray, forgets the account, then unregisters', async () => {
     mockSession.cookies = cookieMap('tok-a.sig');
     onlineManager.setOnline(true);
     globalThis.fetch = endpoint([200]).fetch as unknown as typeof fetch;
     fakeNotifications.calls = mockLog;
+    fakeNotifications.presented = [pushNotification('gate_change:AAL-100', { v: '1' })];
     await signOut(null);
     expect(mockLog).toEqual([
       'registrar.reset',
       'registrar.idle',
       'invalidate better-auth.session_token=tok-a.sig',
+      'dismissAll',
       'forgetAccount',
       'unregister',
     ]);
+    expect(fakeNotifications.presented).toEqual([]);
+  });
+
+  it.each([
+    ['fails', new Error('the presenter is gone')],
+    ['never settles', 'pending' as const],
+  ])('signs out at once when clearing the tray %s', async (_case, outcome) => {
+    mockSession.cookies = cookieMap('tok-a.sig');
+    onlineManager.setOnline(true);
+    globalThis.fetch = endpoint([200]).fetch as unknown as typeof fetch;
+    fakeNotifications.calls = mockLog;
+    fakeNotifications.dismissAll = outcome;
+    jest.mocked(Sentry.captureException).mockClear();
+    await signOut(null);
+    expect(mockLog.slice(-3)).toEqual(['dismissAll', 'forgetAccount', 'unregister']);
+    expect(Sentry.captureException).toHaveBeenCalledTimes(outcome === 'pending' ? 0 : 1);
   });
 
   it('offline it signs out at once; the next launch sends the call before any registration', async () => {
@@ -341,7 +364,13 @@ describe('signOut', () => {
     globalThis.fetch = endpoint([200]).fetch as unknown as typeof fetch;
     fakeNotifications.calls = mockLog;
     await signOut(null);
-    expect(mockLog).toEqual(['registrar.reset', 'registrar.idle', 'forgetAccount', 'unregister']);
+    expect(mockLog).toEqual([
+      'registrar.reset',
+      'registrar.idle',
+      'dismissAll',
+      'forgetAccount',
+      'unregister',
+    ]);
 
     // Online again, a new session registers: the signed-out session's call goes first, once.
     mockLog.length = 0;

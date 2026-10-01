@@ -137,6 +137,7 @@ import {
   forceRefreshTracker,
   getTrackerState,
   isAbsentTrackerError,
+  storedOverrides,
   subscribeTracker,
   unsubscribeTracker,
   type TrackerFor,
@@ -408,7 +409,7 @@ async function resubscribeQuietly(
   flightKey: FlightKey,
   row: FlightSubscriptionRecord,
 ): Promise<void> {
-  const overrides = row.notificationOverrides;
+  const overrides = storedOverrides(row.notificationOverrides);
   try {
     await callWithDeadline(
       'subscribe',
@@ -416,9 +417,7 @@ async function resubscribeQuietly(
         subscriptionId: row.id,
         userId: row.userId,
         muted: row.muted,
-        ...(typeof overrides === 'object' && overrides !== null && !Array.isArray(overrides)
-          ? { overrides }
-          : {}),
+        ...(overrides === undefined ? {} : { overrides }),
       }),
       ctx.deadlineMs,
       { waitUntil: ctx.waitUntil },

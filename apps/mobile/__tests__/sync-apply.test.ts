@@ -18,7 +18,7 @@ import { listFlights } from '../src/lib/flight-queries';
 import { pendingFlightKey } from '../src/lib/flight-model';
 import { STORE_SCHEMA_VERSION } from '../src/lib/sync/version';
 import { commitWrite, subscribeToTable } from '../src/lib/db/store-signal';
-import { SyncEnvelopeV1 } from '@planeahead/shared';
+import { DEFAULT_NOTIFICATION_PREFERENCES, SyncEnvelopeV1 } from '@planeahead/shared';
 import type { RawRequest, RawResponse } from '../src/lib/api-client';
 import {
   createMemorySqlite,
@@ -32,6 +32,7 @@ import {
   envelope,
   flight,
   id,
+  notificationPreferencesUpsert,
   page,
   preferencesUpsert,
   subscriptionDelete,
@@ -252,6 +253,60 @@ describe('applySyncPage', () => {
     expect(subscriptions(db).map((row) => row.id)).toEqual([id(1)]);
     expect(readCursor(db)).toBe(cursorAt(2));
   });
+
+  it('reads notification_preferences for the settings store, the defaults filled in (ruling C11)', () => {
+    const db = createMemorySqlite();
+    // The stored bag: toggles the user changed only, plus what this build does not read.
+    const events = { delay: false, first_gate_assignment: true, diversion: 'no', boarding: false };
+    const outcome = applySyncPage(
+      db,
+      parsePage(
+        page({ changes: [notificationPreferencesUpsert({ events })], cursor: cursorAt(1) }),
+      ),
+    );
+    expect(outcome.notifications).toEqual({
+      pushEnabled: true,
+      events: {
+        delay: false,
+        gate_change: true,
+        first_gate_assignment: true,
+        cancellation: true,
+        diversion: true,
+      },
+    });
+    // Still kept whole in its table.
+    expect(count(db, 'notification_preferences')).toBe(1);
+
+    const none = applySyncPage(
+      db,
+      parsePage(page({ changes: [subscriptionUpsert(1, AA100)], cursor: cursorAt(2) })),
+    );
+    expect(none.notifications).toBeNull();
+  });
+
+  it('reads a tombstoned notification_preferences row as the defaults, and skips one that does not parse', () => {
+    const db = createMemorySqlite();
+    const tombstoned = notificationPreferencesUpsert({
+      pushEnabled: false,
+      events: { delay: false },
+      deletedAt: '2026-09-19T12:00:00.000Z',
+    });
+    const outcome = applySyncPage(
+      db,
+      parsePage(page({ changes: [tombstoned], cursor: cursorAt(1) })),
+    );
+    expect(outcome.notifications).toEqual(DEFAULT_NOTIFICATION_PREFERENCES);
+
+    const broken = notificationPreferencesUpsert({ id: id(711), pushEnabled: 'yes' });
+    const next = applySyncPage(db, parsePage(page({ changes: [broken], cursor: cursorAt(2) })));
+    expect(next.skipped).toEqual([
+      { entity: 'notification_preferences', id: id(711), field: 'row.pushEnabled' },
+    ]);
+    expect(next.notifications).toBeNull();
+    expect(count(db, 'notification_preferences')).toBe(1);
+    expect(readCursor(db)).toBe(cursorAt(2));
+  });
+
   it('signals each touched table ONCE per page, after the commit', () => {
     const db = createMemorySqlite();
     const calls: string[] = [];

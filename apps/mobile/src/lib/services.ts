@@ -16,7 +16,7 @@ import { useFlightNotices } from './flight-notices';
 import { clearReplacements } from './flight-replacements';
 import { flightOutboxHooks } from './flights';
 import { analyticsId, installId } from './identity';
-import { withPendingPatches } from './preference-mutations';
+import { withPendingNotificationPatches, withPendingPatches } from './preference-mutations';
 import { queryClient } from './query';
 import { useSettings } from './settings';
 import { createSyncClient, type SyncClient } from './sync/client';
@@ -83,6 +83,11 @@ function build(store: Store): Services {
     onPreferences: (preferences) => {
       // A toggle whose PATCH is still queued stays as the user set it (preference-mutations.ts).
       useSettings.getState().applyServerPreferences(withPendingPatches(store.sqlite, preferences));
+    },
+    onNotifications: (notifications) => {
+      useSettings
+        .getState()
+        .applyServerNotifications(withPendingNotificationPatches(store.sqlite, notifications));
     },
     onSkipped: (skipped) => {
       // Entity, id (a uuid, or a flight's position in the page) and the failing field: never a

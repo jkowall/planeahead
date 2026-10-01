@@ -25,6 +25,7 @@ import {
   UnsubscribeResponseV1,
   type FlightKey,
   type ForceRefreshRequestV1,
+  type NotificationOverrides,
   type SubscribeRequestV1,
   type UnsubscribeRequestV1,
 } from '@planeahead/shared';
@@ -56,6 +57,21 @@ export function isAbsentTrackerError(error: unknown): boolean {
     (error.message.startsWith('invalid_request:') ||
       (error.name === 'RpcRequestError' && error.message.includes('not seeded')))
   );
+}
+
+/**
+ * A subscription's stored overrides (`flight_subscriptions.notification_overrides`, a jsonb bag)
+ * as `subscribe` carries them: `muted` alone, or undefined when the bag is not an object. The
+ * contract refuses every other key (increment 16, ruling C12), so a re-subscribe that relayed a bag
+ * written before it narrowed, or by hand, would be refused, and `isAbsentTrackerError` would take
+ * the refusal for a tracker that holds no flight.
+ */
+export function storedOverrides(stored: unknown): NotificationOverrides | undefined {
+  if (typeof stored !== 'object' || stored === null || Array.isArray(stored)) {
+    return undefined;
+  }
+  const { muted } = stored as { readonly muted?: unknown };
+  return typeof muted === 'boolean' ? { muted } : {};
 }
 
 export async function getTrackerState(tracker: TrackerRpc): Promise<GetStateResponseV1> {
