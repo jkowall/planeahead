@@ -174,8 +174,10 @@ error handler maps SQLSTATE 23503 on a user foreign key, for a principal whose `
   in the same transaction. A delay reaching the line or a suspected cancellation or diversion
   moves the next alarm to at most 5 minutes out for its re-read. A suspected cancellation or
   diversion is evidence, not state (review ruling Q11): the tracker stores the suspicion in its
-  policy state, keeps its snapshot, phase and version, and holds the finish only while fast
-  re-reads are left; then it finishes unconfirmed, without a push.
+  policy state, keeps its snapshot, phase and times (the version moves with the schedule), and
+  holds the finish only while fast re-reads are left; then it finishes unconfirmed, without a
+  push. A cancellation supersedes an open diversion suspicion, and after a provider read the
+  policy's re-read is never at the read's own instant (review ruling Q19).
 - **Subscribers.** `subscribe` and `unsubscribe` are idempotent on the subscription id; Postgres is
   the record and the list only follows it. The nightly housekeeping reconciliation (section 7) lists
   every active tracker's subscribers and makes the list follow Postgres.
@@ -419,8 +421,9 @@ from increment 15, the event injector (`/admin/push/inject`, section 10).
   change sequence, so a retried alarm reproduces it and writes nothing, while a later return to a
   value pushed before gets a new one; every instance row the tracker sends has its own version. A
   snapshot showing only a suspected cancellation or diversion is not adopted: the tracker keeps
-  its stored snapshot, phase and version, writes a `cancel_suspect` or `diversion_suspect` event
-  and the policy state, and the alarm is the sooner of the cadence slot and the re-read. So the
+  its stored snapshot, phase and times (the version moves with the schedule), writes a
+  `cancel_suspect` or `diversion_suspect` event and the policy state, and the alarm is the
+  sooner of the cadence slot and the re-read. So the
   app never shows an unconfirmed cancellation, and the live-tracking slots stay as they were. The
   suspicion holds the finish only while fast re-reads are left, even past the cadence's last
   slot; then the flight finishes with the cadence's reason, without a push, and logs

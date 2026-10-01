@@ -43,11 +43,14 @@
  *      notification policy's state with one `notify_intent` outbox row per intent, each guarded
  *      by `notif_dedupe`. A re-read the policy owes (a delay's settle, a cancellation's or a
  *      diversion's confirmation) moves the next alarm to at most `wants.at`, and a failed one
- *      is counted by the policy rather than retried in a loop. A suspected cancellation or
- *      diversion is evidence, not state: the snapshot, phase and version stay the last confirmed
- *      ones until the raising provider's conclusive re-read, and its fast re-reads hold the
- *      finish past the cadence's last slot (rulings N2, N4, N7; review rulings Q1, Q3, Q4, Q11;
- *      `#applyStatus`, `#policySchedule`). Every instance row goes out under a new version.
+ *      is counted by the policy rather than retried in a loop, and a re-read still due at a
+ *      provider read is next tried `CONFIRM_REREAD_MINUTES` later, never at the read's own
+ *      instant. A suspected cancellation or
+ *      diversion is evidence, not state: the snapshot, phase and times stay the last confirmed
+ *      ones until the raising provider's conclusive re-read (the version moves with the
+ *      schedule), and its fast re-reads hold the finish past the cadence's last slot (rulings
+ *      N2, N4, N7; review rulings Q1, Q3, Q4, Q11, Q19; `#applyStatus`, `#policySchedule`).
+ *      Every instance row goes out under a new version.
  *   5. After the commit: send the outbox to the `persist` queue in byte-chunked batches, and
  *      write the debounced KV snapshot off the critical path. A write the debounce suppressed is
  *      marked pending and performed by the next entry point once the gap has passed.
@@ -116,6 +119,7 @@ import {
   SubscribeRequestV1,
   USER_REFRESH_FRESHNESS_MS,
   UnsubscribeRequestV1,
+  CONFIRM_REREAD_MINUTES,
   deadLetterResendSpacingMs,
   evaluateFailedReread,
   evaluatePolicy,
@@ -128,6 +132,7 @@ import {
   parseRpcRequest,
   policyWants,
   pollEquivalents,
+  REREAD_TOLERANCE_MS,
   readPolicyState,
   reconcileFlightKey,
   refreshIntervalFor,
@@ -156,6 +161,7 @@ import {
   type PolicyIntent,
   type PolicyResult,
   type PolicyState,
+  type PolicyWants,
   type ProviderCallContext,
   type ProviderCallRecord,
   type ProviderCallTrigger,
@@ -236,8 +242,17 @@ export const FINISH_ALARM_MS = 22 * 60 * 60_000;
 export const FINISH_RETRY_MS = 60 * 60_000;
 /** The deferral after which the finished object raises the ops alert, once (L2). */
 export const FINISH_ALERT_AFTER_ATTEMPTS = 6;
-/** An alarm that fires more than this early is a duplicate delivery and only re-arms. */
-const EARLY_ALARM_TOLERANCE_MS = 5_000;
+/**
+ * An alarm that fires more than this early is a duplicate delivery and only re-arms. The policy's
+ * re-read tolerance is the same instant (review ruling Q19): a read the tracker makes as the
+ * re-read is one the policy counts as it.
+ */
+const EARLY_ALARM_TOLERANCE_MS = REREAD_TOLERANCE_MS;
+/**
+ * Review ruling Q19 (c): a policy re-read still due at or before a provider read is next tried
+ * this long after it (`#policySchedule`), never at the read's own instant.
+ */
+const POLICY_REREAD_FLOOR_MS = CONFIRM_REREAD_MINUTES * 60_000;
 /**
  * A sent row is re-sent by the next flush when it has been unconfirmed this long. Confirmation
  * normally lands within seconds; the grace keeps a burst of coalesced user refreshes from
@@ -561,12 +576,31 @@ function windowSourceAt(cadence: CadenceDefinition, ctx: CadenceContext): Cadenc
 
 /**
  * Review rulings Q4 and Q11 (3): a suspected cancellation or diversion with fast re-reads left
- * holds the tracker's finish, so its confirmation is not lost to the cadence's last slot.
+ * holds the tracker's finish, so its confirmation is not lost to the cadence's last slot. Q19
+ * (b): only a suspicion `policyWants` lists holds, so a diversion holds while the cancellation
+ * is `none` and a pushed cancellation finishes `cancelled` whatever a stored diversion
+ * suspicion says (the policy drops it, Q19 (a)).
  */
-function holdsFinish(state: PolicyState): boolean {
-  return [state.cancellation, state.diversion].some(
-    (suspicion) => suspicion.status === 'suspect' && suspicion.fastLeft > 0,
-  );
+function holdsFinish(state: PolicyState, wants: PolicyWants): boolean {
+  return wants.reasons.some((reason) => {
+    const suspicion =
+      reason === 'cancellation'
+        ? state.cancellation
+        : reason === 'diversion'
+          ? state.diversion
+          : null;
+    return suspicion?.status === 'suspect' && suspicion.fastLeft > 0;
+  });
+}
+
+/** The provider read at `now` a schedule follows: none, the one step 1 plans, the one made. */
+type ReadAtNow = 'none' | 'planning' | 'made';
+
+/** The policy's entry points as the tracker calls them (a test seam, see `policy`). */
+interface NotificationPolicy {
+  readonly evaluateFailedReread: typeof evaluateFailedReread;
+  readonly evaluatePolicy: typeof evaluatePolicy;
+  readonly evaluateReread: typeof evaluateReread;
 }
 
 /** JSON with object keys sorted at every level, so key order never reads as a change. */
@@ -700,6 +734,12 @@ export class FlightTracker extends DurableObject<Env> {
    */
   outboxSink: Pick<Queue, 'sendBatch'>;
   kv: Pick<KVNamespace, 'put'>;
+  /**
+   * The notification policy's entry points (review ruling Q19 (c)'s backstop test replaces one
+   * with a policy that leaves a re-read due at the read's own instant; `#policySchedule` must
+   * still never loop the alarm).
+   */
+  policy: NotificationPolicy = { evaluateFailedReread, evaluatePolicy, evaluateReread };
   bucket: Pick<R2Bucket, 'put'>;
   providerDeps: RouterDeps = {};
   caps: PerFlightCaps = { softCapPe: A2_SOFT_CAP_PE, hardCapPe: A2_HARD_CAP_PE };
@@ -1215,7 +1255,8 @@ export class FlightTracker extends DurableObject<Env> {
       const previous = this.#snapshotOf(current);
       const next: FlightStatus = { ...request.status, key: current.key as FlightKey };
       const state = this.#storedPolicyState(current) ?? initialPolicyState(previous);
-      const result = evaluatePolicy({ previous, next, state, now, context: { confirmed: true } });
+      const context = { confirmed: true };
+      const result = this.policy.evaluatePolicy({ previous, next, state, now, context });
       return this.#appendIntents(current, now, result.intents, next, request.injectionId);
     });
     await this.#flushOutbox(now);
@@ -1629,7 +1670,7 @@ export class FlightTracker extends DurableObject<Env> {
         soft_cap_pe: budget.soft_cap_pe,
       });
     }
-    const next = this.#schedule(row, now, trigger === 'reconcile', true);
+    const next = this.#schedule(row, now, trigger === 'reconcile', 'planning');
     this.#exec(
       `INSERT INTO attempts (slot_ms, flight_id, started_at_ms, retry_count, trigger, outcome)
        VALUES (?, 1, ?, ?, ?, 'started')
@@ -1877,7 +1918,7 @@ export class FlightTracker extends DurableObject<Env> {
       const policyText =
         due === null
           ? current.policy_state
-          : JSON.stringify(evaluateFailedReread({ state: due, now }).state);
+          : JSON.stringify(this.policy.evaluateFailedReread({ state: due, now }).state);
       this.#exec(
         `UPDATE flight SET provider_cost_units = provider_cost_units + ?, policy_state = ?,
                 updated_at_ms = ? WHERE id = 1`,
@@ -1886,7 +1927,7 @@ export class FlightTracker extends DurableObject<Env> {
         now,
       );
       const after = this.#requireFlight();
-      const next = this.#schedule(after, now);
+      const next = this.#schedule(after, now, false, 'made');
       this.#reschedule(after, next, now);
       return { version: after.version, changed: false, finish: next.finish };
     }
@@ -1939,10 +1980,11 @@ export class FlightTracker extends DurableObject<Env> {
     // flight on a cancellation the policy has not confirmed (N4).
     const policy = this.#evaluate(row, previous, next, now, source === 'read', answeredBy);
     // Review ruling Q11 (1): a change the policy only suspects is evidence, not state. The
-    // snapshot, its phase, its times and its version stay the last confirmed ones (so the
-    // cadence and the window's provider stay those of the operating flight, and neither the
-    // instance row nor KV ever shows it); only the policy state, the cost and the instant of
-    // this read are stored, and a new suspicion writes its event.
+    // snapshot, its phase and its times stay the last confirmed ones (so the cadence and the
+    // window's provider stay those of the operating flight, and neither the instance row nor
+    // KV ever shows it); the version moves with the schedule, as `emit` says below. Only the
+    // policy state, the cost and the instant of this read are stored, and a new suspicion
+    // writes its event.
     const held = showsSuspectedChange(policy.state, next);
     const drafts = held ? [] : diffSnapshots(previous, next, next.source, providerCallId);
     // `fetchedAt` moves on every poll; a snapshot that differs in nothing else is the same
@@ -1974,7 +2016,8 @@ export class FlightTracker extends DurableObject<Env> {
           operator_source: next.operatorSource ?? null,
           policy_state: policyText,
         };
-    const schedule = this.#schedule(stored, now, trigger === 'reconcile');
+    const read: ReadAtNow = source === 'read' ? 'made' : 'none';
+    const schedule = this.#schedule(stored, now, trigger === 'reconcile', read);
     const at = schedule.finish === null ? schedule.at : null;
     const rescheduled = at !== row.next_refresh_at_ms;
     const emit = changed || rescheduled || source === 'seed';
@@ -2125,17 +2168,17 @@ export class FlightTracker extends DurableObject<Env> {
   /**
    * The next alarm: the cadence's slot (`#cadenceSchedule`), moved by what the notification
    * policy owes (`#policySchedule`) unless polling is stopped (the hard cap and a key drift end
-   * the tracking whatever the policy holds). `planningRead` says step 1 is planning the provider
-   * read it is about to make at `now`.
+   * the tracking whatever the policy holds). `read` names the provider read at `now` the schedule
+   * follows: the one step 1 is planning, or the one just made (or failed).
    */
   #schedule(
     row: FlightRow,
     now: number,
     afterReconcilePoll = false,
-    planningRead = false,
+    read: ReadAtNow = 'none',
   ): { readonly at: number; readonly finish: FinishReason | null } {
     const base = this.#cadenceSchedule(row, now, afterReconcilePoll);
-    return row.polling_stopped === 1 ? base : this.#policySchedule(row, now, base, planningRead);
+    return row.polling_stopped === 1 ? base : this.#policySchedule(row, now, base, read);
   }
 
   /**
@@ -2149,30 +2192,45 @@ export class FlightTracker extends DurableObject<Env> {
    * re-reads left holds the finish, even past the cadence's last slot (Q4, Q11 (3)): a
    * cancellation first seen at the last slot is still confirmed. Once they are spent the flight
    * finishes unconfirmed (`#finishBody` logs it); the hard cap ends it whatever is held.
+   * Review ruling Q19 (c), the backstop: a policy `wants.at` still at or before the provider
+   * read made (or planned) at `now` would be an alarm at the read's own instant, a read loop at
+   * the provider's expense. The policy never leaves one (Q19 (a), (b)); should it, the re-read
+   * is floored to the read plus `CONFIRM_REREAD_MINUTES`, logged `policy_wants_overdue` once
+   * the read is made, and holds no finish. The cadence's slot and a future `wants.at` are never
+   * touched, and before any read (an alert merge, a re-seed, a late alarm) an overdue re-read
+   * runs at once.
    */
   #policySchedule(
     row: FlightRow,
     now: number,
     base: { readonly at: number; readonly finish: FinishReason | null },
-    planningRead: boolean,
+    read: ReadAtNow,
   ): { readonly at: number; readonly finish: FinishReason | null } {
     const stored = this.#storedPolicyState(row);
     if (stored === null) {
       return base;
     }
     const state =
-      planningRead && this.#rereadDue(row, now)
-        ? evaluateFailedReread({ state: stored, now }).state
+      read === 'planning' && this.#rereadDue(row, now)
+        ? this.policy.evaluateFailedReread({ state: stored, now }).state
         : stored;
     const wants = policyWants(state);
     if (wants === null) {
       return base;
     }
-    const at = wants.at <= now + EARLY_ALARM_TOLERANCE_MS ? now : wants.at;
+    const overdue = wants.at <= now + EARLY_ALARM_TOLERANCE_MS;
+    const frozen = overdue && read !== 'none';
+    if (overdue && read === 'made') {
+      this.#log.error('policy_wants_overdue', {
+        wants_at: new Date(wants.at).toISOString(),
+        reasons: wants.reasons,
+      });
+    }
+    const at = frozen ? now + POLICY_REREAD_FLOOR_MS : overdue ? now : wants.at;
     if (base.finish === null) {
       return { at: Math.min(base.at, at), finish: null };
     }
-    return holdsFinish(state) ? { at, finish: null } : base;
+    return !frozen && holdsFinish(state, wants) ? { at, finish: null } : base;
   }
 
   #cadenceContext(row: FlightRow, now: number): CadenceContext | null {
@@ -2839,7 +2897,10 @@ export class FlightTracker extends DurableObject<Env> {
     const state = this.#storedPolicyState(row) ?? initialPolicyState(previous);
     const context = answeredBy === undefined ? undefined : { provider: answeredBy };
     const input = { previous, next, state, now, context };
-    return read && this.#rereadDue(row, now) ? evaluateReread(input) : evaluatePolicy(input);
+    const { policy } = this;
+    return read && this.#rereadDue(row, now)
+      ? policy.evaluateReread(input)
+      : policy.evaluatePolicy(input);
   }
 
   #debit(budget: BudgetRow, trigger: ProviderCallTrigger, pe: number): void {

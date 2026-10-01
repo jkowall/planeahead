@@ -199,3 +199,54 @@ describe('Q11 (6): an alert merge raises a suspicion as its provider and never d
     expect(await adbCalls(flight)).toBe(1);
   });
 });
+
+describe('Q19 in live mode: a diverted alert, then AeroAPI says cancelled on the poll', () => {
+  it('the cancellation supersedes the diversion: one intent, finished cancelled, reads bounded', async () => {
+    const flight = uniqueFlight();
+    const { tracker, fake } = await liveAt(flight, [{ cancelled: true }]);
+    const at = flight.scheduledOut.getTime() - 2 * HOUR_MS + MINUTE_MS;
+    await tracker.setClock(at);
+    const merged = await tracker.stub.ingestProviderEvent({
+      rpcVersion: RPC_SCHEMA_VERSION,
+      provider: 'aeroapi',
+      kind: 'update',
+      externalId: `alert-${crypto.randomUUID()}`,
+      receivedAt: new Date(at).toISOString(),
+      flightRef: { flightKey: flight.flightKey },
+      payload: {
+        source: 'aeroapi_alert',
+        faFlightId: 'x',
+        eventCode: 'diverted',
+        times: {},
+        diverted: true,
+      },
+    });
+    expect(merged.outcome).toBe('merged');
+    expect(await policyState(tracker)).toMatchObject({
+      cancellation: { status: 'none' },
+      diversion: { status: 'suspect', provider: 'aeroapi', value: 'diverted', since: at },
+    });
+    expect((await flightRow(tracker))?.phase).toBe('scheduled');
+    expect(await tracker.alarmAt()).toBe(at + 5 * MINUTE_MS);
+    // The re-read (AeroAPI, by designator) says cancelled: the diversion suspicion is dropped
+    // and the cancellation's own re-read is 5 minutes on, never an alarm at the read itself.
+    const polled = await nextAlarm(tracker);
+    expect(await policyState(tracker)).toMatchObject({
+      cancellation: { status: 'suspect', provider: 'aeroapi', value: 'cancelled', fastLeft: 3 },
+      diversion: { status: 'none' },
+      fastRereadsLeft: 6,
+    });
+    expect(await tracker.alarmAt()).toBe(polled + 5 * MINUTE_MS);
+    expect(intentsOf(tracker)).toEqual([]);
+    expect((await flightRow(tracker))?.phase).toBe('scheduled');
+    await nextAlarm(tracker);
+    expect(intentsOf(tracker).map((m) => m.payload.intent.value)).toEqual(['cancelled']);
+    expect(await flightRow(tracker)).toMatchObject({
+      phase: 'finished',
+      finish_reason: 'cancelled',
+    });
+    expectDesignatorReads(fake, flight, 2);
+    expect(await adbCalls(flight)).toBe(1);
+    expectOnePayloadPerVersion(tracker);
+  });
+});

@@ -6,9 +6,12 @@ import {
   evaluateReread,
   initialPolicyState,
   POLICY_STATE_VERSION,
+  policyWants,
   readPolicyState,
+  REREAD_TOLERANCE_MS,
   showsSuspectedChange,
   type PolicyIntent,
+  type PolicyRereadReason,
   type PolicyResult,
   type PolicyState,
 } from '../src/notification-policy';
@@ -1139,6 +1142,240 @@ describe('N4 cancellation and diversion', () => {
 });
 
 /** The first intent a walk produces. */
+describe('Q19 (a): a cancellation supersedes an open diversion suspicion', () => {
+  const AIRBORNE = { out: 0, off: 10, status: 'en_route' } as const;
+  const DIVERTED = { ...AIRBORNE, status: 'diverted', actualDestination: 'EINN' } as const;
+  const CANCELLED = { status: 'cancelled' } as const;
+  const suspected: Step[] = [
+    { at: t(120), shape: DIVERTED },
+    { at: t(125), shape: CANCELLED, reread: true },
+  ];
+
+  it('Diverted, then Canceled on the re-read: the diversion drops, the cancellation re-reads', () => {
+    const { intents, state, last } = walk({}, suspected);
+    expect(intents).toEqual([]);
+    expect(state.diversion).toEqual({ status: 'none' });
+    expect(state.cancellation).toMatchObject({
+      status: 'suspect',
+      value: 'cancelled',
+      fastLeft: 3,
+    });
+    // No unit spent on the superseded diversion; the re-read is the cancellation's, 5 minutes on.
+    expect(state.fastRereadsLeft).toBe(6);
+    expect(last.wants).toEqual({ at: t(130), from: t(130), reasons: ['cancellation'] });
+    const confirmed = walk({}, [...suspected, { at: t(130), shape: CANCELLED, reread: true }]);
+    expect(confirmed.intents.map(summary)).toEqual(['cancellation flight cancelled']);
+    expect(confirmed.last.wants).toBeNull();
+  });
+
+  it('the re-read clears the cancellation but still shows the diversion: suspected afresh, then confirmed', () => {
+    const cleared = walk({}, [...suspected, { at: t(130), shape: DIVERTED, reread: true }]);
+    expect(cleared.intents).toEqual([]);
+    expect(cleared.state.cancellation).toEqual({ status: 'none' });
+    expect(cleared.state.diversion).toMatchObject({
+      status: 'suspect',
+      value: 'EINN',
+      since: t(130),
+    });
+    expect(cleared.last.wants).toEqual({ at: t(135), from: t(135), reasons: ['diversion'] });
+    const confirmed = walk({}, [
+      ...suspected,
+      { at: t(130), shape: DIVERTED, reread: true },
+      { at: t(135), shape: DIVERTED, reread: true },
+    ]);
+    expect(confirmed.intents.map(summary)).toEqual(['diversion flight EINN']);
+    expect(confirmed.last.wants).toBeNull();
+  });
+
+  it('the re-read clears the cancellation and shows no diversion: nothing is owed', () => {
+    const { intents, state, last } = walk({}, [
+      ...suspected,
+      { at: t(130), shape: AIRBORNE, reread: true },
+    ]);
+    expect(intents).toEqual([]);
+    expect(state.cancellation).toEqual({ status: 'none' });
+    expect(state.diversion).toEqual({ status: 'none' });
+    expect(last.wants).toBeNull();
+  });
+
+  it('a cancelled alert merge while a diversion is suspected drops it, without an intent', () => {
+    const { intents, state, last } = walk({}, [
+      { at: t(120), shape: DIVERTED },
+      { at: t(122), shape: { ...CANCELLED, source: 'aeroapi' } },
+    ]);
+    expect(intents).toEqual([]);
+    expect(state.cancellation).toMatchObject({ status: 'suspect', provider: 'aeroapi' });
+    expect(state.diversion).toEqual({ status: 'none' });
+    expect(last.wants).toEqual({ at: t(127), from: t(127), reasons: ['cancellation'] });
+  });
+
+  it('an un-diversion suspicion, then Canceled: the push is restored; cleared, it is suspected again and corrected', () => {
+    const pushed: Step[] = [
+      { at: t(120), shape: DIVERTED },
+      { at: t(125), shape: DIVERTED, reread: true },
+      { at: t(155), shape: AIRBORNE },
+    ];
+    const restored = walk({}, [...pushed, { at: t(160), shape: CANCELLED, reread: true }]);
+    expect(restored.intents.map(summary)).toEqual(['diversion flight EINN']);
+    expect(restored.state.diversion).toEqual({ status: 'pushed', at: t(125), value: 'EINN' });
+    expect(restored.last.wants).toEqual({ at: t(165), from: t(165), reasons: ['cancellation'] });
+    const corrected = walk({}, [
+      ...pushed,
+      { at: t(160), shape: CANCELLED, reread: true },
+      { at: t(165), shape: AIRBORNE, reread: true },
+      { at: t(170), shape: AIRBORNE, reread: true },
+    ]);
+    expect(corrected.intents.map(summary)).toEqual([
+      'diversion flight EINN',
+      'diversion flight undiverted correction',
+    ]);
+    expect(corrected.state.diversion).toEqual({ status: 'none' });
+    expect(corrected.last.wants).toBeNull();
+  });
+
+  it('a re-diversion suspicion, then Canceled: the pushed airport stands', () => {
+    const { state } = walk({}, [
+      { at: t(120), shape: DIVERTED },
+      { at: t(125), shape: DIVERTED, reread: true },
+      { at: t(155), shape: { ...DIVERTED, actualDestination: 'EGLL' } },
+      { at: t(160), shape: CANCELLED, reread: true },
+    ]);
+    expect(state.diversion).toEqual({ status: 'pushed', at: t(125), value: 'EINN' });
+    expect(state.cancellation).toMatchObject({ status: 'suspect', value: 'cancelled' });
+  });
+
+  it('a stored state with both open: wants lists the cancellation only, the next evaluation normalises', () => {
+    const open = walk({}, [{ at: t(120), shape: DIVERTED }]).state;
+    const cancellation = {
+      status: 'suspect',
+      since: t(120),
+      value: 'cancelled',
+      provider: 'aerodatabox',
+      reads: 0,
+      fastLeft: 3,
+      lastReadAt: t(120),
+    } as const;
+    const both: PolicyState = { ...open, cancellation };
+    expect(policyWants(both)).toEqual({ at: t(125), from: t(125), reasons: ['cancellation'] });
+    // A failed read spends one unit, the cancellation's, and drops the diversion.
+    const failed = evaluateFailedReread({ state: both, now: t(125) });
+    expect(failed.state.diversion).toEqual({ status: 'none' });
+    expect(failed.state.cancellation).toMatchObject({ reads: 1, fastLeft: 2 });
+    expect(failed.state.fastRereadsLeft).toBe(5);
+    expect(failed.wants).toEqual({ at: t(130), from: t(130), reasons: ['cancellation'] });
+    const input = { previous: snap(DIVERTED), next: snap(CANCELLED), state: both, now: t(125) };
+    const read = evaluateReread(input);
+    expect(read.state.diversion).toEqual({ status: 'none' });
+    expect(read.intents.map(summary)).toEqual(['cancellation flight cancelled']);
+    expect(read.wants).toBeNull();
+  });
+});
+
+/** mulberry32: a small seeded generator, so a failing walk is reproducible by its seed. */
+function prng(seed: number): () => number {
+  let a = seed >>> 0;
+  return () => {
+    a = (a + 0x6d2b79f5) >>> 0;
+    let x = Math.imul(a ^ (a >>> 15), 1 | a);
+    x ^= x + Math.imul(x ^ (x >>> 7), 61 | x);
+    return ((x ^ (x >>> 14)) >>> 0) / 4294967296;
+  };
+}
+
+describe('Q19: a seeded random walk never leaves a re-read in the past', () => {
+  const AIRBORNE = { out: 0, off: 10, status: 'en_route' } as const;
+  const DIVERTED = { ...AIRBORNE, status: 'diverted', actualDestination: 'EINN' } as const;
+  const SHAPES: Shape[] = [
+    {},
+    { delay: 20 },
+    { delay: 45 },
+    { delay: 5 },
+    { originGate: 'B12' },
+    { originGate: 'C3' },
+    { status: 'cancelled' },
+    { status: 'cancelled', source: 'aeroapi' },
+    { status: 'cancelled', uncertain: true },
+    { status: 'unknown' },
+    AIRBORNE,
+    { ...AIRBORNE, arrival: 20 },
+    { ...AIRBORNE, arrival: 40 },
+    { ...AIRBORNE, destinationGate: 'A1' },
+    DIVERTED,
+    { ...AIRBORNE, status: 'diverted' },
+    { ...DIVERTED, actualDestination: 'EGLL' },
+    { ...DIVERTED, source: 'aeroapi' },
+  ];
+
+  /** What `wants` must list: every open suspicion and unsettled settle, and only those. */
+  function expectedReasons(state: PolicyState): PolicyRereadReason[] {
+    const reasons: PolicyRereadReason[] = [];
+    const { pending } = state.delay;
+    if (pending !== null && !pending.settled && state.cancellation.status === 'none') {
+      reasons.push('settle');
+    }
+    if (state.cancellation.status === 'suspect') {
+      reasons.push('cancellation');
+    }
+    if (state.diversion.status === 'suspect') {
+      reasons.push('diversion');
+    }
+    return reasons;
+  }
+  /**
+   * Reads happen as the tracker makes them: a re-read exactly when `wants.from` has come (within
+   * the tolerance), an ordinary observation otherwise, a failed read, or an alert merge (never a
+   * re-read); the clock moves to the sooner of a cadence slot and `wants.at`, sometimes late.
+   */
+  it.each([1, 2, 3, 5, 8, 13, 21, 34, 55, 89])('seed %i: 80 steps', (seed) => {
+    const random = prng(seed);
+    const pick = <T>(items: readonly T[]): T => items[Math.floor(random() * items.length)] as T;
+    let previous = snap({});
+    let state = initialPolicyState(previous);
+    let now = t(-300);
+    const spentOn = new Map<string, number>();
+    for (let step = 0; step < 80; step += 1) {
+      const wants = policyWants(state);
+      const slot = pick([15, 30, 60]) * MIN;
+      const late = random() < 0.2 ? pick([0, 1, 2, 3]) * MIN : 0;
+      now = (wants === null ? now + slot : Math.min(wants.at, now + slot)) + late;
+      const openKey = (['cancellation', 'diversion'] as const).find(
+        (key) => state[key].status === 'suspect',
+      );
+      const open = openKey === undefined ? null : state[openKey];
+      const openId = open?.status === 'suspect' ? `${String(openKey)}:${String(open.since)}` : null;
+      const budgetBefore = state.fastRereadsLeft;
+      const kind = pick(['read', 'read', 'read', 'read', 'failed', 'merge'] as const);
+      let result: PolicyResult;
+      if (kind === 'failed') {
+        result = evaluateFailedReread({ state, now });
+      } else {
+        const next = snap(pick(SHAPES));
+        const due = wants !== null && wants.from <= now + REREAD_TOLERANCE_MS;
+        const context = kind === 'merge' ? { provider: 'aeroapi' as const } : undefined;
+        const input = { previous, next, state, now, context };
+        result = kind === 'read' && due ? evaluateReread(input) : evaluatePolicy(input);
+        previous = next;
+      }
+      ({ state } = result);
+      const at = result.wants?.at ?? Infinity;
+      // After a read or a failed read, nothing is owed at or before the read itself.
+      expect(kind === 'merge' || at > now + REREAD_TOLERANCE_MS).toBe(true);
+      expect(state.cancellation.status !== 'none' && state.diversion.status === 'suspect').toBe(
+        false,
+      );
+      expect(result.wants?.reasons ?? []).toEqual(expectedReasons(state));
+      const drop = budgetBefore - state.fastRereadsLeft;
+      expect(drop).toBeLessThanOrEqual(1);
+      if (drop === 1) {
+        // A unit is spent only on the suspicion that was open, at most 3 per suspicion.
+        expect(openId).not.toBeNull();
+        spentOn.set(openId ?? '', (spentOn.get(openId ?? '') ?? 0) + 1);
+        expect(spentOn.get(openId ?? '')).toBeLessThanOrEqual(3);
+      }
+    }
+  });
+});
+
 function first(start: Shape, steps: Step[]): PolicyIntent {
   const [intent] = walk(start, steps).intents;
   if (intent === undefined) {

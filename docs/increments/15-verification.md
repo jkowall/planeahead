@@ -562,7 +562,7 @@ un-cancellation correction is unreachable while a confirmed cancellation finishe
   (`CONFIRM_SLOW_REREAD_MINUTES`), within a per-flight budget of 6 (`CONFIRM_FAST_REREAD_BUDGET`);
   AeroAPI's `nearestInstance` prefers an operating `fa_flight_id` among equally near instances.
   Part A1 (the tracker): a snapshot showing only a suspected change keeps the stored snapshot,
-  phase, times and version (`showsSuspectedChange`), writes the policy state and a
+  phase and times (`showsSuspectedChange`; the version moves with the schedule), writes the policy state and a
   `cancel_suspect` or `diversion_suspect` event, and no instance row or KV write shows it; the
   re-read goes to the window's own provider; an alert merge passes its provider, so it never
   decides a suspicion. Part A2 removed persist's `cancelSuspect` case, now dead. Proven: the
@@ -637,7 +637,8 @@ Part B (the policy, the adapters, the rendering):
 Part A1 (the tracker):
 
 - A snapshot showing only a suspected change keeps the stored snapshot text (its `fetchedAt`
-  too, so old data is never presented as re-confirmed), phase, scalar times and version, writes
+  too, so old data is never presented as re-confirmed), phase and scalar times (the version
+  moves with the schedule), writes
   no diff events, and stores the policy state, the call's cost and `last_refreshed_at_ms` (a read
   did happen, so a user refresh within 60 s coalesces); a new suspicion writes a `cancel_suspect`
   or `diversion_suspect` event whose source is the raising provider.
@@ -730,3 +731,60 @@ reports and logs; part C's are its own runs on this commit's tree.
 The whole API suite was not run in one call (the brief runs named files one at a time), nor the
 db suite in part C (no schema change) or the mobile app's (untouched); the orchestrator's full
 check covers them.
+
+### Re-review round
+
+The Opus re-review of `6c0a503..bea247c` (2026-10-01) confirmed the blocker gone and every
+ruling Q1 to Q18 applied, and found one major regression the fix round had introduced (Q19) and
+a docs nit (Q20); the orchestrator escalated the fix to a Fable round, read by two skeptics.
+
+- **Q19 (major regression): a suspected diversion frozen by a later suspected cancellation
+  looped the alarm and held the finish.** AeroDataBox answered `Diverted`, then `Canceled` on
+  the diversion's re-read. `run()` resolved the diversion only while the cancellation was
+  `none`, so its window stayed at `lastReadAt + 5 min` in the past; `#policySchedule` scheduled
+  `now` whenever `wants.at` had passed, with no floor after a read; `holdsFinish` held the
+  finish on the frozen diversion once the cancellation was confirmed. Probes (mock mode): 900
+  alarms and 900 AeroDataBox calls in 20 simulated minutes; run on, 4,880 alarms and 4,879 calls
+  to the hard cap, the cancellation pushed once at alarm 591 and the flight finished `hard_cap`,
+  not `cancelled`. Ruling, as the second skeptic refined it: (a) a cancellation, suspected
+  (an un-cancellation too) or pushed, supersedes an open diversion suspicion: restored to its
+  push when it carries one, else `none`, no intent, no budget unit, normalised in `run()` after
+  the cancellation rule (the rule order kept) and at the top of `evaluateFailedReread`; (b)
+  `policyWants` lists a diversion suspicion only while the cancellation is `none`, and
+  `holdsFinish` holds only on a suspicion `policyWants` lists; (c) narrowed to a backstop: after
+  a provider read, a policy `wants.at` still at or before the read plus the tolerance is floored
+  to the read plus `CONFIRM_REREAD_MINUTES`, logged at error level as `policy_wants_overdue`,
+  and holds no finish; the cadence's slot and a future `wants.at` are never touched;
+  `EARLY_ALARM_TOLERANCE_MS` is now `REREAD_TOLERANCE_MS`; no per-time-window call bound beyond
+  it; (d) with (a) at most one suspicion is ever open: a property assertion, no code. Changed:
+  `supersedeDiversion` and the `policyWants` gate (`packages/shared`); `holdsFinish` by
+  `wants.reasons`, `#schedule`'s `read` (`none`, `planning`, `made`) with the floor and the
+  log, and the `policy` test seam (`flight-tracker.ts`). Proven: seven policy rows (Diverted
+  then Canceled: diversion `none`, no intent, the cancellation's re-read 5 minutes on, then one
+  intent; cleared while still Diverted: suspected afresh and confirmed; cleared with no
+  diversion: nothing; an un-diversion or re-diversion then Canceled restores the push, the
+  un-diversion suspected again and corrected after the clear; a cancelled alert merge drops it;
+  a stored state with both open) and a seeded random walk (10 seeds by 80 steps of reads made
+  exactly when the tracker would, failed reads and alert merges: after every read `wants.at` is
+  past the read, never a cancellation beside a diversion suspicion, `wants.reasons` is exactly
+  the open windows, the budget drops by at most 1 per evaluation and 3 per suspicion). Tracker:
+  the probe as a regression (the next alarm 5 minutes on, one intent, finished `cancelled` at
+  +10 minutes, 4 provider calls; the 1-second-per-alarm walk ends after 2 alarms, rows written
+  under `ROWS_WRITTEN_BUDGET_PER_FLIGHT`); the cleared variant (phase `diverted`, no finish);
+  the live-mode variant (a `diverted` alert merge, AeroAPI `cancelled` on the poll, 2 AeroAPI
+  reads, finished `cancelled`); the backstop through the seam (a policy that moves no window:
+  the alarm at the read plus 5 minutes, `policy_wants_overdue` once, and past the last slot the
+  flight finishes `lifetime`, unheld); and `nextAlarm` now asserts, in every tracker test, that
+  the alarm after an alarm is later than it plus the tolerance. The probes after the fix: 2
+  alarms, 2 calls, finished `cancelled`, no alarm at `now`.
+- **Q20 (nit): a held read does not keep the version** (`emit = changed || rescheduled || seed`
+  bumps it whenever the alarm moves). Reworded in `flight-tracker.ts` (the header and
+  `#applyStatus`), `docs/architecture.md`, `docs/open-decisions.md` and above: the snapshot,
+  phase and times stay; the version moves with the schedule.
+
+What ran, on this tree: typecheck and lint in `apps/api` and `packages/shared`; the shared suite
+(27 files, 784 tests; the policy file 148, 17 new); one file per command from `apps/api`: the
+tracker's `suspicion` 14 (6 new), `aeroapi` 5 (1 new), `policy` 8, `finish` 13, `lifecycle` 3,
+`outbox` 4, `refresh` 8, `retries` 7, `scheduler` 2; `notify.real-path` 4, `persist` 10,
+`admin-inject` 8; `prettier --check` on every changed file; the migration hash (up to date, 10
+migrations, no migration in this round).
