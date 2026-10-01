@@ -2,7 +2,8 @@
 
 Status: increment 12 (2026-09-23); the store steps (step 18) increment 13 (2026-09-30); the push
 transport (the `push` queues in step 2, its secrets in step 6, step 19) increment 14
-(2026-09-30). Everything
+(2026-09-30); client push (step 12's Time Sensitive Notifications, step 18's channels and
+notification icon, step 19's soak and exit test) increment 16 (2026-10-01). Everything
 the owner does once, in order, before and during the first staging and production deploys and the
 first store builds, with the exact commands. Nothing here has been run: there
 is no Cloudflare account, Neon project, provider key or Apple and Google credential in the build
@@ -283,9 +284,13 @@ SHOW idle_in_transaction_session_timeout;` and
 
 ## 12. Apple App IDs and capabilities
 
-- [ ] App IDs for the three variants (`app.planeahead.mobile`, `.preview`, `.dev`) with Sign in
-      with Apple, Associated Domains, **Push Notifications**, and the App Groups capability with
-      `group.<bundle id>` (ADR 0005).
+- [ ] App IDs for the three variants (`app.planeahead.mobile`, `.preview`, `.dev`) with Sign in with
+      Apple, Associated Domains, **Push Notifications**, **Time Sensitive Notifications**, and the
+      App Groups capability with `group.<bundle id>` (ADR 0005). Time Sensitive Notifications is
+      increment 16's (ruling C8): the app's entitlement asks for it, and without it iOS delivers a
+      time-sensitive push as an ordinary one. EAS capability sync turns it on at a signed profile's
+      next `eas build` (R2 fact 13); the development profile builds for the Simulator, unsigned, so
+      tick it on `.dev` here for a development build on a device, which the Mac signs.
 - [ ] Sign in with Apple grouping, BEFORE any user signs in: on `app.planeahead.mobile` enable
       Sign in with Apple as **Enable as a primary App ID**; on `app.planeahead.mobile.preview` and
       `app.planeahead.mobile.dev` choose **Group with an existing primary App ID** and pick
@@ -482,6 +487,29 @@ the store listing.
       are missing (the app, `.widgets`, `.watchkitapp`, `.watchkitapp.widget`), syncs their
       capabilities, and creates the distribution certificate and the four provisioning profiles.
       It does not group Sign in with Apple (step 12 does, first).
+- [ ] The Android notification channels (increment 16, ruling C4), before the first Android build
+      reaches a tester's phone: confirm or change what the app creates at every start,
+      `flight_changes` "Flight changes" (gate changes, first gate assignments, cancellations,
+      diversions) and `flight_delays` "Delays", both importance HIGH, so they sound and show
+      heads-up and the user can lower either (`docs/open-decisions.md`, section 8). Once a phone has
+      created a channel the app cannot change its importance, and a renamed id is a new channel
+      beside the old one, so after that a change needs a new id. A change touches
+      `ANDROID_CHANNEL_IDS` and `ANDROID_CHANNEL_BY_KIND` (`packages/shared/src/notify.ts`), the
+      names in `ANDROID_CHANNELS` (`apps/mobile/src/lib/push.ts`) and the plugin's `defaultChannel`
+      literal (`apps/mobile/app.config.ts`), which `app-config.test.ts` holds equal to the constant.
+- [ ] The notification icon (increment 16, ruling C5; R2 owner action 5), whenever your own
+      monochrome icon exists: replace `apps/mobile/assets/notification-icon.png` at the same path
+      (96 by 96 pixels, white on transparent, nothing within 4 px of the border, 5 to 50 percent
+      opaque: the app-config test checks each). Then delete `scripts/gen-notification-icon.mjs`, the
+      `--check` lines that end the icon test in `apps/mobile/__tests__/app-config.test.ts` (its
+      pixel checks stay), and the script's input line and its comment sentence in
+      `apps/mobile/turbo.json`; reword the comments that name the script (`NOTIFICATION_ICON` in
+      `apps/mobile/app.config.ts`, the test file's header); then `pnpm run lint` and
+      `pnpm exec jest __tests__/app-config.test.ts` from `apps/mobile`. The icon file is not a
+      fingerprint source, so the swap keeps the runtime version, and the new icon shows only after
+      the next native build (an update cannot carry it). An accent colour of your choosing replaces
+      the plugin's `color` (each variant's launcher background until then) in the same entry, and
+      that does change the runtime version.
 - [ ] First Android production build: `eas build --platform android --profile production`, letting
       EAS generate the upload keystore. Keep a copy: `eas credentials --platform android`,
       profile `production`, download the keystore, into the password manager.
@@ -522,13 +550,14 @@ the store listing.
       in with the link and installs from Play. Record any App Store Connect email in
       docs/increments/13-verification.md (its unverified items).
 
-## 19. Push transport: keys and the staging send
+## 19. Push: keys, the staging send, the soak and the exit test
 
 Increment 14. The API sends APNs directly and FCM through HTTP v1 from the `push` queue's
 consumer; nothing produces real push jobs until increment 15, so the first push is the admin
 page's test push. Staging deploys without any push secret (its consumer holds push jobs as
 `not_configured` and `/admin` says so); production requires them (step 6). The exact staging
-commands are in `docs/increments/14-verification.md`.
+commands are in `docs/increments/14-verification.md`. Increment 16 adds the transport soak on staging and
+the exit test on production, the last items below.
 
 - [ ] APNs keys (Certificates, Identifiers and Profiles > Keys > +, **Apple Push Notifications
       service (APNs)**): one team-scoped key restricted to **Sandbox** for staging and one to
@@ -560,14 +589,71 @@ commands are in `docs/increments/14-verification.md`.
       pooled and whether they speak HTTP/2 (R1 U2 and U3, owner action 7). That the setting
       governs Worker subrequests is unverified, so a setting found on does not close the question.
       Record the setting's state and the answer in `docs/increments/14-verification.md`.
-- [ ] The transport soak (increment 16, ruling C9; staging only), once the staging send passes:
-      from the test devices, follow a flight that departs after the soak will end, with live
-      tracking on. On `/admin/push/soak` enter its flight key, the hours (24 to 48) and the
-      iPhone's device token (kind APNs), and start. Every five minutes a synthetic departure delay
-      goes to the devices (each replacing the last on screen), and once an hour two canary test
-      pushes. It passes with no rows under "403 and 429 answers, by reason" and "Edge 52x answers
-      without an apns-id" for the whole soak and every canary round `sent`; any such row is a
-      finding (plan section 11 item 8: the relay). Record the counts in the increment 16
-      verification doc. The page's button stops it early; production refuses to start one.
+- [ ] The transport soak's devices (increment 16, ruling C9; staging only), once the staging send
+      passes. Staging is the development variant's API, and a development-signed build registers
+      with sandbox APNs, the environment staging's key covers: the Simulator build of the staging
+      send; the iPhone with a development build signed on the Mac (`IOS_DEVELOPMENT_TEAM` exported,
+      then `pnpm ios --device "<the iPhone's name>"` from `apps/mobile`); and the Android emulator
+      or phone with `GOOGLE_SERVICES_JSON` naming the development app's file (`pnpm android`). Sign
+      all of them in to one account and follow one flight that stays live-tracked for the whole
+      soak: inside its live window (from 48 hours before scheduled departure; a free account has two
+      live-tracked flights) and departing after the soak ends, since an injected delay changes
+      nothing once the flight is out. For 24 hours, a flight departing 24 to 48 hours after the
+      start; for 48 hours, one departing just after the end, whose ticks before it enters its window
+      reach the inbox only. Its key and the iPhone's token, in the Neon SQL editor on `staging`:
+
+  ```sql
+  select fi.flight_key, fs.live_tracked from flight_subscriptions fs
+  join flight_instances fi on fi.id = fs.flight_instance_id where fs.user_id = '<user id>';
+  select token, registered_at from push_tokens where user_id = '<user id>' and kind = 'apns'
+  and invalidated_at is null order by registered_at desc;
+  ```
+
+- [ ] Start it: `https://api-staging.planeahead.app/admin/push/soak`, the flight key, the hours (24
+      to 48; the form takes 1 to 72), the iPhone's token, kind APNs (iOS), then **Start the soak**.
+      Every five minutes a synthetic departure delay (30, 60, 90 and 120 minutes in turn) goes to
+      every device that follows the flight, each replacing the last on screen, and once an hour two
+      canary test pushes go to the iPhone in the same instant. Read the same page while it runs:
+      **Sent** by channel; **403 and 429 answers, by reason** and **Edge 52x answers without an
+      apns-id**, which a clean soak leaves empty; **Every attempt**; **Injections** by outcome
+      (`ignored` with `suspected` or `cancelled` is the tracker's 409, `refused` a tick that never
+      called it); **Canaries**, each round's outcome and each send's first answer, with links to the
+      last round's result pages. The counts cover every push sent in the soak's window, not only the
+      soak's.
+- [ ] Stop it with **Stop the soak**, or let it end at its hours; production refuses to start or
+      stop one. It passes with both answer tables empty for the whole soak and every canary round
+      `sent`; any row there is a finding (plan section 11 item 8: the relay). Record the counts in
+      `docs/increments/16-verification.md` (its Unverified section says what to note).
 - [ ] Production, after the first TestFlight install (increment 16): `PUSH_INJECT_ALLOWED_USER_IDS`
       set to your own user id, then the same test push to your iPhone's token.
+- [ ] The exit test (increment 16; plan section 8, row 16), once step 18's builds are installed: the
+      TestFlight build on the iPhone and the internal-track build on an Android 13 or later phone
+      with Google Play. Sign in as the allow-listed tester on both. On the iPhone add a flight that
+      departs 6 to 47 hours from now (inside its live window), then on the pre-prompt that follows
+      tap "Turn on notifications" and Allow; on the Android phone, Settings > Notifications > "Turn
+      on notifications", then Allow. In the Neon SQL editor on `main`:
+
+  ```sql
+  select kind, app_id, environment, permission, invalidated_at from push_tokens
+  where user_id = '<tester user id>' order by registered_at desc;
+  select fi.flight_key, fs.live_tracked from flight_subscriptions fs
+  join flight_instances fi on fi.id = fs.flight_instance_id
+  where fs.user_id = '<tester user id>';
+  ```
+
+  It shows a live `apns` row (`app.planeahead.mobile`, `production`, `granted`), a live `fcm` row
+  (`granted`) and the flight live-tracked.
+
+- [ ] With both apps in the background, `https://api.planeahead.app/admin/push/inject`: the flight
+      key, a departure delay of 30 minutes, Inject. The answer lists one intent written; both phones
+      show the push within a minute, and a tap on each opens the app on the flight, the notification
+      leaving the tray.
+- [ ] Swipe both apps away (not Android's Force stop, after which FCM delivers nothing until the app
+      is reopened), inject 60 minutes and tap the push: the app starts on the flight. With the
+      flight's screen open, inject 90: no banner, and the screen shows the new delay. From the home
+      screen, inject 120: a banner.
+- [ ] Sign out on both phones, online: the trays empty, both token rows above get `invalidated_at`,
+      and a further injection (30 minutes) answers one intent written and reaches neither phone.
+      Record every answer in `docs/increments/16-verification.md`, whose Unverified section also
+      lists the device checks the same session can make (R2 U1 and U7 to U10, the dismissal of what
+      FCM displayed, what a sign-out cannot recall).

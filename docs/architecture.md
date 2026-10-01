@@ -1,12 +1,13 @@
 # Architecture
 
-Phase 0 architecture of PlaneAhead as built at the end of increment 12 (2026-09-23), with the
-push transport of increment 14 (2026-09-30, section 9): what runs where, the request paths, the
-Durable Object lifecycle, the outbox and persist path, the sync feed and its watermark, the crons
-and housekeeping, the push path, and the environments. The last section, the refresh
-cadence, is generated from `packages/shared/src/cadence.ts` and checked against the code by a test;
-everything above it is prose kept honest by the tests it names. Decisions and their alternatives
-are in `docs/adr/`; the data model is `docs/schema-review.md`; threats are
+Phase 0 architecture of PlaneAhead as built at the end of increment 12 (2026-09-23), with the push
+transport of increment 14 (2026-09-30, section 9), increment 15's notification policy (section 10)
+and increment 16's push on the app and the transport soak (2026-10-01, section 11): what runs where,
+the request paths, the Durable Object lifecycle, the outbox and persist path, the sync feed and its
+watermark, the crons and housekeeping, the push path, and the environments. The last section, the
+refresh cadence, is generated from `packages/shared/src/cadence.ts` and checked against the code by
+a test; everything above it is prose kept honest by the tests it names. Decisions and their
+alternatives are in `docs/adr/`; the data model is `docs/schema-review.md`; threats are
 `docs/security/threat-model.md`; money is `docs/cost-estimate.md`; what is still open is
 `docs/open-decisions.md`; the owner's setup is `docs/runbooks/first-deploy.md`.
 
@@ -24,6 +25,7 @@ are in `docs/adr/`; the data model is `docs/schema-review.md`; threats are
  | queue(): persist, notify, push, provider-events, imports, reconcile,              |
  |          housekeeping, DLQs                                                       |
  | scheduled(): */15 reconcile, 03:00 housekeeping + Analytics Engine rollup         |
+ |              staging also */5, the push soak's tick (increment 16, section 11)    |
  +----+-------------+-------------+--------------+--------------+----------+--------+
       | RPC         | Hyperdrive  | KV           | R2           | AE       | fetch (push)
       v             v             v              v              v          v
@@ -125,6 +127,8 @@ to production (ADR 0005).
 | `GET /admin`                                                          | the operator, through Cloudflare Access | `Cf-Access-Jwt-Assertion` validated                                           | read-only Postgres, the Analytics Engine SQL API, the Queues API, the `PushAuth` objects' status                                          |
 | `GET`, `POST /admin/accounts/delete`                                  | the operator, through Cloudflare Access | the Access assertion; the POST also same-origin and the user id typed twice   | a write action: `deleteAccount`, exactly as `POST /v1/me/delete`, with an audit row naming the operator                                   |
 | `GET`, `POST /admin/push/test`, `GET /admin/push/test/result`         | the operator, through Cloudflare Access | the Access assertion; the POST also same-origin; production: allow-listed ids | the other write action (increment 14): one test job on the `push` queue, an audit row, then the delivery row the persist consumer writes  |
+| `GET`, `POST /admin/push/inject`                                      | the operator, through Cloudflare Access | the Access assertion; the POST also same-origin; production: allow-listed ids | increment 15: test intents through one tracker's `injectPolicyEvent`, an audit row written `pending` before the call                      |
+| `GET`, `POST /admin/push/soak`                                        | the operator, through Cloudflare Access | the Access assertion; the POST also same-origin; production refuses (403)     | increment 16, staging only: the soak record in `CONFIG` KV (start, stop), an audit row each; the page counts from Postgres                |
 | `GET /account/delete`                                                 | Google Play's listing, anyone           | none                                                                          | a static page                                                                                                                             |
 
 Every non-2xx JSON answer under `/v1` is the envelope `{ error, message, requestId, ... }`
@@ -264,6 +268,7 @@ message per unit of work.
 | --------------------------------------- | ---------------------------------- | ------------------------------------------------------------------------------------------------------------ |
 | every 15 minutes (reconcile)            | 30 s on Paid (a 25 s wall budget)  | one `reconcile` message per active tracker whose refresh is 20 min overdue                                   |
 | 03:00 UTC daily (housekeeping + rollup) | 15 min on Paid (uses milliseconds) | one `housekeeping` message per step, then one `ae_rollup` message per UTC day (yesterday and the day before) |
+| every 5 minutes, staging only (soak)    | 30 s on Paid (uses milliseconds)   | inside a push soak only (section 11): one `push_soak` injection step, and every twelfth tick a canary step   |
 
 The housekeeping consumer (`max_batch_size` 1, `max_concurrency` 1, so one message at a time on
 one connection) runs each message within a 30 s wall budget and enqueues a continuation of the
@@ -286,6 +291,11 @@ the ledger purge judges the rollup against ninety days later, so a purge that de
 day and was retried cannot find the day implausible by its own shrunken count; a sum that is not
 a number fails the message (retried, then dead-lettered with the ops alert), never a 0 row.
 
+On staging the push soak's steps (section 11) share the queue: each `push_soak` message carries one
+injection or one canary step, reads the soak's record again first, and does nothing for a soak since
+stopped or replaced, or in production; its audit rows are the injector's and the canary's, not
+`housekeeping.{step}`. A soak step planned at 03:00 UTC can wait behind the nightly steps.
+
 ## 8. Observability
 
 JSON log lines with the request id on every line (`src/observability/log.ts`); Sentry for
@@ -297,9 +307,11 @@ key and per provider per day, the Durable Object schema versions, the sync water
 partial when the role lacks `pg_read_all_stats`), the queue depths, the sync horizon and epoch, and
 the last housekeeping runs, and (increment 14) the push transport: its configuration, the
 `PushAuth` objects' last mints and failures, and every push attempt's outcome by reason over the
-last 24 hours. Its write actions are the operator account deletion (`/admin/accounts/delete`) for
-a request that reached the support inbox, the test push (`/admin/push/test`, section 9) and,
-from increment 15, the event injector (`/admin/push/inject`, section 10).
+last 24 hours. Its write actions are the operator account deletion (`/admin/accounts/delete`) for a
+request that reached the support inbox, the test push (`/admin/push/test`, section 9), from
+increment 15 the event injector (`/admin/push/inject`, section 10), and from increment 16, on
+staging only, the transport soak's start and stop (`/admin/push/soak`, section 11), whose page also
+counts the provider answers while a soak runs.
 
 ## 9. The push path (increment 14)
 
@@ -367,14 +379,16 @@ from increment 15, the event injector (`/admin/push/inject`, section 10).
   live row; `POST /v1/devices/current/invalidate` invalidates every kind of the caller's
   installation before sign-out, and nothing from a batch whose liveness read starts after that
   commits reaches the phone (a batch already past its read can finish its sends, within seconds
-  usually and about seven minutes at worst, and a push the provider had already accepted can
-  still arrive until its `expiresAt`).
+  usually and about seven minutes at worst, and a push the provider had already accepted can still
+  arrive until its `expiresAt`). The app's side of registration and sign-out, from increment 16, is
+  section 11.
 - **Visibility.** The admin page's push section and "Send a test push" (section 8); the test push
   is the plan's staging smoke, sent through the real queue, consumer, `PushAuth` and transport to a
   registered, live token (in production only one of a user id in `PUSH_INJECT_ALLOWED_USER_IDS`).
   Its result page shows Apple's `apns-unique-id` for a sandbox send (the key to the Push
-  Notifications Console's delivery log) and stops reloading once the job's window has passed
-  without an outcome.
+  Notifications Console's delivery log) and stops reloading once the job's window has passed without
+  an outcome. On staging the transport soak (section 11) sends the plan's canary through the same
+  consumer and counts every attempt's answer by reason while it runs.
 
 ## 10. Notifications end to end (increment 15)
 
@@ -477,8 +491,11 @@ from increment 15, the event injector (`/admin/push/inject`, section 10).
 - **Preferences.** `notification_preferences` holds `push_enabled` and the per-kind `events`
   toggles (delay, gate change, first gate assignment off by default, cancellation, diversion),
   read and written through `GET` and `PATCH /v1/me/preferences` (a nested `notifications` object
-  beside the display preferences); a tombstoned preferences row reads as the defaults there, as
-  in notify (review ruling Q18); muting is the subscription's own flag.
+  beside the display preferences); a tombstoned preferences row reads as the defaults there, as in
+  notify (review ruling Q18); muting is the subscription's own flag, set at the subscribe and
+  API-only in Phase 1 (`notificationOverrides` carries `muted` alone since increment 16's ruling
+  C12). The app reads the toggles from the sync feed's `notification_preferences` row and writes
+  them with that `PATCH` through its outbox (section 11).
 - **The event injector** (`/admin/push/inject`, src/routes/admin-inject.ts) reads a tracker's
   snapshot (`getState`), applies one event to a copy (an origin or destination gate, a departure
   delay of N minutes, a cancellation, a diversion), and calls `injectPolicyEvent` with a fresh
@@ -492,6 +509,91 @@ from increment 15, the event injector (`/admin/push/inject`, section 10).
   confirmed by construction and would decide it) or its stored snapshot is cancelled (review
   ruling Q5). The `audit_log` row naming the operator is written `pending` before the tracker
   call and settled after it as `written`, `ignored`, `timeout` or `error` (Q6).
+
+## 11. Push on the app, and the transport soak (increment 16)
+
+```
+ app start         the Android channels, the foreground handler, a queued invalidation settled
+ session start,    registrar: the permission and the raw token  -->  POST /v1/devices
+ foreground,         (appId and pushPermission in every state; one run at a time, one queued;
+ token rotation       a queued invalidation settled first; listener echo ignored, 1 s debounce)
+ push received     shown unless its flight is in front; a push naming a flight syncs the store
+ tap               held until a session exists, then /flight/{id} (unknown: one sync, else home)
+ sign-out          registration stopped -> invalidate, or queue it -> the tray cleared
+                   -> forgetAccount (authClient.signOut) -> unregisterForNotificationsAsync
+```
+
+- **Permission** (ruling C1, `apps/mobile/src/lib/push.ts`). Asked in context, once: after the first
+  flight add that succeeds, or is queued offline, a pre-prompt (`(app)/notifications`) says what the
+  alerts are for, and "Turn on notifications" checks first and asks for alert and sound only (no
+  badge, no provisional). Settings offers the same button while the system can still ask, and the
+  system settings once the state is denied. iOS's state comes from `ios.status`, provisional being a
+  quiet grant that is never prompted over; Android 13 and later report denied before the first
+  request, so the app keeps its own record of having asked: undetermined until it has, denied after.
+- **Registration** (C2, `src/lib/push-registration.ts`, `src/lib/devices.ts`). On every session
+  start, every return to the foreground, a permission answer and a token rotation, the registrar
+  reads the permission and the raw APNs or FCM token (`getDevicePushTokenAsync`, which needs no
+  permission; 10 s at most) and calls `POST /v1/devices` with `appId` (the variant's bundle or
+  package id) and `pushPermission`, in every permission state: the API keeps the state only on a
+  token row, and `notify` skips a token that is `denied` or `undetermined`. Without a token the
+  device still registers. One registration runs at a time with at most one more queued;
+  `addPushTokenListener` also fires on reads, so its echo of the last token is ignored, and a
+  rotation is debounced 1 s and registered as the listener carried it.
+- **Channels, the icon and the entitlement** (C4, C5, C8). At every start, and again before any
+  permission request, the app creates `flight_changes` ("Flight changes") and `flight_delays`
+  ("Delays") from `ANDROID_CHANNEL_IDS`, both HIGH. The expo-notifications plugin names
+  `flight_changes` as FCM's default channel, the notification icon (`assets/notification-icon.png`,
+  a white plane on transparent drawn by `scripts/gen-notification-icon.mjs` until the owner's own
+  exists) and its accent colour. Every iOS variant carries
+  `com.apple.developer.usernotifications.time-sensitive`, so a push the policy marks time-sensitive
+  breaks through Focus and the notification summary.
+- **In the foreground** (C6, `src/lib/push-notifications.ts`). `setNotificationHandler` is installed
+  once, at the root layout's module scope, and answers synchronously from memory: banner, list and
+  sound, except for a push about the flight whose detail screen is focused, which is not presented
+  at all. Every push received in the foreground that names a flight starts a sync
+  (`src/lib/push-routing.ts`), which is how the open screen updates in place.
+- **Taps and dismissal** (C7). The root layout takes `getLastNotificationResponse()` at mount (a
+  cold start) and every response after, once each; the `(app)` layout routes the tap once a session
+  exists to `/flight/{flightSubscriptionId}`, after one sync when the store does not know the id,
+  else to home, and clears the response. Focusing a flight's detail screen dismisses its presented
+  notifications: those whose data names it, and those whose identifier or tag is one of its collapse
+  ids (`{kind}:{flightKey}`), the only handle on a notification FCM displayed itself, which expo
+  reads back without its app data.
+- **Sign-out** (C3, `src/lib/sign-out.ts`, `src/lib/device-invalidation.ts`), from the button and on
+  a revoked Apple credential alike. Registration stops (a run in flight is waited for, 5 s at most);
+  `POST /v1/devices/current/invalidate` goes with the session's cookies and `X-Install-Id` (5 s at
+  most); the tray is cleared (`dismissAllNotificationsAsync`, never awaited); `forgetAccount` runs,
+  `authClient.signOut()` included; then `unregisterForNotificationsAsync()`, which on Android
+  deletes the FCM token (5 s at most). Offline, past the timeout, or on a 408, 429 or 5xx, the call
+  is queued in SecureStore with the signed-out session's cookie map, because the route invalidates
+  the caller's tokens and only that session is the caller; one record, the first kept. It is retried
+  at launch and before every registration: a 2xx settles it; any other 4xx, cookies that have all
+  expired, or a third 408, 429 or 5xx drop it; a network failure keeps it. An account deletion ends
+  in `forgetAccount` alone. What a sign-out cannot recall is in `docs/security/threat-model.md`,
+  section 1.8.
+- **Settings** (C11, C12). Settings shows the permission state and the account's notification
+  preferences: "Flight alerts" (`pushEnabled`) and the five per-kind toggles, first gate assignment
+  off by default. They are read from the sync feed's `notification_preferences` row with the
+  defaults filled in, change at once, and are queued as `PATCH /v1/me/preferences` with
+  `{ notifications }` through the outbox, a queued change holding over older sync pages; they stay
+  editable whatever the permission, and with "Flight alerts" off the five are greyed out. A
+  subscription's overrides carry `muted` only.
+- **The transport soak** (C9, staging only; `apps/api/src/push/soak.ts`,
+  `src/routes/admin-soak.ts`). `/admin/push/soak`, behind Access, starts a soak (a test flight the
+  owner's devices follow, 1 to 72 hours, a canary token) and stops it, each with an `audit_log` row
+  (`push.soak_started`, `push.soak_stopped`) written `pending` before the KV write; production
+  refuses both and shows no form. The record is one value in `CONFIG` KV (`push-soak:v1`) that holds
+  the canary's `push_tokens` row id, never the token. `PUSH_SOAK_CRON` (`*/5 * * * *`, in staging's
+  `triggers` only) plans each tick inside the soak onto `housekeeping` (section 7): an injection
+  through increment 15's injector as `system`, a departure delay of 30, 60, 90 and 120 minutes in
+  turn (a `notify.injected` row naming the soak and its operator), and on every twelfth tick from
+  the start a canary: two test pushes from one invocation through the push consumer's batch handler,
+  each with an empty token cache, held so both ask `PushAuth` in the same instant (a
+  `push.soak_canary` row). The page counts every delivery attempt in the soak's window from
+  `notification_deliveries.attempt_log`: the sends by channel, every 403 and 429 by status and
+  reason, edge 52x answers without an `apns-id`, then the injections by outcome and the canary
+  rounds. A clean 24 to 48 hours settles R1 U2; a failing one ships the relay
+  (`src/push/transport.ts`).
 
 ## Refresh cadence
 

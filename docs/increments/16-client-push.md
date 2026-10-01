@@ -1,10 +1,28 @@
 # Increment 16: client push
 
-Status: spec (2026-10-01), revised after increment 15 merged (58d7774). Builder: Opus 5.5, in
-parts. Reviewers: two Opus 5.5 lenses (the mobile client's push lifecycle on both platforms; the
-soak, the API changes and their tests) plus the orchestrator's read; two skeptics on every
-serious finding. Branch `inc16-client-push` from main at 58d7774 (increment 15 merged), built while
-increment 18's review fixes finish on their own branch; whichever merges second takes main in.
+Status: built (2026-10-01) in four parts; review pending. Part 1 (`82b1543`): the app's push
+lifecycle, C1 to C4, C6 and C7. Part 2 (`e4754d6`): the notification icon and the time-sensitive
+entitlement, C5, C8 and the plugin's default channel. Part 3a (`47fc437`, built on its own branch
+and merged as `741ec86`): notification settings, the overrides contract and the tray at sign-out,
+C11 and C12. Part 3b (`ac113d7`): the transport soak harness, C9. A test-only fix (`de4237c`) then
+stopped the API suite exhausting Postgres connections, which main shares. Part 4: the documents.
+What ran, the measurements, the findings, the departures and what stays unverified, with the steps
+that settle it, are in `docs/increments/16-verification.md`. Spec written 2026-10-01, revised after
+increment 15 merged (58d7774). Builder: Opus 5.5, in parts. Reviewers: two Opus 5.5 lenses (the
+mobile client's push lifecycle on both platforms; the soak, the API changes and their tests) plus
+the orchestrator's read; two skeptics on every serious finding. Branch `inc16-client-push` from main
+at 58d7774 (increment 15 merged), built while increment 18's review fixes finish on their own
+branch; whichever merges second takes main in.
+
+Departures from these rulings, each with its reason in the verification file: the hourly canary
+sends its two test pushes from one invocation, each with a cold token cache, held so both ask
+`PushAuth` in the same instant, not from two isolates (C9: a Worker cannot choose its isolate, and
+two queued jobs would run one after the other); the flight in front loses its list entry and its
+sound as well as its banner (C6, as R2 design 12 words it); the toggles are read from the sync
+feed's `notification_preferences` row, which carries what `GET /v1/me/preferences` answers (C11);
+and the native smoke checks the entitlement, the plugin-chain test the icon. C2 and C7 below already
+carry part 1's corrections: the token registers in every permission state, and the dismissal also
+matches the flight's collapse ids as identifiers or tags.
 
 Read first: `docs/plans/phase1-plan.md` (section 3 row Client push; section 4 Transport gate and
 soak; section 8 row 16; section 9 items 2 and 4; section 10 Hours and Days),
@@ -69,8 +87,9 @@ proves the transport over 24 to 48 hours once staging and the keys exist.
   runbook names the swap.
 - **C6. Foreground presentation (R2 design 12).** `setNotificationHandler` installed once at module
   scope: banner, list and sound, except when that flight's detail screen is open, where the screen
-  refreshes in place and the banner is suppressed. It answers synchronously from in-memory state,
-  never a network call, well inside the 3-second limit.
+  refreshes in place and the banner is suppressed (as built, the list entry and the sound too, as R2
+  design 12 words it: departure 2 in the verification file). It answers synchronously from in-memory
+  state, never a network call, well inside the 3-second limit.
 - **C7. Tap routing (R2 design 13).** A root-level observer reads `getLastNotificationResponse()`
   at mount and subscribes to responses; once a session exists it routes to
   `/flight/{flightSubscriptionId}` (the app data's field) and clears the response. An id the local
@@ -88,18 +107,21 @@ proves the transport over 24 to 48 hours once staging and the keys exist.
 - **C9. The soak harness (plan section 4 Transport gate and soak).** An Access-protected admin
   action on staging starts and stops a soak: on a schedule (every 5 minutes for the chosen hours),
   it injects synthetic events through increment 15's injector into one test flight followed by the
-  owner's test devices, and once an hour sends a canary test push from two isolates at once. The
-  admin page shows the soak's counts by reason from the delivery attempt log: every 403 and 429
-  reason (`UnrelatedKeyIdInToken`, `TooManyProviderTokenUpdates`), edge 52x answers without an
-  `apns-id`, and sent counts. Staging only; production refuses to start one.
+  owner's test devices, and once an hour sends a canary test push from two isolates at once (as
+  built, two sends from one invocation, each with a cold token cache, held so both ask `PushAuth` in
+  the same instant, since a Worker cannot choose its isolate: departure 1). The admin page shows the
+  soak's counts by reason from the delivery attempt log: every 403 and 429 reason
+  (`UnrelatedKeyIdInToken`, `TooManyProviderTokenUpdates`), edge 52x answers without an `apns-id`,
+  and sent counts. Staging only; production refuses to start one.
 - **C11. Notification settings (decision 4; increment 15's N10).** The Settings screen shows the
   push switch (`pushEnabled`) and the five per-kind toggles that `GET /v1/me/preferences` returns
-  under `notifications`: delays, gate changes, first gate assignment (off by default, the owner's
-  decision 4), cancellations and diversions. A change applies at once and is queued as `PATCH
-  /v1/me/preferences` with `{ notifications: ... }` through the outbox, the path the screen's units
-  already take (src/lib/settings.ts `updatePreferences`, src/lib/preference-mutations.ts), so it
-  holds offline and across a relaunch. While permission is denied the toggles stay editable,
-  beside C1's link to the system settings.
+  under `notifications` (as built, read from the sync feed's `notification_preferences` row, which
+  carries the same values: departure 3): delays, gate changes, first gate assignment (off by
+  default, the owner's decision 4), cancellations and diversions. A change applies at once and is
+  queued as `PATCH /v1/me/preferences` with `{ notifications: ... }` through the outbox, the path
+  the screen's units already take (src/lib/settings.ts `updatePreferences`,
+  src/lib/preference-mutations.ts), so it holds offline and across a relaunch. While permission is
+  denied the toggles stay editable, beside C1's link to the system settings.
 - **C12. Per-flight overrides (open decision, section 8).** Phase 1 offers no per-flight event
   lists, so `notificationOverrides.events` leaves the contract: `NotificationOverridesSchema`
   (packages/shared/src/rpc.ts) keeps `muted` only and no longer passes unknown keys through
@@ -122,7 +144,8 @@ proves the transport over 24 to 48 hours once staging and the keys exist.
 
 - Every C10 test; the app-config tests cover the entitlement, the plugin's icon, colour and
   default channel, and the fingerprint change is recorded.
-- The native smoke's iOS and Android steps pass locally with the new entitlement and icon.
+- The native smoke's iOS and Android steps pass locally with the new entitlement and icon (as built,
+  the smoke checks the entitlement, and the plugin-chain test the icon's metadata: departure 5).
 - The full check and both wrangler dry runs are green.
 - Unverified until the accounts, the devices and staging exist, with exact steps in the
   verification doc: the exit test (the TestFlight iPhone and the internal Android build receive an

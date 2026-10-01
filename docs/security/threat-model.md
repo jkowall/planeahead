@@ -1,13 +1,15 @@
 # PlaneAhead threat model
 
 Status: complete for Phase 0 (increment 12, 2026-09-23); first version 2026-09-22 (increment 5).
-Increment 5 added authentication, the envelope-encryption module and the account routes;
-increment 6 the provider webhook receivers (section 3.1); increment 8 account deletion (section 5);
-increment 12 the anonymous events endpoint (3.2), the admin page behind Cloudflare Access (3.3),
-the public account-deletion page (3.4), the operational surface (section 6), the share-link and
-MCP threats as documentation only (section 7) and the KEK rotation runbook (section 8). Everything
-below refers to the code as built in `apps/api`; where a fact came from research rather than from
-running code it cites the facts sheet (`docs/increments/05-auth.facts.md` and its siblings).
+Increment 5 added authentication, the envelope-encryption module and the account routes; increment 6
+the provider webhook receivers (section 3.1); increment 8 account deletion (section 5); increment 12
+the anonymous events endpoint (3.2), the admin page behind Cloudflare Access (3.3), the public
+account-deletion page (3.4), the operational surface (section 6), the share-link and MCP threats as
+documentation only (section 7) and the KEK rotation runbook (section 8). Increments 14 to 16
+extended section 1.8 (the push token lifecycle, then the app's half of signing out) and section 3.3
+(the admin page's push actions). Everything below refers to the code as built in `apps/api`, and
+section 1.8 to `apps/mobile` too; where a fact came from research rather than from running code it
+cites the facts sheet (`docs/increments/05-auth.facts.md` and its siblings).
 
 ## 1. Authentication (increment 5)
 
@@ -367,15 +369,57 @@ length (review ruling R5).
 
 What a sign-out or a re-point guarantees (increment 14's review ruling R1): the `push` consumer
 reads every target's token row once per batch, before the batch's first send (first attempts
-included), and sends only to a live row still owned by the job's user, so nothing from a batch
-whose read starts after the invalidation or the re-point commits reaches the phone. A batch
-already past its read can still finish its sends, usually within seconds and at most about seven
-minutes (five jobs of 50 targets, six in flight, a 10-second timeout each; the re-review's probe
-showed a second job of the same batch sent after a mid-batch sign-out). Two windows no server
-check closes: a push APNs or FCM had already accepted,
-which the provider holds until the job's `expiresAt` and delivers to a phone that was offline at
-sign-out; and a sign-out made offline, until the app's invalidate call succeeds, which increment
-16 builds with its retry (`docs/open-decisions.md`, section 5, decision 1).
+included), and sends only to a live row still owned by the job's user, so nothing from a batch whose
+read starts after the invalidation or the re-point commits reaches the phone. A batch already past
+its read can still finish its sends, usually within seconds and at most about seven minutes (five
+jobs of 50 targets, six in flight, a 10-second timeout each; the re-review's probe showed a second
+job of the same batch sent after a mid-batch sign-out). Two windows no server check closes: a push
+APNs or FCM had already accepted, which the provider holds until the job's `expiresAt` and delivers
+to a phone that was offline at sign-out; and a sign-out made offline, until the app's queued
+invalidate call lands (below).
+
+Increment 16 builds the app's half (`apps/mobile/src/lib/sign-out.ts` and `device-invalidation.ts`,
+ruling C3), for the Sign out button and a revoked Apple credential alike: registration stops;
+`POST /v1/devices/current/invalidate` goes with the session's cookies and the install id, waited for
+at most 5 s; the tray is cleared; `forgetAccount` runs, its `authClient.signOut()` revoking the
+session; then `unregisterForNotificationsAsync()` (Android deletes its FCM token, which FCM then
+refuses; iOS unregisters from APNs).
+
+**The queued invalidation keeps the signed-out session's cookies.** Offline, past the timeout, or on
+a 408, 429 or 5xx, the call is queued in SecureStore (through the Expo client's chunked adapter, the
+store and protection the live session has) with the signed-out session's whole cookie map, because
+the route invalidates only the CALLER's rows for the installation: replayed with the next session's
+cookies it would reach nothing of the signed-out account, or, if the same account signed back in,
+invalidate the token it had just registered. Its bounds: one record, the first kept (while it waits
+every registration waits too, so a later session has registered nothing a second record would need);
+retried at launch and before every registration, and at no other time; cleared by a 2xx, by any
+other 4xx (a 401 once the session is revoked), by cookies that have all expired (the map keeps their
+expiries; Better Auth's session lasts at most 30 days) and by a third 408, 429 or 5xx; kept, without
+counting, through a network failure. Each drop is reported to Sentry by its reason, never with the
+cookies. While it waits the record is a bearer credential for the signed-out session: after an
+offline sign-out the server never heard `signOut`, so that session stays valid until it expires, and
+the record is its only copy left on the phone. Routes under `/v1` never refresh a session or set a
+cookie (section 1.5), so a retry cannot extend it.
+
+**The tray is cleared at sign-out.** `dismissAllNotificationsAsync()` removes every notification the
+app has presented, so the signed-out account's flights leave the lock screen and the shade, and none
+can be opened from a tap. It runs right after the invalidation step, never awaited, and a failure
+goes to Sentry.
+
+**What a sign-out still cannot recall.** First, a push APNs or FCM accepted before the invalidation
+committed: the provider holds it for a phone that is offline until the job's `expiresAt` and then
+delivers it. Whether the app's unregister stops such a push from displaying is in neither Apple's
+nor Google's documentation as R2 read it (`docs/increments/16-verification.md`, Unverified, has the
+device check); the push names a flight and its change on the lock screen, though a tap on it opens
+nothing of the old account (the store is wiped, so the next session's sync does not know the id: one
+sync, then home). Second, an offline sign-out until its queued call lands, at the next launch from
+cold or the next sign-in, since nothing retries it while the app runs signed out: the token row
+stays live for the signed-out user, `notify` keeps sending to it, and Android's token deletion, a
+network call, has failed too. Third, a queued call that is dropped: when the invalidation is queued
+at sign-out (a 408, 429 or 5xx, or no answer within 5 s) and the session revoke that follows
+succeeds, the retry gets 401 and is dropped, so the row stays live until APNs or FCM reports the
+token dead (FCM does, after Android's deletion) or the next session's registration re-points it. The
+candidate fixes are open items (section 9).
 
 ## 2. Envelope encryption
 
@@ -489,7 +533,7 @@ loss only, nothing the app depends on).
 
 ### 3.3 The admin page behind Cloudflare Access (increment 12)
 
-`GET /admin` (and every path below it) is read-only except two actions (below), server-rendered
+`GET /admin` (and every path below it) is read-only except four actions (below), server-rendered
 HTML with no script under a CSP of `default-src 'none'` plus one hashed stylesheet, `no-store`,
 `frame-ancestors 'none'`.
 Cloudflare Access sits in front of the path, and the Worker validates the
@@ -523,6 +567,22 @@ production it accepts only a token whose user id is in `PUSH_INJECT_ALLOWED_USER
 refuses every token), so an Access session cannot push to arbitrary users there. The page shows
 the push configuration by secret name only, the `PushAuth` objects' mint times and never a token,
 and every attempt's outcome counts.
+
+The third write action (increment 15) is the event injector, `POST /admin/push/inject`, under the
+same `Origin` rule and form-action allowance: it applies one synthetic event to a copy of a
+tracker's snapshot and has the tracker write test intents, which reach the flight's followers
+through the real `notify` and push path, their rows marked `is_test`. In production it accepts only
+a flight that a live subscriber in `PUSH_INJECT_ALLOWED_USER_IDS` follows, and `notify` drops a test
+intent's every other recipient there; its audit row naming the operator is written `pending` before
+the tracker call.
+
+The fourth (increment 16, ruling C9) is the transport soak, on staging only: `POST /admin/push/soak`
+under the same rules starts a soak (a test flight, its hours, a registered live token for the
+canary) or stops one, each audited `pending` before its record in `CONFIG` KV changes. Production
+answers both with 403 and shows no form, the soak's cron is declared in staging's `triggers` alone,
+and every step it plans refuses in production too, so a record put in production's KV by hand runs
+nothing. The record keeps the canary's `push_tokens` row id, never the device token, and the page
+shows counts by reason.
 
 ### 3.4 The public account-deletion page (increment 12)
 
@@ -688,4 +748,9 @@ root restarts the anonymous per-IP caps.
 - The residual windows of the re-enabled cookie cache (section 1.5): a revoked session keeps the
   read-only paths for up to 300 s; tombstoning revoked sessions too, not only deleted accounts',
   would close it (`docs/open-decisions.md`).
+- Push at sign-out (section 1.8, increment 16): the server could invalidate an installation's push
+  tokens when its session is revoked, closing the window a dropped queued invalidation leaves (a
+  question for increment 16's review); and the queued call could replay the sign-out as well, so
+  that an offline sign-out also ends the server session rather than leaving it valid until it
+  expires.
 - Share-link and MCP threats (Phases 5 and 6), App Attest and Play Integrity (columns reserved).
