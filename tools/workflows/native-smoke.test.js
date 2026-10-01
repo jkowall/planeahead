@@ -1,5 +1,5 @@
 /**
- * Every workflow's job keys are unique, and the nightly native-smoke workflow keeps its shape
+ * Every workflow's job keys are unique, and the scheduled native-smoke workflow keeps its shape
  * (increment 11, ruling V7, ADR 0008).
  *
  * A duplicate job key is a YAML mapping with the same key twice: most parsers keep the last one
@@ -12,9 +12,10 @@
  */
 
 import { spawnSync } from 'node:child_process';
-import { readdirSync, readFileSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { describe, expect, it } from 'vitest';
+import { afterAll, describe, expect, it } from 'vitest';
 
 const repoRoot = join(import.meta.dirname, '..', '..');
 const workflowsDir = join(repoRoot, '.github', 'workflows');
@@ -83,7 +84,7 @@ describe('native-smoke.yml', () => {
     .join('\n');
   const script = readFileSync(join(repoRoot, 'scripts', 'native-smoke.sh'), 'utf8');
 
-  it('runs nightly and on demand only, never on a push or a pull request', () => {
+  it('runs on a schedule and on demand only, never on a push or a pull request', () => {
     const on = /^on:\n((?: .*\n|\n)*?)(?=^\S)/m.exec(code)?.[1] ?? '';
     expect(on).toMatch(/^ {2}schedule:\n {4}- cron: '[^']+'$/m);
     expect(on).toMatch(/^ {2}workflow_dispatch:/m);
@@ -121,6 +122,7 @@ describe('native-smoke.yml', () => {
       'android-prebuild',
       'android-build',
       'android-archive',
+      'disk-guard',
       'android-launch',
     ]);
     for (const step of steps) {
@@ -154,6 +156,51 @@ describe('native-smoke.yml', () => {
     expect(launch).not.toMatch(/app-debug\.apk|\$APK_DEBUG/);
     expect(launch).toContain('| logcat_errors)');
   });
+
+  it('lets a manual run pick one platform, while a scheduled run runs every leg', () => {
+    const on = /^on:\n((?: .*\n|\n)*?)(?=^\S)/m.exec(code)?.[1] ?? '';
+    expect(on).toMatch(/^ {6}platforms:\n(?: {8}.*\n)*? {8}options: \[all, ios, android\]\n/m);
+    expect(on).toMatch(/^ {8}default: all$/m);
+    // A scheduled run has no inputs, so `inputs.platforms` is empty and neither job is skipped.
+    expect(jobBlock(text, 'ios')).toMatch(/^ {4}if: inputs\.platforms != 'android'$/m);
+    expect(jobBlock(text, 'android')).toMatch(/^ {4}if: inputs\.platforms != 'ios'$/m);
+    // One concurrency group per platform choice: a one-platform run never cancels the other's.
+    expect(code).toMatch(
+      /^ {2}group: native-smoke-\$\{\{ github\.ref \}\}-\$\{\{ inputs\.platforms \|\| 'all' \}\}$/m,
+    );
+  });
+
+  it('selects Xcode before the checkout, so a missing Xcode fails in seconds', () => {
+    const ios = jobBlock(text, 'ios');
+    const select = ios.indexOf('- name: Select Xcode');
+    expect(select).toBeGreaterThan(-1);
+    expect(select).toBeLessThan(ios.indexOf('actions/checkout'));
+    expect(ios.slice(0, select)).not.toMatch(/^ {6}- /m);
+  });
+
+  it('builds only the ABI the Android emulator runs, after freeing only unused toolchains', () => {
+    const android = jobBlock(text, 'android');
+    const abi = /^ {6}SMOKE_ANDROID_ABIS: (\S+)$/m.exec(android)?.[1];
+    expect(abi).toBe('x86_64');
+    expect(android).toMatch(new RegExp(`^ {10}arch: ${abi}$`, 'm'));
+    expect(android).toMatch(/^ {6}SMOKE_BUILD_MIN_FREE_GB: '\d+'$/m);
+    const free = android.indexOf('- name: Free disk space');
+    const checkout = android.indexOf('actions/checkout');
+    expect(free).toBeGreaterThan(-1);
+    expect(free).toBeLessThan(checkout);
+    // Exactly these paths: the Android SDK, the JDKs and the setup actions' tool cache all stay.
+    const removed =
+      /sudo rm -rf ((?:[^\n\\]|\\\n)+)/.exec(android.slice(free, checkout))?.[1] ?? '';
+    expect(removed.split(/[\s\\]+/).filter(Boolean)).toEqual([
+      '/usr/share/dotnet',
+      '/usr/local/.ghcup',
+      '/usr/share/swift',
+      '/opt/hostedtoolcache/CodeQL',
+    ]);
+    // The emulator step downloads its system image before the script runs: the disk is checked
+    // in a step of its own just before it.
+    expect(android).toMatch(/run: scripts\/native-smoke\.sh disk-guard \d+ "the emulator"/);
+  });
 });
 
 describe('native-smoke.sh classifiers', () => {
@@ -164,6 +211,96 @@ describe('native-smoke.sh classifiers', () => {
     const result = spawnSync('bash', [scriptPath, step], { input, encoding: 'utf8' });
     return { status: result.status, stdout: result.stdout, stderr: result.stderr };
   }
+
+  const scratch = [];
+
+  afterAll(() => {
+    for (const dir of scratch) {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  function runWith(args, env = {}, file = scriptPath) {
+    const result = spawnSync('bash', [file, ...args], {
+      env: { ...process.env, ...env },
+      encoding: 'utf8',
+    });
+    return { status: result.status, stdout: result.stdout, stderr: result.stderr };
+  }
+
+  /** A `df` first on PATH that reports `availableKb` free, in the POSIX layout. */
+  function stubDf(availableKb) {
+    const dir = mkdtempSync(join(tmpdir(), 'smoke-df-'));
+    scratch.push(dir);
+    const line = `/dev/root 76026616 1 ${String(availableKb)} 79%% /`;
+    writeFileSync(
+      join(dir, 'df'),
+      `#!/bin/sh\nprintf 'Filesystem 1024-blocks Used Available Capacity Mounted on\\n${line}\\n'\n`,
+      { mode: 0o755 },
+    );
+    return { PATH: `${dir}:${process.env.PATH ?? ''}` };
+  }
+
+  const GIB = 1048576;
+
+  it('checks the disk on the fourth df column, in whole gigabytes, against the need', () => {
+    const sixteen = stubDf(16 * GIB);
+    const enough = runWith(['disk-guard', '16', 'the test'], sixteen);
+    expect(enough.status).toBe(0);
+    expect(enough.stdout).toContain('16 GB free before the test');
+    const refused = runWith(['disk-guard', '17', 'the test'], sixteen);
+    expect(refused.status).toBe(1);
+    expect(refused.stderr).toContain('only 16 GB free before the test, which needs about 17 GB');
+    expect(runWith(['disk-guard', '0', 'the test'], stubDf(0)).status).toBe(0);
+    const fraction = runWith(['disk-guard', '7.5', 'the test'], sixteen);
+    expect(fraction.status).toBe(1);
+    expect(fraction.stderr).toContain('whole gigabytes');
+    expect(runWith(['disk-guard', '', 'the test'], sixteen).status).toBe(1);
+  });
+
+  it('builds with the ABI list, checks the disk first and keeps a failed build exit code', () => {
+    // A copy of the script in a scratch repository, whose gradlew records its arguments.
+    const root = mkdtempSync(join(tmpdir(), 'smoke-repo-'));
+    scratch.push(root);
+    mkdirSync(join(root, 'scripts'));
+    mkdirSync(join(root, 'apps', 'mobile', 'android'), { recursive: true });
+    const copy = join(root, 'scripts', 'native-smoke.sh');
+    writeFileSync(copy, script);
+    const argsFile = join(root, 'gradlew-args');
+    writeFileSync(
+      join(root, 'apps', 'mobile', 'android', 'gradlew'),
+      `#!/bin/sh\nprintf '%s\\n' "$@" > '${argsFile}'\nexit "\${STUB_EXIT:-0}"\n`,
+      { mode: 0o755 },
+    );
+    const gradleArgs = () => readFileSync(argsFile, 'utf8').trim().split('\n');
+    const build = (env) => runWith(['android-build'], env, copy);
+    const plenty = stubDf(100 * GIB);
+
+    expect(build({ ...plenty, SMOKE_ANDROID_ABIS: 'x86_64' }).status).toBe(0);
+    expect(gradleArgs()).toEqual(
+      expect.arrayContaining([
+        'assembleDebug',
+        'assembleRelease',
+        '-PreactNativeArchitectures=x86_64',
+      ]),
+    );
+    expect(build({ ...plenty, SMOKE_ANDROID_ABIS: '' }).status).toBe(0);
+    expect(gradleArgs().some((arg) => arg.startsWith('-PreactNativeArchitectures'))).toBe(false);
+
+    // The default need grows with the ABIs (15 GB for one, 30 for all four); 0 skips the check.
+    const twenty = stubDf(20 * GIB);
+    expect(build({ ...twenty, SMOKE_ANDROID_ABIS: 'x86_64' }).status).toBe(0);
+    const allAbis = build({ ...twenty, SMOKE_ANDROID_ABIS: '' });
+    expect(allAbis.status).toBe(1);
+    expect(allAbis.stderr).toContain('needs about 30 GB');
+    expect(build({ ...twenty, SMOKE_ANDROID_ABIS: '', SMOKE_BUILD_MIN_FREE_GB: '0' }).status).toBe(
+      0,
+    );
+
+    const failed = build({ ...plenty, SMOKE_ANDROID_ABIS: 'x86_64', STUB_EXIT: '3' });
+    expect(failed.status).toBe(3);
+    expect(failed.stdout).toContain('GB free after the Android build');
+  });
 
   it('fails the launch on a fatal in the app process or a ReactNativeJS error, not elsewhere', () => {
     const logcat = [

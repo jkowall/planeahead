@@ -73,7 +73,7 @@ are in `docs/adr/`; the data model is `docs/schema-review.md`; threats are
   `usage_counters` row.
 - **Outside the Worker**: Cloudflare Access in front of `/admin`; Sentry (errors, scrubbed);
   Workers Logs (JSON lines, 10% sampled in production); GitHub Actions (CI, the staging and
-  production deploys, the nightly native smoke, the mobile preview).
+  production deploys, the weekly native smoke, the mobile preview).
 
 ## 2. Environments
 

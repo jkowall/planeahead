@@ -36,7 +36,7 @@ name: Mobile preview
 #   - vars.EAS_PROJECT_ID the project id `eas init` prints (app.config.ts reads EAS_PROJECT_ID)
 #   - SENTRY_AUTH_TOKEN   for the source-map step (skipped on its own when the token is absent)
 #
-# Never an EAS build: native builds run on GitHub runners in increment 11's nightly job, not on
+# Never an EAS build: native builds run on GitHub runners in increment 11's native-smoke job, not on
 # EAS credit (Starter plan).
 
 on:
