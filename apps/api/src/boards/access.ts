@@ -2,10 +2,15 @@
  * Ruling B9 (increment 18; plan section 3, R3 D11): who may open a board or search a route, and
  * how often.
  *
- *   - `BOARD_RL`, 30 requests per 60 s, is taken TWICE per board or route-search request: once
- *     keyed by the user, once by the client IP, so neither many accounts behind one address nor
- *     one account behind many addresses gets past it. Like every binding it is per colo and an
- *     abuse brake, never a quota, and it fails open (src/middleware/rate-limit.ts).
+ *   - Both routes answer 404 `boards_disabled` while `BOARDS_ENABLED` is not `true` (increment
+ *     18, R8: production, until AeroDataBox's written End Use answer and the per-user budget),
+ *     before the session, the brakes or the database are touched.
+ *   - Two brakes per board or route-search request: `BOARD_RL`, 30 per 60 s, keyed by the user,
+ *     and `BOARD_IP_RL`, 300 per 60 s, keyed by the client's address reduced to its /64
+ *     (`normaliseClientIp`, R11), so neither many accounts behind one address nor one account
+ *     behind many addresses gets past them, while one NAT or IPv6 subnet of real installs is not
+ *     starved by another's 30. Like every binding they are per colo and abuse brakes, never
+ *     quotas, and they fail open (src/middleware/rate-limit.ts).
  *   - An anonymous account may open only the board of an airport one of its live subscriptions
  *     departs from or arrives at: one indexed query per anonymous request (the partial unique
  *     index on `flight_subscriptions (user_id, flight_instance_id) where deleted_at is null`,
@@ -13,30 +18,41 @@
  *   - The route search is open to anonymous accounts (every install starts anonymous, and finding
  *     a flight by route is the onboarding path) within `usage_counters` caps: `route_searches`
  *     per user per UTC day, and for an anonymous account also per salted client IP per UTC day,
- *     the way `tracker_creations` caps creations (src/lib/flight-search.ts).
+ *     the way `tracker_creations` caps creations (src/lib/flight-search.ts). The 403
+ *     `cap_exceeded` names the allowance that ran out (`scope`: `user` or `ip`, R11), so the app
+ *     can tell an anonymous account held by its network's cap to sign in.
  */
 
 import { sql } from 'drizzle-orm';
 import type { MiddlewareHandler } from 'hono';
+import { createMiddleware } from 'hono/factory';
 import type { AuthenticatedUser } from '../auth/user';
-import type { AppBindings, Env } from '../env';
+import { boardsEnabled, type AppBindings, type Env } from '../env';
 import { clientIp, rateLimit, type LimiterSelector } from '../middleware/rate-limit';
 import type { Logger } from '../observability/log';
 import { normaliseClientIp } from '../validation/client-ip';
 import { ipRouteSearchCap, userCap, type CapSlot, type SqlExecutor } from '../lib/caps';
 import { requireSecret, saltedIpSubject } from '../lib/hmac';
 
-/** The binding's own period, so a refused client backs off past it. */
+/** The bindings' own period, so a refused client backs off past it. */
 export const BOARD_RL_PERIOD_SECONDS = 60;
 
-/** `BOARD_RL` by user, then by client IP; a request without an address skips the second. */
+/** Stand-ins for the two bindings (tests); each defaults to the Worker's own. */
+export interface BoardLimiters {
+  /** Replaces `BOARD_RL` (per user). */
+  readonly user?: LimiterSelector | undefined;
+  /** Replaces `BOARD_IP_RL` (per /64). */
+  readonly ip?: LimiterSelector | undefined;
+}
+
+/** `BOARD_RL` by user, then `BOARD_IP_RL` by the /64; a request without an address skips it. */
 export function boardRateLimits(
-  limiter: LimiterSelector = (env) => env.BOARD_RL,
+  limiters: BoardLimiters = {},
 ): [MiddlewareHandler<AppBindings>, MiddlewareHandler<AppBindings>] {
   return [
     rateLimit({
       name: 'BOARD_RL',
-      limiter,
+      limiter: limiters.user ?? ((env) => env.BOARD_RL),
       key: (c) => {
         const user = c.var.user ?? null;
         return user === null ? null : `user:${user.id}`;
@@ -44,15 +60,32 @@ export function boardRateLimits(
       retryAfterSeconds: BOARD_RL_PERIOD_SECONDS,
     }),
     rateLimit({
-      name: 'BOARD_RL',
-      limiter,
+      name: 'BOARD_IP_RL',
+      limiter: limiters.ip ?? ((env) => env.BOARD_IP_RL),
       key: (c) => {
-        const ip = clientIp(c);
+        const ip = normaliseClientIp(clientIp(c));
         return ip === null ? null : `ip:${ip}`;
       },
       retryAfterSeconds: BOARD_RL_PERIOD_SECONDS,
     }),
   ];
+}
+
+/** 404 `boards_disabled` unless `BOARDS_ENABLED` is `true` (R8); first on both routes. */
+export function requireBoardsEnabled(): MiddlewareHandler<AppBindings> {
+  return createMiddleware<AppBindings>(async (c, next) => {
+    if (!boardsEnabled(c.env)) {
+      return c.json(
+        {
+          error: 'boards_disabled' as const,
+          message: 'airport boards are not available yet',
+          requestId: c.var.requestId,
+        },
+        404,
+      );
+    }
+    await next();
+  });
 }
 
 /** Whether one of the user's live subscriptions departs from or arrives at the airport. */

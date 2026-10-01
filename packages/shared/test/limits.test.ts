@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import {
   API_ERROR_CODES,
+  ApiErrorSchema,
   CAP_NAMES,
   FREE_TIER_LIMITS,
   LIVE_TRACKING_LEAD_MS,
@@ -75,6 +76,19 @@ describe('the error envelope', () => {
       expect(API_ERROR_CODES, code).toContain(code);
     }
     expect(new Set(API_ERROR_CODES).size).toBe(API_ERROR_CODES.length);
+  });
+
+  it('lists the increment 18 board codes, and reads whose allowance a cap_exceeded names', () => {
+    for (const code of ['board_requires_account', 'boards_disabled']) {
+      expect(API_ERROR_CODES, code).toContain(code);
+    }
+    const body = { error: 'cap_exceeded', cap: 'route_searches', limit: 30, requestId: 'r' };
+    for (const scope of ['user', 'ip'] as const) {
+      const parsed = ApiErrorSchema.safeParse({ ...body, scope });
+      expect(parsed.success && parsed.data.scope).toBe(scope);
+    }
+    expect(ApiErrorSchema.safeParse({ ...body, scope: 'install' }).success).toBe(false);
+    expect(ApiErrorSchema.safeParse(body).success).toBe(true);
   });
 
   it('isApiError reads a body by its code', () => {

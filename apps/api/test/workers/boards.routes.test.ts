@@ -171,7 +171,8 @@ describe('GET /v1/airports/{code}/board (rulings B7 and B8)', () => {
     expect(s.harness.adb.fidsCalls()).toBe(1);
     const etag = first.headers.get('etag');
     expect(etag).toMatch(/^W\/"[A-Za-z0-9_-]+"$/);
-    expect(first.headers.get('cache-control')).toBe('private, no-cache');
+    // No cache may keep a board, the phone's HTTP disk cache included (R1).
+    expect(first.headers.get('cache-control')).toBe('no-store');
     await s.harness.settled();
     const copy = await testEnv.CACHE.getWithMetadata(boardKvKey(s.home.icao, s.bucket));
     expect(copy.metadata).toMatchObject({ fetchedAt: new Date(s.now).toISOString() });
@@ -189,7 +190,7 @@ describe('GET /v1/airports/{code}/board (rulings B7 and B8)', () => {
     expect(s.harness.adb.fidsCalls()).toBe(1);
   });
 
-  it('answers If-None-Match with 304 for the current tag, and 200 for another', async () => {
+  it('answers If-None-Match with 304 for the current tag, and 200 for another, neither stored', async () => {
     const s = await boardScenario();
     const first = await s.app.get(boardPath(s), s.session);
     const etag = first.headers.get('etag') ?? '';
@@ -197,12 +198,14 @@ describe('GET /v1/airports/{code}/board (rulings B7 and B8)', () => {
     expect(notModified.status).toBe(304);
     expect(await notModified.text()).toBe('');
     expect(notModified.headers.get('etag')).toBe(etag);
+    expect(notModified.headers.get('cache-control')).toBe('no-store');
     const listed = await s.app.get(boardPath(s), s.session, {
       'if-none-match': `W/"old", ${etag.replace(/^W\//, '')}`,
     });
     expect(listed.status).toBe(304);
     const changed = await s.app.get(boardPath(s), s.session, { 'if-none-match': 'W/"old"' });
     expect(changed.status).toBe(200);
+    expect(changed.headers.get('cache-control')).toBe('no-store');
     // Another window is another body, so another tag.
     const later = await s.app.get(boardPath(s, '?direction=arrivals'), s.session, {
       'if-none-match': etag,
@@ -269,17 +272,45 @@ describe('GET /v1/airports/{code}/board (rulings B7 and B8)', () => {
     expect(uncovered.harness.adb.fidsCalls()).toBe(0);
   });
 
+  it('serves a window ending up to 72 hours ahead, and answers 422 beyond it without a call (R3)', async () => {
+    const s = await boardScenario();
+    const at = (ms: number) => new Date(ms).toISOString();
+    const edge = s.now + 72 * HOUR_MS;
+    const last = await s.app.get(boardPath(s, `?to=${at(edge)}`), s.session);
+    expect(last.status).toBe(200);
+    expect(await last.json<AirportBoardResponse>()).toMatchObject({
+      from: at(edge - 12 * HOUR_MS),
+      to: at(edge),
+    });
+    const served = s.harness.adb.fidsCalls();
+    expect(served).toBeGreaterThan(0);
+    for (const query of [
+      `?to=${at(edge + MINUTE_MS)}`,
+      `?from=${at(edge - 12 * HOUR_MS + MINUTE_MS)}`,
+      `?from=${at(edge)}&to=${at(edge + HOUR_MS)}`,
+    ]) {
+      const refused = await s.app.get(boardPath(s, query), s.session);
+      expect(refused.status, query).toBe(422);
+      expect(refused.headers.get('cache-control')).toBe('no-store');
+      const body = await refused.json<Record<string, unknown>>();
+      expect(body).toMatchObject({ error: 'date_out_of_range', maxHoursAhead: 72 });
+      expect(body).not.toHaveProperty('maxDaysAhead');
+    }
+    expect(s.harness.adb.fidsCalls()).toBe(served);
+  });
+
   it('answers 404 for an unknown airport, 422 past the lookahead, 503 when nothing is readable', async () => {
     const s = await boardScenario();
     const unknown = await s.app.get('/v1/airports/ZZZ9/board', s.session);
     expect(unknown.status).toBe(404);
     expect(await unknown.json()).toMatchObject({ error: 'airport_not_found' });
 
+    // Past the plan's lookahead is past the board's own 72 hours first (R3).
     const maxDaysAhead = providerSettings(testEnv).adbPlan.maxDaysAhead;
     const far = new Date(s.now + (maxDaysAhead + 2) * 24 * HOUR_MS).toISOString();
     const tooFar = await s.app.get(boardPath(s, `?from=${far}`), s.session);
     expect(tooFar.status).toBe(422);
-    expect(await tooFar.json()).toMatchObject({ error: 'date_out_of_range', maxDaysAhead });
+    expect(await tooFar.json()).toMatchObject({ error: 'date_out_of_range', maxHoursAhead: 72 });
     expect(s.harness.adb.fidsCalls()).toBe(0);
 
     s.harness.adb.fids = () => Response.json({ message: 'boom' }, { status: 500 });
@@ -422,6 +453,14 @@ describe('GET /v1/airports/{origin}/flights/to/{destination} (ruling B8)', () =>
     expect(await again.json()).toEqual(body);
     expect(r.harness.adb.fidsCalls()).toBe(2);
     expect(await counterValue('user', r.session.userId, 'route_searches')).toBe(2);
+
+    // The tag answers 304; no cache may store either answer (R1).
+    const etag = response.headers.get('etag') ?? '';
+    expect(response.headers.get('cache-control')).toBe('no-store');
+    const notModified = await r.app.get(routePath(r), r.session, { 'if-none-match': etag });
+    expect(notModified.status).toBe(304);
+    expect(notModified.headers.get('etag')).toBe(etag);
+    expect(notModified.headers.get('cache-control')).toBe('no-store');
   });
 
   it('answers the designator search 422 past the lookahead, and for a date long gone, charging nothing', async () => {

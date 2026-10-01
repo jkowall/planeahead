@@ -168,12 +168,20 @@ export class CapLedger {
   }
 }
 
-/** The 403 body for a cap that was hit. */
+/**
+ * The 403 body for a cap that was hit. `scope` says whose allowance ran out (increment 18, R11):
+ * `user` the account's own, `ip` the per-address one an anonymous account shares with every other
+ * anonymous install behind its network, which signing in lifts. Typed inline, not as `CapScope`:
+ * the typed client's declarations would otherwise import this module, and with it the database
+ * package, into the mobile app's view (test/consumer).
+ */
 export function capExceededBody(slot: CapSlot, requestId: string) {
+  const scope: 'user' | 'ip' = slot.scope;
   return {
     error: 'cap_exceeded' as const,
     cap: slot.cap,
     limit: slot.limit,
+    scope,
     message: `the free plan allows ${String(slot.limit)} (${slot.cap.replaceAll('_', ' ')})`,
     requestId,
   };

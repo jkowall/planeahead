@@ -1,16 +1,23 @@
 /**
- * Ruling B9 (increment 18, part 2): `BOARD_RL` in every environment, taken by user and by client
- * IP on both routes; the anonymous airport limit (only airports of live subscriptions); the
- * route-search caps in `usage_counters` (per user, and per salted IP for anonymous accounts); and
- * that the deployed Worker mounts both routes behind a session.
+ * Ruling B9 (increment 18, part 2) and the review round's R8, R11 and R15: `BOARD_RL` (per user,
+ * 30) and `BOARD_IP_RL` (per /64, 300) in every environment, both taken on both routes; the
+ * anonymous airport limit (only airports of live subscriptions); the route-search caps in
+ * `usage_counters` (per user, and per salted IP for anonymous accounts), whose 403 names its
+ * scope; `BOARDS_ENABLED` (off answers 404 `boards_disabled`); and that both routes admit only a
+ * session principal, mounted behind a session in the deployed Worker.
  */
 
+import { createExecutionContext, waitOnExecutionContext } from 'cloudflare:test';
 import { sql } from 'drizzle-orm';
+import { Hono } from 'hono';
 import { afterEach, describe, expect, it } from 'vitest';
 import { boardBucketBounds, uuidv7, type AirportBoardResponse } from '@planeahead/shared';
 import { flightInstances, flightSubscriptions } from '@planeahead/db';
 import wranglerConfig from '../../wrangler.jsonc?raw';
+import type { AuthenticatedUser } from '../../src/auth/user';
+import type { AppBindings } from '../../src/env';
 import { saltedIpSubject } from '../../src/lib/hmac';
+import { createAirportRoutes } from '../../src/routes/airports';
 import { normaliseClientIp } from '../../src/validation/client-ip';
 import { airportHarness, uniqueDay } from './helpers/airports';
 import { signInAnonymously, uniqueIp, worker, jsonRequest } from './helpers/auth';
@@ -46,46 +53,96 @@ async function servedAirport(now: number): Promise<TestAirport> {
   return airport;
 }
 
-describe('BOARD_RL (ruling B9)', () => {
-  it('is 30 per 60 s with its own namespace in every environment', () => {
-    const entries = [
-      ...wranglerConfig.matchAll(
-        /\{ "name": "BOARD_RL", "namespace_id": "(\d+)", "simple": \{ "limit": (\d+), "period": (\d+) \} \}/g,
-      ),
-    ].map((match) => ({ id: match[1], limit: Number(match[2]), period: Number(match[3]) }));
-    expect(entries.map(({ limit, period }) => ({ limit, period }))).toEqual([
-      { limit: 30, period: 60 },
-      { limit: 30, period: 60 },
-      { limit: 30, period: 60 },
-    ]);
+/** Every `{ "name": NAME, ... "simple": { "limit", "period" } }` entry of wrangler.jsonc. */
+function rateLimitEntries(name: string) {
+  const entry = new RegExp(
+    `\\{ "name": "${name}", "namespace_id": "(\\d+)", "simple": \\{ "limit": (\\d+), "period": (\\d+) \\} \\}`,
+    'g',
+  );
+  return [...wranglerConfig.matchAll(entry)].map((match) => ({
+    id: match[1],
+    limit: Number(match[2]),
+    period: Number(match[3]),
+  }));
+}
+
+describe('BOARD_RL and BOARD_IP_RL (rulings B9 and R11)', () => {
+  it('are 30 per user and 300 per /64 per 60 s, with their own namespaces in every environment', () => {
+    const perUser = rateLimitEntries('BOARD_RL');
+    const perAddress = rateLimitEntries('BOARD_IP_RL');
+    expect(perUser.map(({ limit, period }) => ({ limit, period }))).toEqual(
+      Array.from({ length: 3 }, () => ({ limit: 30, period: 60 })),
+    );
+    expect(perAddress.map(({ limit, period }) => ({ limit, period }))).toEqual(
+      Array.from({ length: 3 }, () => ({ limit: 300, period: 60 })),
+    );
+    // Next to BOARD_RL's ids: local 3005, staging 1005, production 2005.
+    expect(perAddress.map(({ id }) => id)).toEqual(['3005', '1005', '2005']);
     const ids = [...wranglerConfig.matchAll(/"namespace_id": "(\d+)"/g)].map((match) => match[1]);
     expect(new Set(ids).size).toBe(ids.length);
   });
 
-  it('is taken by user and by client IP on both routes, and refuses either one past 30', async () => {
-    const app = boardApp({ nowMs: () => clockOfNewDay(), limit: 30 });
+  it('takes BOARD_RL by user and BOARD_IP_RL by address on both routes, each refusing past its own limit', async () => {
+    // Stand-in limits (the real ones are pinned above): 2 per user, 3 per address.
+    const app = boardApp({ nowMs: () => clockOfNewDay(), limit: 2, ipLimit: 3 });
     const ip = uniqueIp();
-    const alice = await signedInSession(ip);
+    // Signed in from their own addresses (Better Auth allows 3 sign-ins a minute per address),
+    // then all behind one.
+    const behind = async (): Promise<BoardSession> => ({ ...(await signedInSession()), ip });
+    const [alice, bob, carol] = [await behind(), await behind(), await behind()];
     const board = (session: BoardSession) => app.get('/v1/airports/ZZZ7/board', session);
-    for (let i = 0; i < 30; i += 1) {
-      expect((await board(alice)).status).toBe(404);
-    }
-    expect(app.limiterKeys.slice(0, 2)).toEqual([`user:${alice.userId}`, `ip:${ip}`]);
+    expect((await board(alice)).status).toBe(404);
+    expect((await board(alice)).status).toBe(404);
+    expect(app.limiterKeys.slice(0, 2)).toEqual([
+      `BOARD_RL user:${alice.userId}`,
+      `BOARD_IP_RL ip:${ip}`,
+    ]);
     const refused = await board(alice);
     expect(refused.status).toBe(429);
     expect(refused.headers.get('retry-after')).toBe('60');
     expect(await refused.json()).toMatchObject({ error: 'rate_limited', limiter: 'BOARD_RL' });
-
-    // Another account behind the same address is refused by the IP key ...
-    const bob = await signedInSession(ip);
-    expect((await board(bob)).status).toBe(429);
-    // ... the same account from another address by the user key ...
+    // The same account from another address is still refused by the user key ...
     expect((await board({ ...alice, ip: uniqueIp() })).status).toBe(429);
-    // ... and the route search takes the same two keys.
-    const carol = await signedInSession();
-    const route = await app.get('/v1/airports/ZZZ7/flights/to/ZZZ6?date=2101-01-01', carol);
+    // ... another account behind the address has the address's third request ...
+    expect((await board(bob)).status).toBe(404);
+    // ... and a third account is refused by the address key.
+    const crowded = await board(carol);
+    expect(crowded.status).toBe(429);
+    expect(crowded.headers.get('retry-after')).toBe('60');
+    expect(await crowded.json()).toMatchObject({ error: 'rate_limited', limiter: 'BOARD_IP_RL' });
+
+    // The route search takes the same two brakes.
+    const dave = await signedInSession();
+    const route = await app.get('/v1/airports/ZZZ7/flights/to/ZZZ6?date=2101-01-01', dave);
     expect(route.status).toBe(404);
-    expect(app.limiterKeys.slice(-2)).toEqual([`user:${carol.userId}`, `ip:${carol.ip}`]);
+    expect(app.limiterKeys.slice(-2)).toEqual([
+      `BOARD_RL user:${dave.userId}`,
+      `BOARD_IP_RL ip:${dave.ip}`,
+    ]);
+  });
+
+  it('keys BOARD_IP_RL by the /64: three addresses in one subnet share one allowance', async () => {
+    const app = boardApp({ nowMs: () => clockOfNewDay(), ipLimit: 2 });
+    const group = () => Math.floor(Math.random() * 0xffff).toString(16);
+    const prefix = `2001:db8:${group()}:${group()}`;
+    const slash64 = `${prefix
+      .split(':')
+      .map((part) => part.padStart(4, '0'))
+      .join(':')}:0000:0000:0000:0000`;
+    const subnet = [`${prefix}::1`, `${prefix}:1::2`, `${prefix}:ffff:1:2:3`];
+    const statuses: number[] = [];
+    for (const address of subnet) {
+      expect(normaliseClientIp(address)).toBe(slash64);
+      const session = await signedInSession();
+      statuses.push((await app.get('/v1/airports/ZZZ7/board', { ...session, ip: address })).status);
+    }
+    expect(statuses).toEqual([404, 404, 429]);
+    expect(app.limiterKeys.filter((key) => key.startsWith('BOARD_IP_RL'))).toEqual(
+      subnet.map(() => `BOARD_IP_RL ip:${slash64}`),
+    );
+    // Another /64 is another allowance.
+    const elsewhere = { ...(await signedInSession()), ip: `2001:db8:${group()}:${group()}::1` };
+    expect((await app.get('/v1/airports/ZZZ7/board', elsewhere)).status).toBe(404);
   });
 });
 
@@ -176,7 +233,7 @@ async function searchScenario() {
   return { day, app, path };
 }
 
-describe('the route-search caps (rulings B9 and B10)', () => {
+describe('the route-search caps (rulings B9, B10 and R11)', () => {
   it('allows 30 searches per user per UTC day, and charges a signed-in account no IP slot', async () => {
     const { day, app, path } = await searchScenario();
     const user = await signedInSession();
@@ -189,6 +246,7 @@ describe('the route-search caps (rulings B9 and B10)', () => {
       error: 'cap_exceeded',
       cap: 'route_searches',
       limit: 30,
+      scope: 'user',
     });
     const subject = await saltedIpSubject(
       testEnv.IP_SALT_SECRET ?? '',
@@ -215,10 +273,12 @@ describe('the route-search caps (rulings B9 and B10)', () => {
     const second = await signInAnonymously(ip);
     const refused = await app.get(path, second);
     expect(refused.status).toBe(403);
+    // The network's allowance, not this account's (R11): the app says to sign in.
     expect(await refused.json()).toMatchObject({
       error: 'cap_exceeded',
       cap: 'route_searches',
       limit: 30,
+      scope: 'ip',
     });
     // The refused search gave its own user slot back.
     expect(await counterValue('user', second.userId, 'route_searches')).toBe(0);
@@ -246,5 +306,117 @@ describe('the deployed Worker', () => {
     );
     expect(unknown.status).toBe(404);
     expect(await unknown.json()).toMatchObject({ error: 'airport_not_found' });
+  });
+});
+
+/** The Worker's env with `BOARDS_ENABLED` absent (production's state), or set to `value`. */
+function envWithBoards(value: string | null): typeof testEnv {
+  const rest = Object.fromEntries(
+    Object.entries(testEnv).filter(([key]) => key !== 'BOARDS_ENABLED'),
+  );
+  return (value === null ? rest : { ...rest, BOARDS_ENABLED: value }) as typeof testEnv;
+}
+
+describe('BOARDS_ENABLED (R8)', () => {
+  it('is "true" in local and staging and absent in production', () => {
+    expect(testEnv.BOARDS_ENABLED).toBe('true');
+    expect([...wranglerConfig.matchAll(/"BOARDS_ENABLED": "true"/g)]).toHaveLength(2);
+    const production = wranglerConfig.slice(wranglerConfig.indexOf('"production": {'));
+    expect(production).toContain('"ENVIRONMENT": "production"');
+    expect(production).not.toContain('"BOARDS_ENABLED"');
+  });
+
+  it('answers 404 boards_disabled on both routes while off, before any brake or lookup', async () => {
+    const paths = ['/v1/airports/ZZZ4/board', '/v1/airports/ZZZ4/flights/to/ZZZ3?date=2101-01-01'];
+    const session = await signedInSession();
+    for (const value of [null, 'false']) {
+      const app = boardApp({ nowMs: () => clockOfNewDay(), env: envWithBoards(value) });
+      for (const path of paths) {
+        const response = await app.get(path, session);
+        expect(response.status, `${String(value)} ${path}`).toBe(404);
+        expect(response.headers.get('cache-control')).toBe('no-store');
+        expect(await response.json()).toMatchObject({
+          error: 'boards_disabled',
+          message: 'airport boards are not available yet',
+        });
+      }
+      expect(app.limiterKeys).toEqual([]);
+    }
+    // On, the same requests reach the routes.
+    const on = boardApp({ nowMs: () => clockOfNewDay(), env: envWithBoards('true') });
+    for (const path of paths) {
+      const response = await on.get(path, session);
+      expect(response.status, path).toBe(404);
+      expect(await response.json()).toMatchObject({ error: 'airport_not_found' });
+    }
+    expect(on.limiterKeys).toHaveLength(4);
+  });
+});
+
+describe('the session requirement (R15)', () => {
+  /** The airport routes behind a stand-in auth that resolves `principal`, counting the brakes. */
+  function probe(principal: AuthenticatedUser) {
+    const taken: string[] = [];
+    const counting = () => ({
+      limit: ({ key }: { key: string }) => {
+        taken.push(key);
+        return Promise.resolve({ success: true });
+      },
+    });
+    const app = new Hono<AppBindings>();
+    app.use(async (c, next) => {
+      c.set('requestId', 'probe-request-0001');
+      c.set('user', principal);
+      await next();
+    });
+    app.route('/v1/airports', createAirportRoutes({ limiter: counting, ipLimiter: counting }));
+    const get = async (path: string) => {
+      const ctx = createExecutionContext();
+      const response = await app.fetch(
+        new Request(`https://api.planeahead.test${path}`),
+        testEnv,
+        ctx,
+      );
+      await waitOnExecutionContext(ctx);
+      return response;
+    };
+    return { get, taken };
+  }
+
+  it('refuses a principal that is not a session (an API token) on both routes, whatever its scopes', async () => {
+    const token = probe({
+      id: uuidv7(),
+      isAnonymous: false,
+      kind: 'api_token',
+      sessionId: '',
+      scopes: ['user'],
+    });
+    for (const path of [
+      '/v1/airports/ZZZ2/board',
+      '/v1/airports/ZZZ2/flights/to/ZZZ1?date=2101-01-01',
+    ]) {
+      const response = await token.get(path);
+      expect(response.status, path).toBe(403);
+      expect(await response.json()).toMatchObject({
+        error: 'insufficient_scope',
+        message: 'this action needs a signed-in session',
+      });
+    }
+    expect(token.taken).toEqual([]);
+
+    // The same principal as a session reaches the board (the probe sends no client address, so
+    // only the user brake is taken).
+    const userId = uuidv7();
+    const session = probe({
+      id: userId,
+      isAnonymous: false,
+      kind: 'session',
+      sessionId: 'probe-session',
+      scopes: ['user'],
+    });
+    const board = await session.get('/v1/airports/ZZZ2/board');
+    expect(board.status).toBe(404);
+    expect(await board.json()).toMatchObject({ error: 'airport_not_found' });
+    expect(session.taken).toEqual([`user:${userId}`]);
   });
 });

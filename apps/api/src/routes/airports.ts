@@ -6,19 +6,24 @@
  *   GET /v1/airports/{code}/board?direction=departures|arrivals&from=&to=&airline=
  *   GET /v1/airports/{origin}/flights/to/{destination}?date=YYYY-MM-DD
  *
- * Both need a user session (`requireScope('user')`; anonymous accounts included), take `BOARD_RL`
- * by user and by client IP, and answer UI-shaped rows with the buckets' `fetchedAt`, `stale`,
- * `partial` and coverage, and an ETag (`If-None-Match` answers 304). The airport is resolved in
- * the Worker (ruling B2): an unknown code is 404 `airport_not_found` and never reaches an object.
- * An airport AeroDataBox covers neither live nor by schedule is 404 `board_not_covered`; a range
- * or date beyond the plan's lookahead, or ended too long ago to be fetched, is 422
+ * Both answer 404 `boards_disabled` while `BOARDS_ENABLED` is not `true` (increment 18, R8; off in
+ * production). Both need a Better Auth session, anonymous ones included (`requireSession`, R15: a
+ * principal of another kind, an API token once those exist, is 403 whatever its scopes), take
+ * `BOARD_RL` by user and `BOARD_IP_RL` by the client's /64 (R11), and answer UI-shaped rows
+ * with the buckets' `fetchedAt`, `stale`, `partial` and coverage, and an ETag (`If-None-Match`
+ * answers 304). The airport is resolved in the Worker (ruling B2): an unknown code is 404
+ * `airport_not_found` and never reaches an object. An airport AeroDataBox covers neither live nor
+ * by schedule is 404 `board_not_covered`; a window or date out of range is 422
  * `date_out_of_range` (the designator search's answer); nothing readable is 503
  * `board_unavailable`.
  *
  * The board: an anonymous account may open only an airport of its live subscriptions (403
  * `board_requires_account`). `from` and `to` are instants (`Z` or an offset), at most 12 hours
  * apart; without them the window starts an hour before now, rounded down to 5 minutes, and runs
- * 12 hours. Rows are kept by the home leg's scheduled time in `[from, to)`.
+ * 12 hours. Rows are kept by the home leg's scheduled time in `[from, to)`. The window may end at
+ * most 72 hours ahead (R3; 422 with `maxHoursAhead`, a range the app never asks for, since it
+ * sends no `from` or `to`): later dates are the route search's, which is capped. A bucket that
+ * ended too long ago to be fetched is 422 as well, with the plan's `maxDaysAhead`.
  *
  * The route search: open to anonymous accounts within the `route_searches` caps (403
  * `cap_exceeded`; a search that answers no flights because nothing could be read gives its slots
@@ -30,7 +35,8 @@
  * Licence posture (ruling B9; R3 D11, plan section 10 item 3): boards and route results stay OUT
  * of share pages, public API tokens and MCP until AeroDataBox confirms in writing that they are
  * End Use. Nothing outside these two session-only routes may serve board rows, and no response
- * here may be stored by a shared cache (`Cache-Control: private, no-cache`).
+ * here may be stored by any cache, the phone's included (`Cache-Control: no-store` on the 200 and
+ * the 304, R1; the ETag and 304 stay for a client that revalidates its in-memory copy).
  */
 
 import { Hono, type Context } from 'hono';
@@ -48,7 +54,6 @@ import {
   boardBucketAt,
   boardBucketsOfDate,
   nextBoardBucketStart,
-  utcMsToLocalMinute,
   type AirportBoardResponse,
   type BoardAirportView,
   type BoardBucketResponseV1,
@@ -57,7 +62,12 @@ import {
 } from '@planeahead/shared';
 import * as z from 'zod';
 import { authRuntime } from '../auth/runtime';
-import { boardRateLimits, routeSearchSlots, subscribedAtAirport } from '../boards/access';
+import {
+  boardRateLimits,
+  requireBoardsEnabled,
+  routeSearchSlots,
+  subscribedAtAirport,
+} from '../boards/access';
 import { resolveBoardAirportCached } from '../boards/airport-ref';
 import { readBoardBucket } from '../boards/read';
 import {
@@ -73,7 +83,7 @@ import { CapLedger, capExceededBody } from '../lib/caps';
 import { withDeadline } from '../lib/deadline';
 import { beyondLookahead } from '../lib/flight-search';
 import { queryValue, validate } from '../lib/validate';
-import { currentUser, requireFreshSession, requireScope } from '../middleware/auth';
+import { currentUser, requireFreshSession, requireScope, requireSession } from '../middleware/auth';
 import { clientIp, type LimiterSelector } from '../middleware/rate-limit';
 import { errorFields } from '../observability/log';
 import { providerSettings } from '../providers/config';
@@ -81,8 +91,10 @@ import { providerSettings } from '../providers/config';
 export interface AirportRoutesOptions {
   /** The Worker's clock, in ms; the bucket and lookahead arithmetic read nothing else. */
   readonly now?: (() => number) | undefined;
-  /** Replaces the `BOARD_RL` binding. */
+  /** Replaces the `BOARD_RL` binding (per user). */
   readonly limiter?: LimiterSelector | undefined;
+  /** Replaces the `BOARD_IP_RL` binding (per /64). */
+  readonly ipLimiter?: LimiterSelector | undefined;
   /** The deadline on each bucket read; `DO_CALL_DEADLINE_MS` (8 s) by default. */
   readonly deadlineMs?: number | undefined;
 }
@@ -238,8 +250,16 @@ async function readBuckets(
   return { answers, allTimedOut: buckets.length > 0 && timedOut === buckets.length };
 }
 
-/** The client keeps its copy and revalidates every time; no shared cache may store one. */
-const BOARD_CACHE_CONTROL = 'private, no-cache';
+/**
+ * No cache may store an answer, the phone's HTTP disk cache included (R1): it would keep board
+ * rows past the 48-hour purge and past sign-out. Named here, on the 200 and the 304 alike, so the
+ * boards' contract does not rest on the `/v1` default (src/middleware/no-store.ts).
+ */
+const BOARD_CACHE_CONTROL = 'no-store';
+
+/** How far ahead a board window may end (R3); later dates are the route search's. */
+const BOARD_MAX_HOURS_AHEAD = 72;
+const BOARD_MAX_AHEAD_MS = BOARD_MAX_HOURS_AHEAD * 3_600_000;
 
 /** Seconds a client should wait after a 503 before asking again. */
 const BOARD_RETRY_AFTER_SECONDS = 30;
@@ -247,6 +267,21 @@ const BOARD_RETRY_AFTER_SECONDS = 30;
 function airportNotFound(c: Ctx, code: string) {
   const named = code.trim().toUpperCase().slice(0, 16);
   return c.json(errorBody(c, 'airport_not_found', `no airport has the code ${named}`), 404);
+}
+
+/** A board window ending more than 72 hours ahead: the designator search's code, its own bound. */
+function boardTooFar(c: Ctx) {
+  return c.json(
+    {
+      ...errorBody(
+        c,
+        'date_out_of_range',
+        `the board shows at most ${String(BOARD_MAX_HOURS_AHEAD)} hours ahead; search the route for a later date`,
+      ),
+      maxHoursAhead: BOARD_MAX_HOURS_AHEAD,
+    },
+    422,
+  );
 }
 
 function dateOutOfRange(c: Ctx, maxDaysAhead: number) {
@@ -308,7 +343,7 @@ function airportView(airport: BoardAirport): BoardAirportView {
 const DIRECTION_ROWS = { departures: 'dep', arrivals: 'arr' } as const;
 
 export function createAirportRoutes(options: AirportRoutesOptions = {}) {
-  const limits = boardRateLimits(options.limiter);
+  const limits = boardRateLimits({ user: options.limiter, ip: options.ipLimiter });
   const clock = (): number => options.now?.() ?? Date.now();
   const resolve = (c: Ctx, code: string) =>
     resolveBoardAirportCached(c.env, code, {
@@ -324,6 +359,9 @@ export function createAirportRoutes(options: AirportRoutesOptions = {}) {
       // ---------------------------------------------------------------------------------------
       .get(
         '/:code/board',
+        // Off first (no session read, no brake), then a session principal with the user scope.
+        requireBoardsEnabled(),
+        requireSession(),
         requireScope('user'),
         ...limits,
         validate('query', AirportBoardQuerySchema),
@@ -331,6 +369,10 @@ export function createAirportRoutes(options: AirportRoutesOptions = {}) {
           const user = currentUser(c.var.user);
           const query = c.req.valid('query');
           const nowMs = clock();
+          const window = boardTimeWindow(query, nowMs);
+          if (window.toMs - nowMs > BOARD_MAX_AHEAD_MS) {
+            return boardTooFar(c);
+          }
           const code = c.req.param('code');
           const airport = await resolve(c, code);
           if (airport === null) {
@@ -349,15 +391,9 @@ export function createAirportRoutes(options: AirportRoutesOptions = {}) {
               403,
             );
           }
+          // The 72-hour bound above is inside every plan's lookahead (180 or 365 days); the plan's
+          // figure answers only a bucket that ended too long ago (the object's `out_of_range`).
           const maxDaysAhead = providerSettings(c.env).adbPlan.maxDaysAhead;
-          const window = boardTimeWindow(query, nowMs);
-          const fromLocal = utcMsToLocalMinute(window.fromMs, airport.tz);
-          if (
-            fromLocal !== null &&
-            beyondLookahead(fromLocal.slice(0, 10), new Date(nowMs), maxDaysAhead)
-          ) {
-            return dateOutOfRange(c, maxDaysAhead);
-          }
           const read = await readBuckets(
             c,
             airport,
@@ -399,6 +435,8 @@ export function createAirportRoutes(options: AirportRoutesOptions = {}) {
       // ---------------------------------------------------------------------------------------
       .get(
         '/:origin/flights/to/:destination',
+        requireBoardsEnabled(),
+        requireSession(),
         requireScope('user'),
         ...limits,
         requireFreshSession(),

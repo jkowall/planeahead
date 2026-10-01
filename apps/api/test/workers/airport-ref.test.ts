@@ -6,13 +6,14 @@
  */
 
 import { describe, expect, it } from 'vitest';
-import { airports, withDb } from '@planeahead/db';
+import { airports } from '@planeahead/db';
 import {
   AIRPORT_REF_NEGATIVE_TTL_SECONDS,
   resolveBoardAirportCached,
 } from '../../src/boards/airport-ref';
 import { uniqueAirport } from './helpers/airports';
 import { testEnv } from './helpers/flights';
+import { db } from './helpers/routes';
 
 /** A KV that keeps values in memory and records every write's options. */
 function memoryKv() {
@@ -30,9 +31,11 @@ function memoryKv() {
   return { kv, puts };
 }
 
+/** Through the file's one database handle, never a client per call (increment 18, R0). */
 async function insertAirport(icao: string, iata: string): Promise<void> {
-  await withDb(testEnv, async (db) => {
-    await db.insert(airports).values({
+  await db()
+    .insert(airports)
+    .values({
       ourairportsId: 900_000_000 + Math.floor(Math.random() * 99_000_000),
       ident: icao,
       icao,
@@ -46,7 +49,6 @@ async function insertAirport(icao: string, iata: string): Promise<void> {
       tz: 'America/New_York',
       tzSource: 'override',
     });
-  });
 }
 
 describe('resolveBoardAirportCached (ruling B2)', () => {

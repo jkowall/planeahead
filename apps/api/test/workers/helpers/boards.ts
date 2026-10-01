@@ -3,18 +3,19 @@
  * API test database (it has no reference data), each named by a unique ICAO code so its
  * `AirportState` object is fresh; FIDS is the counting fake of `helpers/airports.ts`, injected
  * into that object. The routes run in `createApp()` with `createV1Routes({ airports })`, the
- * Worker's own chain, so a test can set the Worker's clock to the object's and count `BOARD_RL`.
- * No real provider is ever called.
+ * Worker's own chain, so a test can set the Worker's clock to the object's, count `BOARD_RL` and
+ * `BOARD_IP_RL`, and switch the boards off. No real provider is ever called.
  */
 
 import { createExecutionContext, waitOnExecutionContext } from 'cloudflare:test';
-import { airports, withDb } from '@planeahead/db';
+import { airports } from '@planeahead/db';
 import { utcMsToLocalMinute } from '@planeahead/shared';
 import { createApp } from '../../../src/app';
 import { createV1Routes } from '../../../src/routes/v1';
 import { API_ORIGIN, APP_ORIGIN, signInWithMagicLink, uniqueEmail, uniqueIp } from './auth';
 import { uniqueAirport } from './airports';
 import { testEnv, track } from './flights';
+import { db } from './routes';
 
 export interface TestAirport {
   readonly icao: string;
@@ -23,12 +24,18 @@ export interface TestAirport {
   readonly tz: string;
 }
 
-/** A synthetic airport with a real-looking ICAO code (`icao_source = 'icao_code'`). */
+/**
+ * A synthetic airport with a real-looking ICAO code (`icao_source = 'icao_code'`). It writes
+ * through the file's one database handle (`db()`, helpers/routes.ts), never a client per call: a
+ * client keeps its sockets until the file's isolate ends, so a client per airport exhausted the
+ * cluster's `max_connections` in the full suite (increment 18, R0).
+ */
 export async function insertBoardAirport(tz = 'America/New_York'): Promise<TestAirport> {
   const icao = uniqueAirport();
   const airport = { icao, iata: icao.slice(1), name: `Test Field ${icao}`, tz };
-  await withDb(testEnv, async (db) => {
-    await db.insert(airports).values({
+  await db()
+    .insert(airports)
+    .values({
       ourairportsId: 900_000_000 + Math.floor(Math.random() * 99_000_000),
       ident: icao,
       icao,
@@ -42,7 +49,6 @@ export async function insertBoardAirport(tz = 'America/New_York'): Promise<TestA
       tz,
       tzSource: 'override',
     });
-  });
   return airport;
 }
 
@@ -111,31 +117,47 @@ export async function signedInSession(ip: string = uniqueIp()): Promise<BoardSes
 export interface BoardAppOptions {
   /** The Worker's clock; the AirportState object's is set apart (`_setClock`). */
   readonly nowMs: () => number;
-  /** What the `BOARD_RL` stub allows per key per test; unlimited by default. */
+  /** What the `BOARD_RL` stub (per user) allows per key per test; unlimited by default. */
   readonly limit?: number;
+  /** What the `BOARD_IP_RL` stub (per /64) allows per key per test; unlimited by default. */
+  readonly ipLimit?: number;
+  /** The Worker's bindings and variables; `testEnv` (BOARDS_ENABLED "true") by default. */
+  readonly env?: typeof testEnv;
 }
 
 export interface BoardApp {
   get(path: string, session: BoardSession, headers?: Record<string, string>): Promise<Response>;
-  /** Every key `BOARD_RL` was taken with, in order. */
+  /** Every brake taken, in order: `BOARD_RL user:{id}` or `BOARD_IP_RL ip:{address or /64}`. */
   readonly limiterKeys: string[];
 }
 
-/** The Worker's chain with the airport routes' clock and `BOARD_RL` replaced. */
+/** The Worker's chain with the airport routes' clock, `BOARD_RL` and `BOARD_IP_RL` replaced. */
 export function boardApp(options: BoardAppOptions): BoardApp {
   const counts = new Map<string, number>();
   const limiterKeys: string[] = [];
-  const limiter = () => ({
-    limit: ({ key }: { key: string }) => {
-      limiterKeys.push(key);
-      const next = (counts.get(key) ?? 0) + 1;
-      counts.set(key, next);
-      return Promise.resolve({ success: next <= (options.limit ?? Number.POSITIVE_INFINITY) });
-    },
-  });
+  const stub =
+    (binding: 'BOARD_RL' | 'BOARD_IP_RL', limit = Number.POSITIVE_INFINITY) =>
+    () => ({
+      limit: ({ key }: { key: string }) => {
+        const taken = `${binding} ${key}`;
+        limiterKeys.push(taken);
+        const next = (counts.get(taken) ?? 0) + 1;
+        counts.set(taken, next);
+        return Promise.resolve({ success: next <= limit });
+      },
+    });
   const allow = () => ({ limit: () => Promise.resolve({ success: true }) });
   const app = createApp({ limiter: allow });
-  app.route('/v1', createV1Routes({ airports: { now: options.nowMs, limiter } }));
+  app.route(
+    '/v1',
+    createV1Routes({
+      airports: {
+        now: options.nowMs,
+        limiter: stub('BOARD_RL', options.limit),
+        ipLimiter: stub('BOARD_IP_RL', options.ipLimit),
+      },
+    }),
+  );
   return {
     limiterKeys,
     get: async (path, session, headers = {}) => {
@@ -149,7 +171,7 @@ export function boardApp(options: BoardAppOptions): BoardApp {
             ...headers,
           },
         }),
-        testEnv,
+        options.env ?? testEnv,
         ctx,
       );
       await waitOnExecutionContext(ctx);
