@@ -389,3 +389,42 @@ export const ResolveResponseV1 = z.looseObject({
   reason: z.string().optional(),
 });
 export type ResolveResponseV1 = z.infer<typeof ResolveResponseV1>;
+
+/**
+ * The event injector (increment 15, ruling N11): a synthetic next snapshot for one tracker, sent
+ * by the Access-protected admin action. The tracker classifies it against its current snapshot
+ * and policy state with the same notification policy, confirmed by construction (no settle
+ * re-read, no cancellation confirmation), and writes the intents through its outbox marked as
+ * tests, `injectionId` in each dedupe key, so a replayed injection writes nothing. It stores
+ * NEITHER the synthetic snapshot NOR the policy state the evaluation returns: the next real poll
+ * diffs against real data and produces no spurious change back.
+ */
+export const InjectPolicyEventRequestV1 = z.looseObject({
+  rpcVersion,
+  injectionId: z
+    .string()
+    .min(1)
+    .max(64)
+    .regex(/^[A-Za-z0-9_-]+$/),
+  status: FlightStatusSchema,
+});
+export type InjectPolicyEventRequestV1 = z.infer<typeof InjectPolicyEventRequestV1>;
+
+export const InjectedIntentV1 = z.looseObject({
+  kind: z.string(),
+  subject: z.string(),
+  value: z.string(),
+  dedupeKey: z.string(),
+  /** False when the dedupe key was already written (a replay): no outbox row. */
+  written: z.boolean(),
+});
+export type InjectedIntentV1 = z.infer<typeof InjectedIntentV1>;
+
+export const InjectPolicyEventResponseV1 = z.looseObject({
+  rpcVersion,
+  outcome: z.enum(['injected', 'ignored']),
+  /** Why an injection was ignored: no tracked flight, or a finished one. */
+  reason: z.enum(['absent', 'finished']).optional(),
+  intents: z.array(InjectedIntentV1),
+});
+export type InjectPolicyEventResponseV1 = z.infer<typeof InjectPolicyEventResponseV1>;

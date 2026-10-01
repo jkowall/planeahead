@@ -506,12 +506,46 @@ describe('N4 cancellation and diversion', () => {
       [],
     ],
     [
-      'un-cancelled after a pushed cancellation: a correction',
+      'un-cancelled after a pushed cancellation: a correction once the re-read confirms it',
       {},
       [
         { at: t(-90), shape: CANCELLED },
         { at: t(-85), shape: CANCELLED, reread: true },
         { at: t(-60), shape: {} },
+        { at: t(-55), shape: {}, reread: true },
+      ],
+      ['cancellation flight cancelled', 'cancellation flight uncancelled correction'],
+    ],
+    [
+      'un-cancelled after a pushed cancellation: nothing before the re-read',
+      {},
+      [
+        { at: t(-90), shape: CANCELLED },
+        { at: t(-85), shape: CANCELLED, reread: true },
+        { at: t(-60), shape: {} },
+        { at: t(-58), shape: {} },
+      ],
+      ['cancellation flight cancelled'],
+    ],
+    [
+      'un-cancelled, then cancelled again on the re-read: the cancellation stands',
+      {},
+      [
+        { at: t(-90), shape: CANCELLED },
+        { at: t(-85), shape: CANCELLED, reread: true },
+        { at: t(-60), shape: {} },
+        { at: t(-55), shape: CANCELLED, reread: true },
+        { at: t(-30), shape: CANCELLED },
+      ],
+      ['cancellation flight cancelled'],
+    ],
+    [
+      'an injected un-cancellation after a push is confirmed by construction',
+      {},
+      [
+        { at: t(-90), shape: CANCELLED },
+        { at: t(-85), shape: CANCELLED, reread: true },
+        { at: t(-60), shape: {}, confirmed: true },
       ],
       ['cancellation flight cancelled', 'cancellation flight uncancelled correction'],
     ],
@@ -610,6 +644,32 @@ describe('N4 cancellation and diversion', () => {
       value: 'cancelled',
     });
     expect(last.wants).toEqual({ at: t(-85), reasons: ['cancellation'] });
+  });
+
+  it('a suspected un-cancellation asks for the cancellation re-read, and a clear restores the push', () => {
+    const pushed = [
+      { at: t(-90), shape: CANCELLED },
+      { at: t(-85), shape: CANCELLED, reread: true },
+    ];
+    const suspected = walk({}, [...pushed, { at: t(-60), shape: {} }]);
+    expect(suspected.state.cancellation).toEqual({
+      status: 'suspect',
+      since: t(-60),
+      value: 'uncancelled',
+      pushedAt: t(-85),
+    });
+    expect(suspected.last.wants).toEqual({ at: t(-55), reasons: ['cancellation'] });
+    const restored = walk({}, [
+      ...pushed,
+      { at: t(-60), shape: {} },
+      { at: t(-55), shape: CANCELLED, reread: true },
+    ]);
+    expect(restored.state.cancellation).toEqual({
+      status: 'pushed',
+      at: t(-85),
+      value: 'cancelled',
+    });
+    expect(restored.last.wants).toBeNull();
   });
 
   it('a suspected diversion asks for its confirming re-read', () => {
@@ -724,6 +784,7 @@ describe('N6 expiresAt', () => {
       [
         { at: t(-90), shape: { status: 'cancelled' }, confirmed: true },
         { at: t(-60), shape: {} },
+        { at: t(-55), shape: {}, reread: true },
       ],
       OUT + 24 * H * MIN,
     ],

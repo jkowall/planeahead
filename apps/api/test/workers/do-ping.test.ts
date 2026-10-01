@@ -46,9 +46,10 @@ interface PingCase {
   readonly className: string;
   readonly ping: (name: string) => Promise<DurableObjectPing>;
   /**
-   * The class's migrations: one for ProviderBudget (increment 6), two each for FlightTracker
-   * (increment 7 and its final re-review round) and DesignatorResolver (increment 7 and its
-   * review fix round), one for PushAuth (increment 14); none for the two shells.
+   * The class's migrations: one for ProviderBudget (increment 6), three for FlightTracker
+   * (increment 7, its final re-review round, increment 15's policy state), two for
+   * DesignatorResolver (increment 7 and its review fix round), one for PushAuth (increment 14);
+   * none for the two shells.
    */
   readonly version: number;
 }
@@ -57,7 +58,7 @@ const CLASSES: readonly PingCase[] = [
   {
     className: 'FlightTracker',
     ping: (name) => track(env.FLIGHT_TRACKER.getByName(name, { locationHint: 'enam' })).ping(),
-    version: 2,
+    version: 3,
   },
   {
     className: 'DesignatorResolver',

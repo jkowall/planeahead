@@ -53,10 +53,19 @@ const GateSideStateSchema = z.object({
     .nullable(),
 });
 
-/** N4: none, suspected (awaiting the confirming re-read), or confirmed and pushed. */
+/**
+ * N4: none, suspected (awaiting the confirming re-read), or confirmed and pushed. A suspected
+ * un-cancellation (`value` `uncancelled`) keeps the pushed cancellation's instant in `pushedAt`,
+ * so a re-read that clears it restores the pushed state as it was.
+ */
 const DisruptionStateSchema = z.discriminatedUnion('status', [
   z.object({ status: z.literal('none') }),
-  z.object({ status: z.literal('suspect'), since: EpochMsSchema, value: z.string() }),
+  z.object({
+    status: z.literal('suspect'),
+    since: EpochMsSchema,
+    value: z.string(),
+    pushedAt: EpochMsSchema.optional(),
+  }),
   z.object({ status: z.literal('pushed'), at: EpochMsSchema, value: z.string() }),
 ]);
 
@@ -523,24 +532,51 @@ function applyGate(d: Draft, side: GateSide): void {
 // ---------------------------------------------------------------------------------------------
 
 /**
+ * After a pushed cancellation, a snapshot that is neither `cancelled` nor `unknown` suspects an
+ * un-cancellation (no intent; the same `cancellation` re-read reason). The confirming re-read,
+ * still operating, pushes the correction; still cancelled (or unknown), it restores the pushed
+ * cancellation. An injection is confirmed by construction.
+ */
+function applyUncancellation(d: Draft, current: DisruptionState): void {
+  const operating = d.next.status !== 'cancelled' && d.next.status !== 'unknown';
+  const pushedAt =
+    current.status === 'pushed'
+      ? current.at
+      : current.status === 'suspect'
+        ? (current.pushedAt ?? current.since)
+        : d.now;
+  if (!operating) {
+    d.state.cancellation = { status: 'pushed', at: pushedAt, value: 'cancelled' };
+  } else if (current.status === 'pushed' && !d.confirmed) {
+    d.state.cancellation = { status: 'suspect', since: d.now, value: 'uncancelled', pushedAt };
+  } else {
+    const fields = { kind: 'cancellation', subject: 'flight', value: 'uncancelled' } as const;
+    d.intents.push(
+      intent({ ...fields, previousValue: 'cancelled', correction: true }, d.next, d.now),
+    );
+    d.state.cancellation = { status: 'none' };
+  }
+}
+
+/**
  * A snapshot turning `cancelled` makes the state `suspect` (no intent; the tracker must not
  * finish). The confirming re-read pushes the cancellation if it still says `cancelled` and
- * clears the suspicion otherwise. After a pushed cancellation, a snapshot that is neither
- * `cancelled` nor `unknown` pushes the un-cancellation as a correction.
+ * clears the suspicion otherwise. An un-cancellation is confirmed the same way (research R4 D2
+ * confirms `uncancelled` too; a false "your flight is back on" is as harmful as a false
+ * cancellation): see `applyUncancellation`.
  */
 function applyCancellation(d: Draft): void {
   const current = d.state.cancellation;
   const cancelled = d.next.status === 'cancelled';
   const fields = { kind: 'cancellation', subject: 'flight' } as const;
-  if (current.status === 'pushed') {
-    if (!cancelled && d.next.status !== 'unknown') {
-      const correction = { ...fields, value: 'uncancelled', previousValue: 'cancelled' };
-      d.intents.push(intent({ ...correction, correction: true }, d.next, d.now));
-      d.state.cancellation = { status: 'none' };
-    }
+  if (current.status === 'suspect' && !d.reread && !d.confirmed) {
     return;
   }
-  if (current.status === 'suspect' && !d.reread && !d.confirmed) {
+  if (
+    current.status === 'pushed' ||
+    (current.status === 'suspect' && current.pushedAt !== undefined)
+  ) {
+    applyUncancellation(d, current);
     return;
   }
   if (current.status === 'none' && cancelled && !d.confirmed) {

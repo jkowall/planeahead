@@ -25,6 +25,12 @@ export interface FlightInstants {
   readonly actualOffMs: number | null;
   readonly actualOnMs: number | null;
   readonly actualInMs: number | null;
+  /**
+   * The departure anchor's inputs (increment 15, ruling N8): a later estimated out extends the
+   * 15-minute band, an actual out ends it. Optional so a caller without them keeps the old anchor.
+   */
+  readonly estimatedOutMs?: number | null | undefined;
+  readonly actualOutMs?: number | null | undefined;
   readonly phase: TrackerPhase;
 }
 
@@ -45,6 +51,8 @@ export function instantsOf(status: FlightStatus): FlightInstants {
     actualOffMs: instantMs(status.times.actualOff),
     actualOnMs: instantMs(status.times.actualOn),
     actualInMs: instantMs(status.times.actualIn),
+    estimatedOutMs: instantMs(status.times.estimatedOut),
+    actualOutMs: instantMs(status.times.actualOut),
     phase: status.status,
   };
 }
@@ -61,6 +69,12 @@ export function cadenceContextFor(instants: FlightInstants, now: number): Cadenc
     scheduledIn: new Date(scheduledIn),
     phase: instants.phase,
   };
+  if (instants.estimatedOutMs !== null && instants.estimatedOutMs !== undefined) {
+    context.estimatedOut = new Date(instants.estimatedOutMs);
+  }
+  if (instants.actualOutMs !== null && instants.actualOutMs !== undefined) {
+    context.actualOut = new Date(instants.actualOutMs);
+  }
   if (instants.estimatedInMs !== null) {
     context.estimatedIn = new Date(instants.estimatedInMs);
   }

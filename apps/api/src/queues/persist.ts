@@ -1,6 +1,7 @@
 /**
  * `persist` queue consumer (increment 7; increment 8 adds the `live_tracked` bookkeeping and the
- * `merge` message; increment 14 the `push_outcome` message, src/queues/push-outcomes.ts).
+ * `merge` message; increment 14 the `push_outcome` message, src/queues/push-outcomes.ts;
+ * increment 15 the `notify_intent` forward to the `notify` queue, confirmed only once sent).
  *
  * This is the only path from a Durable Object to Postgres (ADR 0007): a tracker appends outbox
  * rows, flushes them here, and this consumer writes `flight_instances`, `flight_events` and
@@ -125,6 +126,8 @@ export interface PersistDeps {
   readonly mergeTrackerFor?: TrackerFor | undefined;
   /** The clock the live-window decision reads (ruling O3); `Date.now` by default. */
   readonly now?: (() => number) | undefined;
+  /** Where `notify_intent` rows are forwarded (increment 15); `NOTIFY_QUEUE` by default. */
+  readonly notifyQueue?: { send(body: unknown): Promise<unknown> } | undefined;
 }
 
 const AIRCRAFT_TYPE_RE = /^[A-Z0-9]{2,4}$/;
@@ -760,6 +763,19 @@ export async function handlePersistBatch(
           log.info('provider_budget_daily', {
             origin: body.origin,
             ...payloadFields(body.payload),
+          });
+          break;
+        case 'notify_intent':
+          // Increment 15, ruling N7: forwarded to `notify` as it is. A send that throws fails
+          // the message, which is retried and NOT confirmed, so the tracker's row stays (and a
+          // finished tracker stays undeleted) until the intent has reached the notify queue.
+          await (deps.notifyQueue ?? env.NOTIFY_QUEUE).send(body.payload);
+          log.info('notify_intent_forwarded', {
+            flight_key: body.flightKey,
+            kind: body.payload.intent.kind,
+            test: body.payload.test,
+            origin: body.origin,
+            seq: body.seq,
           });
           break;
       }

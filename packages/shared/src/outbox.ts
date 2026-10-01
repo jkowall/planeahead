@@ -8,6 +8,7 @@ import {
   ProviderCallRecordSchema,
   ProviderIdSchema,
 } from './flight-status';
+import { NotifyIntentV1 } from './notify';
 import { TrackerPhaseSchema } from './rpc';
 
 /**
@@ -27,6 +28,8 @@ import { TrackerPhaseSchema } from './rpc';
  *   point from it with `providerCallPoint`; there is no separate analytics kind.
  * - `provider_budget_kill_switch` and `provider_budget_daily`: the ProviderBudget kinds as built
  *   in increment 6, unchanged; their payloads are read loosely.
+ * - `notify_intent` (increment 15): a FlightTracker's notification intent (`NotifyIntentV1`),
+ *   forwarded to the `notify` queue; the row is confirmed only once the forward succeeded.
  *
  * Every message names its sender's LIFETIME in `origin` (`flight_tracker:{key}@{epochMs}`,
  * `provider_budget:{name}@{epochMs}`, `designator_resolver:{name}@{epochMs}`), so `(origin, seq)`
@@ -50,6 +53,7 @@ export const OUTBOX_KINDS = [
   'provider_call',
   'provider_budget_kill_switch',
   'provider_budget_daily',
+  'notify_intent',
 ] as const;
 export type OutboxKind = (typeof OUTBOX_KINDS)[number];
 
@@ -262,6 +266,18 @@ export const ProviderBudgetDailyMessageV1 = z.looseObject({
 });
 export type ProviderBudgetDailyMessageV1 = z.infer<typeof ProviderBudgetDailyMessageV1>;
 
+/**
+ * A FlightTracker's notification intent (increment 15, ruling N7): the persist consumer forwards
+ * `payload` to the `notify` queue and confirms the row only after that send succeeded.
+ */
+export const NotifyIntentMessageV1 = z.looseObject({
+  ...envelope,
+  kind: z.literal('notify_intent'),
+  flightKey: FlightKeySchema,
+  payload: NotifyIntentV1,
+});
+export type NotifyIntentMessageV1 = z.infer<typeof NotifyIntentMessageV1>;
+
 /** Every message the `persist` queue carries. */
 export const PersistMessageV1 = z.discriminatedUnion('kind', [
   FlightInstanceMessageV1,
@@ -269,6 +285,7 @@ export const PersistMessageV1 = z.discriminatedUnion('kind', [
   ProviderCallMessageV1,
   ProviderBudgetKillSwitchMessageV1,
   ProviderBudgetDailyMessageV1,
+  NotifyIntentMessageV1,
 ]);
 export type PersistMessageV1 = z.infer<typeof PersistMessageV1>;
 /** What a producer builds; the defaults (`outboxVersion`, event `field`) may be left out. */
