@@ -2,15 +2,20 @@
  * Ruling B7 (increment 18; R3 D7, D8, D13): what the Worker makes of a bucket's cached rows.
  * Nothing here enters a cache key, and nothing here reads a clock or the network.
  *
+ *   - Each flight once (ruling R12): a row repeating the direction, designator and scheduled
+ *     minute of an earlier one (one flight in two buckets) is dropped first, so row ids are unique.
  *   - Codeshares are grouped server-side: rows of one direction with the same scheduled UTC
- *     time, the same counterpart airport and the same registration or the same callsign are one
- *     operated flight. The `IsOperator` row is primary (else the row whose marketing carrier
- *     operates it, else the provider's first); the others become `codeshares[]`. Rows with
- *     neither a registration nor a callsign are never merged (R3 D7's trade-off: a wrong merge
- *     hides a flight, a missed one only repeats it).
- *   - Filters run after grouping: the direction, the time range `[from, to)` on the home leg's
- *     scheduled time, and an airline matched against the operating carrier or any marketing
- *     carrier of the group, by IATA or ICAO code.
+ *     minute, the same counterpart airport and the same registration or the same callsign are one
+ *     operated flight. A row with neither key that the provider marks `IsCodeshared` joins the
+ *     only `IsOperator` row of its direction, minute and counterpart (R12: days ahead the aircraft
+ *     is rarely known); with none there, or several, it stays alone (R3 D7's trade-off: a wrong
+ *     merge hides a flight, a missed one only repeats it). The `IsOperator` row is primary (else
+ *     the row whose marketing carrier operates it, else the provider's first); the others become
+ *     `codeshares[]`.
+ *   - Filters run after grouping: the direction, the time range `[from, to)` (a flight is in it by
+ *     its home leg's scheduled time or its best time, and an earlier one stays while it has not
+ *     yet departed or arrived, ruling R14), and an airline matched against the operating carrier
+ *     or any marketing carrier of the group, by IATA or ICAO code.
  *   - Rows leave as `BoardViewRow`, never as provider JSON, and every answer carries an ETag.
  */
 
@@ -22,16 +27,39 @@ export interface BoardGroup {
   readonly others: readonly BoardRow[];
 }
 
+/** The UTC minute a row is scheduled at (FIDS times are minutes), however it is spelled. */
+function minuteOf(row: BoardRow): number {
+  return Math.floor(Date.parse(row.scheduled) / 60_000);
+}
+
+/** Where a flight sits on the board: its direction, scheduled minute and counterpart. */
+function slotOf(row: BoardRow): string {
+  return `${row.direction}|${String(minuteOf(row))}|${row.counterpart.icao}`;
+}
+
 function groupKeys(row: BoardRow): string[] {
-  const base = `${row.direction}|${String(Date.parse(row.scheduled))}|${row.counterpart.icao}`;
+  const slot = slotOf(row);
   const keys: string[] = [];
   if (row.registration !== undefined && row.registration !== '') {
-    keys.push(`${base}|reg|${row.registration}`);
+    keys.push(`${slot}|reg|${row.registration}`);
   }
   if (row.callSign !== undefined && row.callSign !== '') {
-    keys.push(`${base}|cs|${row.callSign}`);
+    keys.push(`${slot}|cs|${row.callSign}`);
   }
   return keys;
+}
+
+/** The rows with each (direction, designator, scheduled minute) once, the first copy kept. */
+function uniqueRows(rows: readonly BoardRow[]): BoardRow[] {
+  const seen = new Set<string>();
+  return rows.filter((row) => {
+    const key = `${row.direction}|${row.designator}|${String(minuteOf(row))}`;
+    if (seen.has(key)) {
+      return false;
+    }
+    seen.add(key);
+    return true;
+  });
 }
 
 function primaryOf(members: readonly BoardRow[]): BoardRow {
@@ -46,9 +74,10 @@ function primaryOf(members: readonly BoardRow[]): BoardRow {
   );
 }
 
-/** The rows grouped into operated flights, in the order each flight first appears. */
+/** The rows, each flight once, grouped into operated flights in the order each first appears. */
 export function groupCodeshares(rows: readonly BoardRow[]): BoardGroup[] {
-  const parent = rows.map((_row, index) => index);
+  const unique = uniqueRows(rows);
+  const parent = unique.map((_row, index) => index);
   const find = (index: number): number => {
     let root = index;
     while (parent[root] !== root) {
@@ -57,20 +86,37 @@ export function groupCodeshares(rows: readonly BoardRow[]): BoardGroup[] {
     parent[index] = root;
     return root;
   };
+  const join = (first: number, other: number): void => {
+    const [a, b] = [find(first), find(other)];
+    parent[Math.max(a, b)] = Math.min(a, b);
+  };
   const firstByKey = new Map<string, number>();
-  rows.forEach((row, index) => {
+  const operatorsBySlot = new Map<string, number[]>();
+  unique.forEach((row, index) => {
     for (const key of groupKeys(row)) {
       const first = firstByKey.get(key);
       if (first === undefined) {
         firstByKey.set(key, index);
-        continue;
+      } else {
+        join(first, index);
       }
-      const [a, b] = [find(first), find(index)];
-      parent[Math.max(a, b)] = Math.min(a, b);
+    }
+    if (row.codeshareStatus === 'IsOperator') {
+      const slot = slotOf(row);
+      operatorsBySlot.set(slot, [...(operatorsBySlot.get(slot) ?? []), index]);
+    }
+  });
+  unique.forEach((row, index) => {
+    if (row.codeshareStatus === 'IsCodeshared' && groupKeys(row).length === 0) {
+      const operators = operatorsBySlot.get(slotOf(row)) ?? [];
+      const [only] = operators;
+      if (operators.length === 1 && only !== undefined) {
+        join(only, index);
+      }
     }
   });
   const byRoot = new Map<number, BoardRow[]>();
-  rows.forEach((row, index) => {
+  unique.forEach((row, index) => {
     const root = find(index);
     byRoot.set(root, [...(byRoot.get(root) ?? []), row]);
   });
@@ -82,7 +128,7 @@ export function groupCodeshares(rows: readonly BoardRow[]): BoardGroup[] {
 
 export interface BoardFilter {
   readonly direction: BoardRow['direction'];
-  /** The window on the home leg's scheduled time, `[fromMs, toMs)`. */
+  /** The window, `[fromMs, toMs)`; `inWindow` says which flights it holds. */
   readonly fromMs: number;
   readonly toMs: number;
   /** A carrier code, IATA (2) or ICAO (3), upper case; absent for every airline. */
@@ -98,18 +144,52 @@ function flownBy(group: BoardGroup, airline: string): boolean {
   );
 }
 
+/** The statuses short of the home movement: not yet departed, or not yet arrived. */
+const BEFORE_HOME_MOVEMENT: Readonly<
+  Record<BoardRow['direction'], ReadonlySet<BoardRow['status']>>
+> = {
+  dep: new Set(['scheduled', 'boarding']),
+  arr: new Set(['scheduled', 'boarding', 'departed', 'en_route']),
+};
+
+/**
+ * Whether the provider's live data says a flight has not yet made its home movement: no actual
+ * time, a status short of it, and something live behind that status, an estimate or (for an
+ * arrival) its departure from the origin. A row with only its timetable says nothing either way:
+ * a schedules-only airport's rows read `boarding` from the schedule alone.
+ */
+function notYetMoved(row: BoardRow): boolean {
+  if (row.actual !== undefined || !BEFORE_HOME_MOVEMENT[row.direction].has(row.status)) {
+    return false;
+  }
+  return row.estimated !== undefined || row.status === 'departed' || row.status === 'en_route';
+}
+
+/**
+ * Whether a flight is in the window (ruling R14): by its home leg's scheduled time, by its best
+ * time (actual, else estimated), or, scheduled before the window, while it has not yet departed
+ * or arrived (a delayed flight stays on the board). Only the buckets already read are searched.
+ */
+function inWindow(row: BoardRow, filter: BoardFilter): boolean {
+  const within = (at: number): boolean => at >= filter.fromMs && at < filter.toMs;
+  const scheduled = Date.parse(row.scheduled);
+  const best = row.actual ?? row.estimated;
+  return (
+    within(scheduled) ||
+    (best !== undefined && within(Date.parse(best))) ||
+    (scheduled < filter.fromMs && notYetMoved(row))
+  );
+}
+
 /** The groups the filter keeps, by scheduled time, then designator. */
 export function filterGroups(groups: readonly BoardGroup[], filter: BoardFilter): BoardGroup[] {
   return groups
-    .filter((group) => {
-      const at = Date.parse(group.primary.scheduled);
-      return (
+    .filter(
+      (group) =>
         group.primary.direction === filter.direction &&
-        at >= filter.fromMs &&
-        at < filter.toMs &&
-        (filter.airline === undefined || flownBy(group, filter.airline))
-      );
-    })
+        inWindow(group.primary, filter) &&
+        (filter.airline === undefined || flownBy(group, filter.airline)),
+    )
     .sort(
       (a, b) =>
         Date.parse(a.primary.scheduled) - Date.parse(b.primary.scheduled) ||
@@ -172,8 +252,11 @@ export type CombinedBuckets =
  * The buckets as one answer. Coverage is per airport, so one `not_covered` bucket makes the
  * whole answer `not_covered`. With no bucket readable: `out_of_range` when every bucket is out
  * of range (never fetched: ended over 24 h ago or past the lookahead), else `unavailable`. With
- * some readable: their rows, the oldest `fetchedAt`, stale if any is, and `partial` when one is
- * missing. One `schedules_only` bucket makes the answer `schedules_only` (the badge).
+ * some readable: their rows, the oldest `fetchedAt`, stale if any is, and `partial` when one
+ * could not be read (`unavailable`: its fetch failed or was refused, or the Worker's read failed
+ * or timed out; a state this build does not know counts the same). Never for a bucket out of
+ * range, which no refresh can fill, so a range past the lookahead is not partial (R10, R15).
+ * One `schedules_only` bucket makes the answer `schedules_only` (the badge).
  */
 export function combineBuckets(answers: readonly BoardBucketResponseV1[]): CombinedBuckets {
   if (answers.some((answer) => answer.state === 'not_covered')) {
@@ -199,7 +282,7 @@ export function combineBuckets(answers: readonly BoardBucketResponseV1[]): Combi
         : 'unknown',
     fetchedAt: fetched[0] ?? null,
     stale: ok.some((answer) => answer.stale),
-    partial: ok.length < answers.length,
+    partial: answers.some((answer) => answer.state !== 'ok' && answer.state !== 'out_of_range'),
   };
 }
 

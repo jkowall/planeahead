@@ -333,8 +333,9 @@ export class ProviderBudget extends DurableObject<Env> {
    * `provider_daily_cap` (which also trips the kill switch) and `provider_rate_limit` with the
    * bucket's `retryAfterMs`; for board triggers also `boards_share`, `board_airports_per_hour`
    * and `board_rate_floor` (the bucket holds the call but not the trackers' floor, with the wait
-   * until it would). Never throws for a bad request: an exception would cross the RPC boundary
-   * into the caller's alarm.
+   * until it would). A board trigger's free `health` call (the coverage check) meets only the
+   * floor: it costs no units and fetches no board, so it takes no airport slot. Never throws for
+   * a bad request: an exception would cross the RPC boundary into the caller's alarm.
    */
   async reserve(request: BudgetRequest): Promise<BudgetDecision> {
     const identity = this.#requireIdentity();
@@ -367,17 +368,20 @@ export class ProviderBudget extends DurableObject<Env> {
         tripped = true;
         return { allowed: false, reason: 'provider_daily_cap' };
       }
-      // Increment 18 (ruling B5): board and route-search calls only.
-      const boards = isBoardTrigger(request.trigger)
-        ? checkBoards(request, units, config.daily_unit_cap, now, this.#boardsLedger())
-        : null;
+      // Increment 18 (ruling B5): board and route-search calls only. The free coverage check
+      // fetches no board, so it takes no airport slot (ruling R5, review A's ma4).
+      const boardCall = isBoardTrigger(request.trigger);
+      const boards =
+        boardCall && request.operation !== 'health'
+          ? checkBoards(request, units, config.daily_unit_cap, now, this.#boardsLedger())
+          : null;
       if (boards !== null && !boards.allowed) {
         this.#countDenial(boards.reason);
         return { allowed: false, reason: boards.reason, boardsShareSpent: boards.shareSpent };
       }
       const bucket = bucketFor(config.per_second_limit);
-      // Ruling R2: a board call must leave the trackers' floor in the bucket.
-      const keep = boards === null ? 0 : boardTokenFloor(bucket);
+      // Ruling R2: a board call, the coverage check included, leaves the trackers' floor.
+      const keep = boardCall ? boardTokenFloor(bucket) : 0;
       const taken = take(this.#bucket(bucket, now), bucket, now, 1, keep);
       this.#saveBucket(taken.state);
       if (!taken.allowed) {

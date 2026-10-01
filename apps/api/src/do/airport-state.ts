@@ -13,7 +13,9 @@
  *   2. A bucket that ended more than 24 hours ago is never fetched again, nor one beyond the
  *      plan's lookahead: the copy is served if one exists, else `out_of_range`.
  *   3. Coverage, once a day through the free health check (ruling B6): `not_covered` makes no
- *      FIDS call at all; `schedules_only` is carried on the answer for the screen's badge.
+ *      FIDS call at all; `schedules_only` is carried on the answer for the screen's badge. A feed
+ *      down or of unknown status is `unknown`, fetched anyway and asked again in an hour (ruling
+ *      R5, `coverageOf`): `not_covered` only when AeroDataBox provides neither feed.
  *   4. Between `freshUntil` and `staleUntil` the stale copy is served at once while ONE refresh
  *      runs in the background.
  *   5. Otherwise (no copy, or past `staleUntil`) the caller waits for the refresh. Concurrent
@@ -93,14 +95,35 @@ import { chunkOutbox, forEachBindChunk, sendOutboxChunks } from './outbox';
  * deterministic answer waits the ladder (`retryDelayMs`, `deterministicFailure`; ruling R6).
  */
 export const BOARD_REFRESH_RETRY_MS = 60_000;
-/** An unknown coverage (the free check failed) is asked again after this long. */
+/**
+ * An `unknown` coverage (the free check failed, or the deciding feed is down or of unknown
+ * status) is asked again after this long; every other answer stands `ADB_COVERAGE_TTL_MS`.
+ */
 export const COVERAGE_RETRY_MS = 60 * 60_000;
 /** Unsent call records are retried by the alarm this often. */
 export const AIRPORT_OUTBOX_RETRY_MS = 5 * 60_000;
 /** Decoded buckets kept in memory, so a hot board is not decompressed on every view. */
 const DECODED_CACHE_SIZE = 4;
 
-const COVERED_FEED_STATUSES: ReadonlySet<string> = new Set(['OK', 'OKPartial']);
+/**
+ * What a feed's `FeedServiceStatus` (spec v1.15.3) says about it (ruling R5): OK, OKPartial and
+ * Degraded mean provided, Down provided but down, Unavailable not provided. Unknown, and any
+ * value outside the enum, is indeterminate: only Unavailable may ever read as not covered.
+ */
+type FeedState = 'provided' | 'down' | 'indeterminate' | 'not_provided';
+
+const FEED_STATES: ReadonlyMap<string, FeedState> = new Map([
+  ['OK', 'provided'],
+  ['OKPartial', 'provided'],
+  ['Degraded', 'provided'],
+  ['Down', 'down'],
+  ['Unknown', 'indeterminate'],
+  ['Unavailable', 'not_provided'],
+]);
+
+function feedState(status: string): FeedState {
+  return FEED_STATES.get(status) ?? 'indeterminate';
+}
 
 export const AIRPORT_STATE_ORIGIN_PREFIX = 'airport_state:';
 
@@ -125,12 +148,28 @@ function isBoardProvider(value: unknown): value is BoardProvider {
   );
 }
 
-/** The coverage a health check answer means (R3 D6). */
-export function coverageOf(feeds: AdbCoverage): BoardCoverage {
-  if (COVERED_FEED_STATUSES.has(feeds.live)) {
-    return 'live';
+/**
+ * The coverage a health check answer means (R3 D6, ruling R5), live updates first: provided is
+ * `live`; down or indeterminate is `unknown` (the board is fetched anyway and the check asked
+ * again in an hour, so a transient status never pins a covered airport). Only when live updates
+ * are not provided do the schedules decide, the same way: `schedules_only`, `unknown`, and
+ * `not_covered` only when neither feed is provided.
+ */
+export function coverageOf(feeds: Pick<AdbCoverage, 'schedules' | 'live'>): BoardCoverage {
+  const live = feedState(feeds.live);
+  if (live !== 'not_provided') {
+    return live === 'provided' ? 'live' : 'unknown';
   }
-  return COVERED_FEED_STATUSES.has(feeds.schedules) ? 'schedules_only' : 'not_covered';
+  const schedules = feedState(feeds.schedules);
+  if (schedules !== 'not_provided') {
+    return schedules === 'provided' ? 'schedules_only' : 'unknown';
+  }
+  return 'not_covered';
+}
+
+/** How long a coverage answer stands: an hour while it is `unknown`, else a day (ruling R5). */
+export function coverageTtlMs(coverage: BoardCoverage): number {
+  return coverage === 'unknown' ? COVERAGE_RETRY_MS : ADB_COVERAGE_TTL_MS;
 }
 
 /** A guard that hands every decision to `seen` as well, so the share spent reaches the object. */
@@ -549,13 +588,19 @@ export class AirportState extends DurableObject<Env> {
   }
 
   /**
-   * The free health check (`checkCoverage`), stored for a day; a failed check is `unknown` (the
-   * board is fetched anyway) and asked again after `COVERAGE_RETRY_MS`. The answer lives in this
-   * object only (R15: the KV copy it used to write had no reader).
+   * The free health check (`checkCoverage`), stored for `coverageTtlMs`: a day, or an hour while
+   * `unknown` (a failed check, or a feed down or of unknown status; ruling R5). A check the
+   * budget refuses never reached AeroDataBox, so it stores nothing: this request goes on with the
+   * last answer (`unknown` if none) and the next one asks again, rather than an `unknown` standing
+   * for an hour while FIDS calls go out ungated (review A's ma4). The answer lives in this object
+   * only (R15: the KV copy it used to write had no reader).
    */
   async #checkCoverage(request: BoardBucketRequestV1): Promise<BoardCoverage> {
     const buffered: ProviderCallRecord[] = [];
-    const ctx = this.#context(request, 'coverage', buffered);
+    const observed: { decision: BudgetDecision | null } = { decision: null };
+    const ctx = this.#context(request, 'coverage', buffered, (decision) => {
+      observed.decision = decision;
+    });
     const startedAt = new Date(this.#now());
     let feeds: AdbCoverage | null = null;
     try {
@@ -565,8 +610,22 @@ export class AirportState extends DurableObject<Env> {
     } catch (error) {
       buffered.push(this.#thrownRecord(ctx, 'health', startedAt, error));
     }
-    const coverage: BoardCoverage = feeds === null ? 'unknown' : coverageOf(feeds);
     const at = this.#now();
+    if (observed.decision?.allowed === false) {
+      this.#keepRecords(request.airportIcao, buffered, at);
+      return this.#knownCoverage();
+    }
+    const coverage: BoardCoverage = feeds === null ? 'unknown' : coverageOf(feeds);
+    if (feeds !== null) {
+      // The raw statuses, so a status outside the enum (read as indeterminate) is seen as sent.
+      this.#log.info('airport_state_coverage_checked', {
+        airport_icao: request.airportIcao,
+        schedules: feeds.schedules,
+        live: feeds.live,
+        adsb: feeds.adsb,
+        coverage,
+      });
+    }
     this.#ensureSchema();
     this.ctx.storage.transactionSync(() => {
       this.ctx.storage.sql.exec(
@@ -578,7 +637,7 @@ export class AirportState extends DurableObject<Env> {
         feeds?.live ?? null,
         feeds?.adsb ?? null,
         at,
-        at + (coverage === 'unknown' ? COVERAGE_RETRY_MS : ADB_COVERAGE_TTL_MS),
+        at + coverageTtlMs(coverage),
       );
       this.#appendRecords(buffered, at);
     });

@@ -51,7 +51,7 @@ export const BoardAddSchema = z.looseObject({
  * UTC instants; `estimated` may be a gate or runway time (R3 F8), so label it cautiously.
  */
 export const BoardViewRowSchema = z.looseObject({
-  /** Stable for the flight within its bucket, for list keys. */
+  /** Unique within an answer (each flight is listed once, R12) and stable, for list keys. */
   id: z.string(),
   /** The primary designator: the operating carrier's own number when the provider marks one. */
   designator: z.string(),
@@ -85,14 +85,19 @@ export type BoardViewRow = z.infer<typeof BoardViewRowSchema>;
 const BoardFreshnessFields = {
   /**
    * `live`, `schedules_only` (show the badge: times are the published schedule, no live status)
-   * or `unknown` (the free coverage check failed; the board was fetched anyway).
+   * or `unknown` (the free coverage check failed, or a feed was down or of unknown status; the
+   * board was fetched anyway).
    */
   coverage: BoardCoverageSchema,
   /** The oldest `fetchedAt` of the buckets shown: the board is "as of" this instant. */
   fetchedAt: IsoInstantSchema.nullable(),
   /** True when a bucket shown is past its freshness: one refresh runs, or none can. */
   stale: z.boolean(),
-  /** True when part of the range could not be read (no copy and the provider unavailable). */
+  /**
+   * True when part of the range could not be read (no copy and the provider unavailable, or the
+   * read timed out). Never for a part beyond the plan's lookahead or long past, which no refresh
+   * can fill (R10).
+   */
   partial: z.boolean(),
 };
 
@@ -100,7 +105,10 @@ const BoardFreshnessFields = {
 export const AirportBoardResponseSchema = z.looseObject({
   airport: BoardAirportViewSchema,
   direction: z.enum(BOARD_DIRECTIONS),
-  /** The window shown, `[from, to)`, by the home leg's scheduled time. */
+  /**
+   * The window shown, `[from, to)`: flights whose home leg is scheduled in it or whose best time
+   * (actual, else estimated) is, and earlier ones not yet departed or arrived (R14).
+   */
   from: IsoInstantSchema,
   to: IsoInstantSchema,
   /** The airline filter as given (operating or marketing carrier, IATA or ICAO). */

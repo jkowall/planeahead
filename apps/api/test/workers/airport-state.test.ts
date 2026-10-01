@@ -8,7 +8,8 @@
  * the call; a hub-sized bucket is chunked, read back and purged with its KV copy. From the
  * review round: a failure waits as long as its cause warrants (R6) and a copy that cannot be
  * stored keeps its record (R15); board calls leave the trackers their rate floor (R2); a copy
- * fetched weeks ahead is purged a week after its fetch (R4).
+ * fetched weeks ahead is purged a week after its fetch (R4); coverage reads every feed status as
+ * the spec defines it, and a check the budget refuses stores nothing (R5).
  */
 
 import { runDurableObjectAlarm, runInDurableObject } from 'cloudflare:test';
@@ -23,7 +24,7 @@ import {
 } from '@planeahead/shared';
 import { decodeBoardRows, joinChunks, readBoardKv } from '../../src/boards/cache';
 import { readBoardBucket } from '../../src/boards/read';
-import type { AirportState } from '../../src/do/airport-state';
+import { coverageOf, coverageTtlMs, type AirportState } from '../../src/do/airport-state';
 import { HOUR_MS, MINUTE_MS, drainTouched, testEnv, track } from './helpers/flights';
 import {
   airportHarness,
@@ -429,10 +430,10 @@ describe('AirportState: the trackers keep their rate floor (ruling R2)', () => {
   });
 });
 
-describe('AirportState: coverage, once per airport per day (ruling B6)', () => {
+describe('AirportState: coverage, once per airport per day (rulings B6 and R5)', () => {
   it('neither schedules nor live: not_covered, no FIDS call, and one check a day for every bucket', async () => {
     const { bucket, now, harness } = await currentBucket();
-    harness.adb.health = () => feeds('NoData', 'NoData');
+    harness.adb.health = () => feeds('Unavailable', 'Unavailable');
     expect(await ask(harness, bucket)).toMatchObject({
       state: 'not_covered',
       rows: [],
@@ -444,7 +445,7 @@ describe('AirportState: coverage, once per airport per day (ruling B6)', () => {
     expect(harness.adb.fidsCalls()).toBe(0);
     expect(harness.adb.healthCalls()).toBe(1);
     // A day later the free check is asked again.
-    harness.adb.health = () => feeds('OK', 'NoData');
+    harness.adb.health = () => feeds('OK', 'Unavailable');
     await harness.setClock(now + 24 * HOUR_MS + 1);
     expect(await ask(harness, tomorrow)).toMatchObject({ state: 'ok', coverage: 'schedules_only' });
     expect(harness.adb.healthCalls()).toBe(2);
@@ -454,7 +455,7 @@ describe('AirportState: coverage, once per airport per day (ruling B6)', () => {
 
   it('schedules only: the board is served and says so; a failed check fetches anyway, asked again in an hour', async () => {
     const { bucket, harness } = await currentBucket();
-    harness.adb.health = () => feeds('OKPartial', 'NoData');
+    harness.adb.health = () => feeds('OKPartial', 'Unavailable');
     expect(await ask(harness, bucket)).toMatchObject({ state: 'ok', coverage: 'schedules_only' });
     const other = await currentBucket();
     other.harness.adb.health = () => Response.json({ message: 'down' }, { status: 500 });
@@ -471,6 +472,126 @@ describe('AirportState: coverage, once per airport per day (ruling B6)', () => {
     expect(other.harness.adb.healthCalls()).toBe(2);
     await harness.settled();
     await other.harness.settled();
+  });
+
+  it('live updates down are unknown, never not_covered: fetched, and recovered within the hour (R5)', async () => {
+    const { bucket, now, harness } = await currentBucket();
+    // Review A's probe: Down and Degraded once, OK after (which kept a 404 for 24 hours).
+    harness.adb.health = () => feeds('Degraded', 'Down');
+    expect(await ask(harness, bucket)).toMatchObject({ state: 'ok', coverage: 'unknown' });
+    await harness.setClock(now + 30 * MINUTE_MS);
+    expect(await ask(harness, `${bucket.slice(0, 10)}T00:00`)).toMatchObject({
+      state: 'ok',
+      coverage: 'unknown',
+    });
+    expect(harness.adb.healthCalls()).toBe(1);
+    harness.adb.health = () => feeds('OK', 'OK');
+    await harness.setClock(now + HOUR_MS);
+    const tomorrow = `${new Date(now + 24 * HOUR_MS).toISOString().slice(0, 10)}T00:00`;
+    expect(await ask(harness, tomorrow)).toMatchObject({ state: 'ok', coverage: 'live' });
+    expect(harness.adb.healthCalls()).toBe(2);
+    expect(harness.adb.fidsCalls()).toBe(3);
+    await harness.settled();
+  });
+
+  it('Degraded live updates are provided: live for a day, not the schedules-only badge (R5)', async () => {
+    const { bucket, now, harness } = await currentBucket();
+    harness.adb.health = () => feeds('OK', 'Degraded');
+    expect(await ask(harness, bucket)).toMatchObject({ state: 'ok', coverage: 'live' });
+    await harness.setClock(now + 23 * HOUR_MS);
+    const tomorrow = `${new Date(now + 24 * HOUR_MS).toISOString().slice(0, 10)}T00:00`;
+    expect(await ask(harness, tomorrow)).toMatchObject({ state: 'ok', coverage: 'live' });
+    expect(harness.adb.healthCalls()).toBe(1);
+    await harness.settled();
+  });
+
+  it('a status outside the enum is unknown: the board is fetched, not refused as uncovered (R5)', async () => {
+    const { bucket, harness } = await currentBucket();
+    harness.adb.health = () => feeds('NoData', 'NoData');
+    expect(await ask(harness, bucket)).toMatchObject({ state: 'ok', coverage: 'unknown' });
+    expect(harness.adb.fidsCalls()).toBe(1);
+    await harness.settled();
+  });
+
+  it('a check the budget refuses stores nothing: asked again next time, no FIDS call ungated (R5)', async () => {
+    const { bucket, now, harness } = await currentBucket();
+    harness.adb.health = () => feeds('Unavailable', 'Unavailable');
+    // Tracker polls take 3 of Growth's burst of 5: the 2 left are the floor board calls keep.
+    const utcDate = new Date(now).toISOString().slice(0, 10);
+    const budget = testEnv.PROVIDER_BUDGET.getByName(`aerodatabox:${utcDate}`, {
+      locationHint: 'enam',
+    });
+    for (let i = 0; i < 3; i += 1) {
+      const poll: BudgetRequest = {
+        provider: 'aerodatabox',
+        operation: 'flight_status',
+        pollEquivalents: 0.1,
+        trigger: 'alarm',
+        utcDate,
+      };
+      expect((await budget.reserve(poll)).allowed).toBe(true);
+    }
+    expect(await ask(harness, bucket)).toMatchObject({
+      state: 'unavailable',
+      coverage: 'unknown',
+      reason: 'budget_denied:board_rate_floor',
+    });
+    expect(harness.adb.healthCalls()).toBe(0);
+    // A second on, the check is asked (not an hour on, under a stored `unknown` that would have
+    // let this FIDS call out to an airport AeroDataBox does not cover).
+    await harness.setClock(now + 1_000);
+    expect(await ask(harness, bucket)).toMatchObject({ state: 'not_covered' });
+    expect(harness.adb.healthCalls()).toBe(1);
+    expect(harness.adb.fidsCalls()).toBe(0);
+    // The refused check's record still reaches persist, unbilled.
+    await harness.settled();
+    const checks = harness.sent.flatMap((message) =>
+      message.kind === 'provider_call' && message.payload.operation === 'health'
+        ? [message.payload]
+        : [],
+    );
+    expect(checks.map((call) => [call.result, call.error, call.costUnits])).toEqual([
+      ['rate_limited', 'budget_denied:board_rate_floor', 0],
+      ['ok', undefined, 0],
+    ]);
+  });
+});
+
+describe('coverageOf: every pair of feed statuses (ruling R5)', () => {
+  const STATUSES = ['OK', 'OKPartial', 'Degraded', 'Down', 'Unknown', 'Unavailable'] as const;
+  // One line per live-updates status; its columns are the schedules statuses in the same order.
+  // L live, S schedules_only, N not_covered (each for a day), U unknown (asked again in an hour).
+  const TABLE: Record<(typeof STATUSES)[number], string> = {
+    OK: 'L L L L L L',
+    OKPartial: 'L L L L L L',
+    Degraded: 'L L L L L L',
+    Down: 'U U U U U U',
+    Unknown: 'U U U U U U',
+    Unavailable: 'S S S U U N',
+  };
+  const NAMES = { L: 'live', S: 'schedules_only', N: 'not_covered', U: 'unknown' } as const;
+
+  it('maps all 36 pairs, live updates first: only Unavailable twice is not covered', () => {
+    const pairs = STATUSES.flatMap((live) =>
+      TABLE[live].split(' ').map((letter, column) => ({
+        live,
+        schedules: STATUSES[column] ?? '',
+        expected: NAMES[letter as keyof typeof NAMES],
+      })),
+    );
+    expect(pairs).toHaveLength(36);
+    for (const { live, schedules, expected } of pairs) {
+      const coverage = coverageOf({ live, schedules });
+      expect(coverage, `live ${live}, schedules ${schedules}`).toBe(expected);
+      expect(coverageTtlMs(coverage)).toBe(expected === 'unknown' ? HOUR_MS : 24 * HOUR_MS);
+    }
+  });
+
+  it('reads any status outside the enum as indeterminate: unknown, never not covered', () => {
+    for (const odd of ['NoData', 'ok', '', 'toString']) {
+      expect(coverageOf({ live: odd, schedules: 'OK' }), odd).toBe('unknown');
+      expect(coverageOf({ live: 'Unavailable', schedules: odd }), odd).toBe('unknown');
+    }
   });
 });
 

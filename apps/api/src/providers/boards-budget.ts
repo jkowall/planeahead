@@ -14,9 +14,12 @@
  *     airport already counted in the hour is free against the cap; a new one past the cap is
  *     refused with `board_airports_per_hour`. A board reservation that names no airport is
  *     refused (`routing_rule`): an uncounted board call is exactly what the cap exists to stop.
- *   - The rate floor: a board call takes a token only while the bucket keeps `boardTokenFloor`
- *     more; otherwise it is refused with `board_rate_floor` and the wait until it would pass
- *     (`take`'s `keep` in `token-bucket.ts`, whose module comment says why the burst matters).
+ *     The free `health` call (the coverage check) is no refresh: the object skips the share and
+ *     the cap for it (ruling R5), so zero-cost checks alone can never fill the hour's cap.
+ *   - The rate floor: a board call, the `health` one included, takes a token only while the
+ *     bucket keeps `boardTokenFloor` more; otherwise it is refused with `board_rate_floor` and the
+ *     wait until it would pass (`take`'s `keep` in `token-bucket.ts`, whose module comment says
+ *     why the burst matters).
  */
 
 import { BOARD_CALL_TRIGGERS, ICAO_AIRPORT_RE, type BudgetRequest } from '@planeahead/shared';

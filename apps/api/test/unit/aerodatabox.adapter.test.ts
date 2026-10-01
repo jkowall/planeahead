@@ -996,7 +996,6 @@ describe('boards, airports and coverage', () => {
       schedules: 'OK',
       live: 'OKPartial',
       adsb: 'OK',
-      covered: true,
     });
     expect(call).toMatchObject({
       operation: 'health',
@@ -1005,6 +1004,24 @@ describe('boards, airports and coverage', () => {
       estCostUsdMicros: 0,
     });
     expect(recorder.reservations[0]).toMatchObject({ operation: 'health', pollEquivalents: 0 });
+  });
+
+  it('passes a status outside the enum on as sent, not as a failed check (R5)', async () => {
+    const fixture = FIXTURES['health-kjfk'] as Fixture;
+    const body = fixture.response.body as Record<string, object>;
+    const stub = fixtureFetch({
+      ...fixture,
+      response: {
+        ...fixture.response,
+        body: {
+          ...body,
+          liveFlightUpdatesFeed: { service: 'FlightLiveUpdates', status: 'NoData' },
+        },
+      },
+    });
+    const { data, call } = await adapter(stub.fetch).checkCoverage('KJFK', providerContext().ctx);
+    expect(data).toEqual({ airportIcao: 'KJFK', schedules: 'OK', live: 'NoData', adsb: 'OK' });
+    expect(call).toMatchObject({ operation: 'health', result: 'ok' });
   });
 });
 

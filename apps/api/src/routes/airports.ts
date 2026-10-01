@@ -20,7 +20,9 @@
  * The board: an anonymous account may open only an airport of its live subscriptions (403
  * `board_requires_account`). `from` and `to` are instants (`Z` or an offset), at most 12 hours
  * apart; without them the window starts an hour before now, rounded down to 5 minutes, and runs
- * 12 hours. Rows are kept by the home leg's scheduled time in `[from, to)`. The window may end at
+ * 12 hours. Rows are kept by the home leg's scheduled time or best time in `[from, to)`, and an
+ * earlier flight of the buckets read stays while it has not yet departed or arrived (R14,
+ * `filterGroups`). Each flight appears once, codeshares grouped (R12). The window may end at
  * most 72 hours ahead (R3; 422 with `maxHoursAhead`, a range the app never asks for, since it
  * sends no `from` or `to`): later dates are the route search's, which is capped. A bucket that
  * ended too long ago to be fetched is 422 as well, with the plan's `maxDaysAhead`.
@@ -28,9 +30,11 @@
  * The route search: open to anonymous accounts within the `route_searches` caps (403
  * `cap_exceeded`; a search that answers no flights because nothing could be read gives its slots
  * back). It reads the origin's two buckets of the origin-local date and keeps the departures
- * whose arrival leg is the destination, grouped as on the board. `GET /v1/flights/search` stays
- * the designator search. Adding a flight from either list is the existing `POST /v1/flights` with
- * the row's `add` (designator, origin-local date, origin).
+ * of that date (`scheduledDepartureDateLocal`, R12) whose arrival leg is the destination,
+ * grouped as on the board. `partial` never marks a bucket out of range, which no pull can fill
+ * (R10). `GET /v1/flights/search` stays the designator search. Adding a flight from either list
+ * is the existing `POST /v1/flights` with the row's `add` (designator, origin-local date,
+ * origin).
  *
  * Licence posture (ruling B9; R3 D11, plan section 10 item 3): boards and route results stay OUT
  * of share pages, public API tokens and MCP until AeroDataBox confirms in writing that they are
@@ -495,7 +499,10 @@ export function createAirportRoutes(options: AirportRoutesOptions = {}) {
             await ledger.releaseAll();
             return bucketFailure(c, combined.kind, read.allTimedOut, maxDaysAhead);
           }
-          const departures = filterGroups(groupCodeshares(combined.rows), {
+          // The date's own flights only (R12): a bucket may also return a delayed one of the day
+          // before, or one of the next day.
+          const ofDate = combined.rows.filter((row) => row.scheduledDepartureDateLocal === date);
+          const departures = filterGroups(groupCodeshares(ofDate), {
             direction: 'dep',
             fromMs: Number.NEGATIVE_INFINITY,
             toMs: Number.POSITIVE_INFINITY,

@@ -257,7 +257,7 @@ describe('GET /v1/airports/{code}/board (rulings B7 and B8)', () => {
   });
 
   it('carries the schedules-only badge, and answers 404 for an airport not covered, with no FIDS call', async () => {
-    const schedules = await boardScenario(() => feeds('OK', 'NoData'));
+    const schedules = await boardScenario(() => feeds('OK', 'Unavailable'));
     const badge = await schedules.app.get(boardPath(schedules), schedules.session);
     expect(badge.status).toBe(200);
     expect(await badge.json<AirportBoardResponse>()).toMatchObject({
@@ -265,10 +265,14 @@ describe('GET /v1/airports/{code}/board (rulings B7 and B8)', () => {
       stale: false,
     });
 
-    const uncovered = await boardScenario(() => feeds('NoData', 'NoData'));
+    const uncovered = await boardScenario(() => feeds('Unavailable', 'Unavailable'));
     const missing = await uncovered.app.get(boardPath(uncovered), uncovered.session);
     expect(missing.status).toBe(404);
     expect(await missing.json()).toMatchObject({ error: 'board_not_covered' });
+    // Only both feeds Unavailable mean not covered (R5); the answer stands, checked once.
+    const again = await uncovered.app.get(boardPath(uncovered), uncovered.session);
+    expect(again.status).toBe(404);
+    expect(uncovered.harness.adb.healthCalls()).toBe(1);
     expect(uncovered.harness.adb.fidsCalls()).toBe(0);
   });
 
@@ -338,9 +342,12 @@ interface RouteScenario {
 /**
  * Both buckets of one origin-local date. Morning: AA10 to the destination with BA8010 on it,
  * AA11 elsewhere, AA12 arriving FROM the destination. Evening: DL20 to the destination with
- * AF21 on it (one callsign), and UA22, earlier. The clock is the evening before.
+ * AF21 on it (one callsign), and UA22, earlier. The clock is the evening before, unless `nowOf`
+ * places it from the morning bucket.
  */
-async function routeScenario(): Promise<RouteScenario> {
+async function routeScenario(
+  nowOf: (am: BoardBucketBounds) => number = (am) => am.startMs - 2 * HOUR_MS,
+): Promise<RouteScenario> {
   const [origin, destination, london] = await Promise.all([
     insertBoardAirport(NY),
     insertBoardAirport('America/Chicago'),
@@ -349,7 +356,7 @@ async function routeScenario(): Promise<RouteScenario> {
   const day = uniqueDay();
   const am = boundsOf(`${day}T00:00`);
   const pm = boundsOf(`${day}T12:00`);
-  const now = am.startMs - 2 * HOUR_MS;
+  const now = nowOf(am);
   const at = (bounds: BoardBucketBounds, hours: number) => bounds.startMs + hours * HOUR_MS;
   const dep = (
     number: string,
@@ -461,6 +468,70 @@ describe('GET /v1/airports/{origin}/flights/to/{destination} (ruling B8)', () =>
     expect(notModified.status).toBe(304);
     expect(notModified.headers.get('etag')).toBe(etag);
     expect(notModified.headers.get('cache-control')).toBe('no-store');
+  });
+
+  it("lists only the date's own flights, each once, keyless codeshares grouped (R12)", async () => {
+    const r = await routeScenario();
+    const am = boundsOf(`${r.day}T00:00`);
+    const pm = boundsOf(`${r.day}T12:00`);
+    const flight = (
+      number: string,
+      airline: { iata: string; icao: string },
+      homeMs: number,
+      codeshareStatus: 'IsOperator' | 'IsCodeshared' = 'IsOperator',
+    ) =>
+      fidsFlight('dep', {
+        number,
+        airline,
+        codeshareStatus,
+        homeTz: NY,
+        homeMs,
+        far: r.destination,
+        farMs: homeMs + 3 * HOUR_MS,
+      });
+    // Review B's flight, days ahead with no aircraft yet: no registration, no callsign.
+    const aa100 = flight('AA 100', AA, am.startMs + 8 * HOUR_MS);
+    const codeshares = ['BA 1511', 'IB 4218'].map((number) =>
+      flight(number, number.startsWith('BA') ? BA : IB, am.startMs + 8 * HOUR_MS, 'IsCodeshared'),
+    );
+    // The day before's late flight and the next day's first are in these buckets too, and the
+    // evening bucket returns AA100 again.
+    const morning = {
+      departures: [flight('UA 5', UA, am.startMs - 2 * HOUR_MS), aa100, ...codeshares],
+      arrivals: [],
+    };
+    const evening = {
+      departures: [
+        aa100,
+        flight('DL 20', DL, pm.startMs + 3 * HOUR_MS),
+        flight('DL 99', DL, pm.startMs + 13 * HOUR_MS),
+      ],
+      arrivals: [],
+    };
+    r.harness.adb.fids = (url) =>
+      Response.json(url.pathname.includes(`/${r.day}T00:00/`) ? morning : evening);
+    const response = await r.app.get(routePath(r), r.session);
+    expect(response.status).toBe(200);
+    const body = await response.json<RouteSearchResponse>();
+    expect(body.flights.map((f) => [f.designator, f.codeshares])).toEqual([
+      ['AA100', ['BA1511', 'IB4218']],
+      ['DL20', []],
+    ]);
+    expect(new Set(body.flights.map((f) => f.id)).size).toBe(2);
+    expect(body.partial).toBe(false);
+  });
+
+  it("is not partial when the date's evening lies past the plan's lookahead (R10, R15)", async () => {
+    const maxDaysAhead = providerSettings(testEnv).adbPlan.maxDaysAhead;
+    // An hour after the origin's midnight on the date's last searchable day: the morning bucket
+    // starts inside the lookahead, the evening one past it (`out_of_range`, never fetched).
+    const r = await routeScenario((am) => am.startMs - maxDaysAhead * 24 * HOUR_MS + HOUR_MS);
+    const response = await r.app.get(routePath(r), r.session);
+    expect(response.status).toBe(200);
+    const body = await response.json<RouteSearchResponse>();
+    expect(body.flights.map((flight) => flight.designator)).toEqual(['AA10']);
+    expect(body.partial).toBe(false);
+    expect(r.harness.adb.fidsCalls()).toBe(1);
   });
 
   it('answers the designator search 422 past the lookahead, and for a date long gone, charging nothing', async () => {

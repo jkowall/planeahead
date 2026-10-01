@@ -213,6 +213,10 @@ const AirportContractSchema = z.looseObject({
   timeZone: z.string().min(1),
 });
 
+/**
+ * `FeedServiceStatusContract`. The status is any string, not the spec's enum: a value AeroDataBox
+ * adds later must not fail the whole check, and `coverageOf` reads it as indeterminate (R5).
+ */
 const FeedStatusSchema = z.looseObject({ service: z.string(), status: z.string() });
 const AirportFeedsSchema = z.looseObject({
   flightSchedulesFeed: FeedStatusSchema,
@@ -592,14 +596,16 @@ export interface AeroDataBoxAdapterOptions {
   readonly now: () => Date;
 }
 
-/** Result of an AeroDataBox health check for one airport. */
+/**
+ * Result of an AeroDataBox health check for one airport: each feed's `FeedServiceStatus` as
+ * sent (Down, Degraded, OKPartial, OK, Unknown or Unavailable). What the statuses mean for a
+ * board is `coverageOf` in the AirportState object (ruling R5), the one reader.
+ */
 export interface AdbCoverage {
   readonly airportIcao: string;
   readonly schedules: string;
   readonly live: string;
   readonly adsb: string;
-  /** True when schedules or live updates are `OK` or `OKPartial`. */
-  readonly covered: boolean;
 }
 
 interface Attempt {
@@ -608,8 +614,6 @@ interface Attempt {
   /** True when the caller must not retry this lookup (451, a refusal, a push-back). */
   readonly terminal: boolean;
 }
-
-const COVERED_STATUSES: ReadonlySet<string> = new Set(['OK', 'OKPartial']);
 
 function retryAfterMs(response: Response): number {
   const header = response.headers.get('retry-after');
@@ -958,8 +962,9 @@ export class AeroDataBoxAdapter implements FlightDataProvider {
   }
 
   /**
-   * FREE TIER health check for one airport's data feeds: the DesignatorResolver's not-found
-   * path asks it whether a miss means "no such flight" or "we do not cover this airport".
+   * FREE TIER health check for one airport's data feeds: the AirportState object asks it once a
+   * day whether a board can be fetched (R3 D6). Each status is passed on as sent; one outside
+   * the enum is not a failed check, so the object reads it as indeterminate (ruling R5).
    */
   async checkCoverage(
     airportIcao: string,
@@ -979,15 +984,12 @@ export class AeroDataBoxAdapter implements FlightDataProvider {
     if (!parsed.success) {
       return { data: null, call: { ...attempt.call, result: 'error', error: 'not_a_feed_status' } };
     }
-    const schedules = parsed.data.flightSchedulesFeed.status;
-    const live = parsed.data.liveFlightUpdatesFeed.status;
     return {
       data: {
         airportIcao: icao,
-        schedules,
-        live,
+        schedules: parsed.data.flightSchedulesFeed.status,
+        live: parsed.data.liveFlightUpdatesFeed.status,
         adsb: parsed.data.adsbUpdatesFeed.status,
-        covered: COVERED_STATUSES.has(schedules) || COVERED_STATUSES.has(live),
       },
       call: attempt.call,
     };

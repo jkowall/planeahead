@@ -257,8 +257,9 @@ export function airportRefKvKey(code: string): string {
 export const BOARD_KV_CACHE_TTL_SECONDS = 30;
 
 /**
- * How long a coverage answer stands before the object asks again (ruling B6: once a day). It
- * lives in the AirportState object only (R15: the KV copy it used to have had no reader).
+ * How long a coverage answer stands before the object asks again (ruling B6: once a day; an
+ * `unknown` one stands an hour, ruling R5). It lives in the AirportState object only (R15: the
+ * KV copy it used to have had no reader).
  */
 export const ADB_COVERAGE_TTL_MS = 24 * HOUR_MS;
 
@@ -267,9 +268,10 @@ export const AIRPORT_REF_KV_TTL_SECONDS = 24 * 60 * 60;
 
 /**
  * An airport's coverage (R3 F10, D6): `live` (live updates, so status and gates), `schedules_only`
- * (static schedules: the board says so and the screen shows a badge), `not_covered` (neither: no
- * FIDS call, the route answers 404 `board_not_covered`), `unknown` (the free check failed, so the
- * board is fetched anyway). A value a newer object adds parses as `unknown`.
+ * (static schedules: the board says so and the screen shows a badge), `not_covered` (AeroDataBox
+ * provides neither: no FIDS call, the route answers 404 `board_not_covered`), `unknown` (the free
+ * check failed, or the feed that decides is down or of unknown status, ruling R5: the board is
+ * fetched anyway). A value a newer object adds parses as `unknown`.
  */
 export const BOARD_COVERAGES = ['live', 'schedules_only', 'not_covered', 'unknown'] as const;
 export const BoardCoverageSchema = tolerantEnum(BOARD_COVERAGES, 'unknown');

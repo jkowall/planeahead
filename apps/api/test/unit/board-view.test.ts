@@ -1,6 +1,8 @@
 /**
  * Ruling B7 (increment 18): codeshare grouping, the filters after the cache, the UI row, the
- * combination of a request's buckets, and the ETag. Pure; synthetic rows only.
+ * combination of a request's buckets, and the ETag. From the review round: keyless codeshares
+ * and each flight once (R12), delayed flights kept (R14), `partial` never for a range out of
+ * reach (R10). Pure; synthetic rows only.
  */
 
 import { describe, expect, it } from 'vitest';
@@ -101,6 +103,75 @@ describe('groupCodeshares (R3 D7)', () => {
     ]);
     expect(first[0]?.primary.designator).toBe('QR8');
   });
+
+  it("review B's case: keyless codeshares join the only IsOperator row of their slot (R12)", () => {
+    const [group, ...rest] = groupCodeshares([
+      row('BA1511', { codeshareStatus: 'IsCodeshared' }),
+      row('AA100', { codeshareStatus: 'IsOperator', operatingCarrierIcao: 'AAL' }),
+      row('IB4218', { codeshareStatus: 'IsCodeshared' }),
+    ]);
+    expect(rest).toEqual([]);
+    expect(group?.primary.designator).toBe('AA100');
+    expect(boardViewRow(group!, 'KJFK').codeshares).toEqual(['BA1511', 'IB4218']);
+  });
+
+  it('a keyless codeshare stays alone with no IsOperator row in its slot, or several (R12)', () => {
+    const designators = (rows: BoardRow[]) =>
+      groupCodeshares(rows).map((g) => [g.primary.designator, g.others.length]);
+    expect(
+      designators([
+        row('BA1', { codeshareStatus: 'IsCodeshared' }),
+        row('AA1', { codeshareStatus: 'Unknown' }),
+      ]),
+    ).toEqual([
+      ['BA1', 0],
+      ['AA1', 0],
+    ]);
+    expect(
+      designators([
+        row('AA2', { codeshareStatus: 'IsOperator' }),
+        row('DL2', { codeshareStatus: 'IsOperator' }),
+        row('BA2', { codeshareStatus: 'IsCodeshared' }),
+      ]),
+    ).toEqual([
+      ['AA2', 0],
+      ['DL2', 0],
+      ['BA2', 0],
+    ]);
+    // Never across a minute, a counterpart or a direction.
+    expect(
+      designators([
+        row('AA3', { codeshareStatus: 'IsOperator' }),
+        row('BA3', { codeshareStatus: 'IsCodeshared', scheduled: '2026-10-02T13:01:00Z' }),
+        row('IB3', { codeshareStatus: 'IsCodeshared', counterpart: { icao: 'KJFK', iata: 'JFK' } }),
+        row('QR3', { codeshareStatus: 'IsCodeshared', direction: 'arr' }),
+      ]),
+    ).toHaveLength(4);
+  });
+
+  it('lists a flight two buckets return once, first copy kept, before grouping (R12)', () => {
+    const evening = aa100().map((r) => ({ ...r, gate: 'B12' }));
+    const keyless = row('DL40', { scheduled: '2026-10-02T14:00:00Z' });
+    const at1330 = '2026-10-02T13:30:00Z';
+    const groups = groupCodeshares([
+      ...aa100(),
+      keyless,
+      row('AA200', { codeshareStatus: 'IsOperator', scheduled: at1330 }),
+      row('BA2000', { codeshareStatus: 'IsCodeshared', scheduled: at1330 }),
+      ...evening,
+      { ...keyless },
+      row('AA200', { codeshareStatus: 'IsOperator', scheduled: '2026-10-02T13:30:00.000Z' }),
+    ]);
+    expect(groups.map((g) => [g.primary.designator, g.others.map((r) => r.designator)])).toEqual([
+      ['AA100', ['BA1511', 'IB4218']],
+      ['DL40', []],
+      // The doubled IsOperator row is still the only one of its slot.
+      ['AA200', ['BA2000']],
+    ]);
+    expect(groups[0]?.primary.gate).toBeUndefined();
+    const ids = groups.map((g) => boardViewRow(g, 'KJFK').id);
+    expect(new Set(ids).size).toBe(3);
+  });
 });
 
 describe('filterGroups (R3 D8)', () => {
@@ -131,6 +202,39 @@ describe('filterGroups (R3 D8)', () => {
     expect(by('AAL')).toEqual(['AA100']);
     expect(by('DL')).toEqual(['DL50', 'DL40', 'DL60']);
     expect(by('LH')).toEqual([]);
+  });
+
+  it('keeps a delayed flight: its best time in the window, or earlier and not yet moved (R14)', () => {
+    const at = (hhmm: string) => `2026-10-02T${hhmm}:00Z`;
+    const rows = [
+      row('DL1', { scheduled: at('12:00'), estimated: at('13:30') }),
+      row('DL2', { scheduled: at('11:00'), actual: at('13:10'), status: 'departed' }),
+      row('DL3', { scheduled: at('11:00'), actual: at('12:30'), status: 'departed' }),
+      row('DL4', { scheduled: at('10:00'), estimated: at('16:00') }),
+      row('DL5', { scheduled: at('12:00'), status: 'boarding' }),
+      row('DL6', { scheduled: at('12:00'), estimated: at('12:10'), status: 'en_route' }),
+      row('DL8', { scheduled: at('15:30'), estimated: at('14:50') }),
+      row('DL9', { scheduled: at('15:30'), estimated: at('16:00') }),
+      row('BA1', { direction: 'arr', scheduled: at('11:00'), status: 'en_route' }),
+      row('BA2', { direction: 'arr', scheduled: at('11:00'), status: 'landed' }),
+      row('BA3', {
+        direction: 'arr',
+        scheduled: at('11:00'),
+        actual: at('12:00'),
+        status: 'arrived',
+      }),
+      row('BA4', { direction: 'arr', scheduled: at('11:00'), status: 'boarding' }),
+    ];
+    const kept = (direction: 'dep' | 'arr') =>
+      filterGroups(groupCodeshares(rows), { ...window, direction }).map(
+        (g) => g.primary.designator,
+      );
+    // DL4 waits on an estimate past the window, DL2 left in it, DL1 is expected in it and DL8
+    // early into it. DL3 left before it, DL6 is airborne, and DL5's `boarding` is its timetable's
+    // word alone; DL9 is due after the window.
+    expect(kept('dep')).toEqual(['DL4', 'DL2', 'DL1', 'DL8']);
+    // An arrival still in the air stays; one landed or in, or with only its timetable, does not.
+    expect(kept('arr')).toEqual(['BA1']);
   });
 });
 
@@ -235,6 +339,22 @@ describe('combineBuckets', () => {
     expect(combineBuckets([bucket('ok', { coverage: 'unknown' })])).toMatchObject({
       coverage: 'unknown',
     });
+  });
+
+  it('is partial only for a bucket that could not be read, never for one out of range (R10)', () => {
+    const morning = bucket('ok', { rows: [row('AA1')] });
+    const partialWith = (other: BoardBucketResponseV1): unknown => {
+      const combined = combineBuckets([morning, other]);
+      return combined.kind === 'ok' ? combined.partial : combined.kind;
+    };
+    // A range past the lookahead (or long past) has nothing a pull could add.
+    expect(partialWith(bucket('out_of_range'))).toBe(false);
+    expect(partialWith(bucket('unavailable', { reason: 'budget_denied:boards_share' }))).toBe(true);
+    // The Worker's timed-out or failed read is `unavailable` too (routes/airports.ts).
+    expect(partialWith(bucket('unavailable', { reason: 'timeout', coverage: 'unknown' }))).toBe(
+      true,
+    );
+    expect(partialWith(bucket('unknown'))).toBe(true);
   });
 });
 

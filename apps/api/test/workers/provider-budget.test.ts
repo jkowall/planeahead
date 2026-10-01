@@ -805,6 +805,34 @@ describe('ProviderBudget: the boards share and the hourly airport cap (increment
       routing_rule: 1,
     });
   });
+
+  it('the free coverage check takes no airport slot, even with the hour full (R5, ma4)', async () => {
+    const { stub } = await budget();
+    await stub.configure({ dailyUnitCap: 100_000, perSecondLimit: 1_000 });
+    const check = (airportIcao: string): BudgetRequest => ({
+      ...board(airportIcao),
+      operation: 'health',
+      pollEquivalents: 0,
+    });
+    // Checks alone never fill the cap, and a checked airport is not counted.
+    for (let i = 0; i < 70; i += 1) {
+      expect((await stub.reserve(check(`E${String(i).padStart(3, '0')}`))).allowed).toBe(true);
+    }
+    expect((await stub.snapshot()).boards.airportsThisHour).toEqual([]);
+    for (let i = 0; i < 60; i += 1) {
+      expect((await stub.reserve(board(`K${String(i).padStart(3, '0')}`))).allowed).toBe(true);
+    }
+    // With the hour full, a new airport's check still passes; its FIDS call does not.
+    expect((await stub.reserve(check('EGLL'))).allowed).toBe(true);
+    expect(await stub.reserve(board('EGLL'))).toMatchObject({
+      allowed: false,
+      reason: 'board_airports_per_hour',
+    });
+    const snapshot = await stub.snapshot();
+    expect(snapshot.boards.airportsThisHour).toHaveLength(60);
+    expect(snapshot.boards.airportsThisHour).not.toContain('EGLL');
+    expect(snapshot.byTrigger).toMatchObject({ board: { units: 120, calls: 131 } });
+  });
 });
 
 describe('ProviderBudget: board calls leave the trackers a rate floor (ruling R2)', () => {
@@ -848,6 +876,23 @@ describe('ProviderBudget: board calls leave the trackers a rate floor (ruling R2
       board: { units: 6, calls: 4 },
       alarm: { units: 4, calls: 2 },
     });
+  });
+
+  it('the free coverage check, outside the airport cap (R5), still keeps the floor on Growth', async () => {
+    const { stub } = await budget();
+    await stub.configure({ perSecondLimit: 10 }); // Growth: a burst of 5, 5 a second, a floor of 2
+    const checks: BudgetDecision[] = [];
+    for (const icao of ['KJFK', 'EGLL', 'LFPG', 'EDDF']) {
+      checks.push(await stub.reserve(boardCall('health', icao)));
+    }
+    expect(checks.map(outcome)).toEqual(['allowed', 'allowed', 'allowed', 'board_rate_floor']);
+    expect(checks[3]).toEqual({ allowed: false, reason: 'board_rate_floor', retryAfterMs: 200 });
+    const trackers: BudgetDecision[] = [];
+    for (let i = 0; i < 3; i += 1) {
+      trackers.push(await stub.reserve(ADB_STATUS));
+    }
+    expect(trackers.map(outcome)).toEqual(['allowed', 'allowed', 'provider_rate_limit']);
+    expect((await stub.snapshot()).boards.airportsThisHour).toEqual([]);
   });
 
   it.each([
