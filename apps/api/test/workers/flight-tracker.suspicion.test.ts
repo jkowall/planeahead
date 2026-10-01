@@ -433,23 +433,32 @@ function prng(seed: number): () => number {
 }
 
 describe('Q19: random answer sequences never leave a re-read in the past', () => {
-  it('over three seeded walks, wants.at is after every read and the alarm after it', async () => {
-    for (const seed of [11, 23, 37]) {
+  it('over five seeded walks, wants.at is after every read and the alarm after it', async () => {
+    // Seeds 6 and 15 answer Canceled while a diversion suspicion is open, the re-review's
+    // regression (the other three never do); the walks must meet that case at least once.
+    let cancelledOverOpenDiversion = 0;
+    for (const seed of [6, 11, 15, 23, 37]) {
       const random = prng(seed);
       const flight = uniqueFlight();
       const out = flight.scheduledOut.getTime();
       const tracker = await seeded(flight, out + 30 * MINUTE_MS, enRoute(flight));
+      const cancelledAnswer = () => cancelledAirborne(flight);
       const answers = [
         () => enRoute(flight),
         () => diverted(flight),
-        () => cancelledAirborne(flight),
+        cancelledAnswer,
         () => answer(flight, { phase: 'en_route' }, { status: 'CanceledUncertain' }),
         () => answer(flight, { phase: 'en_route' }, { arrivalRevisedMs: out + 4 * HOUR_MS }),
         () => ({ status: 500, body: { message: 'unavailable' } }),
       ];
       let budget = 6;
+      let before = readPolicyState(await policyState(tracker));
       for (let i = 0; i < 25 && (await flightRow(tracker))?.phase !== 'finished'; i += 1) {
-        await scriptAdb(flight, [answers[Math.floor(random() * answers.length)]!()]);
+        const next = answers[Math.floor(random() * answers.length)]!;
+        if (next === cancelledAnswer && before?.diversion.status === 'suspect') {
+          cancelledOverOpenDiversion += 1;
+        }
+        await scriptAdb(flight, [next()]);
         // `nextAlarm` asserts the alarm after this one is later than the read itself.
         const at = await nextAlarm(tracker);
         const state = readPolicyState(await policyState(tracker));
@@ -460,7 +469,9 @@ describe('Q19: random answer sequences never leave a re-read in the past', () =>
         expect(both).toBe(false);
         expect(budget - (state?.fastRereadsLeft ?? 0)).toBeLessThanOrEqual(1);
         budget = state?.fastRereadsLeft ?? 0;
+        before = state;
       }
     }
+    expect(cancelledOverOpenDiversion).toBeGreaterThan(0);
   });
 });

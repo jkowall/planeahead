@@ -1141,7 +1141,6 @@ describe('N4 cancellation and diversion', () => {
   });
 });
 
-/** The first intent a walk produces. */
 describe('Q19 (a): a cancellation supersedes an open diversion suspicion', () => {
   const AIRBORNE = { out: 0, off: 10, status: 'en_route' } as const;
   const DIVERTED = { ...AIRBORNE, status: 'diverted', actualDestination: 'EINN' } as const;
@@ -1376,6 +1375,7 @@ describe('Q19: a seeded random walk never leaves a re-read in the past', () => {
   });
 });
 
+/** The first intent a walk produces. */
 function first(start: Shape, steps: Step[]): PolicyIntent {
   const [intent] = walk(start, steps).intents;
   if (intent === undefined) {
