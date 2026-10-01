@@ -12,10 +12,10 @@
  * before the owner has created them (apps/mobile/README.md, owner tasks).
  *
  * Plugin order is load bearing (docs/increments/09-mobile-scaffold.md, ADR 0008):
- * `ios.entitlements` is applied before every plugin, `expo-notifications` then writes
- * `aps-environment` from its `mode`, and expo-widgets writes the literal `development` again,
- * which is why the local `withApsEnvironment` plugin is the LAST entry and runs its entitlements
- * mod after all others.
+ * `ios.entitlements` is applied before every plugin and sets `aps-environment`, which
+ * `expo-notifications` leaves alone (it writes its `mode` only where the key is absent, R2
+ * conflict 9), and expo-widgets writes the literal `development` over it, which is why the local
+ * `withApsEnvironment` plugin is the LAST entry and runs its entitlements mod after all others.
  *
  * Which API each variant talks to, and which host's universal links it claims (ruling S2, ADR
  * 0005): each host is claimed by exactly one kind of build, so a link opens a predictable app.
@@ -39,6 +39,7 @@
  */
 
 import type { ConfigContext, ExpoConfig } from 'expo/config';
+import type { NotificationsPluginProps } from 'expo-notifications/plugin/build/withNotifications';
 import type { ApsEnvironmentProps } from './plugins/withApsEnvironment';
 import type { ExpoWidgetsBuildProps } from './plugins/withExpoWidgetsBuild';
 
@@ -128,6 +129,23 @@ export const PLACEHOLDER_WIDGET = {
 export function widgetsBundleIdentifier(appBundleIdentifier: string): string {
   return `${appBundleIdentifier}.widgets`;
 }
+
+/**
+ * The Android notification icon (ruling C5): white on transparent, 96 by 96, because Android
+ * draws only its alpha channel and FCM ignores the adaptive launcher icon (R2 fact 41). A
+ * placeholder that scripts/gen-notification-icon.mjs draws, until the owner's own exists (R2
+ * owner action 5).
+ */
+const NOTIFICATION_ICON = './assets/notification-icon.png';
+
+/**
+ * The channel FCM shows a notification in when the message names none, or names one the app has
+ * not created yet (ruling C4; R2 fact 41, FCM's `AndroidNotification.channel_id` reference):
+ * `ANDROID_CHANNEL_IDS.flightChanges`, which this file cannot import (the config loader hands its
+ * imports to Node, which cannot load packages/shared's extensionless TypeScript imports);
+ * __tests__/app-config.test.ts holds the two equal.
+ */
+const DEFAULT_NOTIFICATION_CHANNEL = 'flight_changes';
 
 /** Google's iOS URL scheme is the iOS client id reversed; the plugin refuses anything else. */
 const PLACEHOLDER_GOOGLE_IOS_CLIENT_ID = '000000000000-placeholder.apps.googleusercontent.com';
@@ -269,6 +287,11 @@ export default ({ config }: ConfigContext): ExpoConfig => {
         // the group at config-evaluation time, and the owner registers all three with Apple.
         'com.apple.security.application-groups': [appGroup],
         'aps-environment': apsEnvironment,
+        // Ruling C8 (decision 6, R2 design 3): a push whose job is `timeSensitive` (increment 15,
+        // apps/api/src/push/payload.ts) breaks through Focus and the notification summary only
+        // with this entitlement; without it iOS delivers the push as `active`. EAS capability
+        // sync enables it on each App ID at the next `eas build` (R2 fact 13).
+        'com.apple.developer.usernotifications.time-sensitive': true,
       },
       infoPlist: {
         NSSupportsLiveActivities: true,
@@ -408,7 +431,19 @@ export default ({ config }: ConfigContext): ExpoConfig => {
           ...(sentryProject === undefined ? {} : { project: sentryProject }),
         },
       ],
-      ['expo-notifications', { mode: apsEnvironment }],
+      // `mode` would write `aps-environment` only where the key is absent, and `ios.entitlements`
+      // above always sets it (R2 conflict 9). Android (ruling C5): the notification icon, the
+      // variant's colour (its launcher icon's background) as the accent until the owner picks
+      // one (R2 owner action 5), and FCM's default channel (C4).
+      [
+        'expo-notifications',
+        {
+          mode: apsEnvironment,
+          icon: NOTIFICATION_ICON,
+          color: identity.adaptiveBackground,
+          defaultChannel: DEFAULT_NOTIFICATION_CHANNEL,
+        } satisfies NotificationsPluginProps,
+      ],
       // The widget extension (ADR 0008): ONE `widgets[]` entry, the placeholder home-screen widget
       // (widgets/placeholder.tsx). The flight Live Activity is created with `createLiveActivity`
       // (widgets/live-activity.tsx) and must not be listed: an entry without families generates

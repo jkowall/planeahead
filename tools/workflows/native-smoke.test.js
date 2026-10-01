@@ -1491,10 +1491,11 @@ describe('native-smoke.sh store checks (review ruling F2)', () => {
 
   it("prebuilds with EAS's build number and writes it into the app as EAS does (F6)", async () => {
     const group = { 'com.apple.security.application-groups': ['group.app.planeahead.mobile'] };
+    const appEntitlements = { 'aps-environment': 'production', ...group };
     const generated = {
       'ios/PlaneAhead/PlaneAhead.entitlements': plistXml({
-        'aps-environment': 'production',
-        ...group,
+        ...appEntitlements,
+        'com.apple.developer.usernotifications.time-sensitive': true,
       }),
       'ios/PlaneAhead/Info.plist': plistXml({
         CFBundleShortVersionString: VERSION,
@@ -1514,6 +1515,12 @@ describe('native-smoke.sh store checks (review ruling F2)', () => {
         { 'ios/PlaneAheadWatch/PrivacyInfo.xcprivacy': null },
         1,
         'ios/PlaneAheadWatch/PrivacyInfo.xcprivacy is missing or does not parse',
+      ],
+      [
+        'the time-sensitive entitlement missing (increment 16, ruling C8)',
+        { 'ios/PlaneAhead/PlaneAhead.entitlements': plistXml(appEntitlements) },
+        1,
+        "time-sensitive notifications (app) is '', expected 'true'",
       ],
     ];
     const runs = await Promise.all(
@@ -1676,6 +1683,8 @@ describe('native-smoke.sh store checks (review ruling F2)', () => {
           'info.plist': info('PlaneAhead', {
             CFBundleIcons: { CFBundlePrimaryIcon: { CFBundleIconName: 'AppIcon' } },
             'com.apple.security.application-groups': ['group.app.planeahead.mobile'],
+            // ios-prebuild reads this boolean (increment 16, ruling C8).
+            'com.apple.developer.usernotifications.time-sensitive': true,
           }),
           'bad.plist': 'not a property list',
         });
@@ -1741,6 +1750,15 @@ describe('native-smoke.sh store checks (review ruling F2)', () => {
             'PlistBuddy',
             '/usr/libexec/PlistBuddy',
             ['-c', 'Print :com.apple.security.application-groups:0', join(dir, 'info.plist')],
+          ],
+          [
+            'PlistBuddy',
+            '/usr/libexec/PlistBuddy',
+            [
+              '-c',
+              'Print :com.apple.developer.usernotifications.time-sensitive',
+              join(dir, 'info.plist'),
+            ],
           ],
           [
             'PlistBuddy',

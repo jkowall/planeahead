@@ -225,6 +225,9 @@ ios_prebuild() {
   local entitlements="ios/$PROJECT/$PROJECT.entitlements"
   expect_equal "aps-environment (app)" \
     "$(plist_value "$entitlements" :aps-environment)" production
+  # Increment 16, ruling C8: time-sensitive pushes break through Focus and the summary.
+  expect_equal "time-sensitive notifications (app)" \
+    "$(plist_value "$entitlements" :com.apple.developer.usernotifications.time-sensitive)" true
   expect_equal "App Group (app)" \
     "$(plist_value "$entitlements" :com.apple.security.application-groups:0)" "$APP_GROUP"
   expect_equal "App Group (widget extension)" \

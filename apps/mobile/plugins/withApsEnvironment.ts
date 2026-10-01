@@ -2,11 +2,13 @@
  * `aps-environment` from the build's signing, applied after every other plugin (increment 11,
  * ADR 0008; the slot was reserved in increment 9).
  *
- * Three writers touch the key, in this order: `ios.entitlements` in app.config.ts (merged in
- * when the entitlements file is READ, before any plugin's mod), `expo-notifications` (its `mode`
- * prop) and expo-widgets 57.0.20, whose `withPushNotifications` sets the literal `development`
- * unconditionally (plugin/src/ios/withPushNotifications.ts). Left alone, a production or ad hoc
- * preview build would register its Live Activity tokens with the sandbox APNs.
+ * Two writers touch the key, in this order: `ios.entitlements` in app.config.ts (merged in when
+ * the entitlements file is READ, before any plugin's mod) and expo-widgets 57.0.20, whose
+ * `withPushNotifications` sets the literal `development` unconditionally
+ * (plugin/src/ios/withPushNotifications.ts). `expo-notifications` writes its `mode` prop only
+ * where the key is absent (plugin/src/withNotificationsIOS.ts), which `ios.entitlements` never
+ * leaves it, so it writes nothing (R2 conflict 9). Left alone, a production or ad hoc preview
+ * build would register its Live Activity tokens with the sandbox APNs.
  *
  * Being the LAST entry in `plugins` is not enough on its own. A mod registered through
  * `withEntitlementsPlist` wraps the chain registered before it and runs its action FIRST, then

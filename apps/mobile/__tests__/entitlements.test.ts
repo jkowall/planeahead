@@ -4,18 +4,23 @@
  * The iOS entitlements after EVERY config plugin ran, per EAS profile (increment 11, ruling V3,
  * ADR 0008).
  *
- * `aps-environment` has three writers: `ios.entitlements` in app.config.ts, `expo-notifications`
- * and expo-widgets, which writes the literal `development` unconditionally. Only the whole chain
- * says which one wins, so this test runs Expo's own evaluation of it, `expo config --type
- * introspect` (getPrebuildConfigAsync plus compileModsAsync in introspection mode, the CLI in
- * @expo/cli), with each profile's `env` from eas.json and `EAS_BUILD=true` as a builder has it,
- * and parses the entitlements the chain produced. The nightly native-smoke workflow asserts the
- * same values on the files a real `expo prebuild` writes.
+ * `aps-environment` has two writers: `ios.entitlements` in app.config.ts and expo-widgets, which
+ * writes the literal `development` unconditionally (`expo-notifications` writes its `mode` only
+ * where the key is absent, R2 conflict 9). Only the whole chain says which one wins, so this test
+ * runs Expo's own evaluation of it, `expo config --type introspect` (getPrebuildConfigAsync plus
+ * compileModsAsync in introspection mode, the CLI in @expo/cli), with each profile's `env` from
+ * eas.json and `EAS_BUILD=true` as a builder has it, and parses the entitlements the chain
+ * produced. The nightly native-smoke workflow asserts the same values on the files a real `expo
+ * prebuild` writes.
  *
  * Also asserted: the App Group is the variant's, and every extension (the expo-widgets extension
- * and the two watchOS shells, as EAS provisions them) carries exactly the app's group.
+ * and the two watchOS shells, as EAS provisions them) carries exactly the app's group; the app
+ * keeps the time-sensitive entitlement (increment 16, ruling C8); and, from the same evaluation,
+ * the Android manifest carries what expo-notifications writes from its icon, colour and default
+ * channel (rulings C4 and C5), which proves the plugin read them.
  */
 
+import { ANDROID_CHANNEL_IDS } from '@planeahead/shared';
 import { PLACEHOLDER_WIDGET, VARIANT_IDENTITIES, type AppVariant } from '../app.config';
 
 // Jest's CommonJS wrapper provides them; the app's tsconfig carries no Node types.
@@ -39,6 +44,13 @@ const nodeBinary = (process as unknown as { execPath: string }).execPath;
 interface Entitlements {
   readonly 'aps-environment'?: string;
   readonly 'com.apple.security.application-groups'?: string[];
+  readonly 'com.apple.developer.usernotifications.time-sensitive'?: boolean;
+}
+
+/** An Android resource element as the mods hold it (xml2js): attributes in `$`, text in `_`. */
+interface XmlElement {
+  readonly $: Record<string, string | undefined>;
+  readonly _?: string;
 }
 
 interface AppExtension {
@@ -58,6 +70,12 @@ interface IntrospectedConfig {
       readonly ios: {
         readonly entitlements: Entitlements;
         readonly infoPlist: Record<string, unknown>;
+      };
+      readonly android: {
+        readonly manifest: {
+          readonly manifest: { readonly application: { readonly 'meta-data'?: XmlElement[] }[] };
+        };
+        readonly colors: { readonly resources: { readonly color?: XmlElement[] } };
       };
     };
   };
@@ -124,6 +142,41 @@ describe('iOS entitlements after the whole plugin chain', () => {
       expect(config._internal.modResults.ios.entitlements['aps-environment']).toBe(expected);
       // The provider writes the entitlements file from the chain's result and mirrors it here.
       expect(config.ios.entitlements['aps-environment']).toBe(expected);
+    },
+  );
+
+  it.each(PROFILES)('the %s profile keeps the time-sensitive entitlement (C8)', (profile) => {
+    const config = configOf(profile);
+    const key = 'com.apple.developer.usernotifications.time-sensitive';
+    expect(config._internal.modResults.ios.entitlements[key]).toBe(true);
+    expect(config.ios.entitlements[key]).toBe(true);
+  });
+
+  it.each(PROFILES)(
+    'the %s profile gives Android the notification icon, colour and channel (C4, C5)',
+    (profile) => {
+      const { manifest, colors } = configOf(profile)._internal.modResults.android;
+      const metaData = Object.fromEntries(
+        (manifest.manifest.application[0]?.['meta-data'] ?? []).map(({ $ }) => [
+          $['android:name'] ?? '',
+          $['android:resource'] ?? $['android:value'],
+        ]),
+      );
+      // FCM's keys serve a notification FCM displays itself (the app in the background), expo's
+      // one the app presents; the plugin writes both from the same props (R2 fact 41).
+      expect(metaData).toMatchObject({
+        'com.google.firebase.messaging.default_notification_icon': '@drawable/notification_icon',
+        'com.google.firebase.messaging.default_notification_color':
+          '@color/notification_icon_color',
+        'com.google.firebase.messaging.default_notification_channel_id':
+          ANDROID_CHANNEL_IDS.flightChanges,
+        'expo.modules.notifications.default_notification_icon': '@drawable/notification_icon',
+        'expo.modules.notifications.default_notification_color': '@color/notification_icon_color',
+      });
+      const accent = (colors.resources.color ?? []).find(
+        ({ $ }) => $['name'] === 'notification_icon_color',
+      );
+      expect(accent?._).toBe(VARIANT_IDENTITIES[profile].adaptiveBackground);
     },
   );
 
