@@ -560,5 +560,14 @@ commands are in `docs/increments/14-verification.md`.
       pooled and whether they speak HTTP/2 (R1 U2 and U3, owner action 7). That the setting
       governs Worker subrequests is unverified, so a setting found on does not close the question.
       Record the setting's state and the answer in `docs/increments/14-verification.md`.
+- [ ] The transport soak (increment 16, ruling C9; staging only), once the staging send passes:
+      from the test devices, follow a flight that departs after the soak will end, with live
+      tracking on. On `/admin/push/soak` enter its flight key, the hours (24 to 48) and the
+      iPhone's device token (kind APNs), and start. Every five minutes a synthetic departure delay
+      goes to the devices (each replacing the last on screen), and once an hour two canary test
+      pushes. It passes with no rows under "403 and 429 answers, by reason" and "Edge 52x answers
+      without an apns-id" for the whole soak and every canary round `sent`; any such row is a
+      finding (plan section 11 item 8: the relay). Record the counts in the increment 16
+      verification doc. The page's button stops it early; production refuses to start one.
 - [ ] Production, after the first TestFlight install (increment 16): `PUSH_INJECT_ALLOWED_USER_IDS`
       set to your own user id, then the same test push to your iPhone's token.
