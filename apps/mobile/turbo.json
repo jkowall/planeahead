@@ -36,12 +36,15 @@
       // plugin's package included), widgets.test.ts compiles widgets/, and the house-style test
       // reads the native sources, the ADRs, the workflows and the smoke script. The review round:
       // app-config.test.ts reads fingerprint.config.js (its extra sources and ignore paths).
+      // Increment 13: store-bundles.test.ts runs a real prebuild of a copy of the config, the
+      // plugins, the target configs and the icons (assets/).
       "inputs": [
         "src/**",
         "__tests__/**",
         "plugins/**",
         "widgets/**",
         "targets/**",
+        "assets/**",
         "modules/*/expo-module.config.json",
         "modules/*/android/src/**",
         "modules/*/android/build.gradle",
@@ -58,6 +61,8 @@
         "../../scripts/native-smoke.sh",
         "../../docs/adr/**",
         "../../docs/increments/11-verification.md",
+        "../../docs/increments/13-verification.md",
+        "../../docs/runbooks/first-deploy.md",
         "../../packages/db/migrations/*.sql",
         "../../pnpm-lock.yaml"
       ],

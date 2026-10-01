@@ -1,7 +1,8 @@
 /**
  * No em dashes anywhere increments 9 to 11 write (house rule; packages/shared has the same test).
  * Increment 11 adds the native sources (Kotlin, Swift, Gradle, XML, plists), ADR 0008, the
- * nightly workflow and its script, and its review round the verification record.
+ * nightly workflow and its script, and its review round the verification record. Increment 13
+ * adds its own verification record and the runbook's store steps.
  */
 
 // Jest's CommonJS wrapper provides it; the app's tsconfig carries no Node types.
@@ -55,6 +56,8 @@ const FILES = [
   path.join(REPO_ROOT, 'docs', 'adr', '0008-expo-widgets.md'),
   path.join(REPO_ROOT, 'docs', 'adr', 'README.md'),
   path.join(REPO_ROOT, 'docs', 'increments', '11-verification.md'),
+  path.join(REPO_ROOT, 'docs', 'increments', '13-verification.md'),
+  path.join(REPO_ROOT, 'docs', 'runbooks', 'first-deploy.md'),
   path.join(REPO_ROOT, 'apps', 'api', 'src', 'routes', 'well-known.ts'),
   path.join(REPO_ROOT, '.github', 'workflows', 'ci.yml'),
   path.join(REPO_ROOT, '.github', 'workflows', 'mobile-preview.yml'),

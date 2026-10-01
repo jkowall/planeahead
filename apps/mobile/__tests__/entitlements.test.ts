@@ -81,6 +81,9 @@ function introspect(profile: AppVariant): IntrospectedConfig {
         ...processEnv,
         ...easProfileEnv(profile),
         EAS_BUILD: 'true',
+        // From the EAS environment on a builder; a preview or production build refuses to
+        // evaluate without it (review ruling G5).
+        GOOGLE_IOS_CLIENT_ID: '123-abc.apps.googleusercontent.com',
         EXPO_NO_GIT_STATUS: '1',
         EXPO_NO_TELEMETRY: '1',
         PLANEAHEAD_ANDROID_WIDGETS: '',

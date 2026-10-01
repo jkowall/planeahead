@@ -75,6 +75,8 @@
         ".github/workflows/**",
         "scripts/mobile-migrations-guard.mjs",
         "scripts/native-smoke.sh",
+        // The native-smoke test holds the gate leg's Xcode to the EAS image eas.json pins.
+        "apps/mobile/eas.json",
         "scripts/health-smoke.mjs",
         "apps/api/src/generated/migration-hash.ts",
         "apps/api/src/do/*.ts",

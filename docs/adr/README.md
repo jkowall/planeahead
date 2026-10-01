@@ -37,3 +37,7 @@ the watchOS shells, the Android stubs and the native smoke, with the increment's
 results) in increment 11, which the Phase 0 plan had reserved its number for, amended by the
 increment's review round (the content-state bounds, the Android autolinking exclusion, the watch
 icon, the extension's Release settings and the token lifecycle gate on the Phase 1 sender).
+Increment 13 (the store pipeline) amended 0001 (the pinned EAS images, the held Sentry upload,
+`IOS_DEVELOPMENT_TEAM`), 0005 (the stores' own statements that the identifiers are permanent) and
+0008 (the extensions' privacy manifests and versions, the smoke's store checks, its device archive
+on release checks, ExpoFileSystem built from source).
