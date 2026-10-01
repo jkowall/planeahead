@@ -81,6 +81,15 @@ increment is reviewed.
   the fixtures' fixed clock (2026-09-23T14:00Z) and read it through `readFlightFollowing`, which
   checks its age against the real clock, so it failed on `main` from 2026-09-24T14:00Z (increment
   12's merge CI ran before that). The test now pins the clock.
+- **An Expo check that moved with Expo's releases (2026-10-01).** The first CI run after the
+  Actions quota reset failed `test-mobile` on every PR at "SDK packages match the Expo SDK 57
+  manifest": online, `expo install --check` compares against Expo's newest patch list for the
+  SDK, and Expo had published patches for nine packages (expo 57.0.26 against the installed
+  57.0.24, expo-widgets 57.0.22 against ADR 0008's exact 57.0.20, and seven more). The step now
+  runs with `EXPO_OFFLINE`, which compares against the installed `expo`'s own manifest, the
+  same rule the toolchain guard applies; a planted expo-constants 56.0.3 still fails it.
+  Taking Expo's patch releases stays a deliberate change, made and smoke-tested before a store
+  build.
 
 ## Measurements and decisions (increment 12 review fixes)
 
