@@ -33,6 +33,10 @@ export const KV_KEYS = {
   firstLaunchDone: 'planeahead.first_launch_done',
   /** The Apple `user` of a native Apple sign-in, for the launch credential-state check. */
   appleUserId: 'planeahead.apple_user_id',
+  /** Per installation: the notification pre-prompt was offered (src/lib/push.ts, ruling C1). */
+  pushPromptOffered: 'planeahead.push_prompt_offered',
+  /** Per installation: this app has asked for notification permission (src/lib/push.ts). */
+  pushPermissionRequested: 'planeahead.push_permission_requested',
 } as const;
 
 /** zustand `persist` over the kv-store, synchronous both ways. */

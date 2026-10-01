@@ -11,6 +11,10 @@
  * `YYYY-MM-DD` as the digits are typed (`formatDateInput`), and the validation reads eight bare
  * digits as a date too (`normaliseDateInput`), so any date can be typed, not only the three chips
  * (increment 10 review).
+ *
+ * Increment 16 (ruling C1): the first add that succeeds (added, or queued offline) is where the app
+ * asks for notifications, in context: the sheet gives way to the pre-prompt, once per installation
+ * and only while the system prompt can still show (src/lib/push.ts `takePushPromptOffer`).
  */
 
 import { useRouter } from 'expo-router';
@@ -20,6 +24,7 @@ import { Body, Button, Notice, Screen, TextField, Title } from '../../components
 import { useFlightNotices } from '../../lib/flight-notices';
 import { addFlight, drainFor, validateAddFlight, type AddFlightErrors } from '../../lib/flights';
 import { addDays, formatDateInput, formatIsoDate, localDate } from '../../lib/format';
+import { takePushPromptOffer } from '../../lib/push';
 import { services } from '../../lib/services';
 import { useTheme } from '../../theme/useTheme';
 
@@ -93,7 +98,15 @@ export default function AddFlightSheet() {
         return;
       }
       // Added, or queued until the phone is back online: either way the list shows it now.
-      router.back();
+      const offer = await takePushPromptOffer();
+      if (!mounted.current) {
+        return;
+      }
+      if (offer) {
+        router.replace('/notifications');
+      } else {
+        router.back();
+      }
     } catch {
       if (mounted.current) {
         setPhase('editing');

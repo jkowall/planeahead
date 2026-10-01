@@ -63,8 +63,16 @@ jest.mock('../src/lib/services', () => ({
   services: () => Promise.resolve(mockServices.current),
   forgetAccount: jest.fn(),
 }));
-jest.mock('../src/lib/devices', () => ({ registerDevice: jest.fn() }));
-jest.mock('../src/lib/push', () => ({ readDevicePushToken: jest.fn() }));
+// Increment 16: the permission as a phone that has not been asked yet (settings-push.test.tsx
+// covers the section itself).
+jest.mock('../src/lib/push', () => ({
+  usePushPermission: () => [{ state: 'undetermined', canAsk: true }, jest.fn()],
+  requestPushPermission: jest.fn(),
+}));
+jest.mock('../src/lib/push-registration', () => ({
+  pushRegistrar: () => ({ register: jest.fn() }),
+}));
+jest.mock('../src/lib/sign-out', () => ({ signOut: jest.fn() }));
 
 function harness(): { db: MemorySqlite; network: ReturnType<typeof scriptedFetch> } {
   const db = createMemorySqlite();

@@ -11,19 +11,26 @@
  * of it again when the user changes (an anonymous user signing in is a new user id: the store's
  * owner no longer matches, so the synced rows go and the snapshot is pulled), on every
  * foreground, and when the network returns.
+ *
+ * Increment 16 (ruling C2): the registration carries the device token and the notification
+ * permission, on each session start and each return to the foreground, and again when the token
+ * listener reports a rotation (src/lib/push-registration.ts). A revoked Apple credential signs
+ * out the way the Sign out button does (src/lib/sign-out.ts, ruling C3).
  */
 
 import * as Sentry from '@sentry/react-native';
 import { addNetworkStateListener } from 'expo-network';
+import { addPushTokenListener } from 'expo-notifications';
 import { useEffect } from 'react';
 import { AppState } from 'react-native';
 import { create } from 'zustand';
 import { authClient } from './auth-client';
 import { runtimeConfig } from './config';
 import { KV_KEYS, kv } from './db/kv';
-import { registerDevice } from './devices';
 import { checkAppleCredential } from './native-signin/apple';
-import { forgetAccount, services } from './services';
+import { pushRegistrar } from './push-registration';
+import { services } from './services';
+import { signOut } from './sign-out';
 
 interface BootstrapState {
   /** True until the first-launch anonymous sign-in has been attempted. */
@@ -92,7 +99,10 @@ export async function syncNow(userId: string): Promise<void> {
   }
 }
 
-/** Device registration, the Apple credential check and background sync, keyed by user id. */
+/**
+ * Device registration (with the push token, ruling C2), the Apple credential check and background
+ * sync, keyed by user id.
+ */
 export function useSessionWork(userId: string | null): void {
   useEffect(() => {
     if (userId === null) {
@@ -103,7 +113,7 @@ export function useSessionWork(userId: string | null): void {
       try {
         if ((await checkAppleCredential()) === 'revoked') {
           const { store } = await services();
-          await forgetAccount(store);
+          await signOut(store);
           return;
         }
       } catch (error) {
@@ -112,16 +122,14 @@ export function useSessionWork(userId: string | null): void {
       if (cancelled) {
         return;
       }
-      try {
-        await registerDevice((await services()).api);
-      } catch (error) {
-        Sentry.captureException(error);
-      }
+      // Beside the pull, not before it: a token read can take seconds. Never rejects.
+      void pushRegistrar().register();
       await syncNow(userId);
     })();
 
     const appState = AppState.addEventListener('change', (next) => {
       if (next === 'active') {
+        void pushRegistrar().register();
         void syncNow(userId);
       }
     });
@@ -130,10 +138,15 @@ export function useSessionWork(userId: string | null): void {
         void syncNow(userId);
       }
     });
+    const tokens = addPushTokenListener((token) => {
+      pushRegistrar().onToken(token);
+    });
     return () => {
       cancelled = true;
       appState.remove();
       network.remove();
+      tokens.remove();
+      pushRegistrar().reset();
     };
   }, [userId]);
 }

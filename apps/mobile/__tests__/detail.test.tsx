@@ -42,7 +42,16 @@ const mockServices: { current: unknown } = { current: null };
 jest.mock('expo-router', () => ({
   useRouter: () => mockRouter,
   useLocalSearchParams: () => mockParams,
+  useIsFocused: () => true,
 }));
+
+// Increment 16: the screen dismisses its flight's presented notifications when it opens
+// (push-handling.test.tsx covers that); none are presented here.
+jest.mock('expo-notifications', () =>
+  jest
+    .requireActual<typeof import('./support/fake-notifications')>('./support/fake-notifications')
+    .fakeNotificationsModule(),
+);
 
 jest.mock('react-native-safe-area-context', () => {
   const { View } = jest.requireActual<typeof import('react-native')>('react-native');

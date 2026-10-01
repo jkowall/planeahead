@@ -16,6 +16,10 @@
  * that has not been sent yet (src/lib/flights.ts). The screen follows the flight when the server
  * answers an add under its own id (src/lib/flight-queries.ts `useFlight`), so the refresh and the
  * unsubscribe use the id of the row shown, not the route's.
+ *
+ * Increment 16: while the screen is focused its flight is in front, so a push about it received in
+ * the foreground is not presented and the screen updates in place (ruling C6); opening it removes
+ * the flight's presented notifications (ruling C7, src/lib/push-notifications.ts).
  */
 
 import { DO_CALL_DEADLINE_MS } from '@planeahead/shared';
@@ -38,6 +42,7 @@ import {
   localDate,
   providerName,
 } from '../../../lib/format';
+import { useFlightInFront } from '../../../lib/push-notifications';
 import { services } from '../../../lib/services';
 import { buildTimeline, terminalAndGate } from '../../../lib/timeline';
 import { useRefreshGesture } from '../../../lib/use-refresh-gesture';
@@ -126,6 +131,7 @@ export default function FlightDetailScreen() {
   const [slow, setSlow] = useState(false);
 
   const shownId = item?.id ?? id;
+  useFlightInFront(shownId, item?.flightKey ?? null);
   const gesture = useRefreshGesture(async () => {
     setMessage(null);
     const { store, api, onAccountDeleted } = await services();
