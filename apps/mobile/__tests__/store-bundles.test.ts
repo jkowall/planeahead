@@ -2,7 +2,8 @@
  * @jest-environment node
  *
  * plugins/withExtensionPrivacyManifests.ts and plugins/withExtensionVersions.ts (increment 13,
- * rulings S1 and S3), against generated projects: a real `expo prebuild --platform ios` of the
+ * rulings S1 and S3, and review ruling F6: EAS's build number reaches every embedded target),
+ * against generated projects: a real `expo prebuild --platform ios` of the
  * production variant in a temporary copy of the app (support/generated-ios-project.ts), with every
  * plugin app.config.ts lists, read back with the parser @bacons/apple-targets writes it with.
  *
@@ -18,7 +19,11 @@ import {
   privacyManifestPlist,
   type AppleProject,
 } from '../plugins/withExtensionPrivacyManifests';
-import { alignExtensionVersions, type VersionedProject } from '../plugins/withExtensionVersions';
+import {
+  alignExtensionVersions,
+  embeddedVersions,
+  type VersionedProject,
+} from '../plugins/withExtensionVersions';
 import {
   openProject,
   prebuildIos,
@@ -247,7 +252,7 @@ describe('a generated production project', () => {
   });
 });
 
-describe('planted failures in a generated project', () => {
+describe('generated projects with a change planted', () => {
   const projects: GeneratedProject[] = [];
 
   afterAll(() => {
@@ -256,8 +261,8 @@ describe('planted failures in a generated project', () => {
     }
   });
 
-  function prebuild(edit: (root: string) => void): GeneratedProject {
-    const project = prebuildIos(edit);
+  function prebuild(edit: (root: string) => void, env?: Record<string, string>): GeneratedProject {
+    const project = prebuildIos(edit, env);
     projects.push(project);
     return project;
   }
@@ -282,6 +287,24 @@ describe('planted failures in a generated project', () => {
     );
   }, 60_000);
 
+  it("gives every embedded target the build number EAS exports, never the app's config", () => {
+    // EAS exports EAS_BUILD_IOS_BUILD_NUMBER to the whole build, prebuild included; its rewrite
+    // of each target's Info.plist loses to these build settings (review ruling F6).
+    const project = prebuild(() => undefined, { EAS_BUILD_IOS_BUILD_NUMBER: '7' });
+    expect(project.status).toBe(0);
+    const parsed = openProject(project);
+    const embedded = EXTENSION_TARGETS.flatMap((name) => buildSettings(parsed, name));
+    expect(embedded).toHaveLength(6);
+    for (const settings of embedded) {
+      expect(String(settings['CURRENT_PROJECT_VERSION'])).toBe('7');
+      expect(String(settings['MARKETING_VERSION'])).toBe(APP_VERSION);
+    }
+    // The app target's own settings and the config are the config's: nothing fingerprinted moved.
+    for (const settings of buildSettings(parsed, APP_TARGET)) {
+      expect(String(settings['CURRENT_PROJECT_VERSION'])).toBe(APP_BUILD_NUMBER);
+    }
+  }, 60_000);
+
   it('refuses to be listed after @bacons/apple-targets, whose provider is then in place', () => {
     const plugins =
       "      './plugins/withExtensionPrivacyManifests.ts',\n      './plugins/withExtensionVersions.ts',\n";
@@ -300,6 +323,41 @@ describe('planted failures in a generated project', () => {
     );
     expect(project.exists('ios/PlaneAheadWatch/PrivacyInfo.xcprivacy')).toBe(false);
   }, 60_000);
+});
+
+describe('embeddedVersions', () => {
+  const config = { version: APP_VERSION, buildNumber: APP_BUILD_NUMBER };
+
+  it("takes EAS's version and build number when the build exports them", () => {
+    expect(
+      embeddedVersions(config, {
+        EAS_BUILD_IOS_APP_VERSION: '0.2.0',
+        EAS_BUILD_IOS_BUILD_NUMBER: '42',
+      }),
+    ).toEqual({ version: '0.2.0', buildNumber: '42' });
+    expect(embeddedVersions(config, { EAS_BUILD_IOS_BUILD_NUMBER: '1.0.3' })).toEqual({
+      version: APP_VERSION,
+      buildNumber: '1.0.3',
+    });
+  });
+
+  it("keeps the config's without them, an empty variable counting as none", () => {
+    expect(embeddedVersions(config, {})).toEqual(config);
+    expect(
+      embeddedVersions(config, { EAS_BUILD_IOS_APP_VERSION: '', EAS_BUILD_IOS_BUILD_NUMBER: ' ' }),
+    ).toEqual(config);
+  });
+
+  it('refuses a value Apple would refuse', () => {
+    for (const value of ['7a', '1.2.3.4', '-1', '1..2']) {
+      expect(() => embeddedVersions(config, { EAS_BUILD_IOS_BUILD_NUMBER: value })).toThrow(
+        /EAS_BUILD_IOS_BUILD_NUMBER must be one to three period-separated integers/,
+      );
+    }
+    expect(() => embeddedVersions(config, { EAS_BUILD_IOS_APP_VERSION: 'v1' })).toThrow(
+      /EAS_BUILD_IOS_APP_VERSION/,
+    );
+  });
 });
 
 describe('alignExtensionVersions', () => {

@@ -326,19 +326,35 @@ SHOW idle_in_transaction_session_timeout;` and
 
 - [ ] GitHub Actions minutes: GitHub Free includes 2,000 minutes a month, and a macOS minute is
       priced at about ten Linux minutes ($0.062 against $0.006), so `native-smoke.yml` runs weekly
-      (Mondays). Its iOS gate leg took about 22 macOS minutes a run; increment 13's unsigned device
-      archive adds about 16 (estimated; the first run after it measures it), so about 38, or $10
-      of the $12 GitHub Free's minutes are worth each month, before the Android leg and every pull
-      request's Linux checks. In September 2026 six nightly runs used the whole allowance and
-      GitHub refused every job, PR checks included, until the month reset. Add a payment method
-      with a budget (Settings > Billing and licensing) before the allowance runs short again: about
-      $5 a month over the free minutes keeps the weekly run and the pull request checks going with
-      margin; nightly costs about $2.50 a night, after which its cron can become `'17 6 * * *'`.
+      (Mondays) and its dearer legs run on demand only. What each costs, measured by increment
+      13's review on the September 2026 runs:
+
+      | iOS leg                                                              | Billed macOS minutes                                               | When it runs                          |
+      | -------------------------------------------------------------------- | ------------------------------------------------------------------ | ------------------------------------- |
+      | Xcode 26.6, the gate: prebuild, simulator build, checks, launch      | about 22                                                           | every run                             |
+      | The gate leg's unsigned device archive                               | about 16 more                                                      | a manual run with `release_check`     |
+      | Xcode 27                                                             | about 1.5 while the image has no Xcode 27 (it fails at selection) | manual runs only (open decision 7)    |
+
+      So the weekly run costs about 22 macOS minutes, about $6 of the $12 GitHub Free's minutes are
+      worth each month, before the Android leg and every pull request's Linux checks, and each
+      release check (step 18) about 40 more, about $2.50. Once an image carries Xcode 27, a manual
+      run's Xcode 27 leg costs about as much as the gate leg. In September 2026 six nightly runs
+      used the whole allowance and GitHub refused every job, PR checks included, until the month
+      reset. Add a payment method with a budget (Settings > Billing and licensing) before the
+      allowance runs short again: about $5 a month over the free minutes keeps the weekly run, the
+      release checks and the pull request checks going with margin; nightly costs about $1.40 a
+      night, after which its cron can become `'17 6 * * *'`.
+
 - [ ] Prove the Android leg. The Xcode 26.6 gate leg passed on every scheduled run from
       2026-09-24 to 2026-09-29; the Android leg never has (it filled the runner's disk until the
       fix of 2026-09-30). Once Actions minutes are available, run
       `gh workflow run native-smoke.yml -f platforms=android` and then `gh run watch`. Without
-      `-f platforms` a run covers both platforms; the Xcode 27 leg may fail without failing it.
+      `-f platforms` a manual run covers both platforms and adds the Xcode 27 leg, which may fail
+      without failing the run. Each platform choice has its own concurrency group, so a
+      one-platform manual run started while the weekly run is going runs that platform's legs a
+      second time rather than cancelling them; and an `all` run (a release check included) and the
+      weekly run share one, so whichever starts later cancels the other: avoid starting a release
+      check just before Monday 06:17 UTC.
 
 ## 16. Support inbox
 
@@ -377,15 +393,21 @@ production`, smoke `https://api.planeahead.app/health` against the build.
 
 ## 18. Store builds: TestFlight and the Play internal track
 
-Increment 13. Testers get the `production` variant (`app.planeahead.mobile`), store signed, which
-talks to `api.planeahead.app`, so step 17 comes first; steps 11 and 12 too. Run every `eas`
-command from `apps/mobile` with the pinned CLI version or newer (`eas.json` `cli.version`). The
-repository already carries what the builds need and the weekly native smoke proves it: the pinned
-EAS images and CocoaPods, a privacy manifest in every bundle, the app's version in every embedded
-bundle, `ITSAppUsesNonExemptEncryption: false`, and the Sentry upload held off
-(docs/increments/13-verification.md). Not needed for internal testing: Beta App Review, the App
-Privacy answers, Play's Data safety form, the content rating and the store listing.
+Increment 13 and its review round. Testers get the `production` variant (`app.planeahead.mobile`),
+store signed, which talks to `api.planeahead.app`, so step 17 comes first; steps 11 and 12 too.
+Run every `eas` command from `apps/mobile` with the pinned CLI version or newer (`eas.json`
+`cli.version`). The repository already carries what the builds need: the pinned EAS images and
+CocoaPods, a privacy manifest in every bundle that needs one (ExpoFileSystem built from source
+until SDK 58, so its APIs come under the app's), the store build's version and build number in
+every embedded bundle, `ITSAppUsesNonExemptEncryption: false`, and the Sentry upload held off
+(docs/increments/13-verification.md). The weekly native smoke proves the simulator build; the
+release check below proves the device archive before each store build. Not needed for internal
+testing: Beta App Review, the App Privacy answers, Play's Data safety form, the content rating and
+the store listing.
 
+- [ ] Agreements, before any API key or upload: the Account Holder (no other role can) accepts
+      every pending agreement at [developer.apple.com/account](https://developer.apple.com/account)
+      and in App Store Connect > Business, and again whenever Apple posts an updated one.
 - [ ] App Store Connect record (Account Holder, Admin or App Manager): Apps > + > New App, platform
       iOS, name `PlaneAhead` (at most 30 characters, editable until the first App Review
       submission), primary language, bundle ID `app.planeahead.mobile`, SKU `planeahead-ios`, user
@@ -409,7 +431,8 @@ Privacy answers, Play's Data safety form, the content rating and the store listi
       `production`, App Store Connect API key, add it with its key ID and issuer ID, and delete
       the local file.
 - [ ] Play Console app (Owner or Admin): Create app, name `PlaneAhead`, default language, App, Free,
-      the declarations and the Play App Signing terms. The package name comes with the first
+      the contact email the form asks for (`support@planeahead.app`, step 16's inbox), the
+      declarations and the Play App Signing terms. The package name comes with the first
       upload and never changes: Play calls package names "unique and permanent"
       ([Create and set up your app](https://support.google.com/googleplay/android-developer/answer/9859152)).
       Then Test and release > Testing > Internal testing > Testers: an email list of the testers
@@ -422,6 +445,33 @@ Privacy answers, Play's Data safety form, the content rating and the store listi
       ([Expo's guide](https://github.com/expo/fyi/blob/main/creating-google-service-account.md)).
       Then `eas credentials --platform android`, profile `production`, Google Service Account,
       upload the JSON key, and delete the local file.
+- [ ] Export compliance, before the first build: the binary's
+      `ITSAppUsesNonExemptEncryption: false` (app.config.ts) IS the answer to App Store Connect's
+      export compliance question for every build uploaded with it, so confirm it now rather than
+      after an upload. It is your
+      attestation that the app uses only encryption built into the operating system (HTTPS, the
+      Keychain through expo-secure-store, CommonCrypto through expo-crypto), which Apple treats as
+      exempt
+      ([Complying with encryption export regulations](https://developer.apple.com/documentation/security/complying-with-encryption-export-regulations));
+      without the key each build would wait in Missing Compliance. Confirm it again before adding
+      any library that brings its own cryptography.
+- [ ] The production EAS environment, before the first build:
+      `eas env:list --environment production` (or the project's Environment variables page on
+      expo.dev) shows
+      `GOOGLE_IOS_CLIENT_ID` (a preview or production build refuses to evaluate without it, so a
+      store build never carries the placeholder client id), `GOOGLE_WEB_CLIENT_ID`,
+      `EAS_PROJECT_ID`, `GOOGLE_SERVICES_JSON` (a file variable) and, once Sentry exists, the Sentry
+      ones, each with the visibility apps/mobile/README.md gives it; and does NOT show
+      `IOS_DEVELOPMENT_TEAM`, which is for local device builds only (it enters the fingerprinted
+      config, so an EAS build carrying it would get a runtime version no update matches).
+- [ ] The release check, before EVERY `eas build --profile production` and after any native
+      dependency or Xcode bump:
+      `gh workflow run native-smoke.yml -f platforms=all -f release_check=true`, then
+      `gh run watch`. It adds to the weekly run the gate leg's unsigned
+      device archive (the device SDKs, then every bundle's and framework's manifest and version on
+      the archived app) and arm64-v8a to the Android build, so 16 KB pages are proven for the ABI
+      phones run. Build only when the Xcode 26.6 leg and the Android leg are green (the Xcode 27
+      leg may fail). About 40 macOS minutes (step 15).
 - [ ] First iOS production build, interactively on the Mac, logged in with the Apple ID:
       `eas build --platform ios --profile production`, answering yes to the Apple account login
       and to EAS managing the credentials. App Groups are registered only with an Apple ID session,
@@ -436,11 +486,15 @@ Privacy answers, Play's Data safety form, the content rating and the store listi
 - [ ] Submit both: `eas submit --platform ios --profile production --latest`, then
       `eas submit --platform android --profile production --latest`. The iOS build appears in
       TestFlight after processing and automatic distribution hands it to the internal group. The
-      Android release goes to the internal track (`submit.production.android` in eas.json). If
-      Play refuses it with "Only releases with status draft may be created on draft app", the app
-      has never been published: download that build's `.aab` from its EAS build page, upload it by
-      hand in Internal testing > Create new release, roll it out, and use `eas submit` for every
-      later build.
+      Android release goes to the internal track (`submit.production.android` in eas.json). What
+      ends a new Play app's draft state is unverified: Expo says the app stays a draft until its
+      store listing and setup tasks are done (R5 E7, U14). If Play refuses the release with "Only
+      releases with status draft may be created on draft app", submit drafts instead: add
+      `"production-draft": { "extends": "production", "android": { "releaseStatus": "draft" } }`
+      under `submit` in eas.json, run
+      `eas submit --platform android --profile production-draft --latest`, then roll the draft
+      out by hand in Play Console > Test and release > Testing > Internal testing. Do that for each
+      release until a submit with the `production` profile is accepted, then drop the profile.
 - [ ] Signing fingerprints, after the first Play upload: Protected with Play > Play Store
       distribution > Play app signing. A new app gets hybrid signing, with three app signing keys
       whose fingerprints must all be registered with every API provider
@@ -450,21 +504,16 @@ Privacy answers, Play's Data safety form, the content rating and the store listi
       with each SHA-1, so Google sign-in works whichever key signed the installed app. Hybrid
       versus classic can change only until the first open testing or production release; the
       plan took hybrid (docs/plans/phase1-plan.md section 13, decision 10).
-- [ ] Export compliance: `ITSAppUsesNonExemptEncryption: false` (app.config.ts) answers App Store
-      Connect's export compliance question for every build; without it each build waits in
-      Missing Compliance. It is your attestation that the app uses only encryption built into the
-      operating system (HTTPS, the Keychain through expo-secure-store, CommonCrypto through
-      expo-crypto), which Apple treats as exempt
-      ([Complying with encryption export regulations](https://developer.apple.com/documentation/security/complying-with-encryption-export-regulations)).
-      Confirm it now, and again before adding any library that brings its own cryptography.
 - [ ] Sentry: `apps/mobile/eas.json` sets `SENTRY_DISABLE_AUTO_UPLOAD=true` for every build profile,
       because Sentry's Xcode and Gradle steps fail a Release build whose upload fails and no Sentry
       project exists yet. Once `SENTRY_ORG`, `SENTRY_PROJECT` (Plain text) and `SENTRY_AUTH_TOKEN`
       (Secret) are in the three EAS environments (apps/mobile/README.md, owner tasks), delete the
       line from `build.base.env` and its assertion in `__tests__/app-config.test.ts` in one change;
       the next production build's log shows the source maps and debug files uploaded.
-- [ ] Later builds run unattended once `ascAppId` is committed and both keys are stored:
-      `eas build --platform all --profile production --auto-submit`, from CI with `EXPO_TOKEN`.
+- [ ] Later builds run unattended once `ascAppId` is committed and both keys are stored, each after
+      its release check:
+      `eas build --platform all --profile production --auto-submit --non-interactive`, from CI
+      with `EXPO_TOKEN`.
 - [ ] Check: the build reaches Ready to Submit in TestFlight (distributable to internal testers)
       with no email about a missing privacy manifest reason (ITMS-91053) or an invalid binary; an
       internal tester installs it and the app opens on the sign-in screen; an Android tester opts
