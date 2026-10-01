@@ -30,6 +30,15 @@ import {
   type AnyProviderOperation,
   type BoardRow,
   type BoardWindow,
+  type BoardBucketBounds,
+  type BoardBucketRequestV1,
+  type BoardBucketResponseV1,
+  type BoardCallTrigger,
+  type BoardCoverage,
+  type BoardFreshness,
+  type BoardKvMetaV1,
+  type BoardLadderRung,
+  type BoardPosition,
   type BudgetDecision,
   type BudgetDenialReason,
   type BudgetGuard,
@@ -319,6 +328,16 @@ interface TypeSurface {
   // providers
   flightLookup: FlightLookup;
   boardWindow: BoardWindow;
+  // boards (increment 18)
+  boardBucketBounds: BoardBucketBounds;
+  boardBucketRequest: BoardBucketRequestV1;
+  boardBucketResponse: BoardBucketResponseV1;
+  boardCallTrigger: BoardCallTrigger;
+  boardCoverage: BoardCoverage;
+  boardFreshness: BoardFreshness;
+  boardKvMeta: BoardKvMetaV1;
+  boardLadderRung: BoardLadderRung;
+  boardPosition: BoardPosition;
   providerCapabilities: ProviderCapabilities;
   budgetDenialReason: BudgetDenialReason;
   budgetDecision: BudgetDecision;

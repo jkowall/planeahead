@@ -52,6 +52,23 @@ export const ADB_PLANS = {
 } as const satisfies Record<string, AdbPlan>;
 export type AdbPlanName = 'starter' | 'growth' | 'scale';
 
+/**
+ * The boards share (increment 18, ruling B5; plan section 4, R3 D9): the fraction of the day's
+ * AeroDataBox unit cap that the `board` and `route_search` triggers may spend together. A board
+ * reservation beyond it is refused (`boards_share`), so boards and route search can never
+ * starve the flight trackers, whose reservations never see this limit. A constant until the
+ * budget becomes settable (increment 17).
+ */
+export const ADB_BOARDS_SHARE = 0.35;
+
+/**
+ * The global cap on DISTINCT airports whose boards are refreshed in one UTC hour (increment 18,
+ * ruling B5), keyed by the airport each board reservation names, so no traffic pattern sweeps
+ * airports the way the AeroDataBox Terms 8.2 forbid (R3 F17). An airport already refreshed in
+ * the hour costs nothing more against it. Settable with the rest of the budget (increment 17).
+ */
+export const ADB_BOARD_AIRPORTS_PER_HOUR = 60;
+
 /** AeroAPI Standard: 5 result sets per second, 2 days of lookahead on `/flights/{ident}`. */
 export const AEROAPI_STANDARD = {
   perSecondLimit: 5,

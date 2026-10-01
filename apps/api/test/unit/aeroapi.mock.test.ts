@@ -26,14 +26,12 @@ import {
   alertEventFlags,
   bracketLocalDate,
   bracketWindow,
-  localMinuteToUtcMs,
   mergeAeroApiAlert,
   parseAeroApiAlert,
   parseAlertLocation,
   type AeroApiAlertPatch,
 } from '../../src/providers/aeroapi.mock';
-import { AeroDataBoxAdapter } from '../../src/providers/aerodatabox.adapter';
-import { ADB_PLANS, AEROAPI_STANDARD } from '../../src/providers/config';
+import { AEROAPI_STANDARD } from '../../src/providers/config';
 import { ProviderCallError } from '../../src/providers/http';
 import { aeroApiAllowedAt } from '../../src/providers/router';
 import airportDepartures from '../../src/providers/fixtures/aeroapi/airport-departures.json';
@@ -639,132 +637,12 @@ describe('getFlight: mapping', () => {
   );
 });
 
-describe('getBoard', () => {
-  it('keeps a local window ordered across the spring-forward gap', async () => {
-    // Both adapters take the same airport-local window; on the one night a year with a gap the
-    // AeroAPI conversion must not turn a valid local window into an inverted UTC one.
-    const stub = fixtureFetch(FIXTURES['airport-departures'] as Fixture);
-    const ctx = providerContext({ now: '2026-03-08T08:00:00Z' }).ctx;
-    await adapter(stub.fetch).getBoard(
-      'KJFK',
-      'dep',
-      { from: '2026-03-08T01:45', to: '2026-03-08T02:15', tz: 'America/New_York' },
-      ctx,
-    );
-    expect(Object.fromEntries(stub.urls()[0]?.searchParams ?? [])).toEqual({
-      start: '2026-03-08T06:45:00Z',
-      end: '2026-03-08T07:00:00Z',
-      max_pages: '1',
-    });
-    // A window lying entirely inside the gap is empty, and refused like any empty window.
-    await expect(
-      adapter(stub.fetch).getBoard(
-        'KJFK',
-        'dep',
-        { from: '2026-03-08T02:15', to: '2026-03-08T02:45', tz: 'America/New_York' },
-        ctx,
-      ),
-    ).rejects.toThrow(RangeError);
-  });
-
-  it('reads recent departures as airport_departures, one result set', async () => {
-    const stub = fixtureFetch(FIXTURES['airport-departures'] as Fixture);
-    const { data, call } = await adapter(stub.fetch).getBoard(
-      'KJFK',
-      'dep',
-      { from: '2026-09-22T16:00', to: '2026-09-22T22:00', tz: 'America/New_York' },
-      providerContext({ now: '2026-09-22T23:00:00Z' }).ctx,
-    );
-    expect(stub.urls()[0]?.pathname).toBe('/aeroapi/airports/KJFK/flights/departures');
-    expect(stub.urls()[0]?.searchParams.get('max_pages')).toBe('1');
-    expect(call).toMatchObject({
-      operation: 'airport_departures',
-      costUnits: 1,
-      estCostUsdMicros: 5_000,
-    });
-    expect(data).toEqual([
-      containing({
-        direction: 'dep',
-        designator: 'AA100',
-        operatingCarrierIcao: 'AAL',
-        counterpart: { icao: 'EGLL', iata: 'LHR', tz: 'Europe/London' },
-        status: 'en_route',
-        actual: '2026-09-22T22:04:00.000Z',
-        gate: 'B32',
-        source: 'aeroapi',
-      }),
-    ]);
-  });
-
-  it('reads the shared BoardWindow as airport-local time, exactly as AeroDataBox does', async () => {
-    // One window, both providers: 17:00 to 23:00 at JFK is 21:00Z to 03:00Z in September.
-    const window = { from: '2026-09-22T17:00', to: '2026-09-22T23:00', tz: 'America/New_York' };
-    const ctx = providerContext({ now: '2026-09-22T23:30:00Z' }).ctx;
-    const aeroapi = fixtureFetch(FIXTURES['airport-departures'] as Fixture);
-    await adapter(aeroapi.fetch).getBoard('KJFK', 'dep', window, ctx);
-    expect(Object.fromEntries(aeroapi.urls()[0]?.searchParams ?? [])).toEqual({
-      start: '2026-09-22T21:00:00Z',
-      end: '2026-09-23T03:00:00Z',
-      max_pages: '1',
-    });
-    const adb = fetchStub(
-      () =>
-        new Response(JSON.stringify({ departures: [] }), {
-          status: 200,
-          headers: { 'content-type': 'application/json' },
-        }),
-    );
-    await new AeroDataBoxAdapter({
-      apiKey: 'adb',
-      fetch: adb.fetch,
-      plan: ADB_PLANS.growth,
-      now: () => new Date(),
-    }).getBoard('KJFK', 'dep', window, ctx);
-    expect(adb.urls()[0]?.pathname).toBe(
-      '/flights/airports/Icao/KJFK/2026-09-22T17:00/2026-09-22T23:00',
-    );
-    // The same wall clock in winter is five hours from UTC, not four.
-    expect(localMinuteToUtcMs('2026-12-22T17:00', 'America/New_York')).toBe(
-      Date.parse('2026-12-22T22:00:00Z'),
-    );
-    // Across the November fall-back and the March spring-forward.
-    expect(localMinuteToUtcMs('2026-11-01T00:30', 'America/New_York')).toBe(
-      Date.parse('2026-11-01T04:30:00Z'),
-    );
-    expect(localMinuteToUtcMs('2026-11-01T03:00', 'America/New_York')).toBe(
-      Date.parse('2026-11-01T08:00:00Z'),
-    );
-    expect(localMinuteToUtcMs('2026-03-08T04:00', 'America/New_York')).toBe(
-      Date.parse('2026-03-08T08:00:00Z'),
-    );
-    // 02:00 to 03:00 exists on no clock at JFK that night: a gap time lands on the transition
-    // itself (07:00Z), after the last real minute before it and no later than 03:00 EDT, so the
-    // mapping never runs backwards.
-    expect(localMinuteToUtcMs('2026-03-08T01:59', 'America/New_York')).toBe(
-      Date.parse('2026-03-08T06:59:00Z'),
-    );
-    expect(localMinuteToUtcMs('2026-03-08T02:00', 'America/New_York')).toBe(
-      Date.parse('2026-03-08T07:00:00Z'),
-    );
-    expect(localMinuteToUtcMs('2026-03-08T02:30', 'America/New_York')).toBe(
-      Date.parse('2026-03-08T07:00:00Z'),
-    );
-    expect(localMinuteToUtcMs('2026-03-08T03:00', 'America/New_York')).toBe(
-      Date.parse('2026-03-08T07:00:00Z'),
-    );
-    // An ambiguous fall-back time is its first occurrence (EDT), and the hour after it is EST.
-    expect(localMinuteToUtcMs('2026-11-01T01:30', 'America/New_York')).toBe(
-      Date.parse('2026-11-01T05:30:00Z'),
-    );
-    expect(localMinuteToUtcMs('2026-11-01T02:00', 'America/New_York')).toBe(
-      Date.parse('2026-11-01T07:00:00Z'),
-    );
-    expect(localMinuteToUtcMs('2026-09-22T17:00', 'Not/AZone')).toBeNull();
-    expect(localMinuteToUtcMs('2026-13-22T17:00', 'America/New_York')).toBeNull();
-    expect(localMinuteToUtcMs('2026-09-22T17:00:00Z', 'America/New_York')).toBeNull();
-    await expect(
-      adapter(aeroapi.fetch).getBoard('KJFK', 'dep', { ...window, tz: 'nowhere' }, ctx),
-    ).rejects.toThrow(RangeError);
+describe('boards', () => {
+  it('has no board method: boards and route search are AeroDataBox only (increment 18)', () => {
+    const aeroapi = adapter(fetchStub(() => new Response(null, { status: 500 })).fetch);
+    expect(aeroapi.capabilities.boards).toBe(false);
+    expect('getBoard' in aeroapi).toBe(false);
+    expect('getAirportBoard' in aeroapi).toBe(false);
   });
 });
 

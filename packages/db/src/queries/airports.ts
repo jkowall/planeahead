@@ -8,7 +8,7 @@
  * rejects a mismatch the database can see; this helper is how writers avoid producing one.
  */
 
-import { eq } from 'drizzle-orm';
+import { and, eq } from 'drizzle-orm';
 import type { Db } from '../client';
 import { airports } from '../schema/reference';
 
@@ -51,4 +51,45 @@ export function destinationColumns(endpoint: AirportEndpoint) {
     destinationIcao: endpoint.icao,
     destinationAirportId: endpoint.airportId,
   };
+}
+
+/** An airport a board can be asked for (increment 18). */
+export interface BoardAirport {
+  /** A real ICAO code: AeroDataBox FIDS is asked by ICAO. */
+  readonly icao: string;
+  readonly iata: string | null;
+  readonly name: string;
+  /** IANA zone: the board's buckets are airport-local. */
+  readonly tz: string;
+}
+
+const ICAO_CODE_RE = /^[A-Z0-9]{4}$/;
+const IATA_CODE_RE = /^[A-Z0-9]{3}$/;
+
+/**
+ * The airport a board request names (ruling B2), by a 4-character ICAO code or a 3-character
+ * IATA code, case-insensitive. Only an airport with a real ICAO code (`icao_source =
+ * 'icao_code'`) qualifies, because FIDS is asked by ICAO; an ident-derived pseudo code, an
+ * unknown code or anything else is null, which the route answers with a 404 before any object
+ * is touched.
+ */
+export async function resolveBoardAirport(
+  db: Pick<Db, 'select'>,
+  code: string,
+): Promise<BoardAirport | null> {
+  const normalized = code.trim().toUpperCase();
+  const column = ICAO_CODE_RE.test(normalized)
+    ? airports.icao
+    : IATA_CODE_RE.test(normalized)
+      ? airports.iata
+      : null;
+  if (column === null) {
+    return null;
+  }
+  const [row] = await db
+    .select({ icao: airports.icao, iata: airports.iata, name: airports.name, tz: airports.tz })
+    .from(airports)
+    .where(and(eq(column, normalized), eq(airports.icaoSource, 'icao_code')))
+    .limit(1);
+  return row ?? null;
 }

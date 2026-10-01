@@ -725,3 +725,84 @@ describe('ProviderBudget: the day ends', () => {
     );
   });
 });
+
+describe('ProviderBudget: the boards share and the hourly airport cap (increment 18)', () => {
+  const board = (
+    airportIcao?: string,
+    trigger: 'board' | 'route_search' = 'board',
+  ): BudgetRequest => ({
+    provider: 'aerodatabox',
+    operation: 'fids',
+    pollEquivalents: 0.1,
+    trigger,
+    ...(airportIcao === undefined ? {} : { airportIcao }),
+  });
+
+  it('refuses board calls past 35 percent of the cap, reports the share, and never touches trackers', async () => {
+    const { stub } = await budget();
+    // 35 percent of 40 units is 14: seven 2-unit FIDS calls, board and route search together.
+    await stub.configure({ dailyUnitCap: 40, perSecondLimit: 1_000 });
+    const shares: (number | undefined)[] = [];
+    for (let i = 0; i < 7; i += 1) {
+      const decision = await stub.reserve(board('KJFK', i % 2 === 0 ? 'board' : 'route_search'));
+      expect(decision.allowed).toBe(true);
+      shares.push(decision.boardsShareSpent);
+    }
+    expect(shares.map((share) => Math.round((share ?? -1) * 14))).toEqual([2, 4, 6, 8, 10, 12, 14]);
+    expect(await stub.reserve(board('KJFK'))).toEqual({
+      allowed: false,
+      reason: 'boards_share',
+      boardsShareSpent: 1,
+    });
+    // The trackers keep the other 26 units, and never see a board figure.
+    const trackers = await Promise.all(Array.from({ length: 13 }, () => stub.reserve(ADB_STATUS)));
+    expect(trackers.every((d) => d.allowed && d.boardsShareSpent === undefined)).toBe(true);
+    expect(await stub.reserve(ADB_STATUS)).toEqual({
+      allowed: false,
+      reason: 'provider_daily_cap',
+    });
+    const snapshot = await stub.snapshot();
+    expect(snapshot.boards).toEqual({
+      spentUnits: 14,
+      capUnits: 14,
+      shareSpent: 1,
+      airportsPerHourCap: 60,
+      airportsThisHour: ['KJFK'],
+    });
+    expect(snapshot.denials).toMatchObject({ boards_share: 1, provider_daily_cap: 1 });
+    expect(snapshot.byTrigger).toMatchObject({
+      board: { units: 8, calls: 4 },
+      route_search: { units: 6, calls: 3 },
+      alarm: { units: 26, calls: 13 },
+    });
+  });
+
+  it('caps distinct airports per UTC hour at 60, keyed by the airport the request names', async () => {
+    const harness = await budget();
+    const { stub } = harness;
+    await stub.configure({ dailyUnitCap: 100_000, perSecondLimit: 1_000 });
+    const airports = Array.from({ length: 60 }, (_, i) => `K${String(i).padStart(3, '0')}`);
+    for (const airport of airports) {
+      expect((await stub.reserve(board(airport))).allowed).toBe(true);
+    }
+    expect(await stub.reserve(board('EGLL'))).toMatchObject({
+      allowed: false,
+      reason: 'board_airports_per_hour',
+    });
+    // An airport already counted this hour costs nothing more against the cap.
+    expect((await stub.reserve(board('K007', 'route_search'))).allowed).toBe(true);
+    // A board call that names no airport is never uncounted: it is refused.
+    expect(await stub.reserve(board())).toMatchObject({ allowed: false, reason: 'routing_rule' });
+    // Tracker calls never see the airport cap.
+    expect((await stub.reserve(ADB_STATUS)).allowed).toBe(true);
+    expect((await stub.snapshot()).boards.airportsThisHour).toHaveLength(60);
+    // The next UTC hour starts its own count.
+    await harness.setClock(harness.nowMs + 60 * 60_000);
+    expect((await stub.reserve(board('EGLL'))).allowed).toBe(true);
+    expect((await stub.snapshot()).boards.airportsThisHour).toEqual(['EGLL']);
+    expect((await stub.snapshot()).denials).toMatchObject({
+      board_airports_per_hour: 1,
+      routing_rule: 1,
+    });
+  });
+});

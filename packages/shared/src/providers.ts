@@ -60,12 +60,11 @@ export interface FlightLookup {
 
 /**
  * A board (FIDS) window: airport-LOCAL wall-clock times `YYYY-MM-DDTHH:mm` at the airport the
- * board is for, plus that airport's IANA zone. One contract for every provider: AeroDataBox asks
- * in local time and uses `from` and `to` as they are; AeroAPI asks in UTC and converts them with
- * `tz`. Providers differ in WHICH flights a window selects, and the adapters document it:
- * AeroDataBox FIDS selects by scheduled time, AeroAPI `departures` and `arrivals` by the actual
- * off or on time (flights that already left or landed), so an AeroAPI board of a future window is
- * empty.
+ * board is for, plus that airport's IANA zone. AeroDataBox asks in local time and uses `from` and
+ * `to` as they are; `tz` lets a caller turn the window into instants. Which flights a window
+ * selects is the provider's: AeroDataBox FIDS returns flights "scheduled, planned or commenced"
+ * within the range, and its spec does not say whether the scheduled or the revised time decides
+ * membership (R3 F9; unverified, R3 U1). Boards are AeroDataBox only (Phase 1 plan section 3).
  */
 export interface BoardWindow {
   from: string;
@@ -100,7 +99,11 @@ export type BudgetDenialReason =
   | 'provider_kill_switch'
   | 'provider_rate_limit'
   | 'user_refresh_cap'
-  | 'routing_rule';
+  | 'routing_rule'
+  // Increment 18 (ruling B5), for the `board` and `route_search` triggers only: the boards
+  // share of the day's AeroDataBox cap is spent, or the hour's distinct-airport cap is reached.
+  | 'boards_share'
+  | 'board_airports_per_hour';
 
 export type BudgetDecision =
   | {
@@ -109,12 +112,19 @@ export type BudgetDecision =
       granted: number;
       /** Which rung of the 70 / 90 / 100 percent ladder the provider is on right now. */
       ladder: 'normal' | 'warn' | 'degraded';
+      /**
+       * Board triggers only (increment 18): the fraction of the boards share spent after this
+       * reservation, 0 to 1. `AirportState` degrades its freshness ladder from it.
+       */
+      boardsShareSpent?: number | undefined;
     }
   | {
       allowed: false;
       reason: BudgetDenialReason;
       /** For `provider_rate_limit`: when the per-second token bucket next has a token. */
       retryAfterMs?: number | undefined;
+      /** Board triggers only: the fraction of the boards share spent, 0 to 1. */
+      boardsShareSpent?: number | undefined;
     };
 
 export interface BudgetRequest {
@@ -123,6 +133,11 @@ export interface BudgetRequest {
   pollEquivalents: number;
   trigger: ProviderCallTrigger;
   flightKey?: FlightKey | undefined;
+  /**
+   * The airport a board or route-search call is for (increment 18): the key of the hourly cap
+   * on distinct airports refreshed. Absent on every other call.
+   */
+  airportIcao?: string | undefined;
   /**
    * The UTC day (`YYYY-MM-DD`) whose provider-wide budget this reservation debits, decided once
    * when the request is built. `release` refunds that same day even after midnight, where a
@@ -202,9 +217,13 @@ export interface FlightDataProvider {
     lookup: FlightLookup,
     ctx: ProviderCallContext,
   ): Promise<ProviderResult<Exact<FlightStatus>[]>>;
-  getBoard?(
+  /**
+   * One board call for an airport and a window, both directions in one response (R3 D2): the
+   * departures and the arrivals as `BoardRow`s, each carrying its `direction`. An item that
+   * cannot be keyed is skipped and counted on the call record's `error`.
+   */
+  getAirportBoard?(
     airportIcao: string,
-    direction: 'dep' | 'arr',
     window: BoardWindow,
     ctx: ProviderCallContext,
   ): Promise<ProviderResult<Exact<BoardRow>[]>>;

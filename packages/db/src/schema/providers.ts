@@ -63,6 +63,9 @@ export const CALL_TRIGGERS = [
   'cron',
   'import',
   'manual',
+  // Increment 18 (migration 0009).
+  'board',
+  'route_search',
 ] as const;
 
 /** Mirrors PROVIDER_CALL_RESULTS in @planeahead/shared. */
@@ -105,6 +108,8 @@ export const providerCalls = pgTable(
     flightKey: text('flight_key'),
     requestId: text('request_id'),
     errorCode: text('error_code'),
+    /** The airport a board or route-search call was for (increment 18); null otherwise. */
+    airportIcao: text('airport_icao'),
     ...createdOnly(),
   },
   (t) => [
@@ -114,6 +119,7 @@ export const providerCalls = pgTable(
     check('provider_calls_provider_check', sql`${t.provider} in (${inList(PROVIDERS)})`),
     check('provider_calls_trigger_check', sql`${t.trigger} in (${inList(CALL_TRIGGERS)})`),
     check('provider_calls_result_check', sql`${t.result} in (${inList(CALL_RESULTS)})`),
+    formatCheck('provider_calls_airport_icao_check', t.airportIcao, ICAO_AIRPORT_SQL_RE),
   ],
 );
 

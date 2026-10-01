@@ -79,6 +79,7 @@ describe('the provider_calls row', () => {
       flightKey: 'AAL-100-2026-09-22-KJFK',
       requestId: 'req-cost-log',
       errorCode: 'x'.repeat(200),
+      airportIcao: null,
     });
     const refused = record({ result: 'rate_limited', costUnits: 0, estCostUsdMicros: 0 });
     delete refused.httpStatus;
@@ -87,6 +88,14 @@ describe('the provider_calls row', () => {
       httpStatus: null,
       flightKey: null,
       errorCode: null,
+    });
+    // Increment 18: a board call carries its airport into `provider_calls.airport_icao`.
+    const board = record({ operation: 'fids', trigger: 'board', airportIcao: 'KATL' });
+    delete board.flightKey;
+    expect(providerCallRow(board)).toMatchObject({
+      trigger: 'board',
+      airportIcao: 'KATL',
+      flightKey: null,
     });
   });
 });

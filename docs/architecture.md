@@ -55,13 +55,20 @@ are in `docs/adr/`; the data model is `docs/schema-review.md`; threats are
     token bucket and the kill switch (persisted in `CONFIG` KV).
   - **PushAuth** (increment 14), one per push credential (`apns:sandbox`, `apns:production`,
     `fcm`): mints the shared APNs provider token and exchanges the FCM access token (section 9).
-  - **AirportState** and **UserInbox** are schema shells for Phase 1.
+  - **AirportState** (increment 18), one per airport, named by its ICAO code: the only caller
+    of AeroDataBox FIDS. It caches the airport's 12-hour board buckets (one `direction=Both` call
+    each, rows gzip-compressed in chunks of at most 1 MB), coalesces concurrent misses, serves
+    R3's freshness ladder with stale-while-revalidate, checks coverage once a day, copies each
+    bucket to KV `board:v2:{ICAO}:{bucketStartLocal}`, and purges a bucket 48 hours after it ends.
+  - **UserInbox** is a schema shell for Phase 1.
 - **Postgres** (Neon, PostgreSQL 18, us-east-1) is the source of truth for users, subscriptions,
   the flight registry, the sync feed and the ledgers, reached ONLY from the Worker through the
   Hyperdrive binding `DB` (one postgres.js client per request or queue batch, ADR 0009). Durable
   Objects never open Postgres (ADR 0007): their writes travel through the persist queue.
 - **KV**: `CACHE` (search answers 15 min, flight snapshots, used identity tokens, the ProviderBudget
-  read copy, and since increment 12 the tombstones of deleted accounts' sessions), `PUBLIC`,
+  read copy, since increment 12 the tombstones of deleted accounts' sessions, and since increment
+  18 the board buckets `board:v2:{ICAO}:{bucketStartLocal}` until their purge, coverage
+  `adb:coverage:{ICAO}` a day and airport references `ref:airport:{code}` a day), `PUBLIC`,
   `CONFIG` (the kill switch). Never a source of truth, never a cap.
 - **R2**: `PRIVATE_BUCKET` holds finished trackers' timelines (`events/{key}@{epochMs}.json`) and
   dead-lettered messages (`dlq/{queue}/{messageId}.json`, `dlq/persist-parked/`);

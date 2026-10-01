@@ -66,9 +66,10 @@ const CLASSES: readonly PingCase[] = [
     version: 2,
   },
   {
+    // Increment 18: the board buckets, their chunks, coverage and the outbox.
     className: 'AirportState',
     ping: (name) => track(env.AIRPORT_STATE.getByName(name)).ping(),
-    version: 0,
+    version: 1,
   },
   {
     className: 'UserInbox',
@@ -76,9 +77,10 @@ const CLASSES: readonly PingCase[] = [
     version: 0,
   },
   {
+    // Increment 18: the distinct airports refreshed per hour.
     className: 'ProviderBudget',
     ping: (name) => track(env.PROVIDER_BUDGET.getByName(name)).ping(),
-    version: 1,
+    version: 2,
   },
   {
     // Increment 14: the credential table and the last mint failure.

@@ -8,10 +8,10 @@
  * be matched to the schema it was built against without a database round trip.
  */
 
-export const MIGRATION_HASH = '807a78c70e44b688c5e1f7683c4cf7ee750deb762483e9d4b65718870392b19c';
+export const MIGRATION_HASH = 'f434b92dec9be59eb8db884d9ecfeb0f3fbbac71c3eb36e8361f9fb7a1f01857';
 
 /** Number of migrations in the journal at build time. */
-export const MIGRATION_COUNT = 9;
+export const MIGRATION_COUNT = 10;
 
 /** Tag of the newest migration in the journal at build time. */
-export const LATEST_MIGRATION = '0008_notification_tests';
+export const LATEST_MIGRATION = '0009_board_calls';

@@ -5,7 +5,11 @@ import { join } from 'node:path';
 import { REGIONAL_OPERATOR_SEED } from '@planeahead/shared';
 import { eq, isNull, sql } from 'drizzle-orm';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
-import { originColumns, resolveAirportEndpoint } from '../src/queries/airports';
+import {
+  originColumns,
+  resolveAirportEndpoint,
+  resolveBoardAirport,
+} from '../src/queries/airports';
 import * as schema from '../src/schema/index';
 import {
   MissingTimezoneError,
@@ -257,6 +261,27 @@ describe('seed loaders', () => {
       .returning({ flightKey: schema.flightInstances.flightKey });
     expect(synthetic?.flightKey).toBe('ASA-1236-2026-10-01-ZZ01');
     await tdb.db.delete(schema.flightInstances);
+  });
+
+  it('resolves a board airport by ICAO or IATA, only when it has a real ICAO code (increment 18)', async () => {
+    expect(await resolveBoardAirport(tdb.db, 'kjfk')).toMatchObject({
+      icao: 'KJFK',
+      iata: 'JFK',
+      tz: 'America/New_York',
+    });
+    expect((await resolveBoardAirport(tdb.db, 'LHR'))?.icao).toBe('EGLL');
+    expect((await resolveBoardAirport(tdb.db, ' atl '))?.icao).toBe('KATL');
+    const [fourChar] = await tdb.sql<{ icao: string }[]>`
+      select icao from airports where icao_source = 'ident' and icao ~ '^[A-Z0-9]{4}$'
+      order by icao limit 1
+    `;
+    // An ident-derived pseudo code exists for display but cannot be asked of FIDS.
+    expect(await resolveAirportEndpoint(tdb.db, fourChar!.icao)).not.toBeNull();
+    expect(await resolveBoardAirport(tdb.db, fourChar!.icao)).toBeNull();
+    expect(await resolveBoardAirport(tdb.db, '03N')).toBeNull();
+    expect(await resolveBoardAirport(tdb.db, 'ZZZZ')).toBeNull();
+    expect(await resolveBoardAirport(tdb.db, 'NYC')).toBeNull();
+    expect(await resolveBoardAirport(tdb.db, 'K')).toBeNull();
   });
 
   it('refuses a refresh where two source rows claim one ident, before writing anything', async () => {

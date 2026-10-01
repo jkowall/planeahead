@@ -55,6 +55,7 @@ export async function reserve(
     pollEquivalents: pollEquivalents(provider, operation),
     trigger: ctx.trigger,
     flightKey: ctx.flightKey,
+    airportIcao: ctx.airportIcao,
     utcDate: ctx.now().toISOString().slice(0, 10),
   };
   return { request, decision: await ctx.budget.reserve(request) };

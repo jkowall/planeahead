@@ -108,6 +108,19 @@ const RETRY_ADJACENT_DAY_TRIGGERS: ReadonlySet<string> = new Set(['user_search',
 /** The flight-status query: the path date is the origin-local DEPARTURE date, nothing else. */
 const FLIGHT_STATUS_QUERY = new URLSearchParams({ dateLocalRole: 'Departure' }).toString();
 
+/**
+ * R3 D2's one FIDS fetch shape. `withLocation` is not sent: its default is false, boards need no
+ * position, and whether it bills extra is undocumented (R3 U3).
+ */
+const FIDS_QUERY = new URLSearchParams({
+  direction: 'Both',
+  withLeg: 'true',
+  withCancelled: 'true',
+  withCodeshared: 'true',
+  withCargo: 'false',
+  withPrivate: 'false',
+}).toString();
+
 // ---------------------------------------------------------------------------------------------
 // Response schemas. Tolerant of fields the spec may add (a newer gateway must not break the
 // adapter), strict on the fields the mapping reads.
@@ -163,12 +176,28 @@ export const AdbFlightSchema = z.looseObject({
 });
 export type AdbFlightContract = z.infer<typeof AdbFlightSchema>;
 
+/**
+ * A `withLeg=true` leg. The spec marks `airport` required, but `AirportFlightContract` says the
+ * leg at the requested airport leaves it unset, so it is optional here and the home airport is
+ * the one the call asked about.
+ */
+const LegSchema = MovementSchema.extend({ airport: ListingAirportSchema.nullish() });
+type AdbLegContract = z.infer<typeof LegSchema>;
+
+/**
+ * `AirportFlightContract`: `departure` and `arrival` with `withLeg=true`, else `movement` (the
+ * home leg, whose `airport` is the opposite one). Both shapes are read, so a gateway that ignores
+ * `withLeg` still yields rows, without the counterpart leg's times.
+ */
 const AirportFlightSchema = z.looseObject({
   number: z.string().min(1),
   callSign: NullableString,
   status: AdbStatusSchema,
   codeshareStatus: CodeshareStatusSchema,
   movement: MovementSchema.nullish(),
+  departure: LegSchema.nullish(),
+  arrival: LegSchema.nullish(),
+  aircraft: AircraftSchema.nullish(),
   airline: AirlineSchema.nullish(),
 });
 
@@ -835,14 +864,17 @@ export class AeroDataBoxAdapter implements FlightDataProvider {
   }
 
   /**
-   * FIDS by airport (TIER 2, 2 units). `window.from` and `window.to` are airport-local times
-   * (`YYYY-MM-DDTHH:mm`, the `BoardWindow` contract), sent as they are: FIDS asks in local time,
-   * so `window.tz` is not needed here. FIDS selects by SCHEDULED time. A window wider than the plan
-   * allows is cut to `fidsWindowHours`.
+   * One FIDS call (TIER 2, 2 units) for an airport and an airport-local window, in R3 D2's one
+   * fetch shape (`FIDS_QUERY`): both directions, both legs, codeshares and cancellations, no
+   * cargo, no private flights, no position. `window.from` and `window.to` are sent as they are
+   * (FIDS asks in local time); a window wider than the plan allows is cut to `fidsWindowHours`.
+   * FIDS returns flights "scheduled, planned or commenced" within the range; the spec does not say
+   * whether the scheduled or the revised time decides membership (R3 F9; unverified, R3 U1).
+   * An item that cannot be keyed is skipped and counted on the record's `error`; a 200 whose
+   * items were all skipped is an `error`. A 204 is the billed `not_found` of an empty window.
    */
-  async getBoard(
+  async getAirportBoard(
     airportIcao: string,
-    direction: 'dep' | 'arr',
     window: BoardWindow,
     ctx: ProviderCallContext,
   ): Promise<ProviderResult<Exact<BoardRow>[]>> {
@@ -856,18 +888,10 @@ export class AeroDataBoxAdapter implements FlightDataProvider {
       throw new RangeError('a board window needs two local times YYYY-MM-DDTHH:mm, from < to');
     }
     const cappedTo = Math.min(to, from + this.capabilities.fidsWindowHours * 3_600_000);
-    const query = new URLSearchParams({
-      direction: direction === 'dep' ? 'Departure' : 'Arrival',
-      withLeg: 'false',
-      withCancelled: 'true',
-      withCodeshared: 'true',
-      withCargo: 'false',
-      withPrivate: 'false',
-    });
     const attempt = await this.#attempt(
       ctx,
       'fids',
-      `flights/airports/Icao/${icao}/${formatLocalMinute(from)}/${formatLocalMinute(cappedTo)}?${query.toString()}`,
+      `flights/airports/Icao/${icao}/${formatLocalMinute(from)}/${formatLocalMinute(cappedTo)}?${FIDS_QUERY}`,
     );
     const body = attempt.body;
     if (attempt.call.result !== 'ok' || body?.kind !== 'json') {
@@ -877,21 +901,24 @@ export class AeroDataBoxAdapter implements FlightDataProvider {
     if (!fids.success) {
       return { data: [], call: { ...attempt.call, result: 'error', error: 'not_a_fids_contract' } };
     }
-    const items = (direction === 'dep' ? fids.data.departures : fids.data.arrivals) ?? [];
-    const now = ctx.now();
-    const mapping = this.#mappingContext(now);
+    const mapping = this.#mappingContext(ctx.now());
     const rows: Exact<BoardRow>[] = [];
-    for (const item of items) {
-      const parsed = AirportFlightSchema.safeParse(item);
-      if (!parsed.success || parsed.data.movement === null || parsed.data.movement === undefined) {
-        continue;
-      }
-      const row = boardRow(parsed.data, parsed.data.movement, direction, mapping);
-      if (row !== null) {
-        rows.push(row);
+    const skipped = new Map<BoardSkip, number>();
+    const sides = [
+      ['dep', fids.data.departures ?? []],
+      ['arr', fids.data.arrivals ?? []],
+    ] as const;
+    for (const [direction, items] of sides) {
+      for (const item of items) {
+        const mapped = fidsBoardRow(item, direction, mapping);
+        if (typeof mapped === 'string') {
+          skipped.set(mapped, (skipped.get(mapped) ?? 0) + 1);
+        } else {
+          rows.push(mapped);
+        }
       }
     }
-    return { data: rows, call: attempt.call };
+    return { data: rows, call: withSkipped(attempt.call, skipped, rows.length) };
   }
 
   /** Airport by ICAO code (TIER 1, 1 unit): the reference and its time zone. */
@@ -997,85 +1024,178 @@ function formatLocalMinute(ms: number): string {
   return new Date(ms).toISOString().slice(0, 16);
 }
 
-/**
- * A board row's status from the data the row has. FIDS gives one movement: the departure at a
- * departures board, the arrival at an arrivals board.
- *
- * - Departures: `deriveStatus` over the departure's schedule, estimate and actual, as for a flight.
- * - Arrivals: there is no departure time on the row, so `deriveStatus` cannot see that the flight
- *   left. Flags and an actual arrival first (cancelled, diverted, arrived); then `en_route` once
- *   the status enum says the aircraft has left the origin (`isActualAt('departure')`, the same
- *   disambiguation the revised times use, never a mapping of the enum's name); `scheduled`
- *   before that, whatever the estimate says.
- */
-function boardRowStatus(
-  status: AdbStatus,
-  direction: 'dep' | 'arr',
-  times: { scheduled: string; estimated: string | undefined; actual: string | undefined },
-  now: Date,
-): FlightStatusValue {
-  const flags = adbFlags(status);
-  if (direction === 'dep') {
-    return deriveStatus({
-      ...flags,
-      actualOut: times.actual,
-      scheduledOut: times.scheduled,
-      estimatedOut: times.estimated,
-      now,
-    });
+/** Why a FIDS item yields no row. Counted on the call record, never silently dropped. */
+type BoardSkip =
+  | 'invalid_contract'
+  | 'no_home_leg'
+  | 'no_counterpart_icao'
+  | 'no_scheduled_time'
+  | 'unparseable_number';
+
+/** The record with its skipped items counted (`skipped 3: no_counterpart_icao x2; ...`). */
+function withSkipped(
+  call: ProviderCallRecord,
+  skipped: ReadonlyMap<BoardSkip, number>,
+  kept: number,
+): ProviderCallRecord {
+  if (skipped.size === 0) {
+    return call;
   }
-  if (flags.cancelled || flags.diverted || times.actual !== undefined) {
-    return deriveStatus({ ...flags, actualIn: times.actual, now });
+  let total = 0;
+  const parts: string[] = [];
+  for (const [reason, count] of skipped) {
+    total += count;
+    parts.push(`${reason} x${String(count)}`);
   }
-  return isActualAt('departure', status) ? 'en_route' : 'scheduled';
+  const error = `skipped ${String(total)}: ${parts.join('; ')}`.slice(0, 200);
+  return kept === 0 ? { ...call, result: 'error', error } : { ...call, error };
 }
 
-function boardRow(
+interface LegTimes {
+  readonly scheduled: ReturnType<typeof parseAdbDateTime>;
+  readonly estimated: string | undefined;
+  readonly actual: string | undefined;
+  /** An actual runway time (off or on), read only for the status. */
+  readonly runwayActual: string | undefined;
+}
+
+/** One leg's times, its revised gate and runway times split by the status enum. */
+function legTimes(
+  leg: AdbLegContract | null | undefined,
+  movement: 'departure' | 'arrival',
+  status: AdbStatus,
+): LegTimes {
+  const scheduled = leg == null ? null : parseAdbDateTime(leg.scheduledTime);
+  const revise = (contract: AdbLegContract['revisedTime'], kind: 'gate' | 'runway') =>
+    disambiguateRevisedTime(
+      status,
+      parseAdbDateTime(contract)?.instant,
+      scheduled?.instant,
+      movement,
+      kind,
+    );
+  const gate = leg == null ? null : revise(leg.revisedTime, 'gate');
+  const runway = leg == null ? null : revise(leg.runwayTime, 'runway');
+  return {
+    scheduled,
+    estimated: gate?.quality === 'estimated' ? gate.value : undefined,
+    actual: gate?.quality === 'live' ? gate.value : undefined,
+    runwayActual: runway?.quality === 'live' ? runway.value : undefined,
+  };
+}
+
+/**
+ * A board row's status from both legs, as `mapAdbFlight` derives a flight's: flags, then the
+ * furthest actual, then boarding or scheduled. When no actual says so but the status enum says
+ * the aircraft has left the origin (`isActualAt('departure')`, the disambiguation the revised
+ * times use, never a mapping of the enum's name), the row is `en_route`. An arrival without a
+ * departure leg (a gateway that ignored `withLeg`) is `scheduled` until then.
+ */
+function boardStatus(
+  status: AdbStatus,
+  departure: LegTimes,
+  arrival: LegTimes,
+  now: Date,
+): FlightStatusValue {
+  const derived = deriveStatus({
+    ...adbFlags(status),
+    actualOut: departure.actual,
+    actualOff: departure.runwayActual,
+    actualOn: arrival.runwayActual,
+    actualIn: arrival.actual,
+    scheduledOut: departure.scheduled?.instant,
+    estimatedOut: departure.estimated,
+    now,
+  });
+  if (derived !== 'scheduled' && derived !== 'boarding' && derived !== 'unknown') {
+    return derived;
+  }
+  if (isActualAt('departure', status)) {
+    return 'en_route';
+  }
+  return derived === 'unknown' && departure.scheduled === null ? 'scheduled' : derived;
+}
+
+/** The home leg, the counterpart leg and the counterpart airport of one FIDS item. */
+function boardLegs(
   flight: z.infer<typeof AirportFlightSchema>,
-  movement: AdbMovementContract,
+  direction: 'dep' | 'arr',
+): { home: AdbLegContract; far: AdbLegContract | null; counterpart: AirportRef | null } | null {
+  if (flight.departure != null || flight.arrival != null) {
+    const home = direction === 'dep' ? flight.departure : flight.arrival;
+    const far = (direction === 'dep' ? flight.arrival : flight.departure) ?? null;
+    if (home == null) {
+      return null;
+    }
+    return { home, far, counterpart: far?.airport == null ? null : adbAirportRef(far.airport) };
+  }
+  const movement = flight.movement;
+  return movement == null
+    ? null
+    : { home: movement, far: null, counterpart: adbAirportRef(movement.airport) };
+}
+
+/** Sets `row[key]` only when `value` is defined (`exactOptionalPropertyTypes`). */
+function put<K extends keyof Exact<BoardRow>>(
+  row: Exact<BoardRow>,
+  key: K,
+  value: Exact<BoardRow>[K] | undefined,
+): void {
+  if (value !== undefined) {
+    row[key] = value;
+  }
+}
+
+/**
+ * One FIDS item as a `BoardRow`, or the reason it was skipped. The operator is resolved as
+ * `mapAdbFlight` resolves it, regional hint included, so a row matches the key of the tracker
+ * for the same operation: (operator, operating number).
+ */
+function fidsBoardRow(
+  item: unknown,
   direction: 'dep' | 'arr',
   mapping: AdbMappingContext,
-): Exact<BoardRow> | null {
-  const counterpart = adbAirportRef(movement.airport);
-  const scheduled = parseAdbDateTime(movement.scheduledTime);
-  if (counterpart === null || scheduled === null) {
-    return null;
+): Exact<BoardRow> | BoardSkip {
+  const parsedItem = AirportFlightSchema.safeParse(item);
+  if (!parsedItem.success) {
+    return 'invalid_contract';
+  }
+  const flight = parsedItem.data;
+  const legs = boardLegs(flight, direction);
+  if (legs === null) {
+    return 'no_home_leg';
+  }
+  if (legs.counterpart === null) {
+    return 'no_counterpart_icao';
   }
   let parsed: ParsedNumber;
   try {
     parsed = parseAdbNumber(flight.number, flight.airline, mapping.carriers);
   } catch {
-    return null;
+    return 'unparseable_number';
   }
-  const movementName = direction === 'dep' ? 'departure' : 'arrival';
-  const revised = disambiguateRevisedTime(
-    flight.status,
-    parseAdbDateTime(movement.revisedTime)?.instant,
-    scheduled.instant,
-    movementName,
-  );
-  const actual = revised?.quality === 'live' ? revised.value : undefined;
-  const estimated = revised?.quality === 'estimated' ? revised.value : undefined;
-  const status = boardRowStatus(
-    flight.status,
-    direction,
-    { scheduled: scheduled.instant, estimated, actual },
-    mapping.now,
-  );
+  const homeMovement = direction === 'dep' ? 'departure' : 'arrival';
+  const farMovement = direction === 'dep' ? 'arrival' : 'departure';
+  const home = legTimes(legs.home, homeMovement, flight.status);
+  const far = legTimes(legs.far, farMovement, flight.status);
+  if (home.scheduled === null) {
+    return 'no_scheduled_time';
+  }
+  const departure = direction === 'dep' ? home : far;
+  const arrival = direction === 'dep' ? far : home;
   const row: Exact<BoardRow> = {
     direction,
     designator: parsed.compact,
     flightNumber: parsed.number,
-    counterpart,
-    scheduled: scheduled.instant,
-    status,
+    counterpart: legs.counterpart,
+    scheduled: home.scheduled.instant,
+    status: boardStatus(flight.status, departure, arrival, mapping.now),
+    codeshareStatus: flight.codeshareStatus,
     codeshares: [],
     source: 'aerodatabox',
   };
   const marketingIcao = parsed.marketingIcao;
   if (marketingIcao !== undefined) {
-    // The same resolution as `mapAdbFlight`, regional hint included, so a row matches the key of
-    // the tracker for the same operation: (operator, operating number).
     const operator = operatorOf(
       { ...parsed, marketingIcao },
       flight.codeshareStatus,
@@ -1084,24 +1204,27 @@ function boardRow(
     );
     row.operatingCarrierIcao = operator.operatingCarrierIcao;
     row.flightNumber = operator.operatingFlightNumber;
+    row.marketingCarrierIcao = marketingIcao;
   }
-  if (estimated !== undefined) {
-    row.estimated = estimated;
+  put(row, 'marketingCarrierIata', parsed.marketingIata);
+  put(row, 'callSign', clean(flight.callSign)?.toUpperCase());
+  put(row, 'registration', clean(flight.aircraft?.reg)?.toUpperCase());
+  put(row, 'aircraftModel', clean(flight.aircraft?.model));
+  put(row, 'estimated', home.estimated);
+  put(row, 'actual', home.actual);
+  put(row, 'terminal', clean(legs.home.terminal));
+  put(row, 'gate', clean(legs.home.gate));
+  if (direction === 'arr') {
+    put(row, 'baggageClaim', clean(legs.home.baggageBelt));
   }
-  if (actual !== undefined) {
-    row.actual = actual;
-  }
-  const terminal = clean(movement.terminal);
-  const gate = clean(movement.gate);
-  const belt = clean(movement.baggageBelt);
-  if (terminal !== undefined) {
-    row.terminal = terminal;
-  }
-  if (gate !== undefined) {
-    row.gate = gate;
-  }
-  if (belt !== undefined && direction === 'arr') {
-    row.baggageClaim = belt;
+  put(row, 'counterpartScheduled', far.scheduled?.instant);
+  put(row, 'counterpartEstimated', far.estimated);
+  put(row, 'counterpartActual', far.actual);
+  put(row, 'counterpartTerminal', clean(legs.far?.terminal));
+  put(row, 'counterpartGate', clean(legs.far?.gate));
+  const localDate = departure.scheduled?.localDate;
+  if (localDate !== undefined && isValidIsoDate(localDate)) {
+    row.scheduledDepartureDateLocal = localDate;
   }
   return row;
 }
