@@ -55,6 +55,14 @@ export const API_ERROR_CODES = [
   'upstream_timeout',
   'provider_unavailable',
   'provider_error',
+  // Boards and route search (increment 18): an airport code no `airports` row with a real ICAO
+  // code answers; an airport AeroDataBox covers neither live nor by schedule (no provider call
+  // was made); no copy of a bucket exists and the provider could not fill it; an anonymous
+  // account asked for the board of an airport none of its live subscriptions touches.
+  'airport_not_found',
+  'board_not_covered',
+  'board_unavailable',
+  'board_requires_account',
   // Sync
   'resync_required',
   'invalid_cursor',

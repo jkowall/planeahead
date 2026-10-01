@@ -19,6 +19,16 @@ const EXPECTED_EXPORTS = [
   'SYNTHETIC_ICAO_RE',
   'isSyntheticIcao',
   'isValidTimeZone',
+  // board-view (increment 18, part 2)
+  'AirportBoardResponseSchema',
+  'BOARD_DEFAULT_LOOKBACK_MS',
+  'BOARD_DEFAULT_STEP_MS',
+  'BOARD_DIRECTIONS',
+  'BOARD_MAX_RANGE_MS',
+  'BoardAddSchema',
+  'BoardAirportViewSchema',
+  'BoardViewRowSchema',
+  'RouteSearchResponseSchema',
   // boards (increment 18)
   'ADB_COVERAGE_TTL_MS',
   'AIRPORT_REF_KV_TTL_SECONDS',

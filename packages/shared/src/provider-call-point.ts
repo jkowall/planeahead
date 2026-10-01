@@ -3,7 +3,7 @@ import type { ProviderCallRecord } from './flight-status';
 /**
  * The Analytics Engine point one `ProviderCallRecord` becomes (increment 6 fixes the shape;
  * the persist consumer in increment 7 and the Worker-side cost logger both write it). One
- * index, five blobs and four doubles, far inside the per-point limits (1 index of at most 96
+ * index, six blobs and four doubles, far inside the per-point limits (1 index of at most 96
  * bytes, 20 blobs, 20 doubles, 16,000 cumulative blob bytes; facts sheet section 4).
  *
  * `index1` is the provider, a two-value dimension in practice, which is the worst case for
@@ -15,13 +15,17 @@ import type { ProviderCallRecord } from './flight-status';
  * `double3`), so a field is only ever appended, never inserted or reordered.
  */
 
-/** `blob1` to `blob5`, in order. */
+/**
+ * `blob1` to `blob6`, in order. `airport_icao` (increment 18, ruling B10) is the airport a board
+ * or route-search call was for, appended last so every query by position keeps its meaning.
+ */
 export const PROVIDER_CALL_POINT_BLOBS = [
   'operation',
   'flight_key',
   'trigger',
   'result',
   'environment',
+  'airport_icao',
 ] as const;
 
 /** `double1` to `double4`, in order. */
@@ -39,8 +43,8 @@ export interface ProviderCallPoint {
 }
 
 /**
- * The point for one call. An absent flight key is an empty blob and an absent HTTP status (a
- * call that never reached the provider) is `0`, so every point has the same arity.
+ * The point for one call. An absent flight key or airport is an empty blob and an absent HTTP
+ * status (a call that never reached the provider) is `0`, so every point has the same arity.
  */
 export function providerCallPoint(
   record: ProviderCallRecord,
@@ -48,7 +52,14 @@ export function providerCallPoint(
 ): ProviderCallPoint {
   return {
     indexes: [record.provider],
-    blobs: [record.operation, record.flightKey ?? '', record.trigger, record.result, environment],
+    blobs: [
+      record.operation,
+      record.flightKey ?? '',
+      record.trigger,
+      record.result,
+      environment,
+      record.airportIcao ?? '',
+    ],
     doubles: [record.latencyMs, record.costUnits, record.estCostUsdMicros, record.httpStatus ?? 0],
   };
 }

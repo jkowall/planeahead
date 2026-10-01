@@ -63,7 +63,7 @@ export const CALL_TRIGGERS = [
   'cron',
   'import',
   'manual',
-  // Increment 18 (migration 0009).
+  // Increment 18 (migration 0010).
   'board',
   'route_search',
 ] as const;

@@ -7,7 +7,12 @@
 
 import type { InferRequestType, InferResponseType } from 'hono/client';
 import { describe, expect, expectTypeOf, it } from 'vitest';
-import type { FlightView, NotificationPreferences } from '@planeahead/shared';
+import type {
+  AirportBoardResponse,
+  FlightView,
+  NotificationPreferences,
+  RouteSearchResponse,
+} from '@planeahead/shared';
 import packageJsonText from '../../package.json?raw';
 import { hcWithType, type Client } from '../../src/client';
 
@@ -56,6 +61,43 @@ describe('AppType', () => {
     expectTypeOf<Patched['preferences']['timeFormat']>().toEqualTypeOf<'12h' | '24h'>();
     type Read = InferResponseType<typeof client.v1.me.preferences.$get, 200>;
     expectTypeOf<Read['notifications']['events']['delay']>().toEqualTypeOf<boolean>();
+  });
+
+  it('carries the board and the route search with the shared view contract (increment 18)', () => {
+    const airports = client.v1.airports[':code'].board;
+    const route = client.v1.airports[':origin'].flights.to[':destination'];
+    expectTypeOf(airports.$get).toBeFunction();
+    expectTypeOf(route.$get).toBeFunction();
+    expect(airports.$url({ param: { code: 'JFK' }, query: {} }).pathname).toBe(
+      '/v1/airports/JFK/board',
+    );
+    const routeUrl = route.$url({
+      param: { origin: 'JFK', destination: 'LHR' },
+      query: { date: '2026-10-02' },
+    });
+    expect(`${routeUrl.pathname}${routeUrl.search}`).toBe(
+      '/v1/airports/JFK/flights/to/LHR?date=2026-10-02',
+    );
+    type BoardQuery = InferRequestType<typeof airports.$get>['query'];
+    expectTypeOf<BoardQuery>().toHaveProperty('direction');
+    expectTypeOf<BoardQuery>().toHaveProperty('airline');
+    type Board = InferResponseType<typeof airports.$get, 200>;
+    type Row = Board['rows'][number];
+    expectTypeOf<Row['designator']>().toEqualTypeOf<string>();
+    expectTypeOf<Row['codeshares']>().toEqualTypeOf<string[]>();
+    expectTypeOf<NonNullable<Row['add']>['date']>().toEqualTypeOf<string>();
+    expectTypeOf<Board['coverage']>().toEqualTypeOf<AirportBoardResponse['coverage']>();
+    expectTypeOf<Board['fetchedAt']>().toEqualTypeOf<string | null>();
+    expectTypeOf<Board['stale']>().toEqualTypeOf<boolean>();
+    type RouteQuery = InferRequestType<typeof route.$get>['query'];
+    expectTypeOf<RouteQuery['date']>().toEqualTypeOf<string | string[]>();
+    type Flights = InferResponseType<typeof route.$get, 200>;
+    expectTypeOf<Flights['flights'][number]['scheduled']>().toEqualTypeOf<string>();
+    expectTypeOf<Flights['partial']>().toEqualTypeOf<RouteSearchResponse['partial']>();
+    type Capped = InferResponseType<typeof route.$get, 403>;
+    expectTypeOf<Extract<Capped, { cap: string }>['error']>().toEqualTypeOf<'cap_exceeded'>();
+    type TooFar = InferResponseType<typeof route.$get, 422>;
+    expectTypeOf<TooFar['maxDaysAhead']>().toEqualTypeOf<number>();
   });
 
   it('types a validation failure as the PlaneAhead envelope, never the raw Zod result', () => {

@@ -10,6 +10,7 @@ export const PLANEAHEAD = 'planeahead' as const;
 export * from './adb-time';
 export * from './airports';
 export * from './api';
+export * from './board-view';
 export * from './boards';
 export * from './cadence';
 export * from './carriers';

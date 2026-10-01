@@ -101,10 +101,10 @@ describe('the provider_calls row', () => {
 });
 
 describe('the Analytics Engine point (shape fixed in shared)', () => {
-  it('index1 provider; blobs operation, flight_key, trigger, result, environment; four doubles', () => {
+  it('index1 provider; blobs operation, flight_key, trigger, result, environment, airport_icao; four doubles', () => {
     expect(providerCallPoint(record(), 'test')).toEqual({
       indexes: ['aerodatabox'],
-      blobs: ['flight_status', 'AAL-100-2026-09-22-KJFK', 'alarm', 'ok', 'test'],
+      blobs: ['flight_status', 'AAL-100-2026-09-22-KJFK', 'alarm', 'ok', 'test', ''],
       doubles: [412, 2, 500, 200],
     });
     expect(PROVIDER_CALL_POINT_BLOBS).toEqual([
@@ -113,6 +113,7 @@ describe('the Analytics Engine point (shape fixed in shared)', () => {
       'trigger',
       'result',
       'environment',
+      'airport_icao',
     ]);
     expect(PROVIDER_CALL_POINT_DOUBLES).toEqual([
       'latency_ms',
@@ -144,7 +145,7 @@ describe('in a Worker', () => {
     expect(points).toHaveLength(2);
     expect(points[0]).toEqual({
       indexes: ['aerodatabox'],
-      blobs: ['flight_status', 'AAL-100-2026-09-22-KJFK', 'user_search', 'not_found', 'test'],
+      blobs: ['flight_status', 'AAL-100-2026-09-22-KJFK', 'user_search', 'not_found', 'test', ''],
       doubles: [412, 2, 500, 200],
     });
     const rows = await withDb(env as Env, (db) =>

@@ -1,6 +1,7 @@
 /**
  * The `/v1` surface: the per-principal rate limiter, then the `/v1` idempotency instance, then the
- * account, flight, sync, events and webhook routes. The provider receivers are anonymous (the
+ * airport (boards and route search, increment 18), account, flight, sync, events and webhook
+ * routes. The provider receivers are anonymous (the
  * limiter skips them) and authenticate by path token; `POST /v1/events` (increment 12) is
  * anonymous by design and brakes on `EVENTS_RL` per client IP. Increment 12 also retired the 501
  * stub that reserved `/v1/events`. Two `/v1` paths still answer 501 on purpose, reserved for
@@ -19,7 +20,8 @@
  * validator, because the request hash covers the validated body.
  *
  * `createV1Routes` exists for tests that inject a slow tracker or a failing transaction into the
- * flight routes, a purge horizon into the sync route, or a dataset into the events route; the
+ * flight routes, a purge horizon into the sync route, a dataset into the events route, or a clock
+ * and a `BOARD_RL` stub into the airport routes; the
  * Worker mounts `v1Routes`, built with no options.
  */
 
@@ -27,6 +29,7 @@ import { Hono } from 'hono';
 import type { AppBindings } from '../env';
 import { idempotency } from '../middleware/idempotency';
 import { principalLimiter } from '../middleware/rate-limit';
+import { createAirportRoutes, type AirportRoutesOptions } from './airports';
 import { devicesRoutes } from './devices';
 import { createEventsRoutes, type EventsRoutesOptions } from './events';
 import { createFlightRoutes, type FlightRoutesOptions } from './flights';
@@ -35,6 +38,7 @@ import { createSyncRoutes, type SyncRoutesOptions } from './sync';
 import { webhookRoutes } from './webhooks';
 
 export interface V1RoutesOptions {
+  readonly airports?: AirportRoutesOptions;
   readonly flights?: FlightRoutesOptions;
   readonly sync?: SyncRoutesOptions;
   readonly events?: EventsRoutesOptions;
@@ -44,6 +48,7 @@ export function createV1Routes(options: V1RoutesOptions = {}) {
   return new Hono<AppBindings>()
     .use(principalLimiter())
     .use(idempotency({ mode: 'v1' }))
+    .route('/airports', createAirportRoutes(options.airports))
     .route('/devices', devicesRoutes)
     .route('/flights', createFlightRoutes(options.flights))
     .route('/me', meRoutes)

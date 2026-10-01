@@ -25,7 +25,7 @@ import { FlightKeySchema } from './flight-key';
  *   every deploy is one whole `wrangler deploy` of the Worker and its objects
  *   (deploy-staging.yml, deploy-production.yml), so no older consumer runs beside the new
  *   producer except during a deploy's switchover seconds, where a refused record is an accepted
- *   accounting loss. Migration 0009 widens the `provider_calls` trigger check before that deploy.
+ *   accounting loss. Migration 0010 widens the `provider_calls` trigger check before that deploy.
  *
  * `z.infer` of a `looseObject` carries a string index signature, which switches off
  * TypeScript's excess-property check, so a producer that misspells a field would compile.

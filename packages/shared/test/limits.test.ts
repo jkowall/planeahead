@@ -22,6 +22,8 @@ describe('free-tier limits (ruling K3)', () => {
       instancesCreatedPerDay: 20,
       anonymousTrackerCreationsPerDayPerIp: 10,
       refreshesPerFlightPerDay: 10,
+      routeSearchesPerDay: 30,
+      anonymousRouteSearchesPerDayPerIp: 30,
     });
     expect(SYNC_PAGE_SIZE).toBe(200);
     expect(Object.isFrozen(FREE_TIER_LIMITS)).toBe(true);
@@ -34,6 +36,7 @@ describe('free-tier limits (ruling K3)', () => {
       ['instances_created', 20],
       ['tracker_creations', 10],
       ['refresh', 10],
+      ['route_searches', 30],
     ]);
   });
 });

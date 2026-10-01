@@ -25,6 +25,14 @@ export const FREE_TIER_LIMITS = Object.freeze({
   anonymousTrackerCreationsPerDayPerIp: 10,
   /** User refreshes per flight per UTC day; the FlightTracker enforces the same number. */
   refreshesPerFlightPerDay: 10,
+  /**
+   * Route searches (`GET /v1/airports/{origin}/flights/to/{destination}`, increment 18, ruling
+   * B9) per user per UTC day. Open to anonymous accounts, because route search is the onboarding
+   * path; every search reads the origin's board buckets, so it is capped like a creation.
+   */
+  routeSearchesPerDay: 30,
+  /** Route searches anonymous callers may make per UTC day per salted client IP. */
+  anonymousRouteSearchesPerDayPerIp: 30,
 } as const);
 
 export type FreeTierLimits = typeof FREE_TIER_LIMITS;
@@ -39,6 +47,7 @@ export const CAP_NAMES = [
   'instances_created',
   'tracker_creations',
   'refresh',
+  'route_searches',
 ] as const;
 export type CapName = (typeof CAP_NAMES)[number];
 
@@ -55,6 +64,8 @@ export function freeTierLimit(cap: CapName): number {
       return FREE_TIER_LIMITS.anonymousTrackerCreationsPerDayPerIp;
     case 'refresh':
       return FREE_TIER_LIMITS.refreshesPerFlightPerDay;
+    case 'route_searches':
+      return FREE_TIER_LIMITS.routeSearchesPerDay;
   }
 }
 

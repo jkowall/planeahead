@@ -476,7 +476,7 @@ describe('persist consumer', () => {
     expect(rows).toHaveLength(1);
   });
 
-  it('records an AirportState board call with its airport and no flight (increment 18, migration 0009)', async () => {
+  it('records an AirportState board call with its airport and no flight (increment 18, migration 0010)', async () => {
     const flight = uniqueFlight();
     const call = callRecord(flight.flightKey, {
       operation: 'fids',

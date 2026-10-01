@@ -28,6 +28,11 @@ import {
   type AlertEvent,
   type AlertRegistrationOptions,
   type AnyProviderOperation,
+  type AirportBoardResponse,
+  type BoardAirportView,
+  type BoardDirection,
+  type BoardViewRow,
+  type RouteSearchResponse,
   type BoardRow,
   type BoardWindow,
   type BoardBucketBounds,
@@ -332,6 +337,12 @@ interface TypeSurface {
   // providers
   flightLookup: FlightLookup;
   boardWindow: BoardWindow;
+  // board-view (increment 18, part 2)
+  airportBoardResponse: AirportBoardResponse;
+  boardAirportView: BoardAirportView;
+  boardDirection: BoardDirection;
+  boardViewRow: BoardViewRow;
+  routeSearchResponse: RouteSearchResponse;
   // boards (increment 18)
   boardBucketBounds: BoardBucketBounds;
   boardBucketRequest: BoardBucketRequestV1;

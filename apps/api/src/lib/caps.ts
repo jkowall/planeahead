@@ -17,15 +17,22 @@
  * system.
  *
  * Windows: the UTC day for the monotonic caps (`instances_created`, `tracker_creations`,
- * `refresh:{flightKey}`), the epoch for the two that go down again (`active_subscriptions`,
- * `live_tracked`), which are decremented on unsubscribe and never below zero. Drift between those
- * two and `flight_subscriptions` (a crash between a take and its compensating release) is repaired
- * by the nightly reconciliation the increment 12 housekeeping cron adds.
+ * `refresh:{flightKey}`, `route_searches`), the epoch for the two that go down again
+ * (`active_subscriptions`, `live_tracked`), which are decremented on unsubscribe and never below
+ * zero. Drift between those two and `flight_subscriptions` (a crash between a take and its
+ * compensating release) is repaired by the nightly reconciliation the increment 12 housekeeping
+ * cron adds.
  */
 
 import { sql } from 'drizzle-orm';
 import type { Db } from '@planeahead/db';
-import { type CapName, type FlightKey, freeTierLimit, uuidv7 } from '@planeahead/shared';
+import {
+  FREE_TIER_LIMITS,
+  type CapName,
+  type FlightKey,
+  freeTierLimit,
+  uuidv7,
+} from '@planeahead/shared';
 
 /** Anything that can run a statement: the request's handle or a transaction on it. */
 export type SqlExecutor = Pick<Db, 'execute'>;
@@ -76,6 +83,21 @@ export function ipTrackerCreationCap(saltedSubject: string, now: Date): CapSlot 
     counter: 'tracker_creations',
     windowStart: utcDayStart(now),
     limit: freeTierLimit('tracker_creations'),
+  };
+}
+
+/**
+ * The anonymous per-IP route-search slot (increment 18, ruling B9): taken beside the user's own
+ * `route_searches` slot when the caller is an anonymous account, as `tracker_creations` is.
+ */
+export function ipRouteSearchCap(saltedSubject: string, now: Date): CapSlot {
+  return {
+    cap: 'route_searches',
+    scope: 'ip',
+    subject: saltedSubject,
+    counter: 'route_searches',
+    windowStart: utcDayStart(now),
+    limit: FREE_TIER_LIMITS.anonymousRouteSearchesPerDayPerIp,
   };
 }
 

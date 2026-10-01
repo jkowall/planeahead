@@ -34,8 +34,8 @@ export interface FakeAdb {
   /** Holds every FIDS answer until `release()`. */
   hold(): void;
   release(): void;
-  /** What FIDS answers next (default: the body given at creation). */
-  fids: () => Response;
+  /** What FIDS answers next (default: the body given at creation); sees the request's URL. */
+  fids: (url: URL) => Response;
   health: () => Response;
 }
 
@@ -75,7 +75,7 @@ export function fakeAdb(body: unknown): FakeAdb {
       if (gate !== null) {
         await gate;
       }
-      return adb.fids();
+      return adb.fids(url);
     },
   };
   return adb;
@@ -105,8 +105,8 @@ export async function airportHarness(
   body: unknown,
   clockMs: number,
   tz = 'America/New_York',
+  icao: string = uniqueAirport(),
 ): Promise<AirportHarness> {
-  const icao = uniqueAirport();
   const stub = track(testEnv.AIRPORT_STATE.getByName(icao));
   const adb = fakeAdb(body);
   const sent: PersistMessageV1[] = [];

@@ -3,6 +3,7 @@ import { join, relative, resolve } from 'node:path';
 import {
   ALERT_EVENTS,
   APP_ID_RE,
+  CAP_NAMES,
   DISTANCE_UNITS,
   FLIGHT_STATUS_VALUES,
   IsoInstantSchema,
@@ -454,6 +455,14 @@ describe('agreement with @planeahead/shared', () => {
     for (const provider of PROVIDER_IDS) {
       expect(schema.EVENT_SOURCES).toContain(provider);
     }
+  });
+
+  it('accepts every shared cap name as a usage counter (route_searches from increment 18)', () => {
+    // `refresh` is stored per flight as `refresh:{flightKey}`, which the check matches by pattern.
+    for (const cap of CAP_NAMES.filter((name) => name !== 'refresh')) {
+      expect(schema.COUNTER_KINDS, cap).toContain(cap);
+    }
+    expect(schema.COUNTER_KINDS).toContain('route_searches');
   });
 
   it('push lists match the shared push contracts (increment 14)', () => {
