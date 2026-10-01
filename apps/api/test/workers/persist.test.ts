@@ -30,7 +30,7 @@ import {
   type ProviderCallRecord,
 } from '@planeahead/shared';
 import { createLogger } from '../../src/observability/log';
-import { handleNotifyBatch, type NotifyMessage } from '../../src/queues/notify';
+import { handleNotifyBatch } from '../../src/queues/notify';
 import { handlePersistBatch, type ConfirmingTracker } from '../../src/queues/persist';
 import { makeStatus } from '../../../../packages/shared/test/fixtures';
 import {
@@ -381,7 +381,8 @@ describe('persist consumer', () => {
       test: false,
     });
 
-    // The notify consumer accepts the new kind without failing (part 3 gives it its work).
+    // The notify consumer reads the forwarded intent: nobody follows this flight in Postgres, so it
+    // writes and sends nothing, and acknowledges (test/workers/notify.test.ts covers the work).
     const batch = createMessageBatch(
       'planeahead-notify-local',
       forwarded.map((body, index) => ({
@@ -392,7 +393,7 @@ describe('persist consumer', () => {
       })),
     );
     const ctx = createExecutionContext();
-    await handleNotifyBatch(batch as MessageBatch<NotifyMessage>, {
+    await handleNotifyBatch(batch, {
       env: testEnv,
       ctx,
       log: quietLog,

@@ -236,20 +236,27 @@ export type LiveWindowStage = 'before' | 'live' | 'over';
 
 const OVER_STATUSES: ReadonlySet<string> = new Set(['arrived', 'cancelled']);
 
+/**
+ * A `cancelled` row the tracker still suspects (`cancelSuspect`, increment 15 ruling N4) is not
+ * over: the confirming re-read may clear it, and a slot released meanwhile could not be taken
+ * back once the user's cap filled. Until it is confirmed it is judged by time alone, as if the
+ * flight still operated. A stored row carries no flag, so it is judged by its status.
+ */
 export function liveWindowStage(
   row: {
     readonly status: string;
     readonly trackingState: string;
     readonly scheduledOut: string | null;
+    readonly cancelSuspect?: boolean | undefined;
   },
   nowMs: number,
 ): LiveWindowStage {
-  if (isTerminal(row.trackingState) || OVER_STATUSES.has(row.status)) {
+  const suspect = row.cancelSuspect === true && row.status === 'cancelled';
+  if (isTerminal(row.trackingState) || (OVER_STATUSES.has(row.status) && !suspect)) {
     return 'over';
   }
-  return isInLiveWindow({ phase: row.status, scheduledOut: row.scheduledOut }, nowMs)
-    ? 'live'
-    : 'before';
+  const phase = suspect ? 'unknown' : row.status;
+  return isInLiveWindow({ phase, scheduledOut: row.scheduledOut }, nowMs) ? 'live' : 'before';
 }
 
 /**
@@ -271,7 +278,12 @@ async function applyLiveWindow(
   instanceId: string,
   flightKey: FlightKey,
   stored: StoredInstance | null,
-  next: { status: string; trackingState: string; scheduledOut: string | null },
+  next: {
+    status: string;
+    trackingState: string;
+    scheduledOut: string | null;
+    cancelSuspect: boolean;
+  },
   nowMs: number,
 ): Promise<void> {
   const now = new Date(nowMs);
@@ -438,6 +450,7 @@ async function upsertFlightInstanceIn(
         status: mutable.status,
         trackingState: mutable.trackingState,
         scheduledOut: mutable.scheduledOut,
+        cancelSuspect: p.cancelSuspect === true,
       },
       nowMs,
     );

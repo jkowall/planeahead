@@ -57,6 +57,13 @@
       "when": 1790771368479,
       "tag": "0007_push_transport",
       "breakpoints": true
+    },
+    {
+      "idx": 8,
+      "version": "7",
+      "when": 1790835007392,
+      "tag": "0008_notification_tests",
+      "breakpoints": true
     }
   ]
 }

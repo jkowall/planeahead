@@ -44,8 +44,11 @@ beforeAll(async () => {
   partialFolder = mkdtempSync(join(tmpdir(), 'planeahead-migrations-'));
   cpSync(MIGRATIONS_FOLDER, partialFolder, { recursive: true });
   const journal = readJournal(partialFolder);
-  const before = journal.entries.filter((entry) => entry.tag !== '0007_push_transport');
-  expect(before).toHaveLength(journal.entries.length - 1);
+  // Cut at 0007, not merely without it: drizzle applies only migrations newer than the last one
+  // applied, so a later migration (0008) applied here would make it skip 0007.
+  const cut = journal.entries.findIndex((entry) => entry.tag === '0007_push_transport');
+  const before = journal.entries.slice(0, cut);
+  expect(before.at(-1)?.tag).toBe('0006_ledger_calls');
   writeFileSync(
     join(partialFolder, 'meta', '_journal.json'),
     JSON.stringify({ ...journal, entries: before }, null, 2),

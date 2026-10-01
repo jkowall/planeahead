@@ -108,6 +108,7 @@ async function flightRow(tracker: TrackerHarness): Promise<FlightRowView | undef
 }
 
 const intentsOf = (tracker: TrackerHarness) => ofKind(tracker.outbox.sent, 'notify_intent');
+const instancesOf = (tracker: TrackerHarness) => ofKind(tracker.outbox.sent, 'flight_instance');
 
 describe('N4: a cancellation is confirmed before it is pushed or finishes the tracker', () => {
   it('suspects, retries a failed re-read, then confirms: one intent, and the finish path', async () => {
@@ -120,6 +121,12 @@ describe('N4: a cancellation is confirmed before it is pushed or finishes the tr
     expect(await flightRow(tracker)).toMatchObject({ phase: 'cancelled', finish_reason: null });
     expect(intentsOf(tracker)).toEqual([]);
     expect(await tracker.alarmAt()).toBe(seen + 5 * MINUTE_MS);
+    // The instance row says so, and persist keeps the flight's live-tracking slots meanwhile.
+    expect(instancesOf(tracker).at(-1)?.payload).toMatchObject({
+      phase: 'cancelled',
+      trackingState: 'tracking',
+      cancelSuspect: true,
+    });
 
     // The re-read fails (a provider error): the suspicion is neither trusted nor dropped, and
     // the re-read is tried again a spacing later, never at once.
@@ -145,6 +152,10 @@ describe('N4: a cancellation is confirmed before it is pushed or finishes the tr
     expect(await flightRow(tracker)).toMatchObject({
       phase: 'finished',
       finish_reason: 'cancelled',
+    });
+    expect(instancesOf(tracker).at(-1)?.payload).toMatchObject({
+      trackingState: 'finished',
+      cancelSuspect: false,
     });
     expect(await adbCalls(flight)).toBe(4);
   });

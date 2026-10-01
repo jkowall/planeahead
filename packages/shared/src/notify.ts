@@ -8,7 +8,7 @@ import {
   FlightTimesSchema,
   IsoInstantSchema,
 } from './flight-status';
-import { NotificationKindSchema } from './push';
+import { NotificationKindSchema, type NotificationKind } from './push';
 
 /**
  * The `notify` queue's intent message (increment 15, ruling N7): one push-worthy change a
@@ -84,3 +84,43 @@ export const NotifyIntentV1 = z.looseObject({
 export type NotifyIntentV1 = z.infer<typeof NotifyIntentV1>;
 /** What a producer builds; `notifyVersion` and `test` may be left out. */
 export type NotifyIntentV1Input = z.input<typeof NotifyIntentV1>;
+
+/**
+ * The app's two permanent Android notification channels (increment 15; increment 16's app creates
+ * them at start-up). Permanent because Android keys a user's sound, vibration and importance
+ * settings to the channel id and never lets an app rename one: a new id is a new channel with the
+ * user's choices lost. Both match `ANDROID_CHANNEL_ID_RE`.
+ */
+export const ANDROID_CHANNEL_IDS = {
+  /** Gate changes, first gate assignments, cancellations, diversions, and their corrections. */
+  flightChanges: 'flight_changes',
+  /** Delays and their corrections. */
+  flightDelays: 'flight_delays',
+} as const;
+export type AndroidChannelId = (typeof ANDROID_CHANNEL_IDS)[keyof typeof ANDROID_CHANNEL_IDS];
+
+/**
+ * The channel each notification kind posts to; a correction posts to its kind's channel. Every
+ * kind is listed, so a new kind fails to compile until it is given one. Only `delay`,
+ * `gate_change`, `cancellation` and `diversion` are produced today (increment 15); the others go
+ * to `flight_changes` until a later increment gives them a channel of their own.
+ */
+export const ANDROID_CHANNEL_BY_KIND: Readonly<Record<NotificationKind, AndroidChannelId>> = {
+  schedule_change: ANDROID_CHANNEL_IDS.flightChanges,
+  gate_change: ANDROID_CHANNEL_IDS.flightChanges,
+  delay: ANDROID_CHANNEL_IDS.flightDelays,
+  cancellation: ANDROID_CHANNEL_IDS.flightChanges,
+  diversion: ANDROID_CHANNEL_IDS.flightChanges,
+  boarding: ANDROID_CHANNEL_IDS.flightChanges,
+  departure: ANDROID_CHANNEL_IDS.flightChanges,
+  arrival: ANDROID_CHANNEL_IDS.flightChanges,
+  baggage: ANDROID_CHANNEL_IDS.flightChanges,
+  reminder: ANDROID_CHANNEL_IDS.flightChanges,
+  trip_share: ANDROID_CHANNEL_IDS.flightChanges,
+  system: ANDROID_CHANNEL_IDS.flightChanges,
+};
+
+/** The Android channel a notification of this kind posts to. */
+export function androidChannelFor(kind: NotificationKind): AndroidChannelId {
+  return ANDROID_CHANNEL_BY_KIND[kind];
+}

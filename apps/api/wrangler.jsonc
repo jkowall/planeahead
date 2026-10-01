@@ -131,8 +131,13 @@
         "max_retries": 5,
         "dead_letter_queue": "planeahead-persist-dlq-local",
       },
+      // Notify (increment 15, ruling N9): a batch of up to 10 intents within 1 s, at most 5
+      // invocations at once (each holds a Postgres connection for its reads and inserts).
       {
         "queue": "planeahead-notify-local",
+        "max_batch_size": 10,
+        "max_batch_timeout": 1,
+        "max_concurrency": 5,
         "max_retries": 5,
         "dead_letter_queue": "planeahead-notify-dlq-local",
       },
@@ -297,8 +302,13 @@
             "max_retries": 5,
             "dead_letter_queue": "planeahead-persist-dlq-staging",
           },
+          // Notify (increment 15, ruling N9): a batch of up to 10 intents within 1 s, at most 5
+          // invocations at once (each holds a Postgres connection for its reads and inserts).
           {
             "queue": "planeahead-notify-staging",
+            "max_batch_size": 10,
+            "max_batch_timeout": 1,
+            "max_concurrency": 5,
             "max_retries": 5,
             "dead_letter_queue": "planeahead-notify-dlq-staging",
           },
@@ -463,8 +473,13 @@
             "max_retries": 5,
             "dead_letter_queue": "planeahead-persist-dlq",
           },
+          // Notify (increment 15, ruling N9): a batch of up to 10 intents within 1 s, at most 5
+          // invocations at once (each holds a Postgres connection for its reads and inserts).
           {
             "queue": "planeahead-notify",
+            "max_batch_size": 10,
+            "max_batch_timeout": 1,
+            "max_concurrency": 5,
             "max_retries": 5,
             "dead_letter_queue": "planeahead-notify-dlq",
           },

@@ -212,6 +212,8 @@ export const notifications = pgTable(
     body: text('body').notNull(),
     data: jsonb('data'),
     readAt: instant('read_at'),
+    /** An injected test intent's row (increment 15, ruling N11); the inbox may hide it. */
+    isTest: boolean('is_test').notNull().default(false),
     ...createdOnly(),
   },
   (t) => [

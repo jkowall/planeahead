@@ -231,4 +231,34 @@ describe('live_tracked where the flight enters and leaves its window (ruling O3)
     expect(third.status).toBe(201);
     expect(await counterValue('user', session.userId, 'live_tracked')).toBe(1);
   });
+
+  it('keeps the slot through a suspected cancellation and releases it once confirmed (N4)', async () => {
+    const session = await signInAnonymously();
+    const [suspected, cleared] = [6, 7].map((hours) => seededFlightFor(hours * HOUR));
+    if (suspected === undefined || cleared === undefined) {
+      throw new Error('two flights expected');
+    }
+    for (const flight of [suspected, cleared]) {
+      await seedTracker(flight);
+      expect((await subscribe(session, { flightKey: flight.flightKey })).status).toBe(201);
+    }
+    expect(await counterValue('user', session.userId, 'live_tracked')).toBe(2);
+    const cancelled = (flight: TestFlight, version: number, cancelSuspect: boolean) =>
+      instanceMessage(
+        flight,
+        version,
+        { status: 'cancelled' },
+        { phase: 'cancelled', cancelSuspect },
+      );
+
+    // The tracker suspects both: the confirming re-read is pending, so the flights are not over.
+    await deliver([cancelled(suspected, 100, true), cancelled(cleared, 100, true)], Date.now());
+    expect(await counterValue('user', session.userId, 'live_tracked')).toBe(2);
+    expect((await flags(session.userId)).map((row) => row.live)).toEqual([true, true]);
+
+    // One re-read confirms (the same status, no longer suspected); the other clears.
+    await deliver([cancelled(suspected, 101, false), instanceMessage(cleared, 101)], Date.now());
+    expect(await counterValue('user', session.userId, 'live_tracked')).toBe(1);
+    expect((await flags(session.userId)).map((row) => row.live)).toEqual([false, true]);
+  });
 });

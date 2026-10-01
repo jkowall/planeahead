@@ -115,7 +115,7 @@ export async function queue(
         await handleHousekeepingBatch(batch, context);
         return;
       case 'notify':
-        await handleNotifyBatch(batch as MessageBatch<never>, context);
+        await handleNotifyBatch(batch, context);
         return;
       case 'push':
         await handlePushBatch(batch, context);

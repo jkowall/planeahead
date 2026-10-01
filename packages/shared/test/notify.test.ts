@@ -1,6 +1,14 @@
 import { describe, expect, it } from 'vitest';
 import type { FlightKey } from '../src/flight-key';
-import { NOTIFY_SCHEMA_VERSION, NotifyIntentV1, type NotifyIntentV1Input } from '../src/notify';
+import {
+  ANDROID_CHANNEL_BY_KIND,
+  ANDROID_CHANNEL_IDS,
+  NOTIFY_SCHEMA_VERSION,
+  NotifyIntentV1,
+  androidChannelFor,
+  type NotifyIntentV1Input,
+} from '../src/notify';
+import { ANDROID_CHANNEL_ID_RE, NOTIFICATION_KINDS } from '../src/push';
 import { PersistMessageV1 } from '../src/outbox';
 
 const KEY = 'AAL-100-2026-09-19-KJFK' as FlightKey;
@@ -72,5 +80,27 @@ describe('NotifyIntentV1 (increment 15, ruling N7)', () => {
     });
     expect(message.kind).toBe('notify_intent');
     expect(message.kind === 'notify_intent' && message.payload.intent.value).toBe('45');
+  });
+});
+
+describe('Android channels (increment 15)', () => {
+  it('has two permanent ids the push contract accepts', () => {
+    expect(ANDROID_CHANNEL_IDS).toEqual({
+      flightChanges: 'flight_changes',
+      flightDelays: 'flight_delays',
+    });
+    for (const id of Object.values(ANDROID_CHANNEL_IDS)) {
+      expect(id).toMatch(ANDROID_CHANNEL_ID_RE);
+    }
+  });
+
+  it('posts delays to flight_delays and every other kind to flight_changes', () => {
+    expect(androidChannelFor('delay')).toBe('flight_delays');
+    for (const kind of ['gate_change', 'cancellation', 'diversion'] as const) {
+      expect(androidChannelFor(kind)).toBe('flight_changes');
+    }
+    expect(Object.keys(ANDROID_CHANNEL_BY_KIND).sort()).toEqual([...NOTIFICATION_KINDS].sort());
+    const delays = NOTIFICATION_KINDS.filter((kind) => androidChannelFor(kind) === 'flight_delays');
+    expect(delays).toEqual(['delay']);
   });
 });

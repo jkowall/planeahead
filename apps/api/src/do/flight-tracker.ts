@@ -2744,6 +2744,9 @@ export class FlightTracker extends DurableObject<Env> {
         : row.phase === 'finished'
           ? null
           : iso(now);
+    // Ruling N4: a `cancelled` the confirming re-read has not decided is not the flight's end, so
+    // persist keeps its live-tracking slots (`liveWindowStage`) until it is confirmed or cleared.
+    const cancellation = this.#storedPolicyState(row)?.cancellation;
     const payload: FlightInstanceOutboxPayloadV1 = {
       operatingCarrierIcao: parts.operatingCarrierIcao,
       flightNumber: parts.flightNumber,
@@ -2764,6 +2767,7 @@ export class FlightTracker extends DurableObject<Env> {
       operatorSource: row.operator_source as FlightInstanceOutboxPayloadV1['operatorSource'],
       finishedAt: iso(row.finished_at_ms),
       eventsR2Key: row.events_r2_key,
+      cancelSuspect: cancellation?.status === 'suspect' && cancellation.value === 'cancelled',
     };
     this.#appendOutbox(row, now, { kind: 'flight_instance', flightKey: key, payload });
   }
