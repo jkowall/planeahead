@@ -9,7 +9,10 @@
   `docs/increments/11-verification.md`); 2026-09-30, the smoke runs weekly and its Android leg
   builds `x86_64` only (item 8, ADR 0001, runbook step 15); 2026-09-30, increment 13: the
   extensions' privacy manifests and versions (item 9), the smoke's store checks and device
-  archive (item 8), open decision 4 closed (`docs/increments/13-verification.md`)
+  archive (item 8), open decision 4 closed (`docs/increments/13-verification.md`); 2026-09-30,
+  its review round: the device archive and the Xcode 27 leg on manual runs only, frameworks
+  checked on their own, ExpoFileSystem built from source, EAS's build number in every embedded
+  bundle (items 8 and 9)
 
 ## Context
 
@@ -206,13 +209,22 @@ both apps.
 
    Increment 13 added what the stores check. ios-archive fails unless every `.app` and `.appex`
    in the app carries a `PrivacyInfo.xcprivacy` that declares each required-reason category its
-   executable's undefined symbols (`nm -u`) need, and the app's `CFBundleShortVersionString` and
-   `CFBundleVersion`; the symbol table is data in the script and a classifier the tools tests run.
-   A fifth iOS step, `ios-device-archive`, after the launch, archives Release for
+   executable's undefined symbols (`nm -u -j -arch all`, every slice) need, and the app's
+   `CFBundleShortVersionString` and `CFBundleVersion`, and unless every framework whose
+   executable references such an API carries a manifest of its own (Apple's rule is per bundle);
+   React Native's prebuilt `React.framework` and `ReactNativeDependencies.framework` are allowed
+   without one (no rejection reported; `ios.buildReactNativeFromSource: true` is the fallback),
+   and ExpoFileSystem, whose prebuilt framework App Store Connect rejects, is built from source
+   until SDK 58. The symbol table is data in the script and the tools tests run every check
+   against planted failures. A fifth iOS step, `ios-device-archive`, archives Release for
    `generic/platform=iOS` unsigned, which compiles the device SDKs (arm64, the watchOS device
-   slices) the simulator build never does, and applies the same checks to the archived app.
-   android-archive also runs `zipalign -c -P 16 -v 4` on the release APK and fails on any 64-bit
-   library with a LOAD segment aligned below 16 KB (the NDK's `llvm-readelf -l`).
+   slices) the simulator build never does, checks that the archive is an app archive, and applies
+   the same checks to the archived app; it runs on a manual run with `release_check`, before each
+   store build, on the gate leg only, as the Xcode 27 leg does on manual runs only (the review
+   round's measured costs: about 22 macOS minutes for the gate leg, about 16 more for the
+   archive). android-archive also runs `zipalign -c -P 16 -v 4` on the release APK and fails on
+   any 64-bit library with a LOAD segment aligned below 16 KB (the NDK's `llvm-readelf -l`), on
+   x86_64 weekly and arm64-v8a too on a release check.
 
 9. **What the store needs of the embedded bundles** (increment 13, rulings S1 and S3). Two
    corrections, like item 1's, to what the generators write, both listed before
@@ -221,8 +233,11 @@ both apps.
    gives the widget extension and both watch shells their own privacy manifest (the extension
    declares `NSPrivacyAccessedAPICategoryUserDefaults` with `1C8F.1`, the App Group reason, for
    expo-widgets' `UserDefaults(suiteName:)`; the watch shells call no required-reason API and
-   declare none), and `plugins/withExtensionVersions.ts` gives every embedded target the app's
-   `MARKETING_VERSION` and `CURRENT_PROJECT_VERSION`. Before it, `pod install` gave the watch app
+   declare none), and `plugins/withExtensionVersions.ts` gives every embedded target the store
+   build's `MARKETING_VERSION` and `CURRENT_PROJECT_VERSION`: EAS's (`EAS_BUILD_IOS_APP_VERSION`,
+   `EAS_BUILD_IOS_BUILD_NUMBER`, exported to the whole build) when present, because EAS's rewrite
+   of each target's Info.plist loses to these build settings, and the config's otherwise. Before
+   it, `pod install` gave the watch app
    the phone app's aggregated manifest (React Native's privacy aggregation adds the app's file to
    every application target without one) and the two extensions none. apple-targets 5.0.0
    already set every target's marketing version to the app's at the end of its mod, so the
@@ -439,8 +454,8 @@ in for the 26.6 gate leg; commands and full results in `docs/increments/11-verif
   corrections to expo-widgets' generated output (`plugins/withExpoWidgetsBuild.ts`) to re-check
   on every bump; three more bundle ids per variant to register with Apple; a list of expected
   Android permissions to keep in step with the dependencies; the smoke costs macOS runner
-  minutes (about 22 a run, weekly, and about 16 more since increment 13's device archive) and a
-  release Android build.
+  minutes (about 22 a run, weekly, and about 40 for each release check with the device archive)
+  and a release Android build.
 - Reversibility: high for the Android stub, the Wear module and the watch shells (delete the
   directory and the plugin entry); medium for expo-widgets (the layouts are JavaScript, but the
   bundle ids and App Groups the extension uses are permanent once shipped).

@@ -77,8 +77,10 @@ sends a test push through the real consumer so the transport can be proven on st
   failed read sends nothing and re-enqueues after 60 s. `persist` stays the only writer. The
   limit of that fix: a push APNs or FCM accepted before a sign-out stays with the provider until
   `apns-expiration` or the FCM `ttl` (the job's `expiresAt`) and can still reach a phone that was
-  offline at sign-out; no server-side check can recall it. Ruling R1 closes the window only for
-  pushes the consumer has not yet sent (first attempts in the queue, retries, holds). Increment 16 owns
+  offline at sign-out; no server-side check can recall it. Ruling R1 closes the window for every
+  batch whose liveness read starts after the invalidation commits (first attempts in the queue,
+  retries, holds); a batch already past its read can still finish its sends, usually within
+  seconds and at most about seven minutes (the re-review's probe showed it). Increment 16 owns
   the client half: at sign-out the app also drops its device token on the device, and whether
   that stops an already-accepted push from displaying is to be verified there against Apple's and
   Google's documentation. Ruling R10 replaces the flat 60 s after an FCM 429 without

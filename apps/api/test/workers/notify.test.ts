@@ -525,6 +525,23 @@ describe('notify: jobs and rows', () => {
     expect(notificationIds(first)).toEqual([rows[0]?.id, rows[0]?.id]);
     expect(notificationIds(second)).toEqual(notificationIds(first));
   });
+
+  it("keeps the intent's producedAt in the row's data, which orders supersession (Q16)", async () => {
+    const flightKey = await plantFlight();
+    const follower = await plantFollower(flightKey);
+    await plantTokens(follower.userId, 1);
+    // Produced 40 minutes before notify got to it (an outage): the row keeps when, not now.
+    const producedAt = new Date(Date.now() - 40 * 60_000).toISOString();
+    const intent = intentFor(flightKey, {}, { producedAt });
+    await deliver([intent], recordingQueue().queue);
+
+    const rows = await db()
+      .select({ data: notifications.data })
+      .from(notifications)
+      .where(eq(notifications.dedupeKey, intent.dedupeKey));
+    expect(rows).toHaveLength(1);
+    expect(rows[0]?.data).toMatchObject({ v: 1, flightKey, producedAt, kind: 'gate_change' });
+  });
 });
 
 describe('notify: tokens and job fields', () => {

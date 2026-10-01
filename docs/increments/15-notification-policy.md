@@ -1,22 +1,46 @@
 # Increment 15: notification policy
 
-Status: built (2026-10-01), in four parts; review pending. What ran, the departures and what
-stays unverified are in `docs/increments/15-verification.md`. Spec written 2026-09-30. Builder: Opus 5.5. Reviewers: a Fable 5.1 lens on the tracker's alarm,
-outbox and retry semantics (the owner's decision 11) and an Opus 5.5 lens on the policy rules,
+Status: built (2026-10-01) in four parts and reviewed; the review round's rulings (Q1 to Q18)
+were applied the same day in four parts: B (the policy, the adapters and the rendering), A1 (the
+tracker), A2 (persist, `notify` and the push consumer) and C (the injector and these documents).
+A re-review found one regression (Q19: a frozen diversion suspicion looped the alarm), fixed the
+same day by a Fable 5.1 escalation round; a second re-review found no blocker or major, and the
+close-out fixed or recorded its smaller findings.
+What ran, the departures, the review round and what stays unverified are in
+`docs/increments/15-verification.md` (the rulings' changes in its Review round section). Spec
+written 2026-09-30. Builder: Opus 5.5. Reviewers: a Fable 5.1 lens on the tracker's alarm, outbox
+and retry semantics (the owner's decision 11) and an Opus 5.5 lens on the policy rules,
 preferences and the `notify` consumer, plus the orchestrator's read; two skeptics on every serious
 finding. Branch `inc15-notification-policy`, stacked on `inc14-push-transport` after its review
 fixes.
+
+Review round. The two lenses found the same blocker independently (F1, B1): a confirmed
+cancellation, and an arrival delay produced on the landing observation, reached the inbox and no
+device, because the alarm that confirmed it also released the live-tracking slot in the same
+flush. Three majors followed (M1 arrival bands without hysteresis, M2 a missing estimate read as
+on time, M3 a suspected cancellation decided by another provider), and F2 (a Postgres outage
+longer than notify's five retries, about a minute, lost the intents produced meanwhile), rated a
+narrow major by its skeptics; the rest were minor or nits. Every finding was accepted.
 
 Departures from these rulings, each with its reason in the verification file: the flap
 suppression of N3 holds only before the first push (after it the return is a correction, as N3
 itself records against the plan); every intent's `expiresAt` is floored at 15 minutes after it
 was produced (`RELEVANCE_FLOOR_MINUTES`), so a stale estimate cannot make the push path drop it
-unsent; pushes go only to subscriptions flagged `live_tracked` (the orchestrator's ruling after
-part 3, from increment 8's O3 and the Phase 0 free tier), while every subscriber who passes the
-preferences still gets the `notifications` row; the preferences ride on the existing
-`PATCH /v1/me/preferences` as a nested `notifications` object, with a new
+unsent; pushes go only to subscriptions that were live-tracked when the change happened (flagged
+`live_tracked`, or released at or after the intent's `producedAt`: the orchestrator's ruling after
+part 3, from increment 8's O3 and the Phase 0 free tier, as review ruling Q1 corrected it), while
+every subscriber who passes the preferences still gets the `notifications` row; the preferences
+ride on the existing `PATCH /v1/me/preferences` as a nested `notifications` object, with a new
 `GET /v1/me/preferences`; and an un-cancellation after a pushed cancellation is pushed only once a
-re-read confirms it, like the cancellation itself (the orchestrator's ruling on N4).
+re-read confirms it, like the cancellation itself (the orchestrator's ruling on N4). The review
+round changed N4 itself: a suspected cancellation or diversion is evidence, not state, decided
+only by a conclusive answer from the provider that raised it (Q11), and alert merges never confirm
+one, against the plan row's "an alert code confirms". Its own departures from the review rulings:
+a suspicion holds the finish for the policy's 3 fast re-reads, not Q4's literal two (part A1);
+part A2 ordered supersession by `created_at` until part C put the intent's `producedAt` first; and
+the departure correction at the 15-minute line keeps the owner's literal rule (decision 3) while
+the arrival bands gained a 5-minute margin (Q9), the same margin for departures being a
+recommendation in `docs/open-decisions.md`.
 
 Read first: `docs/plans/phase1-plan.md` (section 3 rows Fan-out, Classification, Delay rule,
 Gates, Cancellation and diversion, Cadence, Client push; section 4 Push path and Event injector;

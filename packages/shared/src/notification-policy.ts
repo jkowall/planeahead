@@ -21,6 +21,9 @@ import type { NotificationKind } from './push';
  * from another provider, `unknown`, `statusUncertain` or a failed read keeps it. A snapshot
  * that shows only a suspected change (`showsSuspectedChange`) is evidence, not state: the
  * tracker stores the returned policy state and keeps its last confirmed snapshot (Q11 (1)).
+ * A cancellation, suspected or pushed, supersedes an open diversion suspicion, and `wants`
+ * lists a diversion only while the cancellation is `none` (Q19), so every re-read `wants` asks
+ * for is one the read resolves or moves on: the tracker never owes one at the instant it read.
  */
 
 /** N2: the departure delay that first produces a delay intent (14 CFR 234.2). */
@@ -55,8 +58,10 @@ export const ARRIVAL_CORRECTION_MARGIN_MINUTES = 5;
 /** Q13: the N2 rate limit's tolerance, so a move at the next slot is not held a slot more. */
 export const DELAY_RATE_LIMIT_TOLERANCE_SECONDS = 60;
 /**
- * How early a read may come and still be the re-read a rule owes (the tracker's early-alarm
- * tolerance): each rule resolves on `evaluateReread` only from its own instant minus this.
+ * How early a read may come and still be the re-read a rule owes: each rule resolves on
+ * `evaluateReread` only from its own instant minus this. The tracker's early-alarm tolerance is
+ * this same constant (review ruling Q19), so a read it makes as the re-read is one the rules
+ * count as it.
  */
 export const REREAD_TOLERANCE_MS = 5_000;
 /** N5: an intent is time-sensitive inside this window before the departure's best estimate. */
@@ -463,18 +468,23 @@ function settleWindow(pending: NonNullable<PolicyState['delay']['pending']>): {
 /**
  * The re-read a state owes, if any: the earliest instants and why. A pending settle is left out
  * while a cancellation is suspected or pushed (no delay rule runs then; it resumes with the
- * re-read that clears the suspicion).
+ * re-read that clears the suspicion), and so is a diversion suspicion (review ruling Q19 (b):
+ * the cancellation supersedes it at the next evaluation, `supersedeDiversion`). Every window
+ * reported is one the next read resolves or moves on, so after a read at `now` the next `at`
+ * is at least `CONFIRM_REREAD_MINUTES` on: a `wants.at` left in the past would be an alarm at
+ * the read's own instant, a read loop.
  */
 export function policyWants(state: PolicyState): PolicyWants | null {
   const due: { from: number; at: number; reason: PolicyRereadReason }[] = [];
   const { pending } = state.delay;
-  if (pending !== null && !pending.settled && state.cancellation.status === 'none') {
+  const uncancelled = state.cancellation.status === 'none';
+  if (pending !== null && !pending.settled && uncancelled) {
     due.push({ ...settleWindow(pending), reason: 'settle' });
   }
   if (state.cancellation.status === 'suspect') {
     due.push({ ...suspicionWindow(state.cancellation), reason: 'cancellation' });
   }
-  if (state.diversion.status === 'suspect') {
+  if (state.diversion.status === 'suspect' && uncancelled) {
     due.push({ ...suspicionWindow(state.diversion), reason: 'diversion' });
   }
   if (due.length === 0) {
@@ -778,7 +788,9 @@ function conclusive(d: Draft, s: SuspicionState): boolean {
 
 /**
  * A due re-read that did not decide (inconclusive, or failed): one fast re-read spent from the
- * suspicion and from the flight's budget (Q11 (5)), the next counted from now.
+ * suspicion and from the flight's budget (Q11 (5)), the next counted from now. One read spends
+ * at most one unit: a cancellation supersedes a diversion suspicion (Q19 (a)), so never two
+ * suspicions are due at once.
  */
 function inconclusiveRead(state: PolicyState, s: SuspicionState, now: number): SuspicionState {
   const fast = s.fastLeft > 0;
@@ -981,6 +993,26 @@ export function showsSuspectedChange(state: PolicyState, next: FlightStatus): bo
   return false;
 }
 
+/**
+ * Review ruling Q19 (a): a cancellation, suspected or pushed, supersedes an open diversion
+ * suspicion. A cancelled flight has nothing to divert and the cancellation's own re-read
+ * decides the flight, so the suspicion is dropped without an intent (a suspected un-diversion
+ * or re-diversion restores the push it would have undone, as a re-read that does not confirm
+ * it does). Left open while no rule could resolve it, it owed a re-read forever: `wants.at`
+ * frozen in the past, the alarm at once after every read. A read that clears the cancellation
+ * and still shows the diversion suspects it afresh, with its own re-reads.
+ */
+function supersedeDiversion(state: PolicyState): void {
+  const s = state.diversion;
+  if (s.status !== 'suspect') {
+    return;
+  }
+  state.diversion =
+    s.pushedValue === undefined
+      ? { status: 'none' }
+      : { status: 'pushed', at: s.pushedAt ?? s.since, value: s.pushedValue };
+}
+
 // ---------------------------------------------------------------------------------------------
 // Entry points.
 // ---------------------------------------------------------------------------------------------
@@ -993,7 +1025,10 @@ function run(input: PolicyInput, reread: boolean): PolicyResult {
   const d: Draft = { previous, next, now, reread, confirmed, provider, state, intents: [] };
   applyCancellation(d);
   // A suspected or confirmed cancellation stops every other rule (its times and gates are noise);
-  // they run again, from the same memory, once a re-read clears the suspicion.
+  // they run again, from the same memory, once a re-read clears the suspicion. A rule that does
+  // not run owes no re-read meanwhile: the settle is left out of `wants` (`policyWants`), and a
+  // diversion suspicion is superseded (Q19 (a)). The order stays: the diversion rule first would
+  // make its injection-only return reachable by a cancelled answer, another frozen window.
   if (d.state.cancellation.status === 'none') {
     applyDiversion(d);
     const diverted = d.state.diversion.status !== 'none' || diversionOf(next) !== undefined;
@@ -1004,6 +1039,8 @@ function run(input: PolicyInput, reread: boolean): PolicyResult {
       applyArrivalDelay(d);
       applyGate(d, 'destination');
     }
+  } else {
+    supersedeDiversion(d.state);
   }
   return { intents: d.intents, state: d.state, wants: policyWants(d.state) };
 }
@@ -1043,6 +1080,10 @@ export function evaluateReread(input: PolicyInput): PolicyResult {
 export function evaluateFailedReread(input: FailedRereadInput): PolicyResult {
   const state = JSON.parse(JSON.stringify(input.state)) as PolicyState;
   const { now } = input;
+  // Q19 (a): a state stored with both open (a build before the ruling) is normalised here too.
+  if (state.cancellation.status !== 'none') {
+    supersedeDiversion(state);
+  }
   const { pending } = state.delay;
   const settling = pending !== null && !pending.settled && state.cancellation.status === 'none';
   if (settling && now >= pending.settleAt - REREAD_TOLERANCE_MS) {

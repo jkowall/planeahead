@@ -423,8 +423,12 @@ export type InjectedIntentV1 = z.infer<typeof InjectedIntentV1>;
 export const InjectPolicyEventResponseV1 = z.looseObject({
   rpcVersion,
   outcome: z.enum(['injected', 'ignored']),
-  /** Why an injection was ignored: no tracked flight, or a finished one. */
-  reason: z.enum(['absent', 'finished']).optional(),
+  /**
+   * Why an injection was ignored: no tracked flight, a finished one, a suspected cancellation or
+   * diversion in the stored policy state (review ruling Q5: an injection, confirmed by
+   * construction, would decide it), or a stored snapshot that is cancelled.
+   */
+  reason: z.enum(['absent', 'finished', 'suspected', 'cancelled']).optional(),
   intents: z.array(InjectedIntentV1),
 });
 export type InjectPolicyEventResponseV1 = z.infer<typeof InjectPolicyEventResponseV1>;

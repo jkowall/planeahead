@@ -13,10 +13,13 @@
 #   scripts/native-smoke.sh android-launch    install the release APK, launch, alive, no JS fatal
 #   scripts/native-smoke.sh disk-guard N WHAT  fail unless N GB are free (before the emulator)
 #
-# What the store accepts (increment 13, rulings S2 to S5): ios-archive and ios-device-archive fail
-# unless every .app and .appex in the app carries a privacy manifest that declares each
-# required-reason API its executable references, and the app's version and build number;
-# android-archive fails unless the release APK and its 64-bit libraries suit 16 KB memory pages.
+# What the store accepts (increment 13, rulings S2 to S5, and its review round): ios-archive and
+# ios-device-archive fail unless every .app and .appex in the app carries a privacy manifest that
+# declares each required-reason API its executable references, and the app's version and build
+# number, and unless every framework that references one carries a manifest of its own
+# (FRAMEWORKS_WITHOUT_MANIFEST aside); android-archive fails unless the release APK and its 64-bit
+# libraries suit 16 KB memory pages. The workflow runs ios-device-archive, and builds arm64-v8a
+# besides x86_64, only on a manual run with release_check (review ruling F1, runbook step 18).
 #
 # The PRODUCTION variant with the production EAS profile's APNS_ENVIRONMENT, so the entitlements
 # asserted are the ones a store build signs (ruling V3). Launching is the point: a dyld failure
@@ -40,7 +43,11 @@
 # rebuild), SMOKE_GRADLE_JVMARGS (default -Xmx4g: the template's 2 GB ran D8 out of heap on a cold
 # build),
 # ANDROID_HOME (or ANDROID_SDK_ROOT; the android-archive step runs its build-tools' aapt2 and
-# zipalign and its NDK's llvm-readelf).
+# zipalign and its NDK's llvm-readelf), SMOKE_PLISTBUDDY (default /usr/libexec/PlistBuddy).
+#
+# The Apple tools the iOS checks run are plutil, nm and vtool from PATH and PlistBuddy, which is
+# not on PATH, from SMOKE_PLISTBUDDY, so tools/workflows/native-smoke.test.js can stand in for all
+# four and run the checks on its Linux runner (review ruling F2).
 set -euo pipefail
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd -P)"
@@ -52,7 +59,14 @@ export EXPO_NO_GIT_STATUS=1
 export EXPO_NO_TELEMETRY=1
 export SENTRY_DISABLE_AUTO_UPLOAD=true
 export LANG="${LANG:-en_US.UTF-8}"
-unset PLANEAHEAD_ANDROID_WIDGETS
+unset PLANEAHEAD_ANDROID_WIDGETS EAS_BUILD_IOS_BUILD_NUMBER EAS_BUILD_IOS_APP_VERSION
+
+PLISTBUDDY="${SMOKE_PLISTBUDDY:-/usr/libexec/PlistBuddy}"
+# The build number ios-prebuild gives the app the way EAS gives a store build its own (review
+# ruling F6): EAS exports EAS_BUILD_IOS_BUILD_NUMBER to the whole build and writes the number into
+# the app's Info.plist, and plugins/withExtensionVersions.ts gives it to every embedded target. No
+# config holds 4242, so ios-archive's build number comparison fails if that path breaks.
+EAS_BUILD_NUMBER=4242
 
 BUNDLE_ID=app.planeahead.mobile
 APP_GROUP="group.$BUNDLE_ID"
@@ -113,11 +127,14 @@ EXPECTED_ANDROID_PERMISSIONS=(
 # manifest (R5 F11, F12). The APIs are Apple's list, 2026-09-30
 # (https://developer.apple.com/documentation/bundleresources/app-privacy-configuration/nsprivacyaccessedapitypes/nsprivacyaccessedapitype):
 # the C functions by name (`$INODE64` variants match their base name), the Foundation keys by
-# their constants, UserDefaults by its class. getattrlist and its two relatives are in both the
-# file timestamp and the disk space lists, and either declaration covers them. Selector-only APIs
-# (ProcessInfo.systemUptime, UIDocument.fileModificationDate, UITextInputMode.activeInputModes,
-# the whole active keyboards category) leave no undefined symbol, so nothing here can see them.
-# shellcheck disable=SC2016 # `$` is part of the Objective-C class symbol, not an expansion.
+# their constants, UserDefaults by its class and by SwiftUI's @AppStorage, whose members reach it
+# without naming the class (review ruling F11). An entry ending in `*` matches every symbol that
+# starts with the rest, here the property wrapper's mangled Swift members. getattrlist and its two
+# relatives are in both the file timestamp and the disk space lists, and either declaration covers
+# them. Selector-only APIs (ProcessInfo.systemUptime, UIDocument.fileModificationDate,
+# UITextInputMode.activeInputModes, the whole active keyboards category) leave no undefined
+# symbol, so nothing here can see them: a known gap (docs/increments/13-verification.md).
+# shellcheck disable=SC2016 # `$` is part of the Objective-C and Swift symbols, not an expansion.
 REQUIRED_REASON_SYMBOLS=(
   'NSPrivacyAccessedAPICategoryFileTimestamp
     _stat _stat64 _fstat _fstat64 _lstat _lstat64 _fstatat _fstatat64
@@ -133,8 +150,21 @@ REQUIRED_REASON_SYMBOLS=(
     _NSURLVolumeAvailableCapacityKey _NSURLVolumeAvailableCapacityForImportantUsageKey
     _NSURLVolumeAvailableCapacityForOpportunisticUsageKey _NSURLVolumeTotalCapacityKey'
   'NSPrivacyAccessedAPICategoryUserDefaults
-    _OBJC_CLASS_$_NSUserDefaults'
+    _OBJC_CLASS_$_NSUserDefaults _$s7SwiftUI10AppStorageV*'
 )
+
+# Frameworks that may use required-reason APIs without a privacy manifest of their own (review
+# ruling F5). Apple wants the manifest in "the bundle that includes the executable or dynamic
+# library" (R5 F12), so every other framework whose executable references such an API must carry
+# one. SDK 57 embeds React Native's core prebuilt (RCT_USE_PREBUILT_RNCORE): React.framework
+# (NSUserDefaults, stat, fstat, mach_absolute_time) and ReactNativeDependencies.framework (stat,
+# fstat) carry no manifest, and no App Store Connect rejection of that prebuilt core has been
+# reported; the app's own manifest declares each of those categories. If App Store Connect ever
+# names one of them, expo-build-properties' `ios.buildReactNativeFromSource: true` links React
+# Native into the app's binary, under the app's manifest. The prebuilt ExpoFileSystem.framework,
+# which App Store Connect does reject for its missing manifest (expo/expo#50503), is built from
+# source instead (apps/mobile/package.json, until SDK 58).
+FRAMEWORKS_WITHOUT_MANIFEST=(React.framework ReactNativeDependencies.framework)
 
 fail() {
   echo "native-smoke: FAIL: $*" >&2
@@ -150,7 +180,7 @@ expect_equal() {
 # A plist value by PlistBuddy key path (`:a:0`): plutil's dotted key paths cannot name keys that
 # contain dots, such as com.apple.security.application-groups.
 plist_value() {
-  /usr/libexec/PlistBuddy -c "Print $2" "$1" 2>/dev/null || true
+  "$PLISTBUDDY" -c "Print $2" "$1" 2>/dev/null || true
 }
 
 watch_shells_expected() {
@@ -186,7 +216,12 @@ pick_simulator() {
 
 ios_prebuild() {
   cd "$APP_DIR"
-  pnpm exec expo prebuild --platform ios
+  EAS_BUILD_IOS_BUILD_NUMBER="$EAS_BUILD_NUMBER" pnpm exec expo prebuild --platform ios
+  # Then what the EAS builder does before it builds (R5 L5): the build number into the app's
+  # Info.plist, over the config's.
+  "$PLISTBUDDY" -c "Set :CFBundleVersion $EAS_BUILD_NUMBER" "ios/$PROJECT/Info.plist"
+  expect_equal "app CFBundleVersion, as EAS writes it" \
+    "$(plist_value "ios/$PROJECT/Info.plist" :CFBundleVersion)" "$EAS_BUILD_NUMBER"
   local entitlements="ios/$PROJECT/$PROJECT.entitlements"
   expect_equal "aps-environment (app)" \
     "$(plist_value "$entitlements" :aps-environment)" production
@@ -248,8 +283,11 @@ ios_build() {
     ONLY_ACTIVE_ARCH=YES build
 }
 
+# The platform an executable was built for (its first architecture's LC_BUILD_VERSION). By the
+# field, not by a match anywhere in the line: vtool prints the file's path first, and a path may
+# contain "platform" (review ruling F12).
 platform_of() {
-  vtool -show-build "$1" | awk '/platform/ { print $2; exit }'
+  vtool -show-build "$1" | awk '$1 == "platform" { print $2; exit }'
 }
 
 ios_archive() {
@@ -292,52 +330,111 @@ ios_archive() {
   check_store_bundles "$APP_PATH"
 }
 
-# What App Store Connect checks of every bundle in APP, the app itself included (rulings S2 and
-# S3): each .app and .appex carries a PrivacyInfo.xcprivacy that parses, gives each category it
-# declares a reason, and declares every required-reason API its executable's undefined symbols
-# name; and each has the app's CFBundleShortVersionString and CFBundleVersion.
+# What App Store Connect checks of the bundles in APP, the app itself included (rulings S2 and S3,
+# review rulings F3 and F5): each .app and .appex carries a PrivacyInfo.xcprivacy that parses,
+# gives each category it declares a reason and declares every required-reason API its
+# executable's undefined symbols name, and has the app's CFBundleShortVersionString and
+# CFBundleVersion; each framework whose executable names such an API carries a manifest of its
+# own that declares it (FRAMEWORKS_WITHOUT_MANIFEST aside), and any manifest a framework carries
+# parses and gives reasons. Also `scripts/native-smoke.sh store-bundles APP`.
 check_store_bundles() {
-  local app="$1" version build bundles bundle label manifest executable symbols undeclared
-  local categories category i
+  local app="$1" version build bundle label
+  [ -d "$app" ] || fail "no app at '$app'"
   version="$(plist_value "$app/Info.plist" :CFBundleShortVersionString)"
   build="$(plist_value "$app/Info.plist" :CFBundleVersion)"
   [ -n "$version" ] && [ -n "$build" ] || fail "$app/Info.plist has no version or build number"
-  bundles="$(find "$app" \( -name '*.app' -o -name '*.appex' \) -type d | LC_ALL=C sort)"
   while IFS= read -r bundle; do
     label="${bundle#"$(dirname "$app")/"}"
-    manifest="$bundle/PrivacyInfo.xcprivacy"
-    [ -f "$manifest" ] || fail "$label carries no PrivacyInfo.xcprivacy"
-    plutil -lint -s "$manifest" || fail "$label: its PrivacyInfo.xcprivacy does not parse"
-    categories=()
-    i=0
-    while category="$(plutil -extract "NSPrivacyAccessedAPITypes.$i.NSPrivacyAccessedAPIType" \
-      raw -o - "$manifest" 2>/dev/null)"; do
-      plutil -extract "NSPrivacyAccessedAPITypes.$i.NSPrivacyAccessedAPITypeReasons.0" \
-        raw -o - "$manifest" >/dev/null 2>&1 || fail "$label declares $category without a reason"
-      categories+=("$category")
-      i=$((i + 1))
-    done
-    executable="$bundle/$(plist_value "$bundle/Info.plist" :CFBundleExecutable)"
-    symbols="$(nm -u "$executable")" || fail "nm could not read $executable"
-    undeclared="$(undeclared_required_reasons ${categories[@]+"${categories[@]}"} <<<"$symbols")"
-    if [ -n "$undeclared" ]; then
-      echo "$undeclared" >&2
-      fail "$label calls required-reason APIs its privacy manifest does not declare" \
-        "(each symbol, then its categories, above)"
-    fi
-    echo "native-smoke: ok: $label's privacy manifest declares" \
-      "${categories[*]:-no required-reason API}, all its executable needs"
+    check_privacy_manifest "$bundle" "$label" bundle
     expect_equal "$label CFBundleShortVersionString" \
       "$(plist_value "$bundle/Info.plist" :CFBundleShortVersionString)" "$version"
     expect_equal "$label CFBundleVersion" "$(plist_value "$bundle/Info.plist" :CFBundleVersion)" \
       "$build"
-  done <<<"$bundles"
+  done <<<"$(find "$app" \( -name '*.app' -o -name '*.appex' \) -type d | LC_ALL=C sort)"
+  while IFS= read -r bundle; do
+    [ -n "$bundle" ] || continue
+    check_privacy_manifest "$bundle" "${bundle#"$(dirname "$app")/"}" framework
+  done <<<"$(find "$app" -name '*.framework' -type d | LC_ALL=C sort)"
+}
+
+# The privacy manifest of BUNDLE (LABEL in messages) against the undefined symbols of its
+# executable. KIND `bundle`, an .app or .appex, must carry a manifest; KIND `framework` must when
+# its executable references a required-reason API, unless FRAMEWORKS_WITHOUT_MANIFEST names it.
+check_privacy_manifest() {
+  local bundle="$1" label="$2" kind="$3" manifest="$1/PrivacyInfo.xcprivacy" name symbols
+  local declared="" undeclared
+  name="$(plist_value "$bundle/Info.plist" :CFBundleExecutable)"
+  [ -n "$name" ] || fail "$label/Info.plist names no CFBundleExecutable"
+  # Every architecture (review ruling F3): without -arch all, nm reads only the host's slice of a
+  # universal binary, and the watch shells' arm64_32 slice would go unread.
+  symbols="$(nm -u -j -arch all "$bundle/$name")" || fail "nm could not read $label/$name"
+  grep -q -v -e '^$' -e ' (for architecture [^)]*):$' <<<"$symbols" ||
+    fail "nm lists no undefined symbol for $label/$name, and every executable imports some: the" \
+      "check is not reading it"
+  if [ -f "$manifest" ]; then
+    declared="$(manifest_categories "$manifest" "$label")" || exit 1
+  elif [ "$kind" = bundle ]; then
+    fail "$label carries no PrivacyInfo.xcprivacy"
+  fi
+  # shellcheck disable=SC2086 # One category a word.
+  undeclared="$(undeclared_required_reasons $declared <<<"$symbols")"
+  if [ -z "$undeclared" ]; then
+    if [ -f "$manifest" ]; then
+      declared="${declared//$'\n'/ }"
+      echo "native-smoke: ok: $label's privacy manifest declares" \
+        "${declared:-no required-reason API}, all its executable needs"
+    else
+      echo "native-smoke: ok: $label references no required-reason API"
+    fi
+    return
+  fi
+  if [ "$kind" = framework ] && [ ! -f "$manifest" ] && allowed_without_manifest "$bundle"; then
+    echo "$undeclared"
+    echo "native-smoke: ok: $label uses the required-reason APIs above without a manifest of" \
+      "its own, which FRAMEWORKS_WITHOUT_MANIFEST allows"
+    return
+  fi
+  echo "$undeclared" >&2
+  [ -f "$manifest" ] ||
+    fail "$label calls required-reason APIs and carries no PrivacyInfo.xcprivacy of its own" \
+      "(each symbol, then its categories, above)"
+  fail "$label calls required-reason APIs its privacy manifest does not declare" \
+    "(each symbol, then its categories, above)"
+}
+
+# The categories a privacy manifest declares, one a line (LABEL names its bundle in messages).
+# Fails on a manifest that does not parse, an NSPrivacyAccessedAPITypes that is not an array, and
+# an entry without a category or without a reason.
+manifest_categories() {
+  local manifest="$1" label="$2" count i category
+  plutil -lint -s "$manifest" >&2 || fail "$label: its PrivacyInfo.xcprivacy does not parse"
+  # `raw` prints an array's length; a manifest without the key declares nothing.
+  count="$(plutil -extract NSPrivacyAccessedAPITypes raw -o - "$manifest" 2>/dev/null)" || count=0
+  [[ "$count" =~ ^[0-9]+$ ]] ||
+    fail "$label: NSPrivacyAccessedAPITypes in its PrivacyInfo.xcprivacy is not an array"
+  for ((i = 0; i < count; i++)); do
+    category="$(plutil -extract "NSPrivacyAccessedAPITypes.$i.NSPrivacyAccessedAPIType" raw -o - \
+      "$manifest" 2>/dev/null)" || category=""
+    [ -n "$category" ] ||
+      fail "$label: entry $i of its NSPrivacyAccessedAPITypes names no NSPrivacyAccessedAPIType"
+    plutil -extract "NSPrivacyAccessedAPITypes.$i.NSPrivacyAccessedAPITypeReasons.0" raw -o - \
+      "$manifest" >/dev/null 2>&1 || fail "$label declares $category without a reason"
+    echo "$category"
+  done
+}
+
+allowed_without_manifest() {
+  local framework
+  for framework in "${FRAMEWORKS_WITHOUT_MANIFEST[@]}"; do
+    [ "$(basename "$1")" != "$framework" ] || return 0
+  done
+  return 1
 }
 
 # `nm -u` output on stdin, the categories a privacy manifest declares as arguments; prints one line
-# per required-reason symbol (REQUIRED_REASON_SYMBOLS) the executable references and none of whose
-# categories is declared: the symbol, then its categories. Each symbol once, however many
-# architectures list it.
+# per required-reason API (REQUIRED_REASON_SYMBOLS) the executable references and none of whose
+# categories is declared: the symbol, then its categories. Each API once, however many
+# architectures or members list it (a prefix entry is one API: its first symbol stands for all).
 undeclared_required_reasons() {
   # One line, entries separated by `|`: the macOS awk also splits a string at every newline.
   local table
@@ -348,8 +445,15 @@ undeclared_required_reasons() {
       for (e = 1; e <= entries; e++) {
         fields = split(entry[e], field, " ")
         for (f = 2; f <= fields; f++) {
-          if (field[f] in categories) categories[field[f]] = categories[field[f]] " " field[1]
-          else categories[field[f]] = field[1]
+          listed = field[f]
+          if (listed ~ /\*$/) {
+            listed = substr(listed, 1, length(listed) - 1)
+            if (!(listed in prefixes)) {
+              prefix[++prefixCount] = listed
+              prefixes[listed] = field[1]
+            } else prefixes[listed] = prefixes[listed] " " field[1]
+          } else if (listed in categories) categories[listed] = categories[listed] " " field[1]
+          else categories[listed] = field[1]
         }
       }
       count = split(ENVIRON["DECLARED"], name, " ")
@@ -360,14 +464,26 @@ undeclared_required_reasons() {
     NF > 0 {
       symbol = $1
       sub(/\$INODE64$/, "", symbol)
-      if (!(symbol in categories) || (symbol in seen)) next
-      seen[symbol] = 1
+      api = symbol
+      found = ""
+      if (symbol in categories) found = categories[symbol]
+      else {
+        for (p = 1; p <= prefixCount; p++) {
+          if (substr(symbol, 1, length(prefix[p])) == prefix[p]) {
+            api = prefix[p] "*"
+            found = prefixes[prefix[p]]
+            break
+          }
+        }
+      }
+      if (found == "" || (api in seen)) next
+      seen[api] = 1
       covered = 0
-      total = split(categories[symbol], candidate, " ")
+      total = split(found, candidate, " ")
       for (c = 1; c <= total; c++) {
         if (candidate[c] in declared) covered = 1
       }
-      if (!covered) print symbol, categories[symbol]
+      if (!covered) print symbol, found
     }
   '
 }
@@ -396,16 +512,26 @@ ios_launch() {
 # device SDKs (arm64 for the app and the extension, the watchOS device slices for the watch
 # shells) and never archives. An unsigned Release archive for generic/platform=iOS does both
 # without an Apple team; ios-archive's store checks then run on the archived app. It shares the
-# derived data with ios-build, whose module cache it reuses, and adds about 2.5 GB to it.
+# derived data with ios-build, whose module cache it reuses, and adds about 2.5 GB to it. The
+# workflow runs it on a release check only (review ruling F1).
 ios_device_archive() {
   cd "$APP_DIR"
-  local app="$ARCHIVE_PATH/Products/Applications/$PROJECT.app" watch
+  local app="$ARCHIVE_PATH/Products/Applications/$PROJECT.app" watch products
   disk_guard "${SMOKE_ARCHIVE_MIN_FREE_GB:-5}" "the device archive"
   rm -rf "$ARCHIVE_PATH"
   xcodebuild archive -workspace "ios/$PROJECT.xcworkspace" -scheme "$PROJECT" \
     -configuration Release -destination 'generic/platform=iOS' -archivePath "$ARCHIVE_PATH" \
     -derivedDataPath "$DERIVED_DATA" CODE_SIGNING_ALLOWED=NO
   [ -d "$app" ] || fail "the archive holds no app at $app"
+  # An iOS app archive, the kind App Store Connect takes (review ruling F7): Xcode names the app in
+  # the archive's Info.plist only when Products holds that app and nothing else, and a library or
+  # header a target installs beside it makes a generic archive, which cannot be uploaded.
+  expect_equal "the archive's ApplicationPath" \
+    "$(plist_value "$ARCHIVE_PATH/Info.plist" :ApplicationProperties:ApplicationPath)" \
+    "Applications/$PROJECT.app"
+  products="$(cd "$ARCHIVE_PATH/Products" && find . -mindepth 1 -maxdepth 2 | LC_ALL=C sort |
+    paste -s -d ' ' -)"
+  expect_equal "the archive's products" "$products" "./Applications ./Applications/$PROJECT.app"
   expect_equal "archived app platform" "$(platform_of "$app/$PROJECT")" IOS
   expect_equal "archived widget extension platform" \
     "$(platform_of "$app/PlugIns/ExpoWidgetsTarget.appex/ExpoWidgetsTarget")" IOS
@@ -541,10 +667,14 @@ android_archive() {
 # Android 15 or newer to support them, and from 2027-02-01 refuses a non-compliant update. Both of
 # Google's checks (https://developer.android.com/guide/practices/page-sizes): the APK's stored
 # libraries start on 16 KB boundaries (zipalign -c -P 16), and every LOAD segment of every 64-bit
-# library is aligned to at least 16 KB (llvm-readelf -l). 32-bit libraries are exempt.
+# library is aligned to at least 16 KB (llvm-readelf -l). 32-bit libraries are exempt. Each 64-bit
+# ABI the build was asked for (SMOKE_ANDROID_ABIS, every ABI when unset) must be in the APK, so a
+# release check proves arm64-v8a or fails (review ruling F4); the weekly run builds x86_64 alone.
 check_page_alignment() {
-  local apk="$1" zipalign readelf report libs abi abis=() so headers misaligned="" count=0
+  local apk="$1" zipalign readelf report libs abi abis=() checked=() listed=() so headers
+  local misaligned="" count=0
   [ -f "$apk" ] || fail "no APK at '$apk'"
+  IFS=, read -r -a listed <<<"${SMOKE_ANDROID_ABIS:-arm64-v8a,armeabi-v7a,x86,x86_64}"
   zipalign="$(build_tool zipalign)"
   mkdir -p "$APP_DIR/android/app/build"
   report="$APP_DIR/android/app/build/zipalign.txt"
@@ -561,6 +691,9 @@ check_page_alignment() {
   for abi in arm64-v8a x86_64; do
     if [ -d "$libs/lib/$abi" ]; then
       abis+=("$libs/lib/$abi")
+      checked+=("$abi")
+    elif abi_listed "$abi" "${listed[@]}"; then
+      fail "$apk carries no $abi library, although the build was asked for $abi"
     fi
   done
   [ "${#abis[@]}" -gt 0 ] || fail "$apk carries no 64-bit native library to check"
@@ -577,7 +710,18 @@ check_page_alignment() {
   [ "$count" -gt 0 ] || fail "$apk carries no 64-bit native library to check"
   [ -z "$misaligned" ] ||
     fail "64-bit libraries with a LOAD segment aligned below 16 KB (0x4000):$misaligned"
-  echo "native-smoke: ok: all $count 64-bit libraries in $apk align every LOAD segment to 16 KB"
+  echo "native-smoke: ok: all $count 64-bit libraries (${checked[*]}) in $apk align every LOAD" \
+    "segment to 16 KB"
+}
+
+# Succeeds when ABI is one of the ABIS that follow it.
+abi_listed() {
+  local abi="$1" listed
+  shift
+  for listed in "$@"; do
+    [ "$listed" != "$abi" ] || return 0
+  done
+  return 1
 }
 
 # `llvm-readelf -lW` output on stdin; prints each LOAD program header whose alignment (the last
@@ -666,15 +810,17 @@ case "${1:-}" in
   # The workflow runs this before the emulator step, which downloads its system image.
   disk-guard) disk_guard "${2:-}" "${3:-the next step}" ;;
   # Internal, for tools/workflows/native-smoke.test.js: the classifiers, on stdin
-  # (undeclared-reasons takes the categories a manifest declares as arguments), and
-  # android-archive's 16 KB check on any APK.
+  # (undeclared-reasons takes the categories a manifest declares as arguments), the iOS store
+  # checks on any app bundle, and android-archive's 16 KB check on any APK.
   logcat-errors) logcat_errors ;;
   permissions-differ) permissions_differ ;;
   undeclared-reasons) undeclared_required_reasons "${@:2}" ;;
+  store-bundles) check_store_bundles "${2:-}" ;;
   elf-load-misaligned) elf_load_misaligned ;;
   page-alignment) check_page_alignment "${2:-}" ;;
   *)
-    sed -n '2,19p' "${BASH_SOURCE[0]}"
+    # The usage: the header's comment lines, up to the first line of code.
+    awk 'NR > 1 && !/^#/ { exit } NR > 1 { print }' "${BASH_SOURCE[0]}"
     exit 2
     ;;
 esac

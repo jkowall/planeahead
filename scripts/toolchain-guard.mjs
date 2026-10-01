@@ -33,7 +33,9 @@
  *     ~57.0.20: its config plugin writes the widget target, the Podfile target and the literal
  *     `aps-environment` withApsEnvironment overrides) and @bacons/apple-targets 5.0.0, the
  *     version the coexistence spike proved next to expo-widgets
- *   The CI test-mobile job also runs `expo install --check`, Expo's own view of the same manifest.
+ *   The CI test-mobile job also runs `expo install --check` with EXPO_OFFLINE, Expo's own view
+ *   of the same installed manifest (online it would compare against Expo's newest patch list,
+ *   which moves without any change here).
  *
  * The wrangler assertion is a PAIR check, not a frozen constant. @cloudflare/vitest-plugin
  * declares `wrangler` as an ordinary dependency at an exact version (1.1.13 declares 4.135.0),

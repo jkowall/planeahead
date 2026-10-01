@@ -47,9 +47,12 @@
  * `installId`, which must agree with `X-Install-Id` when both are sent): it invalidates every
  * live token of every kind registered to the CALLER's device row for that installation, and
  * answers how many. The app calls it before `authClient.signOut()` (increment 16). What that
- * guarantees (review ruling R1): the push consumer reads every token's row before it sends, first
- * attempts included, so nothing it sends after the invalidation (or an account switch's re-point
- * above) commits reaches the phone. What no server check can take back: a push APNs or FCM
+ * guarantees (review ruling R1): the push consumer reads every target's token row once per batch,
+ * before the batch's first send (first attempts included), so nothing from a batch whose read
+ * starts after the invalidation (or an account switch's re-point above) commits reaches the
+ * phone; a batch already past its read can still finish its sends, usually within seconds and at
+ * most about seven minutes (five jobs of 50 targets, six in flight, a 10-second timeout each).
+ * What no server check can take back: a push APNs or FCM
  * accepted before it, which the provider holds until the job's `expiresAt` and delivers to a phone
  * that was offline at sign-out; and a sign-out made offline, until the app's call succeeds
  * (increment 16 builds the call, its retry, and the device-side half). Tokens registered to

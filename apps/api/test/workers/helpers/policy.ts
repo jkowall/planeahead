@@ -6,7 +6,7 @@
 
 import { runInDurableObject } from 'cloudflare:test';
 import { expect } from 'vitest';
-import { RPC_SCHEMA_VERSION } from '@planeahead/shared';
+import { REREAD_TOLERANCE_MS, RPC_SCHEMA_VERSION } from '@planeahead/shared';
 import {
   adbDateTime,
   adbFlightContract,
@@ -68,12 +68,19 @@ export async function seeded(
   return tracker;
 }
 
-/** Runs the pending alarm at its own time; returns that time. */
+/**
+ * Runs the pending alarm at its own time; returns that time. Review ruling Q19's guard, checked
+ * by every test that walks alarms: the alarm after one never lands at its own instant (an alarm
+ * that read the provider is next due at least `REREAD_TOLERANCE_MS`, the tracker's early-alarm
+ * tolerance, later; a frozen policy re-read looped the alarm and the provider calls before).
+ */
 export async function nextAlarm(tracker: TrackerHarness): Promise<number> {
   const at = await tracker.alarmAt();
   expect(at).not.toBeNull();
   await tracker.setClock(at ?? 0);
   expect(await tracker.runAlarm()).toBe(true);
+  const after = await tracker.alarmAt();
+  expect(after === null || after > (at ?? 0) + REREAD_TOLERANCE_MS).toBe(true);
   return at ?? 0;
 }
 

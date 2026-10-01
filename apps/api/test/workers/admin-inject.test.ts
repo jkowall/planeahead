@@ -9,45 +9,31 @@
  * queue a recorder): an injected gate change makes one push job, a replay of the same injection
  * none, a 10-minute delay (under the 15-minute threshold) none; the tracker's stored snapshot and
  * policy state are what they were before; and every injection leaves an `audit_log` row naming
- * the operator.
+ * the operator. The review round's rulings: a tracker holding a suspected cancellation or
+ * diversion, or a cancelled snapshot, answers 409 (Q5); the audit row is written `pending` before
+ * the tracker call and settled after it (Q6). The pipeline after the tracker is the shared
+ * helpers/pipeline.ts.
  */
 
-import {
-  createExecutionContext,
-  createMessageBatch,
-  getQueueResult,
-  waitOnExecutionContext,
-} from 'cloudflare:test';
+import { createExecutionContext, waitOnExecutionContext } from 'cloudflare:test';
 import { eq } from 'drizzle-orm';
 import { SignJWT, exportJWK, generateKeyPair } from 'jose';
 import { afterEach, describe, expect, it } from 'vitest';
-import {
-  auditLog,
-  devices,
-  flightInstances,
-  flightSubscriptions,
-  notifications,
-  pushTokens,
-  users,
-} from '@planeahead/db';
+import { auditLog, flightSubscriptions, notifications } from '@planeahead/db';
 import {
   FlightStatusSchema,
-  PushJobV1,
   RPC_SCHEMA_VERSION,
   uuidv7,
   type FlightKey,
   type FlightStatus,
-  type PersistMessageV1,
 } from '@planeahead/shared';
 import { createApp } from '../../src/app';
 import type { Env } from '../../src/env';
+import { DeadlineExceededError } from '../../src/lib/deadline';
 import { ACCESS_JWT_HEADER, accessCertsUrl } from '../../src/middleware/access';
-import { createLogger } from '../../src/observability/log';
-import { handleNotifyBatch } from '../../src/queues/notify';
-import { handlePersistBatch } from '../../src/queues/persist';
 import { createAdminRoutes, type AdminRoutesOptions } from '../../src/routes/admin';
 import { ADMIN_INJECT_PATH, applyInjectedEvent } from '../../src/routes/admin-inject';
-import { API_ORIGIN, testEnv, uniqueEmail, uniqueInstallId } from './helpers/auth';
+import { API_ORIGIN, testEnv } from './helpers/auth';
 import {
   HOUR_MS,
   adbOk,
@@ -61,11 +47,10 @@ import {
   type TestFlight,
   type TrackerHarness,
 } from './helpers/flights';
+import { persist, pipeline, plantFollower } from './helpers/pipeline';
 import { db } from './helpers/routes';
 
 afterEach(drainTouched);
-
-const quietLog = createLogger({}, () => undefined);
 
 const TEAM = 'planeahead-inject.cloudflareaccess.com';
 const AUD = 'inject0a1b2c3d4e5f6a7b8c9d0e1f2a3b4c5d6e7f8a9b0c1d2e3f4a5b6c7d8e9f0a';
@@ -153,80 +138,6 @@ async function admin(call: AdminCall = {}): Promise<Response> {
   return response;
 }
 
-/** Runs captured outbox messages through the real persist consumer; returns what it forwarded. */
-async function persist(messages: readonly PersistMessageV1[]): Promise<unknown[]> {
-  const forwarded: unknown[] = [];
-  const notifyQueue = {
-    send: (body: unknown): Promise<void> => {
-      forwarded.push(body);
-      return Promise.resolve();
-    },
-  };
-  for (let i = 0; i < messages.length; i += 100) {
-    const batch = createMessageBatch(
-      'planeahead-persist-local',
-      messages.slice(i, i + 100).map((body, index) => ({
-        id: `p-${String(i + index)}-${crypto.randomUUID()}`,
-        timestamp: new Date(),
-        attempts: 1,
-        body,
-      })),
-    );
-    const ctx = createExecutionContext();
-    await handlePersistBatch(
-      batch,
-      { env: testEnv, ctx, log: quietLog },
-      { db: db(), notifyQueue },
-    );
-    expect((await getQueueResult(batch, ctx)).retryMessages).toEqual([]);
-  }
-  return forwarded;
-}
-
-/** Runs forwarded intents through the real notify consumer; returns the push jobs it queued. */
-async function notify(intents: readonly unknown[]): Promise<PushJobV1[]> {
-  if (intents.length === 0) {
-    return [];
-  }
-  const sent: unknown[] = [];
-  const pushQueue: Pick<Queue, 'sendBatch'> = {
-    sendBatch: (messages) => {
-      for (const message of messages) {
-        sent.push(message.body);
-      }
-      return Promise.resolve() as unknown as ReturnType<Queue['sendBatch']>;
-    },
-  };
-  const batch = createMessageBatch(
-    'planeahead-notify-local',
-    intents.map((body, index) => ({
-      id: `n-${String(index)}-${crypto.randomUUID()}`,
-      timestamp: new Date(),
-      attempts: 1,
-      body,
-    })),
-  );
-  const ctx = createExecutionContext();
-  await handleNotifyBatch(batch, { env: testEnv, ctx, log: quietLog }, { pushQueue });
-  const result = await getQueueResult(batch, ctx);
-  expect(result.retryMessages).toEqual([]);
-  return sent.map((body) => PushJobV1.parse(body));
-}
-
-/** What one step of the pipeline after the tracker came to. */
-interface PipelineRun {
-  readonly persisted: PersistMessageV1[];
-  readonly forwarded: unknown[];
-  readonly jobs: PushJobV1[];
-}
-
-/** The tracker's flushed messages since the last run, through persist and then notify. */
-async function pipeline(tracker: TrackerHarness): Promise<PipelineRun> {
-  const persisted = tracker.outbox.sent.splice(0);
-  const forwarded = await persist(persisted);
-  return { persisted, forwarded, jobs: await notify(forwarded) };
-}
-
 /**
  * A tracker created through the resolver at `clock` (origin gate B10, scheduled), its outbox and
  * the resolver's run through persist so Postgres holds the flight as production's would.
@@ -245,37 +156,6 @@ async function trackedFlight(flight: TestFlight, clock: number): Promise<Tracker
   expect((await pipeline(tracker)).jobs).toEqual([]);
   await persist(resolver.outbox.sent.splice(0));
   return tracker;
-}
-
-/** A user following the flight with one sendable FCM token; returns the user id. */
-async function plantFollower(flightKey: FlightKey, liveTracked: boolean): Promise<string> {
-  const userId = uuidv7();
-  await db()
-    .insert(users)
-    .values({ id: userId, name: '', email: uniqueEmail('inject') });
-  const [instance] = await db()
-    .select({ id: flightInstances.id })
-    .from(flightInstances)
-    .where(eq(flightInstances.flightKey, flightKey));
-  expect(instance).toBeDefined();
-  await db()
-    .insert(flightSubscriptions)
-    .values({ id: uuidv7(), userId, flightInstanceId: instance?.id ?? '', liveTracked });
-  const deviceId = uuidv7();
-  await db()
-    .insert(devices)
-    .values({ id: deviceId, userId, installId: uniqueInstallId('inject'), platform: 'android' });
-  await db()
-    .insert(pushTokens)
-    .values({
-      id: uuidv7(),
-      userId,
-      deviceId,
-      kind: 'fcm',
-      token: `tok-${userId}`,
-      environment: 'production',
-    });
-  return userId;
 }
 
 /** The tracker's stored row: what an injection must leave as it was. */
@@ -316,8 +196,8 @@ describe('the injector end to end (acceptance, plan section 8 row 15)', () => {
   it('a gate change makes one push job, its replay none, a 10-minute delay none; the tracker keeps its state', async () => {
     const flight = uniqueFlight();
     const tracker = await trackedFlight(flight, flight.scheduledOut.getTime() - 2 * HOUR_MS);
-    const live = await plantFollower(flight.flightKey, true);
-    const notLive = await plantFollower(flight.flightKey, false);
+    const live = (await plantFollower(flight.flightKey, { liveTracked: true })).userId;
+    const notLive = (await plantFollower(flight.flightKey, { liveTracked: false })).userId;
     const before = await storedRow(tracker);
     expect(JSON.parse(String(before?.['snapshot']))).toMatchObject({ originGate: 'B10' });
     const form = { flight_key: flight.flightKey, event: 'origin_gate', gate: 'B12' };
@@ -381,6 +261,7 @@ describe('the injector end to end (acceptance, plan section 8 row 15)', () => {
       expect(row.details).toMatchObject({
         operator_email: OPERATOR,
         operator_subject: 'access-owner',
+        outcome: 'written',
       });
     }
     expect(audit.map((row) => (row.details as { written: number }).written).sort()).toEqual([
@@ -480,12 +361,113 @@ describe('the injector route (N11)', () => {
   });
 });
 
+describe('the injector and an unsettled tracker (review ruling Q5)', () => {
+  it('answers 409 while a cancellation or diversion is suspected or the snapshot is cancelled', async () => {
+    const flight = uniqueFlight();
+    const clock = flight.scheduledOut.getTime() - 2 * HOUR_MS;
+    const tracker = await trackedFlight(flight, clock);
+    const before = await storedRow(tracker);
+    const policy = JSON.parse(String(before?.['policy_state'])) as Record<string, unknown>;
+    const snapshot = JSON.parse(String(before?.['snapshot'])) as Record<string, unknown>;
+    const suspicion = {
+      status: 'suspect',
+      since: clock,
+      value: 'cancelled',
+      provider: 'aerodatabox',
+      reads: 0,
+      fastLeft: 3,
+      lastReadAt: clock,
+    };
+    const unsettled: [column: string, stored: string, page: string][] = [
+      ['policy_state', JSON.stringify({ ...policy, cancellation: suspicion }), 'suspected'],
+      [
+        'policy_state',
+        JSON.stringify({ ...policy, diversion: { ...suspicion, value: 'KBOS' } }),
+        'suspected',
+      ],
+      ['snapshot', JSON.stringify({ ...snapshot, status: 'cancelled' }), 'cancelled snapshot'],
+    ];
+    const form = { flight_key: flight.flightKey, event: 'origin_gate', gate: 'B12' };
+    for (const [column, stored, page] of unsettled) {
+      await tracker.rows(`UPDATE flight SET ${column} = ?`, stored);
+      const refused = await admin({ form });
+      expect(refused.status).toBe(409);
+      expect(await refused.text()).toContain(page);
+      await tracker.rows(`UPDATE flight SET ${column} = ?`, String(before?.[column]));
+    }
+    // Nothing was written or stored; each refusal is on record as ignored, with its reason.
+    expect(tracker.outbox.sent).toEqual([]);
+    expect(await storedRow(tracker)).toEqual(before);
+    const audit = await auditRows(flight.flightKey);
+    expect(
+      audit.map((row) => (row.details as { outcome: string; reason: string }).reason).sort(),
+    ).toEqual(['cancelled', 'suspected', 'suspected']);
+    expect(audit.every((row) => (row.details as { outcome: string }).outcome === 'ignored')).toBe(
+      true,
+    );
+    // Settled again, the same form injects.
+    const accepted = await admin({ form });
+    expect(accepted.status).toBe(200);
+    expect(ofKind(tracker.outbox.sent, 'notify_intent')).toHaveLength(1);
+  });
+});
+
+describe("the injector's audit row (review ruling Q6)", () => {
+  it('is written pending before the tracker call, and settled as timeout or error after it', async () => {
+    const flight = uniqueFlight();
+    const tracker = await trackedFlight(flight, flight.scheduledOut.getTime() - 2 * HOUR_MS);
+    const form = { flight_key: flight.flightKey, event: 'origin_gate', gate: 'B12' };
+    const inFlight: unknown[] = [];
+    // The real tracker's state, then an injection call that fails once it has seen the row.
+    const failingWith = (failure: Error) => () => () => ({
+      getState: () => tracker.stub.getState(),
+      injectPolicyEvent: async (input: unknown) => {
+        const { injectionId } = input as { injectionId: string };
+        const rows = await auditRows(flight.flightKey);
+        inFlight.push(
+          rows.find((row) => (row.details as { injection_id: string }).injection_id === injectionId)
+            ?.details,
+        );
+        throw failure;
+      },
+    });
+
+    const late = new DeadlineExceededError('injectPolicyEvent', 8_000);
+    const timedOut = await admin({ form, options: { injectorFor: failingWith(late) } });
+    expect(timedOut.status).toBe(504);
+    expect(await timedOut.text()).toContain('may still be written');
+    const failed = await admin({
+      form,
+      options: { injectorFor: failingWith(new TypeError('tracker exploded')) },
+    });
+    expect(failed.status).toBe(500);
+
+    // While each call was in flight its row was there, pending, naming the operator.
+    expect(inFlight).toHaveLength(2);
+    for (const details of inFlight) {
+      expect(details).toMatchObject({ outcome: 'pending', operator_email: OPERATOR });
+    }
+    const settled = (await auditRows(flight.flightKey)).map((row) => row.details);
+    expect(settled).toHaveLength(2);
+    expect(settled).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          outcome: 'timeout',
+          event: { kind: 'origin_gate', gate: 'B12' },
+        }),
+        expect.objectContaining({ outcome: 'error', error_name: 'TypeError' }),
+      ]),
+    );
+    expect(tracker.outbox.sent).toEqual([]);
+  });
+});
+
 describe('the injector on production (N11)', () => {
   it('injects only into a flight that a live subscriber in PUSH_INJECT_ALLOWED_USER_IDS follows', async () => {
     const flight = uniqueFlight();
     const tracker = await trackedFlight(flight, flight.scheduledOut.getTime() - 2 * HOUR_MS);
-    const follower = await plantFollower(flight.flightKey, true);
-    const gone = await plantFollower(flight.flightKey, true);
+    const follower = (await plantFollower(flight.flightKey, { liveTracked: true })).userId;
+    const gone = (await plantFollower(flight.flightKey, { liveTracked: true })).userId;
     await db()
       .update(flightSubscriptions)
       .set({ deletedAt: new Date().toISOString() })
@@ -515,7 +497,7 @@ describe('the injector on production (N11)', () => {
     expect(audit?.details).toMatchObject({
       event: { kind: 'cancellation' },
       written: 1,
-      outcome: 'injected',
+      outcome: 'written',
     });
     expect(audit?.targetId).not.toBeNull();
   });

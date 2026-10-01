@@ -30,10 +30,11 @@
  *     writes from the outcome message (keyed by the job id, marked `is_test`): the status, the
  *     `apns-id` or FCM message name, Apple's `apns-unique-id` for a sandbox send (the key to the
  *     notification in the Push Notifications Console's delivery log, ruling R11), the reason, and
- *     every attempt. It reloads itself every three seconds until the first outcome arrives, but
- *     not for ever (ruling R7): once the job id's embedded time plus `TEST_PUSH_TTL_MS` has passed
- *     without a delivery row, the page stops reloading and says the outcome was not recorded,
- *     pointing at `push_outcome_send_failed` in the logs.
+ *     every attempt. It reloads itself every three seconds while the job is in flight, but not
+ *     for ever (ruling R7 and the re-review): once the job id's embedded time plus
+ *     `TEST_PUSH_TTL_MS` has passed with no delivery row, or with a row still `queued`, the page
+ *     stops reloading and says the outcome was not recorded, pointing at
+ *     `push_outcome_send_failed` in the logs.
  *
  * A test push invalidates a dead token like any send, but only when it was sent with the row's
  * own app id and environment (src/queues/push-outcomes.ts): a hand-typed app id that earns
@@ -436,9 +437,10 @@ export async function pushTestResult(
     from notification_deliveries
     where notification_id = ${job}::uuid and is_test
   `);
+  const windowEndsMs = uuidv7Timestamp(job) + TEST_PUSH_TTL_MS;
+  const windowEnded = (options.now ?? Date.now)() >= windowEndsMs;
   if (row === undefined) {
-    const windowEndsMs = uuidv7Timestamp(job) + TEST_PUSH_TTL_MS;
-    if ((options.now ?? Date.now)() >= windowEndsMs) {
+    if (windowEnded) {
       // Ruling R7: the consumer reports every delivery it takes, and a job's first one normally
       // comes well inside its window; nothing recorded once the window has passed means the
       // report was most likely lost, and reloading every three seconds would never end.
@@ -462,6 +464,15 @@ export async function pushTestResult(
   // Apple's sandbox key to the notification's delivery log, from the newest attempt with one.
   const uniqueId = entries.filter((entry) => typeof entry.u === 'string').at(-1)?.u ?? '';
   const pending = row.status === 'queued';
+  // A row still `queued` after the window: the consumer drops a target once its window has
+  // passed, so the last retry's outcome was most likely not recorded, and reloading would never
+  // end (the same failure ruling R7 covers for a job with no row at all).
+  const stuck = pending && windowEnded;
+  const footer = stuck
+    ? `<p class="unavailable">Still queued after the job's ten-minute window ended at ${esc(new Date(windowEndsMs).toISOString())}. The consumer drops a target past its window, so the outcome of its last retry was most likely not recorded: look for push_outcome_send_failed with this job id in the Workers logs. This page no longer reloads itself; reload it to look again.</p>`
+    : pending
+      ? '<p>Still in flight (a retry or a hold is queued); this page reloads every three seconds.</p>'
+      : '';
   return pushPage(
     style,
     `${table(
@@ -498,7 +509,7 @@ export async function pushTestResult(
         entry.u ?? '',
         entry.at ?? '',
       ]),
-    )}${pending ? '<p>Still in flight (a retry or a hold is queued); this page reloads every three seconds.</p>' : ''}<p><a href="${ADMIN_PUSH_TEST_PATH}">Send another</a></p>`,
-    pending ? { refreshSeconds: 3 } : {},
+    )}${footer}<p><a href="${ADMIN_PUSH_TEST_PATH}">Send another</a></p>`,
+    pending && !stuck ? { refreshSeconds: 3 } : {},
   );
 }

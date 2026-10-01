@@ -109,6 +109,28 @@ describe('PATCH /v1/me/preferences', () => {
     });
   });
 
+  it('GET ignores a tombstoned row, as notify does (review ruling Q18)', async () => {
+    const session = await signInAnonymously();
+    const client = { ip: session.ip, cookie: session.cookie };
+    const patch = await worker(
+      jsonRequest('/v1/me/preferences', 'PATCH', { distanceUnit: 'km', timeFormat: '24h' }, client),
+    );
+    expect(patch.status).toBe(200);
+    const read = async (path: string) => {
+      const response = await worker(jsonRequest(path, 'GET', undefined, client));
+      expect(response.status).toBe(200);
+      return (await response.json<MeBody>()).preferences;
+    };
+    expect(await read('/v1/me/preferences')).toMatchObject({ distanceUnit: 'km' });
+
+    await db().execute(
+      sql`update user_preferences set deleted_at = now() where user_id = ${session.userId}::uuid`,
+    );
+
+    expect(await read('/v1/me/preferences')).toEqual(DEFAULT_USER_PREFERENCES);
+    expect(await read('/v1/me')).toEqual(DEFAULT_USER_PREFERENCES);
+  });
+
   it('rejects an empty patch, an unknown field, a bad value and an oversized settings bag', async () => {
     const session = await signInAnonymously();
     const client = { ip: session.ip, cookie: session.cookie };
