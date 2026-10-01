@@ -7,9 +7,11 @@
  *
  * - pending: the optimistic row the add-flight sheet wrote (src/lib/flights.ts). Its flight key is
  *   a local placeholder, `pending:<DESIGNATOR>:<YYYY-MM-DD>`, because the canonical key (operating
- *   carrier, origin ICAO) is only known once the server resolved the designator. It has no
- *   snapshot until `POST /v1/flights` answers. A pending row the store already holds as a live
- *   row (same designator and date) is `superseded` and hidden (src/lib/sync/local-intent.ts).
+ *   carrier, origin ICAO) is only known once the server resolved the designator. An add from a
+ *   board or a route search names its leg's origin, and its placeholder ends `:<ORIGIN ICAO>`
+ *   (increment 18, R9). It has no snapshot until `POST /v1/flights` answers. A pending row the
+ *   store already holds as a live row (same designator and date, and the same origin when the
+ *   add named one) is `superseded` and hidden (src/lib/sync/local-intent.ts).
  * - live: a subscription with a snapshot (or still waiting for its first one).
  * - over: arrived, cancelled, finished (a refresh answered 410 `flight_archived`), or long past
  *   its arrival time (a flight whose provider never reported the arrival must not stay "next"
@@ -133,16 +135,39 @@ export function displayDesignator(carrierIcao: string, number: string): string {
   return `${ICAO_TO_IATA.get(carrierIcao) ?? carrierIcao}${number}`;
 }
 
-export function pendingFlightKey(designator: string, dateLocal: string): string {
-  return `${PENDING_KEY_PREFIX}${designator}:${dateLocal}`;
+/** The placeholder key of a pending add; `originIcao` when the add named its leg (R9). */
+export function pendingFlightKey(
+  designator: string,
+  dateLocal: string,
+  originIcao: string | null = null,
+): string {
+  const leg = originIcao === null ? '' : `:${originIcao}`;
+  return `${PENDING_KEY_PREFIX}${designator}:${dateLocal}${leg}`;
 }
 
-function parsePendingKey(key: string): { designator: string; dateLocal: string } | null {
+export function parsePendingKey(
+  key: string,
+): { designator: string; dateLocal: string; originIcao: string | null } | null {
   if (!key.startsWith(PENDING_KEY_PREFIX)) {
     return null;
   }
-  const [designator = '', dateLocal = ''] = key.slice(PENDING_KEY_PREFIX.length).split(':');
-  return { designator, dateLocal };
+  const [designator = '', dateLocal = '', originIcao] = key
+    .slice(PENDING_KEY_PREFIX.length)
+    .split(':');
+  return { designator, dateLocal, originIcao: originIcao ?? null };
+}
+
+/** The origin ICAO a row's key names: the canonical key's, or a pending add's leg; else null. */
+export function keyOriginIcao(key: string): string | null {
+  const pending = parsePendingKey(key);
+  if (pending !== null) {
+    return pending.originIcao;
+  }
+  try {
+    return parseFlightKey(key).originIcao;
+  } catch {
+    return null;
+  }
 }
 
 function parseSnapshot(json: string | null): FlightStatus | null {
@@ -458,20 +483,35 @@ export function knownDesignators(item: FlightItem): ReadonlySet<string> {
   return new Set(names.flatMap(designatorSpellings));
 }
 
-/** Whether `designator` on `dateLocal` names the flight a live (not pending) row tracks. */
-export function liveRowNamed(live: FlightItem, designator: string, dateLocal: string): boolean {
+/**
+ * Whether `designator` on `dateLocal` names the flight a live (not pending) row tracks. With an
+ * `originIcao` (an add from a board names its leg, R9) the row's key must depart from it too, so
+ * another leg of the same flight number on the same day is another flight.
+ */
+export function liveRowNamed(
+  live: FlightItem,
+  designator: string,
+  dateLocal: string,
+  originIcao: string | null = null,
+): boolean {
   if (live.pending || live.dateLocal !== dateLocal) {
+    return false;
+  }
+  if (originIcao !== null && keyOriginIcao(live.flightKey) !== originIcao) {
     return false;
   }
   const known = knownDesignators(live);
   return designatorSpellings(designator).some((form) => known.has(form));
 }
 
-/** Whether a pending add names the same flight as a live row: same date, a shared designator. */
+/**
+ * Whether a pending add names the same flight as a live row: same date, a shared designator, and
+ * the live row's origin when the add named its leg (its placeholder key carries it, R9).
+ */
 export function pendingMatchesLive(pending: FlightItem, live: FlightItem): boolean {
   return (
     pending.pending &&
     pending.dateLocal !== null &&
-    liveRowNamed(live, pending.designator, pending.dateLocal)
+    liveRowNamed(live, pending.designator, pending.dateLocal, keyOriginIcao(pending.flightKey))
   );
 }

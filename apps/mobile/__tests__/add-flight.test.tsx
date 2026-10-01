@@ -397,6 +397,61 @@ describe('addFlight writes through the outbox', () => {
         .sort(),
     ).toEqual(['AA100', 'AA100 (adding)', 'BA117', 'DL1', 'IB4218 (adding)']);
   });
+
+  it('adds a second leg of the same number from a board: only its origin matches (R9)', () => {
+    const db = createMemorySqlite();
+    seedStore(db);
+    const day = '2026-09-23';
+    const tracked = { kind: 'already_tracked', subscriptionId: AA100_ID };
+    // A synced first leg: AA100 departs KJFK, by key and by its codeshare's name.
+    expect(addFlight(db, { designator: 'AA100', date: day, origin: 'KJFK' })).toEqual(tracked);
+    expect(addFlight(db, { designator: 'BA1511', date: day, origin: 'KJFK' })).toEqual(tracked);
+    // A typed add names no leg: any leg that day is the flight, as before.
+    expect(addFlight(db, { designator: 'AA100', date: day })).toEqual(tracked);
+    // Its KLAX leg is another flight, and the same add again is answered by its pending key.
+    const lax = addFlight(db, { designator: 'AA100', date: day, origin: 'KLAX' });
+    expect(lax.kind).toBe('queued');
+    expect(addFlight(db, { designator: 'BA1511', date: day, origin: 'KLAX' }).kind).toBe('queued');
+    expect(addFlight(db, { designator: 'AA100', date: day, origin: 'KLAX' })).toEqual({
+      kind: 'already_tracked',
+      subscriptionId: lax.subscriptionId,
+    });
+
+    // A pending first leg: WN1234 from KMDW, its POST not answered yet; then its KBNA leg.
+    const mdw = addFlight(db, { designator: 'WN1234', date: day, origin: 'KMDW' });
+    const bna = addFlight(db, { designator: 'WN1234', date: day, origin: 'KBNA' });
+    expect([mdw.kind, bna.kind]).toEqual(['queued', 'queued']);
+    expect(addFlight(db, { designator: 'WN1234', date: day, origin: 'KBNA' })).toEqual({
+      kind: 'already_tracked',
+      subscriptionId: bna.subscriptionId,
+    });
+    expect(addFlight(db, { designator: 'WN1234', date: day }).kind).toBe('already_tracked');
+
+    const bodies = db.raw.prepare('SELECT body FROM outbox ORDER BY seq').all() as {
+      body: string;
+    }[];
+    expect(bodies.map((row) => (JSON.parse(row.body) as { origin?: string }).origin)).toEqual([
+      'KLAX',
+      'KLAX',
+      'KMDW',
+      'KBNA',
+    ]);
+    expect(listFlights(db).filter((item) => item.pending)).toHaveLength(4);
+  });
+
+  it('queues a board leg over a typed pending add, which names no leg (R9)', () => {
+    const db = createMemorySqlite();
+    expect(addFlight(db, { designator: 'WN1234', date: '2026-09-23' }).kind).toBe('queued');
+    // If the typed add resolves to this leg, the server's `created: false` settles it.
+    const bna = addFlight(db, { designator: 'WN1234', date: '2026-09-23', origin: 'KBNA' });
+    expect(bna.kind).toBe('queued');
+    expect(
+      db.raw.prepare('SELECT flight_key FROM flight_subscriptions ORDER BY flight_key').all(),
+    ).toEqual([
+      { flight_key: 'pending:WN1234:2026-09-23' },
+      { flight_key: 'pending:WN1234:2026-09-23:KBNA' },
+    ]);
+  });
 });
 
 describe('the sheet, through the real outbox', () => {

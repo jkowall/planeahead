@@ -12,323 +12,84 @@ exports[`the results renders from a mocked answer in dark 1`] = `
           "children": [
             {
               "children": [
-                "Find a flight by route",
-              ],
-              "style": {
-                "color": "#F2F4F8",
-              },
-              "type": "Text",
-            },
-            {
-              "children": [
-                "The airports it flies between and the date it departs, in local time.",
-              ],
-              "style": {
-                "color": "#A3ACB8",
-              },
-              "type": "Text",
-            },
-            {
-              "children": [
                 {
                   "children": [
                     {
                       "children": [
-                        {
-                          "children": [
-                            "From",
-                          ],
-                          "style": {
-                            "color": "#A3ACB8",
-                          },
-                          "type": "Text",
-                        },
-                        {
-                          "label": "From",
-                          "style": {
-                            "backgroundColor": "#1F242D",
-                            "borderColor": "#707A8C",
-                            "color": "#F2F4F8",
-                          },
-                          "testID": "route-search-origin",
-                          "type": "TextInput",
-                        },
-                      ],
-                      "type": "View",
-                    },
-                  ],
-                  "type": "View",
-                },
-                {
-                  "children": [
-                    {
-                      "children": [
-                        {
-                          "children": [
-                            "To",
-                          ],
-                          "style": {
-                            "color": "#A3ACB8",
-                          },
-                          "type": "Text",
-                        },
-                        {
-                          "label": "To",
-                          "style": {
-                            "backgroundColor": "#1F242D",
-                            "borderColor": "#707A8C",
-                            "color": "#F2F4F8",
-                          },
-                          "testID": "route-search-destination",
-                          "type": "TextInput",
-                        },
-                      ],
-                      "type": "View",
-                    },
-                  ],
-                  "type": "View",
-                },
-              ],
-              "type": "View",
-            },
-            {
-              "children": [
-                {
-                  "children": [
-                    "Departure date",
-                  ],
-                  "style": {
-                    "color": "#A3ACB8",
-                  },
-                  "type": "Text",
-                },
-                {
-                  "label": "Departure date",
-                  "style": {
-                    "backgroundColor": "#1F242D",
-                    "borderColor": "#707A8C",
-                    "color": "#F2F4F8",
-                  },
-                  "testID": "route-search-date",
-                  "type": "TextInput",
-                },
-              ],
-              "type": "View",
-            },
-            {
-              "children": [
-                {
-                  "children": [
-                    {
-                      "children": [
-                        "Today",
+                        "Find a flight by route",
                       ],
                       "style": {
                         "color": "#F2F4F8",
                       },
                       "type": "Text",
                     },
-                  ],
-                  "label": "Today",
-                  "style": {
-                    "backgroundColor": "#171B22",
-                    "borderColor": "#7C9DFF",
-                  },
-                  "testID": "route-search-date-0",
-                  "type": "View",
-                },
-                {
-                  "children": [
                     {
                       "children": [
-                        "Tomorrow",
-                      ],
-                      "style": {
-                        "color": "#F2F4F8",
-                      },
-                      "type": "Text",
-                    },
-                  ],
-                  "label": "Tomorrow",
-                  "style": {
-                    "backgroundColor": "#171B22",
-                    "borderColor": "#2A303A",
-                  },
-                  "testID": "route-search-date-1",
-                  "type": "View",
-                },
-                {
-                  "children": [
-                    {
-                      "children": [
-                        "Fri 25 Sep",
-                      ],
-                      "style": {
-                        "color": "#F2F4F8",
-                      },
-                      "type": "Text",
-                    },
-                  ],
-                  "label": "Fri 25 Sep",
-                  "style": {
-                    "backgroundColor": "#171B22",
-                    "borderColor": "#2A303A",
-                  },
-                  "testID": "route-search-date-2",
-                  "type": "View",
-                },
-              ],
-              "type": "View",
-            },
-            {
-              "children": [
-                {
-                  "children": [
-                    "Search",
-                  ],
-                  "style": {
-                    "color": "#0B0E13",
-                  },
-                  "type": "Text",
-                },
-              ],
-              "label": "Search flights on this route",
-              "style": {
-                "backgroundColor": "#7C9DFF",
-                "borderColor": "#2A303A",
-              },
-              "testID": "route-search-submit",
-              "type": "View",
-            },
-            {
-              "children": [
-                {
-                  "children": [
-                    "Close",
-                  ],
-                  "style": {
-                    "color": "#F2F4F8",
-                  },
-                  "type": "Text",
-                },
-              ],
-              "label": "Close",
-              "style": {
-                "backgroundColor": "#171B22",
-                "borderColor": "#2A303A",
-              },
-              "testID": "route-search-close",
-              "type": "View",
-            },
-            {
-              "children": [
-                {
-                  "children": [
-                    {
-                      "children": [
-                        "As of 9:58 AM (2 min ago)",
+                        "The airports it flies between and the date it departs, in local time.",
                       ],
                       "style": {
                         "color": "#A3ACB8",
                       },
-                      "testID": "route-search-as-of",
                       "type": "Text",
                     },
                     {
                       "children": [
                         {
                           "children": [
-                            "Schedules only",
+                            {
+                              "children": [
+                                {
+                                  "children": [
+                                    "From",
+                                  ],
+                                  "style": {
+                                    "color": "#A3ACB8",
+                                  },
+                                  "type": "Text",
+                                },
+                                {
+                                  "label": "From",
+                                  "style": {
+                                    "backgroundColor": "#1F242D",
+                                    "borderColor": "#707A8C",
+                                    "color": "#F2F4F8",
+                                  },
+                                  "testID": "route-search-origin",
+                                  "type": "TextInput",
+                                },
+                              ],
+                              "type": "View",
+                            },
                           ],
-                          "style": {
-                            "color": "#F2F4F8",
-                          },
-                          "type": "Text",
-                        },
-                      ],
-                      "label": "Schedules only: the times are the published schedule, with no live status",
-                      "style": {
-                        "backgroundColor": "#171B22",
-                        "borderColor": "#707A8C",
-                      },
-                      "testID": "route-search-schedules-only",
-                      "type": "View",
-                    },
-                  ],
-                  "type": "View",
-                },
-                {
-                  "children": [
-                    {
-                      "children": [
-                        "These times may be out of date. Pull down in a minute to check for newer ones.",
-                      ],
-                      "style": {
-                        "color": "#F2F4F8",
-                      },
-                      "type": "Text",
-                    },
-                  ],
-                  "style": {
-                    "backgroundColor": "#171B22",
-                    "borderColor": "#FFB866",
-                  },
-                  "testID": "route-search-stale",
-                  "type": "View",
-                },
-              ],
-              "type": "View",
-            },
-            {
-              "children": [
-                {
-                  "children": [
-                    "JFK to LHR on Wed 23 Sep",
-                  ],
-                  "style": {
-                    "color": "#A3ACB8",
-                  },
-                  "type": "Text",
-                },
-                {
-                  "children": [
-                    {
-                      "children": [
-                        {
-                          "children": [
-                            "6:00 PM",
-                          ],
-                          "style": {
-                            "color": "#F2F4F8",
-                          },
-                          "type": "Text",
-                        },
-                        {
-                          "children": [
-                            "AA100  to LHR",
-                          ],
-                          "style": {
-                            "color": "#F2F4F8",
-                          },
-                          "type": "Text",
+                          "type": "View",
                         },
                         {
                           "children": [
                             {
                               "children": [
-                                "Scheduled",
+                                {
+                                  "children": [
+                                    "To",
+                                  ],
+                                  "style": {
+                                    "color": "#A3ACB8",
+                                  },
+                                  "type": "Text",
+                                },
+                                {
+                                  "label": "To",
+                                  "style": {
+                                    "backgroundColor": "#1F242D",
+                                    "borderColor": "#707A8C",
+                                    "color": "#F2F4F8",
+                                  },
+                                  "testID": "route-search-destination",
+                                  "type": "TextInput",
+                                },
                               ],
-                              "style": {
-                                "color": "#E4E8EF",
-                              },
-                              "type": "Text",
+                              "type": "View",
                             },
                           ],
-                          "label": "Status: Scheduled",
-                          "style": {
-                            "backgroundColor": "#2A303A",
-                          },
-                          "testID": "board-row-dep:AA100:2026-09-23T22:00:00Z-status",
                           "type": "View",
                         },
                       ],
@@ -336,36 +97,311 @@ exports[`the results renders from a mocked answer in dark 1`] = `
                     },
                     {
                       "children": [
-                        "Expected 6:25 PM",
+                        {
+                          "children": [
+                            "Departure date",
+                          ],
+                          "style": {
+                            "color": "#A3ACB8",
+                          },
+                          "type": "Text",
+                        },
+                        {
+                          "label": "Departure date",
+                          "style": {
+                            "backgroundColor": "#1F242D",
+                            "borderColor": "#707A8C",
+                            "color": "#F2F4F8",
+                          },
+                          "testID": "route-search-date",
+                          "type": "TextInput",
+                        },
                       ],
-                      "style": {
-                        "color": "#FFB866",
-                      },
-                      "type": "Text",
+                      "type": "View",
                     },
                     {
                       "children": [
-                        "Terminal 8, gate 12. Also BA1511, IB4218",
+                        {
+                          "children": [
+                            {
+                              "children": [
+                                "Today",
+                              ],
+                              "style": {
+                                "color": "#F2F4F8",
+                              },
+                              "type": "Text",
+                            },
+                          ],
+                          "label": "Today",
+                          "style": {
+                            "backgroundColor": "#171B22",
+                            "borderColor": "#7C9DFF",
+                          },
+                          "testID": "route-search-date-0",
+                          "type": "View",
+                        },
+                        {
+                          "children": [
+                            {
+                              "children": [
+                                "Tomorrow",
+                              ],
+                              "style": {
+                                "color": "#F2F4F8",
+                              },
+                              "type": "Text",
+                            },
+                          ],
+                          "label": "Tomorrow",
+                          "style": {
+                            "backgroundColor": "#171B22",
+                            "borderColor": "#2A303A",
+                          },
+                          "testID": "route-search-date-1",
+                          "type": "View",
+                        },
+                        {
+                          "children": [
+                            {
+                              "children": [
+                                "Fri 25 Sep",
+                              ],
+                              "style": {
+                                "color": "#F2F4F8",
+                              },
+                              "type": "Text",
+                            },
+                          ],
+                          "label": "Fri 25 Sep",
+                          "style": {
+                            "backgroundColor": "#171B22",
+                            "borderColor": "#2A303A",
+                          },
+                          "testID": "route-search-date-2",
+                          "type": "View",
+                        },
+                      ],
+                      "type": "View",
+                    },
+                    {
+                      "children": [
+                        {
+                          "children": [
+                            "Search",
+                          ],
+                          "style": {
+                            "color": "#0B0E13",
+                          },
+                          "type": "Text",
+                        },
+                      ],
+                      "label": "Search flights on this route",
+                      "style": {
+                        "backgroundColor": "#7C9DFF",
+                        "borderColor": "#2A303A",
+                      },
+                      "testID": "route-search-submit",
+                      "type": "View",
+                    },
+                    {
+                      "children": [
+                        {
+                          "children": [
+                            "Close",
+                          ],
+                          "style": {
+                            "color": "#F2F4F8",
+                          },
+                          "type": "Text",
+                        },
+                      ],
+                      "label": "Close",
+                      "style": {
+                        "backgroundColor": "#171B22",
+                        "borderColor": "#2A303A",
+                      },
+                      "testID": "route-search-close",
+                      "type": "View",
+                    },
+                    {
+                      "children": [
+                        {
+                          "children": [
+                            {
+                              "children": [
+                                "As of 9:58 AM (2 min ago)",
+                              ],
+                              "style": {
+                                "color": "#A3ACB8",
+                              },
+                              "testID": "route-search-as-of",
+                              "type": "Text",
+                            },
+                            {
+                              "children": [
+                                {
+                                  "children": [
+                                    "Schedules only",
+                                  ],
+                                  "style": {
+                                    "color": "#F2F4F8",
+                                  },
+                                  "type": "Text",
+                                },
+                              ],
+                              "label": "Schedules only: the times are the published schedule, with no live status",
+                              "style": {
+                                "backgroundColor": "#171B22",
+                                "borderColor": "#707A8C",
+                              },
+                              "testID": "route-search-schedules-only",
+                              "type": "View",
+                            },
+                          ],
+                          "type": "View",
+                        },
+                        {
+                          "children": [
+                            {
+                              "children": [
+                                "These times may be out of date.",
+                              ],
+                              "style": {
+                                "color": "#F2F4F8",
+                              },
+                              "type": "Text",
+                            },
+                          ],
+                          "style": {
+                            "backgroundColor": "#171B22",
+                            "borderColor": "#FFB866",
+                          },
+                          "testID": "route-search-stale",
+                          "type": "View",
+                        },
+                      ],
+                      "type": "View",
+                    },
+                    {
+                      "children": [
+                        {
+                          "children": [
+                            "JFK to LHR on Wed 23 Sep",
+                          ],
+                          "style": {
+                            "color": "#A3ACB8",
+                          },
+                          "type": "Text",
+                        },
                       ],
                       "style": {
-                        "color": "#A3ACB8",
+                        "backgroundColor": "#171B22",
+                        "borderColor": "#2A303A",
                       },
-                      "type": "Text",
+                      "testID": "route-search-results",
+                      "type": "View",
                     },
                   ],
-                  "label": "AA100, to LHR, scheduled 6:00 PM, expected 6:25 PM, status Scheduled, Terminal 8, gate 12, also sold as BA1511, IB4218",
-                  "style": {
-                    "borderColor": "#2A303A",
-                  },
-                  "testID": "board-row-dep:AA100:2026-09-23T22:00:00Z",
                   "type": "View",
                 },
               ],
-              "style": {
-                "backgroundColor": "#171B22",
-                "borderColor": "#2A303A",
-              },
-              "testID": "route-search-results",
+              "type": "View",
+            },
+            {
+              "children": [
+                {
+                  "children": [
+                    {
+                      "children": [
+                        {
+                          "children": [
+                            {
+                              "children": [
+                                "6:00 PM",
+                              ],
+                              "style": {
+                                "color": "#F2F4F8",
+                              },
+                              "type": "Text",
+                            },
+                            {
+                              "children": [
+                                "AA100  to LHR",
+                              ],
+                              "style": {
+                                "color": "#F2F4F8",
+                              },
+                              "type": "Text",
+                            },
+                            {
+                              "children": [
+                                {
+                                  "children": [
+                                    "Scheduled",
+                                  ],
+                                  "style": {
+                                    "color": "#E4E8EF",
+                                  },
+                                  "type": "Text",
+                                },
+                              ],
+                              "label": "Status: Scheduled",
+                              "style": {
+                                "backgroundColor": "#2A303A",
+                              },
+                              "testID": "board-row-dep:AA100:2026-09-23T22:00:00Z-status",
+                              "type": "View",
+                            },
+                          ],
+                          "type": "View",
+                        },
+                        {
+                          "children": [
+                            "Expected 6:25 PM",
+                          ],
+                          "style": {
+                            "color": "#FFB866",
+                          },
+                          "type": "Text",
+                        },
+                        {
+                          "children": [
+                            "Terminal 8, gate 12. Also BA1511, IB4218",
+                          ],
+                          "style": {
+                            "color": "#A3ACB8",
+                          },
+                          "type": "Text",
+                        },
+                      ],
+                      "label": "AA100, to LHR, scheduled 6:00 PM, expected 6:25 PM, status Scheduled, Terminal 8, gate 12, also sold as BA1511, IB4218",
+                      "style": {
+                        "borderColor": "#2A303A",
+                      },
+                      "testID": "board-row-dep:AA100:2026-09-23T22:00:00Z",
+                      "type": "View",
+                    },
+                  ],
+                  "style": {
+                    "backgroundColor": "#171B22",
+                    "borderColor": "#2A303A",
+                  },
+                  "type": "View",
+                },
+              ],
+              "type": "View",
+            },
+            {
+              "children": [
+                {
+                  "style": {
+                    "backgroundColor": "#171B22",
+                    "borderColor": "#2A303A",
+                  },
+                  "type": "View",
+                },
+              ],
               "type": "View",
             },
           ],
@@ -395,323 +431,84 @@ exports[`the results renders from a mocked answer in light 1`] = `
           "children": [
             {
               "children": [
-                "Find a flight by route",
-              ],
-              "style": {
-                "color": "#101418",
-              },
-              "type": "Text",
-            },
-            {
-              "children": [
-                "The airports it flies between and the date it departs, in local time.",
-              ],
-              "style": {
-                "color": "#525B67",
-              },
-              "type": "Text",
-            },
-            {
-              "children": [
                 {
                   "children": [
                     {
                       "children": [
-                        {
-                          "children": [
-                            "From",
-                          ],
-                          "style": {
-                            "color": "#525B67",
-                          },
-                          "type": "Text",
-                        },
-                        {
-                          "label": "From",
-                          "style": {
-                            "backgroundColor": "#FFFFFF",
-                            "borderColor": "#7D8591",
-                            "color": "#101418",
-                          },
-                          "testID": "route-search-origin",
-                          "type": "TextInput",
-                        },
-                      ],
-                      "type": "View",
-                    },
-                  ],
-                  "type": "View",
-                },
-                {
-                  "children": [
-                    {
-                      "children": [
-                        {
-                          "children": [
-                            "To",
-                          ],
-                          "style": {
-                            "color": "#525B67",
-                          },
-                          "type": "Text",
-                        },
-                        {
-                          "label": "To",
-                          "style": {
-                            "backgroundColor": "#FFFFFF",
-                            "borderColor": "#7D8591",
-                            "color": "#101418",
-                          },
-                          "testID": "route-search-destination",
-                          "type": "TextInput",
-                        },
-                      ],
-                      "type": "View",
-                    },
-                  ],
-                  "type": "View",
-                },
-              ],
-              "type": "View",
-            },
-            {
-              "children": [
-                {
-                  "children": [
-                    "Departure date",
-                  ],
-                  "style": {
-                    "color": "#525B67",
-                  },
-                  "type": "Text",
-                },
-                {
-                  "label": "Departure date",
-                  "style": {
-                    "backgroundColor": "#FFFFFF",
-                    "borderColor": "#7D8591",
-                    "color": "#101418",
-                  },
-                  "testID": "route-search-date",
-                  "type": "TextInput",
-                },
-              ],
-              "type": "View",
-            },
-            {
-              "children": [
-                {
-                  "children": [
-                    {
-                      "children": [
-                        "Today",
+                        "Find a flight by route",
                       ],
                       "style": {
                         "color": "#101418",
                       },
                       "type": "Text",
                     },
-                  ],
-                  "label": "Today",
-                  "style": {
-                    "backgroundColor": "#F2F4F8",
-                    "borderColor": "#1C4FD6",
-                  },
-                  "testID": "route-search-date-0",
-                  "type": "View",
-                },
-                {
-                  "children": [
                     {
                       "children": [
-                        "Tomorrow",
-                      ],
-                      "style": {
-                        "color": "#101418",
-                      },
-                      "type": "Text",
-                    },
-                  ],
-                  "label": "Tomorrow",
-                  "style": {
-                    "backgroundColor": "#F2F4F8",
-                    "borderColor": "#D6DAE1",
-                  },
-                  "testID": "route-search-date-1",
-                  "type": "View",
-                },
-                {
-                  "children": [
-                    {
-                      "children": [
-                        "Fri 25 Sep",
-                      ],
-                      "style": {
-                        "color": "#101418",
-                      },
-                      "type": "Text",
-                    },
-                  ],
-                  "label": "Fri 25 Sep",
-                  "style": {
-                    "backgroundColor": "#F2F4F8",
-                    "borderColor": "#D6DAE1",
-                  },
-                  "testID": "route-search-date-2",
-                  "type": "View",
-                },
-              ],
-              "type": "View",
-            },
-            {
-              "children": [
-                {
-                  "children": [
-                    "Search",
-                  ],
-                  "style": {
-                    "color": "#FFFFFF",
-                  },
-                  "type": "Text",
-                },
-              ],
-              "label": "Search flights on this route",
-              "style": {
-                "backgroundColor": "#1C4FD6",
-                "borderColor": "#D6DAE1",
-              },
-              "testID": "route-search-submit",
-              "type": "View",
-            },
-            {
-              "children": [
-                {
-                  "children": [
-                    "Close",
-                  ],
-                  "style": {
-                    "color": "#101418",
-                  },
-                  "type": "Text",
-                },
-              ],
-              "label": "Close",
-              "style": {
-                "backgroundColor": "#F2F4F8",
-                "borderColor": "#D6DAE1",
-              },
-              "testID": "route-search-close",
-              "type": "View",
-            },
-            {
-              "children": [
-                {
-                  "children": [
-                    {
-                      "children": [
-                        "As of 9:58 AM (2 min ago)",
+                        "The airports it flies between and the date it departs, in local time.",
                       ],
                       "style": {
                         "color": "#525B67",
                       },
-                      "testID": "route-search-as-of",
                       "type": "Text",
                     },
                     {
                       "children": [
                         {
                           "children": [
-                            "Schedules only",
+                            {
+                              "children": [
+                                {
+                                  "children": [
+                                    "From",
+                                  ],
+                                  "style": {
+                                    "color": "#525B67",
+                                  },
+                                  "type": "Text",
+                                },
+                                {
+                                  "label": "From",
+                                  "style": {
+                                    "backgroundColor": "#FFFFFF",
+                                    "borderColor": "#7D8591",
+                                    "color": "#101418",
+                                  },
+                                  "testID": "route-search-origin",
+                                  "type": "TextInput",
+                                },
+                              ],
+                              "type": "View",
+                            },
                           ],
-                          "style": {
-                            "color": "#101418",
-                          },
-                          "type": "Text",
-                        },
-                      ],
-                      "label": "Schedules only: the times are the published schedule, with no live status",
-                      "style": {
-                        "backgroundColor": "#F2F4F8",
-                        "borderColor": "#7D8591",
-                      },
-                      "testID": "route-search-schedules-only",
-                      "type": "View",
-                    },
-                  ],
-                  "type": "View",
-                },
-                {
-                  "children": [
-                    {
-                      "children": [
-                        "These times may be out of date. Pull down in a minute to check for newer ones.",
-                      ],
-                      "style": {
-                        "color": "#101418",
-                      },
-                      "type": "Text",
-                    },
-                  ],
-                  "style": {
-                    "backgroundColor": "#F2F4F8",
-                    "borderColor": "#8A4B00",
-                  },
-                  "testID": "route-search-stale",
-                  "type": "View",
-                },
-              ],
-              "type": "View",
-            },
-            {
-              "children": [
-                {
-                  "children": [
-                    "JFK to LHR on Wed 23 Sep",
-                  ],
-                  "style": {
-                    "color": "#525B67",
-                  },
-                  "type": "Text",
-                },
-                {
-                  "children": [
-                    {
-                      "children": [
-                        {
-                          "children": [
-                            "6:00 PM",
-                          ],
-                          "style": {
-                            "color": "#101418",
-                          },
-                          "type": "Text",
-                        },
-                        {
-                          "children": [
-                            "AA100  to LHR",
-                          ],
-                          "style": {
-                            "color": "#101418",
-                          },
-                          "type": "Text",
+                          "type": "View",
                         },
                         {
                           "children": [
                             {
                               "children": [
-                                "Scheduled",
+                                {
+                                  "children": [
+                                    "To",
+                                  ],
+                                  "style": {
+                                    "color": "#525B67",
+                                  },
+                                  "type": "Text",
+                                },
+                                {
+                                  "label": "To",
+                                  "style": {
+                                    "backgroundColor": "#FFFFFF",
+                                    "borderColor": "#7D8591",
+                                    "color": "#101418",
+                                  },
+                                  "testID": "route-search-destination",
+                                  "type": "TextInput",
+                                },
                               ],
-                              "style": {
-                                "color": "#27303B",
-                              },
-                              "type": "Text",
+                              "type": "View",
                             },
                           ],
-                          "label": "Status: Scheduled",
-                          "style": {
-                            "backgroundColor": "#E4E8EF",
-                          },
-                          "testID": "board-row-dep:AA100:2026-09-23T22:00:00Z-status",
                           "type": "View",
                         },
                       ],
@@ -719,36 +516,311 @@ exports[`the results renders from a mocked answer in light 1`] = `
                     },
                     {
                       "children": [
-                        "Expected 6:25 PM",
+                        {
+                          "children": [
+                            "Departure date",
+                          ],
+                          "style": {
+                            "color": "#525B67",
+                          },
+                          "type": "Text",
+                        },
+                        {
+                          "label": "Departure date",
+                          "style": {
+                            "backgroundColor": "#FFFFFF",
+                            "borderColor": "#7D8591",
+                            "color": "#101418",
+                          },
+                          "testID": "route-search-date",
+                          "type": "TextInput",
+                        },
                       ],
-                      "style": {
-                        "color": "#8A4B00",
-                      },
-                      "type": "Text",
+                      "type": "View",
                     },
                     {
                       "children": [
-                        "Terminal 8, gate 12. Also BA1511, IB4218",
+                        {
+                          "children": [
+                            {
+                              "children": [
+                                "Today",
+                              ],
+                              "style": {
+                                "color": "#101418",
+                              },
+                              "type": "Text",
+                            },
+                          ],
+                          "label": "Today",
+                          "style": {
+                            "backgroundColor": "#F2F4F8",
+                            "borderColor": "#1C4FD6",
+                          },
+                          "testID": "route-search-date-0",
+                          "type": "View",
+                        },
+                        {
+                          "children": [
+                            {
+                              "children": [
+                                "Tomorrow",
+                              ],
+                              "style": {
+                                "color": "#101418",
+                              },
+                              "type": "Text",
+                            },
+                          ],
+                          "label": "Tomorrow",
+                          "style": {
+                            "backgroundColor": "#F2F4F8",
+                            "borderColor": "#D6DAE1",
+                          },
+                          "testID": "route-search-date-1",
+                          "type": "View",
+                        },
+                        {
+                          "children": [
+                            {
+                              "children": [
+                                "Fri 25 Sep",
+                              ],
+                              "style": {
+                                "color": "#101418",
+                              },
+                              "type": "Text",
+                            },
+                          ],
+                          "label": "Fri 25 Sep",
+                          "style": {
+                            "backgroundColor": "#F2F4F8",
+                            "borderColor": "#D6DAE1",
+                          },
+                          "testID": "route-search-date-2",
+                          "type": "View",
+                        },
+                      ],
+                      "type": "View",
+                    },
+                    {
+                      "children": [
+                        {
+                          "children": [
+                            "Search",
+                          ],
+                          "style": {
+                            "color": "#FFFFFF",
+                          },
+                          "type": "Text",
+                        },
+                      ],
+                      "label": "Search flights on this route",
+                      "style": {
+                        "backgroundColor": "#1C4FD6",
+                        "borderColor": "#D6DAE1",
+                      },
+                      "testID": "route-search-submit",
+                      "type": "View",
+                    },
+                    {
+                      "children": [
+                        {
+                          "children": [
+                            "Close",
+                          ],
+                          "style": {
+                            "color": "#101418",
+                          },
+                          "type": "Text",
+                        },
+                      ],
+                      "label": "Close",
+                      "style": {
+                        "backgroundColor": "#F2F4F8",
+                        "borderColor": "#D6DAE1",
+                      },
+                      "testID": "route-search-close",
+                      "type": "View",
+                    },
+                    {
+                      "children": [
+                        {
+                          "children": [
+                            {
+                              "children": [
+                                "As of 9:58 AM (2 min ago)",
+                              ],
+                              "style": {
+                                "color": "#525B67",
+                              },
+                              "testID": "route-search-as-of",
+                              "type": "Text",
+                            },
+                            {
+                              "children": [
+                                {
+                                  "children": [
+                                    "Schedules only",
+                                  ],
+                                  "style": {
+                                    "color": "#101418",
+                                  },
+                                  "type": "Text",
+                                },
+                              ],
+                              "label": "Schedules only: the times are the published schedule, with no live status",
+                              "style": {
+                                "backgroundColor": "#F2F4F8",
+                                "borderColor": "#7D8591",
+                              },
+                              "testID": "route-search-schedules-only",
+                              "type": "View",
+                            },
+                          ],
+                          "type": "View",
+                        },
+                        {
+                          "children": [
+                            {
+                              "children": [
+                                "These times may be out of date.",
+                              ],
+                              "style": {
+                                "color": "#101418",
+                              },
+                              "type": "Text",
+                            },
+                          ],
+                          "style": {
+                            "backgroundColor": "#F2F4F8",
+                            "borderColor": "#8A4B00",
+                          },
+                          "testID": "route-search-stale",
+                          "type": "View",
+                        },
+                      ],
+                      "type": "View",
+                    },
+                    {
+                      "children": [
+                        {
+                          "children": [
+                            "JFK to LHR on Wed 23 Sep",
+                          ],
+                          "style": {
+                            "color": "#525B67",
+                          },
+                          "type": "Text",
+                        },
                       ],
                       "style": {
-                        "color": "#525B67",
+                        "backgroundColor": "#F2F4F8",
+                        "borderColor": "#D6DAE1",
                       },
-                      "type": "Text",
+                      "testID": "route-search-results",
+                      "type": "View",
                     },
                   ],
-                  "label": "AA100, to LHR, scheduled 6:00 PM, expected 6:25 PM, status Scheduled, Terminal 8, gate 12, also sold as BA1511, IB4218",
-                  "style": {
-                    "borderColor": "#D6DAE1",
-                  },
-                  "testID": "board-row-dep:AA100:2026-09-23T22:00:00Z",
                   "type": "View",
                 },
               ],
-              "style": {
-                "backgroundColor": "#F2F4F8",
-                "borderColor": "#D6DAE1",
-              },
-              "testID": "route-search-results",
+              "type": "View",
+            },
+            {
+              "children": [
+                {
+                  "children": [
+                    {
+                      "children": [
+                        {
+                          "children": [
+                            {
+                              "children": [
+                                "6:00 PM",
+                              ],
+                              "style": {
+                                "color": "#101418",
+                              },
+                              "type": "Text",
+                            },
+                            {
+                              "children": [
+                                "AA100  to LHR",
+                              ],
+                              "style": {
+                                "color": "#101418",
+                              },
+                              "type": "Text",
+                            },
+                            {
+                              "children": [
+                                {
+                                  "children": [
+                                    "Scheduled",
+                                  ],
+                                  "style": {
+                                    "color": "#27303B",
+                                  },
+                                  "type": "Text",
+                                },
+                              ],
+                              "label": "Status: Scheduled",
+                              "style": {
+                                "backgroundColor": "#E4E8EF",
+                              },
+                              "testID": "board-row-dep:AA100:2026-09-23T22:00:00Z-status",
+                              "type": "View",
+                            },
+                          ],
+                          "type": "View",
+                        },
+                        {
+                          "children": [
+                            "Expected 6:25 PM",
+                          ],
+                          "style": {
+                            "color": "#8A4B00",
+                          },
+                          "type": "Text",
+                        },
+                        {
+                          "children": [
+                            "Terminal 8, gate 12. Also BA1511, IB4218",
+                          ],
+                          "style": {
+                            "color": "#525B67",
+                          },
+                          "type": "Text",
+                        },
+                      ],
+                      "label": "AA100, to LHR, scheduled 6:00 PM, expected 6:25 PM, status Scheduled, Terminal 8, gate 12, also sold as BA1511, IB4218",
+                      "style": {
+                        "borderColor": "#D6DAE1",
+                      },
+                      "testID": "board-row-dep:AA100:2026-09-23T22:00:00Z",
+                      "type": "View",
+                    },
+                  ],
+                  "style": {
+                    "backgroundColor": "#F2F4F8",
+                    "borderColor": "#D6DAE1",
+                  },
+                  "type": "View",
+                },
+              ],
+              "type": "View",
+            },
+            {
+              "children": [
+                {
+                  "style": {
+                    "backgroundColor": "#F2F4F8",
+                    "borderColor": "#D6DAE1",
+                  },
+                  "type": "View",
+                },
+              ],
               "type": "View",
             },
           ],

@@ -246,6 +246,26 @@ describe('pending adds against live rows (ruling X7)', () => {
       false,
     );
   });
+
+  it('matches an add from a board only by the leg its origin names (R9)', () => {
+    // AA100 also flies a second leg from KLAX that day; a board add names its leg's origin.
+    const LAX_ID = '0199b000-0000-7000-8000-000000000902';
+    const JFK_ID = '0199b000-0000-7000-8000-000000000903';
+    const db = createMemorySqlite();
+    const leg = { designator: 'AA100', date: '2026-09-23' };
+    addFlight(db, { ...leg, origin: 'KLAX' }, { newId: () => LAX_ID });
+    addFlight(db, { ...leg, origin: 'KJFK' }, { newId: () => JFK_ID });
+    seedStore(db);
+    const all = db.all<Parameters<typeof toFlightItemRow>[0]>('SELECT * FROM flight_subscriptions');
+    const items = all.map(toFlightItemRow);
+    const lax = byId(items, LAX_ID);
+    expect(lax.flightKey).toBe(pendingFlightKey('AA100', '2026-09-23', 'KLAX'));
+    expect(lax).toMatchObject({ pending: true, designator: 'AA100', dateLocal: '2026-09-23' });
+    // The synced AA100 departs KJFK: the KLAX leg is another flight and stays shown.
+    expect(pendingMatchesLive(lax, byId(items, AA100_ID))).toBe(false);
+    expect(pendingMatchesLive(byId(items, JFK_ID), byId(items, AA100_ID))).toBe(true);
+    expect([lax.superseded, byId(items, JFK_ID).superseded]).toEqual([false, true]);
+  });
 });
 
 describe('isOver and countdownFor', () => {

@@ -10,12 +10,18 @@
  * offline (said, never an empty list, no request), tap to add with the row's origin, an anonymous
  * account searching (route search is open to it), and that the same search is asked again only
  * when its answer failed, since each answered search takes one of the day's slots.
+ *
+ * The review round: a pull asks again only for a failed or aged answer and nothing invites one
+ * (R10), boards off (404 `boards_disabled`) is said as news (R8), and the network's cap tells an
+ * anonymous account to sign in (R11).
  */
 
 import { onlineManager, QueryClient, QueryClientProvider } from '@tanstack/react-query';
-import { act, fireEvent, render, screen } from '@testing-library/react-native';
+import { act, fireEvent, render, screen, waitFor } from '@testing-library/react-native';
+import type { ReactElement } from 'react';
 import { Alert } from 'react-native';
 import RouteSearchScreen from '../src/app/(app)/route-search';
+import { ROUTE_SEARCH_STALE_MS } from '../src/lib/boards';
 import type { SqliteLike } from '../src/lib/db/sqlite-like';
 import { useFlightNotices } from '../src/lib/flight-notices';
 import { useSettings } from '../src/lib/settings';
@@ -118,6 +124,24 @@ function urls(): string[] {
   return mockEdge.network.requests.map((request) => `${request.method} ${request.url}`);
 }
 
+function refreshControl() {
+  const scroll = screen.getByTestId('route-search');
+  return scroll.props.refreshControl as ReactElement<{
+    onRefresh: () => void;
+    refreshing: boolean;
+  }>;
+}
+
+/** Pulls the list, then waits until the pull's work (and any request it made) has finished. */
+async function pullAndSettle() {
+  await act(() => {
+    refreshControl().props.onRefresh();
+  });
+  await waitFor(() => {
+    expect(refreshControl().props.refreshing).toBe(false);
+  });
+}
+
 beforeAll(() => {
   globalThis.fetch = (input: RequestInfo | URL, init?: RequestInit) =>
     mockEdge.network.fetchMock(input, init);
@@ -201,7 +225,14 @@ describe('the results', () => {
 describe("the route's refusals, said plainly", () => {
   it('403 cap_exceeded: the day’s searches are used, from the payload', async () => {
     mockEdge.network.answer(() =>
-      json(403, { error: 'cap_exceeded', cap: 'route_searches', limit: 30, message: 'm' }),
+      json(403, {
+        error: 'cap_exceeded',
+        cap: 'route_searches',
+        limit: 30,
+        scope: 'user',
+        message: 'm',
+        requestId: 'r',
+      }),
     );
     await openSearch();
     await search('JFK', 'LHR');
@@ -211,7 +242,55 @@ describe("the route's refusals, said plainly", () => {
       ),
     ).toBeTruthy();
     expect(screen.queryByTestId('route-search-results')).toBeNull();
+    // The account's own allowance: signing in would not lift it.
+    expect(screen.queryByTestId('route-search-sign-in')).toBeNull();
     expect(mockEdge.network.requests).toHaveLength(1);
+  });
+
+  it("403 cap_exceeded for the network's allowance: says to sign in, and offers it (R11)", async () => {
+    mockRouter.push.mockClear();
+    mockEdge.network.answer(() =>
+      json(403, {
+        error: 'cap_exceeded',
+        cap: 'route_searches',
+        limit: 30,
+        scope: 'ip',
+        message: 'm',
+        requestId: 'r',
+      }),
+    );
+    await openSearch();
+    await search('JFK', 'LHR');
+    expect(
+      await screen.findByText(
+        'Without an account, route searches are limited to 30 a day per network, and this network’s are used up today. Sign in to keep searching, or add the flight by its number.',
+      ),
+    ).toBeTruthy();
+    await fireEvent.press(screen.getByTestId('route-search-sign-in'));
+    expect(mockRouter.push).toHaveBeenCalledWith('/sign-in');
+    expect(mockEdge.network.requests).toHaveLength(1);
+  });
+
+  it('404 boards_disabled: says route search is not available yet, as news (R8)', async () => {
+    mockEdge.network.answer(() =>
+      json(404, {
+        error: 'boards_disabled',
+        message: 'airport boards are not available yet',
+        requestId: 'r',
+      }),
+    );
+    await openSearch();
+    await search('JFK', 'LHR');
+    const notice = await screen.findByTestId('route-search-disabled');
+    expect(
+      screen.getByText(
+        'Finding a flight by route is not available yet. Add the flight by its number instead.',
+      ),
+    ).toBeTruthy();
+    expect(notice.props.style).toEqual(
+      expect.arrayContaining([expect.objectContaining({ borderColor: LIGHT.color.accent })]),
+    );
+    expect(screen.queryByTestId('route-search-error')).toBeNull();
   });
 
   it('429: says to wait for the seconds Retry-After gives', async () => {
@@ -258,6 +337,48 @@ describe("the route's refusals, said plainly", () => {
     // Answered and fresh: the same search again costs nothing.
     await fireEvent.press(screen.getByTestId('route-search-submit'));
     expect(urls()).toEqual([`GET ${SEARCH_URL}`, `GET ${SEARCH_URL}`]);
+  });
+});
+
+describe('a pull (R10)', () => {
+  it('asks the route again only for a failed or aged answer', async () => {
+    mockEdge.network.answer(() => json(200, routeAnswer()));
+    await openSearch();
+    await search('JFK', 'LHR');
+    await screen.findByTestId('route-search-results');
+    // A fresh answer is kept: the pull costs nothing.
+    await pullAndSettle();
+    expect(urls()).toEqual([`GET ${SEARCH_URL}`]);
+
+    // As old as the stale time, it is asked again; this time the answer fails.
+    jest.mocked(Date.now).mockReturnValue(NOW + ROUTE_SEARCH_STALE_MS);
+    mockEdge.network.answer(() => json(503, { error: 'board_unavailable', message: 'm' }));
+    await pullAndSettle();
+    expect(
+      await screen.findByText('Flight data is unavailable right now. Search again in a minute.'),
+    ).toBeTruthy();
+    expect(urls()).toHaveLength(2);
+
+    // A failed answer is asked again at once.
+    mockEdge.network.answer(() => json(200, routeAnswer()));
+    await pullAndSettle();
+    expect(screen.queryByTestId('route-search-error')).toBeNull();
+    expect(urls()).toEqual([`GET ${SEARCH_URL}`, `GET ${SEARCH_URL}`, `GET ${SEARCH_URL}`]);
+  });
+
+  it('is never invited: a stale or partial answer says so without asking for a pull', async () => {
+    mockEdge.network.answer(() => json(200, routeAnswer({ stale: true, partial: true })));
+    await openSearch();
+    await search('JFK', 'LHR');
+    await screen.findByTestId('route-search-results');
+    expect(screen.getByTestId('route-search-stale')).toBeTruthy();
+    expect(screen.getByText('These times may be out of date.')).toBeTruthy();
+    expect(
+      screen.getByText(
+        'Part of this time range could not be loaded, so some flights may be missing.',
+      ),
+    ).toBeTruthy();
+    expect(screen.queryByText(/pull/i)).toBeNull();
   });
 });
 
