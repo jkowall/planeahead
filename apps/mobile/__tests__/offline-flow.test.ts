@@ -374,7 +374,15 @@ describe('5. the replacement records are bounded (ruling Y5)', () => {
     clearReplacements();
   });
 
+  afterEach(() => {
+    jest.restoreAllMocks();
+  });
+
   it('keeps a record until the row it points at has been read, then drops it', () => {
+    // readFlightFollowing reads the record against the real clock, so pin it to the fixtures'
+    // NOW: recorded at a fixed date and read against today, the record was a week old and swept
+    // (the test passed until a day after 2026-09-23 and failed from then on).
+    jest.spyOn(Date, 'now').mockReturnValue(NOW);
     const db = createMemorySqlite();
     recordReplacement(OPTIMISTIC_ID, AA100_ID, NOW);
     // The row it points at is not in this store yet: nothing read, the record stays.

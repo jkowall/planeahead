@@ -306,12 +306,17 @@ SHOW idle_in_transaction_session_timeout;` and
 
 ## 15. macOS runner minutes and the native smoke gate
 
-- [ ] GitHub Actions macOS minutes: a private repository's macOS minutes bill at 10x; the nightly
-      `native-smoke.yml` runs two iOS legs of 30 to 60 minutes each. Set a spending limit (Settings >
-      Billing) that covers them, or run the workflow by hand only.
-- [ ] Prove the Xcode 26.6 gate leg (unverified in increments 11 and 12: not installed on the build
-      machine): `gh workflow run native-smoke.yml` then `gh run watch`. The iOS gate leg and the
-      Android job must pass; the Xcode 27 leg may fail without failing the run.
+- [ ] GitHub Actions minutes: GitHub Free includes 2,000 minutes a month, and a macOS minute is
+      priced at about ten Linux minutes ($0.062 against $0.006), so `native-smoke.yml` runs weekly
+      (Mondays); its iOS legs take about 22 macOS minutes a run. In September 2026 six nightly runs
+      used the whole allowance and GitHub refused every job, PR checks included, until the month
+      reset. To run it nightly, add a payment method with a budget (Settings > Billing and
+      licensing) that covers about $1.50 a night, then change its cron to `'17 6 * * *'`.
+- [ ] Prove the Android leg. The Xcode 26.6 gate leg passed on every scheduled run from
+      2026-09-24 to 2026-09-29; the Android leg never has (it filled the runner's disk until the
+      fix of 2026-09-30). Once Actions minutes are available, run
+      `gh workflow run native-smoke.yml -f platforms=android` and then `gh run watch`. Without
+      `-f platforms` a run covers both platforms; the Xcode 27 leg may fail without failing it.
 
 ## 16. Support inbox
 

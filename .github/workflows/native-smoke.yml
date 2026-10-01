@@ -1,6 +1,6 @@
 name: Native smoke
 
-# Nightly proof that the generated native projects still build AND launch with every native
+# Weekly proof that the generated native projects still build AND launch with every native
 # surface present (increment 11, ADR 0008): the expo-widgets extension (the placeholder widget
 # and the Live Activity layout), the watchOS shells from @bacons/apple-targets, the Android
 # ongoing-notification stub and the Wear OS module. Launching is the point: a dyld failure (a
@@ -10,21 +10,33 @@ name: Native smoke
 #
 # iOS runs twice: on Xcode 26.6, which mirrors the EAS SDK 57 build image
 # (macos-tahoe-26.5-xcode-26.6), as the leg that must pass; and on Xcode 27 with continue-on-error,
-# the toolchain the project is developed on and the one an SDK 57 defect (expo/expo#47537) is
-# open against. Android runs on ubuntu with JDK 17, as the EAS SDK 57 Android image
-# (ubuntu-26.04-jdk-17-ndk-r27b-sdk-57) does.
+# the toolchain the project is developed on (the SDK 57 defect with it, expo/expo#47537, was fixed
+# in expo-modules-autolinking 57.0.5; the lockfile has 57.0.13). Android runs on ubuntu with
+# JDK 17, as the EAS SDK 57 Android image (ubuntu-26.04-jdk-17-ndk-r27b-sdk-57) does.
 #
-# Never on EAS: the Starter plan's credit does not cover a nightly iOS build (facts section 2).
+# Never on EAS: the Starter plan's credit does not cover a scheduled iOS build (facts section 2).
 # No secrets: the builds are unsigned simulator and debug builds of the production variant.
 
 on:
   schedule:
-    # 06:17 UTC, after the day's merges; off the hour, when scheduled runs queue longest.
-    - cron: '17 6 * * *'
+    # Mondays at 06:17 UTC (off the hour, when scheduled runs queue longest). Weekly, not nightly:
+    # a run takes about 22 macOS minutes, priced at about ten Linux minutes each ($0.062 against
+    # $0.006), against GitHub Free's 2,000 included minutes a month. The six nightly runs of
+    # September 2026 used that allowance up, and GitHub then refused every job, PR checks included,
+    # until the month reset. Nightly is '17 6 * * *' once a budget covers it (runbook step 15).
+    - cron: '17 6 * * 1'
   workflow_dispatch:
+    inputs:
+      platforms:
+        description: 'Legs to run (a scheduled run always runs every leg)'
+        type: choice
+        options: [all, ios, android]
+        default: all
 
+# One group per ref and platform choice, so a manual run of one platform never cancels a run that
+# covers the other (a scheduled run has no inputs and counts as 'all').
 concurrency:
-  group: native-smoke-${{ github.ref }}
+  group: native-smoke-${{ github.ref }}-${{ inputs.platforms || 'all' }}
   cancel-in-progress: true
 
 permissions:
@@ -40,6 +52,8 @@ env:
 jobs:
   ios:
     name: iOS (Xcode ${{ matrix.xcode }})
+    # A manual run can pick one platform; a scheduled run has no inputs and runs both.
+    if: inputs.platforms != 'android'
     runs-on: macos-26
     timeout-minutes: 120
     # The Xcode 27 leg reports without failing the run; the 26.6 leg is the gate.
@@ -52,16 +66,10 @@ jobs:
       SMOKE_DERIVED_DATA: ${{ github.workspace }}/.native-smoke/ios
       SMOKE_GRACE_SECONDS: '45'
     steps:
-      - uses: actions/checkout@v5
-      - uses: pnpm/action-setup@v4
-      - uses: actions/setup-node@v6
-        with:
-          node-version-file: .node-version
-          cache: pnpm
-      - run: pnpm install --frozen-lockfile
-
       # The image carries several Xcodes side by side (/Applications/Xcode_<version>.app); pick
-      # the newest build of the requested version and fail loudly when the image has none.
+      # the newest build of the requested version and fail loudly when the image has none. First,
+      # so a missing Xcode (every night the Xcode 27 leg ran on macos-26 so far) costs seconds of
+      # macOS time, not a checkout and an install.
       - name: Select Xcode ${{ matrix.xcode }}
         env:
           XCODE_VERSION: ${{ matrix.xcode }}
@@ -78,6 +86,14 @@ jobs:
           xcodebuild -version | head -1 | grep -q "^Xcode ${XCODE_VERSION}"
           xcrun simctl list runtimes
 
+      - uses: actions/checkout@v5
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v6
+        with:
+          node-version-file: .node-version
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+
       - name: Prebuild and assert the generated entitlements and targets
         run: scripts/native-smoke.sh ios-prebuild
       - name: Build for the iPhone simulator
@@ -89,11 +105,30 @@ jobs:
 
   android:
     name: Android (JDK 17, emulator)
+    if: inputs.platforms != 'ios'
     runs-on: ubuntu-24.04
     timeout-minutes: 120
     env:
       SMOKE_GRACE_SECONDS: '45'
+      # Only the ABI the emulator below runs. Every ABI, debug and release, filled the hosted
+      # runner's disk: every scheduled run from 2026-09-24 to 2026-09-29 died inside the build with
+      # "No space left on device", and a runner that dies that way uploads no log (ADR 0001).
+      # Store builds on EAS compile every ABI.
+      SMOKE_ANDROID_ABIS: x86_64
+      # Above the script's local default (15 GB for one ABI): after this check the job still
+      # downloads the NDK (about 2.5 GB unpacked) into a cold Gradle cache, then the emulator's
+      # system image (about 3 GB), and saves the Gradle cache when it ends.
+      SMOKE_BUILD_MIN_FREE_GB: '25'
     steps:
+      # The ubuntu-24.04 image ships toolchains this job never touches (.NET, GHCup's Haskell,
+      # Swift, CodeQL); the Android SDK, the JDKs and the tool cache the setup actions use stay.
+      # The build and the emulator need the room, and each checks for it before it starts.
+      - name: Free disk space
+        run: |
+          df -h /
+          sudo rm -rf /usr/share/dotnet /usr/local/.ghcup /usr/share/swift \
+            /opt/hostedtoolcache/CodeQL
+          df -h /
       - uses: actions/checkout@v5
       - uses: pnpm/action-setup@v4
       - uses: actions/setup-node@v6
@@ -107,7 +142,6 @@ jobs:
           cache: gradle
       - run: pnpm install --frozen-lockfile
 
-      # Every ABI a store build carries (ADR 0001); the emulator below runs the x86_64 one.
       - name: Prebuild and assert the Wear module is included
         run: scripts/native-smoke.sh android-prebuild
       # assembleDebug is the compile; assembleRelease embeds the JavaScript the launch runs.
@@ -116,6 +150,10 @@ jobs:
       - name: Assert the APKs, the stub, the Tile, the bundle, the manifest and its permissions
         run: scripts/native-smoke.sh android-archive
 
+      # The emulator step downloads the API 36 system image (about 1.9 GB, about 3 GB unpacked)
+      # and boots an AVD before the script runs, so the check comes first, as the build's does.
+      - name: Check the disk before the emulator
+        run: scripts/native-smoke.sh disk-guard 10 "the emulator"
       - name: Enable KVM for the emulator
         run: |
           echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' | sudo tee /etc/udev/rules.d/99-kvm4all.rules
