@@ -1,7 +1,7 @@
 /**
  * The `notify` consumer (increment 15, ruling N9) against the embedded Postgres 18, with the
  * `push` queue replaced by a recorder: subscription, mute, `push_enabled` and per-kind filtering;
- * the production allow-list for test intents; idempotent `notifications` rows; the 50-target
+ * pushes only to `live_tracked` subscriptions, rows for every subscriber; the production allow-list for test intents; idempotent `notifications` rows; the 50-target
  * split and the `sendBatch` limits; permission filtering; `subjectId`, `notificationId` and the
  * subscription per target; the channel per kind; and a `sendBatch` that fails part way.
  */
@@ -54,6 +54,8 @@ async function plantFlight(): Promise<FlightKey> {
 
 interface PlantOptions {
   readonly muted?: boolean;
+  /** The subscription's `live_tracked` flag; true by default, as only those are pushed. */
+  readonly liveTracked?: boolean;
   readonly unsubscribed?: boolean;
   readonly preferences?: { pushEnabled?: boolean; events?: Record<string, boolean> };
   readonly timeFormat?: '12h' | '24h';
@@ -80,6 +82,7 @@ async function plantFollower(
       userId,
       flightInstanceId: instance?.id ?? '',
       muted: options.muted ?? false,
+      liveTracked: options.liveTracked ?? true,
       deletedAt: options.unsubscribed === true ? new Date().toISOString() : null,
     });
   if (options.preferences !== undefined) {
@@ -262,6 +265,40 @@ describe('notify: who hears of an intent', () => {
       new Set([plain.userId, optedIn.userId]),
     );
     expect((await rowsFor(first.dedupeKey)).map((row) => row.userId)).toEqual([optedIn.userId]);
+  });
+
+  it('pushes only live-tracked subscriptions; every subscriber who passes still gets the row', async () => {
+    const flightKey = await plantFlight();
+    const live = await plantFollower(flightKey);
+    const notLive = await plantFollower(flightKey, { liveTracked: false });
+    await plantTokens(live.userId, 1);
+    await plantTokens(notLive.userId, 2);
+    const recorder = recordingQueue();
+    const intent = intentFor(flightKey);
+    const delivered = await deliver([intent], recorder.queue);
+    expect(delivered.retried).toEqual([]);
+    expect(delivered.acked).toHaveLength(1);
+
+    // One push, to the live-tracked subscriber only.
+    const jobs = recorder.jobs();
+    expect(jobs).toHaveLength(1);
+    expect(jobs.flatMap((job) => job.targets.map((target) => target.subjectId))).toEqual([
+      live.userId,
+    ]);
+    // Both rows: the inbox does not depend on the live-tracking slot.
+    expect(new Set((await rowsFor(intent.dedupeKey)).map((row) => row.userId))).toEqual(
+      new Set([live.userId, notLive.userId]),
+    );
+
+    // A flight whose only subscriber is not live-tracked: the row, and no `sendBatch` at all.
+    const quietFlight = await plantFlight();
+    const alone = await plantFollower(quietFlight, { liveTracked: false });
+    await plantTokens(alone.userId, 1);
+    const quiet = recordingQueue();
+    const quietIntent = intentFor(quietFlight);
+    expect((await deliver([quietIntent], quiet.queue)).retried).toEqual([]);
+    expect(quiet.made()).toBe(0);
+    expect((await rowsFor(quietIntent.dedupeKey)).map((row) => row.userId)).toEqual([alone.userId]);
   });
 });
 

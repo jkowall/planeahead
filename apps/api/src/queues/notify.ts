@@ -10,7 +10,9 @@
  *      test intent on production, the users not in `PUSH_INJECT_ALLOWED_USER_IDS`.
  *   2. One `notifications` row per remaining user, unique per user and dedupe key (a redelivery
  *      inserts nothing and reads back the first delivery's rows), marked `is_test` for a test.
- *   3. Their live device tokens whose permission is not `denied` or `undetermined`.
+ *   3. The live device tokens of those whose subscription is `live_tracked` (only they are pushed,
+ *      the orchestrator's ruling after part 3), less tokens whose permission is `denied` or
+ *      `undetermined`.
  *   4. `push` jobs of at most 50 targets (src/notify/jobs.ts), sent in as few `sendBatch` calls as
  *      the queue's limits allow (100 messages, 256 KB), one after another.
  *
@@ -40,7 +42,7 @@ import {
   type DropReason,
 } from '../notify/recipients';
 import { renderPush, type RenderedPush, type TimeFormat } from '../notify/render';
-import { allowedTestPushUserIds } from '../routes/admin-push';
+import { allowedTestPushUserIds } from '../lib/push-allow-list';
 import { consumeBatch } from './consume';
 import type { QueueContext } from './index';
 
@@ -57,6 +59,8 @@ export interface NotifyConsumerDeps {
 export interface NotifyReport {
   readonly subscribers: number;
   readonly recipients: number;
+  /** Recipients whose subscription is `live_tracked`, the only ones pushed. */
+  readonly pushRecipients: number;
   readonly dropped: Record<DropReason, number>;
   readonly notifications: number;
   readonly targets: number;
@@ -78,7 +82,7 @@ export async function notifyIntent(
   deps: NotifyIntentDeps,
 ): Promise<NotifyReport> {
   const subscribers = await readSubscribers(deps.db, intent.flightKey);
-  const { recipients, dropped } = selectRecipients(subscribers, intent, {
+  const { recipients, pushed, dropped } = selectRecipients(subscribers, intent, {
     production: deps.production,
     allowedTestUserIds: deps.allowedTestUserIds,
   });
@@ -97,17 +101,17 @@ export async function notifyIntent(
       ? new Map<string, string>()
       : await insertNotifications(deps.db, intent, recipients, render);
   const tokens =
-    recipients.length === 0
+    pushed.length === 0
       ? []
       : await readTokens(
           deps.db,
-          recipients.map((recipient) => recipient.userId),
+          pushed.map((recipient) => recipient.userId),
         );
   // Validated as the push consumer will read them: a job this build builds wrong is a bug the
   // retries carry into the dead letter queue, where it is archived and alerted.
   const jobs = buildPushJobs({
     intent,
-    recipients,
+    recipients: pushed,
     notificationIds,
     tokens,
     render,
@@ -120,6 +124,7 @@ export async function notifyIntent(
   return {
     subscribers: subscribers.length,
     recipients: recipients.length,
+    pushRecipients: pushed.length,
     dropped,
     notifications: notificationIds.size,
     targets: jobs.reduce((sum, job) => sum + job.targets.length, 0),
@@ -166,6 +171,7 @@ export async function handleNotifyBatch(
         test: intent.test,
         subscribers: report.subscribers,
         recipients: report.recipients,
+        push_recipients: report.pushRecipients,
         dropped_not_allow_listed: report.dropped.not_allow_listed,
         dropped_muted: report.dropped.muted,
         dropped_push_disabled: report.dropped.push_disabled,

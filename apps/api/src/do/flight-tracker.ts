@@ -1142,7 +1142,7 @@ export class FlightTracker extends DurableObject<Env> {
    * injection id in their dedupe key. It stores NEITHER the synthetic snapshot NOR the state the
    * evaluation returns, so the next real poll diffs against real data and finds no change back;
    * the only rows it writes are its intents' dedupe and outbox rows. A replayed injection id
-   * writes nothing. The Access-protected admin route that calls it is increment 15 part 3's.
+   * writes nothing. The Access-protected admin route that calls it is src/routes/admin-inject.ts.
    */
   async injectPolicyEvent(input: unknown): Promise<Exact<InjectPolicyEventResponseV1>> {
     const request = parseRpcRequest(InjectPolicyEventRequestV1, input);

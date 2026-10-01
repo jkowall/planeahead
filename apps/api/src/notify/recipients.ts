@@ -9,6 +9,13 @@
  * `first_gate_assignment`, off by default; the others default on). A test intent (an injection,
  * ruling N11) reaches on production only the user ids in `PUSH_INJECT_ALLOWED_USER_IDS`, and on
  * staging and locally every subscriber; the preferences apply to it as to any intent.
+ *
+ * Every subscriber left gets the `notifications` row, but only those whose subscription is
+ * `live_tracked` are pushed (the orchestrator's ruling after part 3, from increment 8's O3 and the
+ * Phase 0 free tier: the flag gates notifications and the Live Activity). A change detected
+ * outside the live window, or for a subscription the free tier's cap refused, reaches that user's
+ * inbox only; `docs/open-decisions.md` records it. The gate applies to test intents too, so an
+ * injection exercises the real path.
  */
 
 import { and, eq, inArray, isNull, notInArray, or } from 'drizzle-orm';
@@ -42,6 +49,8 @@ export interface SubscriberRow {
   readonly userId: string;
   readonly flightInstanceId: string;
   readonly muted: boolean;
+  /** Whether the subscription holds a live-tracking slot: only then is it pushed. */
+  readonly liveTracked: boolean;
   readonly pushEnabled: boolean | null;
   readonly events: unknown;
   readonly timeFormat: string | null;
@@ -54,6 +63,7 @@ export async function readSubscribers(db: Db, flightKey: string): Promise<Subscr
       userId: flightSubscriptions.userId,
       flightInstanceId: flightSubscriptions.flightInstanceId,
       muted: flightSubscriptions.muted,
+      liveTracked: flightSubscriptions.liveTracked,
       pushEnabled: notificationPreferences.pushEnabled,
       events: notificationPreferences.events,
       timeFormat: userPreferences.timeFormat,
@@ -82,7 +92,10 @@ export async function readSubscribers(db: Db, flightKey: string): Promise<Subscr
 export type DropReason = 'not_allow_listed' | 'muted' | 'push_disabled' | 'preference_off';
 
 export interface RecipientSelection {
+  /** Every subscriber who hears of the intent: each gets a `notifications` row. */
   readonly recipients: Recipient[];
+  /** Those of `recipients` whose subscription is `live_tracked`: only they are pushed. */
+  readonly pushed: Recipient[];
   readonly dropped: Record<DropReason, number>;
 }
 
@@ -107,6 +120,7 @@ export function selectRecipients(
   };
   const toggle = notificationEventPreferenceFor(intent.intent);
   const recipients: Recipient[] = [];
+  const pushed: Recipient[] = [];
   for (const row of rows) {
     const preferences = effectiveNotificationPreferences(
       row.pushEnabled === null ? null : { pushEnabled: row.pushEnabled, events: row.events },
@@ -129,14 +143,18 @@ export function selectRecipients(
       dropped[reason] += 1;
       continue;
     }
-    recipients.push({
+    const recipient: Recipient = {
       userId: row.userId,
       subscriptionId: row.subscriptionId,
       flightInstanceId: row.flightInstanceId,
       timeFormat: row.timeFormat === '24h' ? '24h' : '12h',
-    });
+    };
+    recipients.push(recipient);
+    if (row.liveTracked) {
+      pushed.push(recipient);
+    }
   }
-  return { recipients, dropped };
+  return { recipients, pushed, dropped };
 }
 
 /** What a `notifications` row keeps of its intent (`data`), for the inbox. */
