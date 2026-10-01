@@ -1,7 +1,7 @@
 # @planeahead/api
 
-The PlaneAhead API: one Cloudflare Worker that serves the HTTP surface, owns five Durable Object
-classes, consumes six queues (and their dead letter queues) and runs two cron triggers. The design is in
+The PlaneAhead API: one Cloudflare Worker that serves the HTTP surface, owns six Durable Object
+classes, consumes seven queues (and their dead letter queues) and runs two cron triggers. The design is in
 [docs/plans/phase0-plan.md](../../docs/plans/phase0-plan.md) section 5; the framework decision and
 the Durable Object migration runner are in [ADR 0004](../../docs/adr/0004-hono-rpc.md).
 
@@ -28,6 +28,14 @@ the `account_deleted` mapping of a user foreign-key violation, a list of Apple b
 the production deploy workflow; the whole system is described in
 [docs/architecture.md](../../docs/architecture.md) and the owner's setup in
 [docs/runbooks/first-deploy.md](../../docs/runbooks/first-deploy.md).
+Increment 14 adds the push transport (`src/push`): `PushTransport` for APNs and FCM HTTP v1
+behind an injected `fetch`, the `PushAuth` Durable Object that mints the shared APNs provider token
+and exchanges the FCM access token, the `push` queue's consumer, the `push_outcome` message the
+persist consumer records as deliveries and dead-token invalidations, the push token's app id,
+registration time and permission on `POST /v1/devices` with rotation and
+`POST /v1/devices/current/invalidate`, and the admin page's push section and test push
+([docs/increments/14-push-transport.md](../../docs/increments/14-push-transport.md), architecture
+section 9).
 The auth design is in [docs/increments/05-auth.md](../../docs/increments/05-auth.md) and its
 threat model in [docs/security/threat-model.md](../../docs/security/threat-model.md).
 
@@ -103,11 +111,15 @@ src/providers/            aerodatabox.adapter.ts, aeroapi.mock.ts, router.ts, co
                           budget.ts, token-bucket.ts, config.ts (plans and settings), http.ts;
                           specs/ (the vendored OpenAPI snapshots), fixtures/ (test data only)
 src/validation/           nul.ts (U+0000 is refused at every JSON boundary; Postgres would 500)
-src/do/                   migrate.ts (the SQLite schema runner), base.ts, the five classes,
+src/do/                   migrate.ts (the SQLite schema runner), base.ts, the six classes,
                           migrations/<class>/NNN.ts (ProviderBudget has the first)
+src/push/                 increment 14: transport.ts (PushTransport, APNs and FCM), payload.ts
+                          (the request builders), credentials.ts (the mint rules and the isolate
+                          cache), jwt.ts (ES256 and RS256 on WebCrypto), config.ts (the secrets)
 src/queues/               index.ts dispatch, consume.ts (per-message ack), analytics.ts, consumers
-                          (persist.ts also routes the anonymous merge's `merge` message to merge.ts;
-                          housekeeping.ts runs the nightly steps, one message each)
+                          (persist.ts also routes the anonymous merge's `merge` message to merge.ts
+                          and the push outcomes to push-outcomes.ts; housekeeping.ts runs the
+                          nightly steps, one message each; push.ts sends the push jobs)
 src/cron/                 index.ts dispatch, reconcile.ts (pages overdue trackers), housekeeping.ts
                           and ae-rollup.ts (plan the nightly messages; never work inline)
 src/observability/log.ts  structured JSON logging with the request id
@@ -287,9 +299,10 @@ message (migration 0005's `xid` btree), the other purges delete in batches of 5,
 ### Deploy checklist
 
 Every secret the Worker reads is declared in `wrangler.jsonc` under `env.staging.secrets.required`
-and `env.production.secrets.required` (the list `WORKER_SECRET_NAMES` in `src/env.ts`;
-`test/workers/secrets-in-logs.test.ts` keeps the two equal), and wrangler refuses a first deploy
-while one is unset. Before the first deploy of an environment, set each with
+and `env.production.secrets.required` (the list `WORKER_SECRET_NAMES` in `src/env.ts`, plus
+`PUSH_SECRET_NAMES` in production only, increment 14; `test/workers/secrets-in-logs.test.ts` keeps
+them equal), and wrangler refuses a first deploy while one is unset. The push secrets are optional
+in staging: without them its push consumer holds every job as `not_configured`. Before the first deploy of an environment, set each with
 `wrangler secret put <NAME> --env <environment>`. Two came with increment 8 and fail loudly when
 missing:
 

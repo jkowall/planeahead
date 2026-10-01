@@ -50,6 +50,13 @@
       "when": 1790224849026,
       "tag": "0006_ledger_calls",
       "breakpoints": true
+    },
+    {
+      "idx": 7,
+      "version": "7",
+      "when": 1790771368479,
+      "tag": "0007_push_transport",
+      "breakpoints": true
     }
   ]
 }

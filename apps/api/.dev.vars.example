@@ -130,3 +130,23 @@ CF_API_TOKEN=
 # environment's variants as the association files name them (production and preview against
 # production, the development build against staging and locally) plus APPLE_BUNDLE_ID.
 # APPLE_BUNDLE_IDS=
+
+# ---------------------------------------------------------------------------------------------
+# The push transport (increment 14). REQUIRED in production (wrangler.jsonc secrets.required),
+# optional in staging and locally: without the three APNs names the push consumer holds APNs jobs
+# as not_configured, without the service account it holds FCM jobs, and /admin says so.
+# Secrets: `wrangler secret put <NAME> --env <env>`.
+
+# The APNs auth key (.p8) as PKCS8 PEM with the newlines written as \n on one line, its 10-character
+# key id, and the 10-character team id. One key per environment: a team-scoped Sandbox key on
+# staging, a Production key on production (docs/runbooks/first-deploy.md step 19).
+APNS_KEY_P8=
+APNS_KEY_ID=
+APNS_TEAM_ID=
+# The FCM HTTP v1 service account's JSON key file, whole (`wrangler secret put
+# FCM_SERVICE_ACCOUNT_JSON --env <env> < service-account.json`). In this file, one line in single
+# quotes. A dedicated account holding only cloudmessaging.messages.create.
+FCM_SERVICE_ACCOUNT_JSON=
+# Production only: the user ids whose tokens /admin/push/test may target, comma separated. Empty
+# in production refuses every token; staging and local ignore it.
+# PUSH_INJECT_ALLOWED_USER_IDS=

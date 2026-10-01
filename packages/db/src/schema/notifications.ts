@@ -55,10 +55,11 @@ export const notificationPreferences = pgTable(
  * `apns_live_activity_push_to_start` (increment 11, migration 0004) is the ActivityKit
  * push-to-start token the app registers through `POST /v1/devices`. It rotates rarely, so it
  * fits this table's `(kind, token)` model: one row per `(kind, token)`, and a rotated token is a
- * new row next to the earlier ones, the newest of a device being the current one (which rows a
- * sign-out or a rotation should invalidate is an open Phase 1 decision, ADR 0008). Per-activity
- * update tokens do NOT fit: they are N per device and rotate during an activity, and land in
- * `live_activities` in Phase 1. `apns_live_activity_start` is increment 3's name for the same
+ * new row next to the earlier ones. Increment 14 (ruling P6) decides which stay live: a
+ * registration invalidates the other live rows of the same device and kind, and
+ * `POST /v1/devices/current/invalidate` (sign-out) invalidates every kind of the installation.
+ * Per-activity update tokens do NOT fit: they are N per device and rotate during an activity, and
+ * land in `live_activities` in Phase 1. `apns_live_activity_start` is increment 3's name for the same
  * idea, which no client ever sent; ruling V5 added the new kind rather than renaming, so it stays
  * accepted until a later migration retires it (ADR 0008, open decisions).
  */
@@ -69,7 +70,18 @@ export const PUSH_TOKEN_KINDS = [
   'expo',
   'apns_live_activity_push_to_start',
 ] as const;
+/** Mirrors PUSH_ENVIRONMENTS in @planeahead/shared; a test asserts the two lists agree. */
 export const PUSH_ENVIRONMENTS = ['sandbox', 'production'] as const;
+/**
+ * The notification permission state a client reports with its token (increment 14, ruling P6).
+ * Mirrors PUSH_PERMISSION_STATES in @planeahead/shared; a test asserts the two lists agree.
+ */
+export const PUSH_PERMISSION_STATES = ['granted', 'provisional', 'denied', 'undetermined'] as const;
+/**
+ * The app id of a registration that names none: the production bundle and package id (ruling P6).
+ * Mirrors PRODUCTION_APP_ID in @planeahead/shared; a test asserts the two agree.
+ */
+export const DEFAULT_PUSH_APP_ID = 'app.planeahead.mobile';
 
 export const pushTokens = pgTable(
   'push_tokens',
@@ -84,7 +96,24 @@ export const pushTokens = pgTable(
     kind: text('kind').notNull(),
     token: text('token').notNull(),
     environment: text('environment').notNull().default('production'),
+    /**
+     * The bundle or package id that registered the token: the APNs topic (increment 14, ruling
+     * P6). A registration that names none is the production app's (every client before
+     * increment 16), and migration 0007 gave every earlier row the same.
+     */
+    appId: text('app_id').notNull().default(DEFAULT_PUSH_APP_ID),
+    /**
+     * When the app last registered this token (every `POST /v1/devices` that carries it). The
+     * APNs 410 guard compares it with Apple's timestamp: a token registered again after APNs saw it
+     * die is not invalidated (ruling P5). Migration 0007 backfilled it from `last_used_at`.
+     */
+    registeredAt: instant('registered_at')
+      .notNull()
+      .default(sql`now()`),
+    /** The notification permission the app reported with the token; null when it reported none. */
+    permission: text('permission'),
     invalidatedAt: instant('invalidated_at'),
+    /** When a push was last sent to the token (the persist consumer, increment 14). */
     lastUsedAt: instant('last_used_at'),
     ...timestamps(),
   },
@@ -96,6 +125,14 @@ export const pushTokens = pgTable(
     index('push_tokens_device_id_idx').on(t.deviceId),
     check('push_tokens_kind_check', sql`${t.kind} in (${inList(PUSH_TOKEN_KINDS)})`),
     check('push_tokens_environment_check', sql`${t.environment} in (${inList(PUSH_ENVIRONMENTS)})`),
+    check(
+      'push_tokens_app_id_check',
+      sql`length(${t.appId}) <= 155 and ${t.appId} ~ '^[A-Za-z0-9_-]+([.][A-Za-z0-9_-]+)+$'`,
+    ),
+    check(
+      'push_tokens_permission_check',
+      sql`${t.permission} is null or ${t.permission} in (${inList(PUSH_PERMISSION_STATES)})`,
+    ),
   ],
 );
 
@@ -139,6 +176,7 @@ export const liveActivities = pgTable(
   ],
 );
 
+/** Mirrors NOTIFICATION_KINDS in @planeahead/shared; a test asserts the two lists agree. */
 export const NOTIFICATION_KINDS = [
   'schedule_change',
   'gate_change',
@@ -192,6 +230,15 @@ export const DELIVERY_STATUSES = [
   'suppressed',
 ] as const;
 
+/**
+ * One row per notification and push token (increment 14, ruling P5): the unique key makes a
+ * redelivered outcome a no-op. The persist consumer writes it from the `push` consumer's outcome
+ * messages: `status` and `attempts` follow the newest attempt, `attempt_log` keeps every attempt's
+ * outcome and reason (`{"<attempt>:<outcome>": {"r": reason, "s": http status, "p": provider id,
+ * "at": instant}}`, plus `"u"`, Apple's `apns-unique-id`, when a sandbox answer carried one:
+ * increment 14's review ruling R11), which the admin page counts by reason. A test push (the admin
+ * page's, ruling P8) has no notification: its row is keyed by the job id and marked `is_test`.
+ */
 export const notificationDeliveries = pgTable(
   'notification_deliveries',
   {
@@ -205,11 +252,20 @@ export const notificationDeliveries = pgTable(
     providerMessageId: text('provider_message_id'),
     error: text('error'),
     sentAt: instant('sent_at'),
+    isTest: boolean('is_test').notNull().default(false),
+    attemptLog: jsonb('attempt_log')
+      .notNull()
+      .default(sql`'{}'::jsonb`),
     ...createdOnly(),
   },
   (t) => [
     index('notification_deliveries_created_at_brin_idx').using('brin', t.createdAt),
-    index('notification_deliveries_notification_id_idx').on(t.notificationId),
+    // Replaces migration 0000's `notification_deliveries_notification_id_idx`: the unique key
+    // leads with the same column and serves the same lookups.
+    uniqueIndex('notification_deliveries_notification_id_push_token_id_key').on(
+      t.notificationId,
+      t.pushTokenId,
+    ),
     index('notification_deliveries_subject_id_created_at_idx').on(t.subjectId, t.createdAt),
     check(
       'notification_deliveries_channel_check',

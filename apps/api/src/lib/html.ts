@@ -4,8 +4,8 @@
  * (`/account/delete`). No client framework and no script at all: every page is one document with
  * one inline `<style>` element, allowed by its SHA-256 in a strict Content Security Policy
  * (`default-src 'none'`, no script source, no framing, no base URI, and no form target except
- * `'self'` on the admin page's account-deletion forms), so an injected tag could neither run nor
- * load anything. Every interpolated value goes through `esc`.
+ * `'self'` on the admin page's account-deletion and test-push forms), so an injected tag could
+ * neither run nor load anything. Every interpolated value goes through `esc`.
  *
  * The referrer policy is `no-referrer` unless the page says otherwise, in the header and in the
  * document's `<meta name="referrer">` (the meta wins in a browser, so the two always agree). A page
@@ -88,6 +88,11 @@ export interface HtmlPage {
    * `Origin` on the POST; `no-referrer` (the default) everywhere else.
    */
   readonly referrerPolicy?: ReferrerPolicy | undefined;
+  /**
+   * Reload the page after this many seconds (`<meta http-equiv="refresh">`, which needs no
+   * script): the admin page's test-push result while the outcome is still on its way.
+   */
+  readonly refreshSeconds?: number | undefined;
 }
 
 /** The document and its headers. */
@@ -98,7 +103,11 @@ export async function renderPage(page: HtmlPage): Promise<Response> {
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<meta name="referrer" content="${referrerPolicy}">
+<meta name="referrer" content="${referrerPolicy}">${
+    page.refreshSeconds === undefined
+      ? ''
+      : `\n<meta http-equiv="refresh" content="${String(Math.max(1, Math.floor(page.refreshSeconds)))}">`
+  }
 <title>${esc(page.title)}</title>
 <style>${page.style}</style>
 </head>

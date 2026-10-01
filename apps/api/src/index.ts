@@ -5,7 +5,7 @@
  *
  *   - `default`: the Worker's handlers (`fetch`, `queue`, `scheduled`), wrapped by
  *     `withSentry` so queue and cron invocations are instrumented too.
- *   - the five Durable Object classes, which `exports` in wrangler.jsonc points at by name.
+ *   - the six Durable Object classes, which `exports` in wrangler.jsonc points at by name.
  *   - `AppType`, the Hono RPC type the mobile client's `hc<AppType>()` is built from (ADR 0004).
  *
  * `AppType` is the type of the CHAINED app. Hono's RPC types accumulate through the return value
@@ -45,6 +45,7 @@ export { AirportState } from './do/airport-state';
 export { DesignatorResolver } from './do/designator-resolver';
 export { FlightTracker } from './do/flight-tracker';
 export { ProviderBudget } from './do/provider-budget';
+export { PushAuth } from './do/push-auth';
 export { UserInbox } from './do/user-inbox';
 
 const app = createApp();

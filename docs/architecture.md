@@ -1,8 +1,9 @@
 # Architecture
 
-Phase 0 architecture of PlaneAhead as built at the end of increment 12 (2026-09-23): what runs
-where, the request paths, the Durable Object lifecycle, the outbox and persist path, the sync feed
-and its watermark, the crons and housekeeping, and the environments. The last section, the refresh
+Phase 0 architecture of PlaneAhead as built at the end of increment 12 (2026-09-23), with the
+push transport of increment 14 (2026-09-30, section 9): what runs where, the request paths, the
+Durable Object lifecycle, the outbox and persist path, the sync feed and its watermark, the crons
+and housekeeping, the push path, and the environments. The last section, the refresh
 cadence, is generated from `packages/shared/src/cadence.ts` and checked against the code by a test;
 everything above it is prose kept honest by the tests it names. Decisions and their alternatives
 are in `docs/adr/`; the data model is `docs/schema-review.md`; threats are
@@ -20,15 +21,17 @@ are in `docs/adr/`; the data model is `docs/schema-review.md`; threats are
  +------------------------ API Worker (planeahead-api-<env>) ------------------------+
  | Hono app: request-id, sentry, cors, rate-limit, idempotency, auth  (src/app.ts)   |
  | /health  /api/auth/*  /auth/magic-link  /.well-known/*  /v1/*  /admin  /account   |
- | queue(): persist, notify, provider-events, imports, reconcile, housekeeping, DLQs |
+ | queue(): persist, notify, push, provider-events, imports, reconcile,              |
+ |          housekeeping, DLQs                                                       |
  | scheduled(): */15 reconcile, 03:00 housekeeping + Analytics Engine rollup         |
- +----+-------------+-------------+--------------+--------------+-------------------+
-      | RPC         | Hyperdrive  | KV           | R2           | Analytics Engine
-      v             v             v              v              v
-  Durable Objects   Neon PG 18    CACHE PUBLIC   PUBLIC_BUCKET  PROVIDER_CALLS
-  FlightTracker     (direct       CONFIG         PRIVATE_BUCKET API_METRICS
-  DesignatorResolver endpoint,                                  PRODUCT_EVENTS
-  ProviderBudget    no caching)
+ +----+-------------+-------------+--------------+--------------+----------+--------+
+      | RPC         | Hyperdrive  | KV           | R2           | AE       | fetch (push)
+      v             v             v              v              v          v
+  Durable Objects   Neon PG 18    CACHE PUBLIC   PUBLIC_BUCKET  PROVIDER_  APNs (HTTP/2)
+  FlightTracker     (direct       CONFIG         PRIVATE_BUCKET CALLS,     FCM HTTP v1
+  DesignatorResolver endpoint,                                  API_,      Google OAuth
+  ProviderBudget    no caching)                                 PRODUCT_
+  PushAuth (increment 14)                                       METRICS/EVENTS
   AirportState, UserInbox (shells)
 ```
 
@@ -50,6 +53,8 @@ are in `docs/adr/`; the data model is `docs/schema-review.md`; threats are
     answer for 24 h in its storage and 15 min in KV.
   - **ProviderBudget**, one per provider per UTC day: the provider-wide unit cap, the per-second
     token bucket and the kill switch (persisted in `CONFIG` KV).
+  - **PushAuth** (increment 14), one per push credential (`apns:sandbox`, `apns:production`,
+    `fcm`): mints the shared APNs provider token and exchanges the FCM access token (section 9).
   - **AirportState** and **UserInbox** are schema shells for Phase 1.
 - **Postgres** (Neon, PostgreSQL 18, us-east-1) is the source of truth for users, subscriptions,
   the flight registry, the sync feed and the ledgers, reached ONLY from the Worker through the
@@ -62,9 +67,10 @@ are in `docs/adr/`; the data model is `docs/schema-review.md`; threats are
   dead-lettered messages (`dlq/{queue}/{messageId}.json`, `dlq/persist-parked/`);
   `PUBLIC_BUCKET` is reserved for share images (Phase 5).
 - **Queues**: `persist` (tracker, resolver and budget outboxes into Postgres, plus the merge
-  job), `reconcile`, `housekeeping` (increment 12), and `notify`, `provider-events`, `imports`
-  (consumers are stubs until their phases); every queue has a dead letter queue whose consumer
-  archives each message to R2 and raises an ops alert.
+  job and, from increment 14, the push outcomes), `reconcile`, `housekeeping` (increment 12),
+  `push` (increment 14: the push transport's consumer, section 9), and `notify`,
+  `provider-events`, `imports` (consumers are stubs until their phases); every queue has a dead
+  letter queue whose consumer archives each message to R2 and raises an ops alert.
 - **Analytics Engine**: `PROVIDER_CALLS` (one point per stored provider call, index = provider),
   `PRODUCT_EVENTS` (increment 12, one point per accepted app event, index = the analytics id),
   `API_METRICS` (reserved). Every sum weights rows by `_sample_interval`; Postgres stays the ledger.
@@ -73,7 +79,9 @@ are in `docs/adr/`; the data model is `docs/schema-review.md`; threats are
   `usage_counters` row.
 - **Outside the Worker**: Cloudflare Access in front of `/admin`; Sentry (errors, scrubbed);
   Workers Logs (JSON lines, 10% sampled in production); GitHub Actions (CI, the staging and
-  production deploys, the weekly native smoke, the mobile preview).
+  production deploys, the weekly native smoke, the mobile preview); from increment 14 APNs
+  (`api.push.apple.com`, `api.sandbox.push.apple.com`), FCM HTTP v1 (`fcm.googleapis.com`) and
+  Google's OAuth token endpoint, reached only from the `push` consumer and `PushAuth`.
 
 ## 2. Environments
 
@@ -103,7 +111,8 @@ to production (ADR 0005).
 | `GET /auth/magic-link`, `POST /api/auth/magic-link/consume`           | a browser from the email                | the token                                                                     | a non-consuming landing page; the consume route verifies server side                                                                      |
 | `GET /.well-known/*`                                                  | Apple's and Google's crawlers           | none                                                                          | the association files from vars                                                                                                           |
 | `GET /v1/me`, `PATCH /v1/me/preferences`, `POST /v1/me/delete`        | the app                                 | session                                                                       | Postgres; the deletion unsubscribes trackers, revokes at Apple, deletes in one transaction, writes KV session tombstones                  |
-| `POST /v1/devices`                                                    | the app                                 | session                                                                       | `devices`, `push_tokens`                                                                                                                  |
+| `POST /v1/devices`                                                    | the app                                 | session                                                                       | `devices`, `push_tokens` (increment 14: `appId`, permission, `registered_at`, rotation of the device's other rows of the kind)            |
+| `POST /v1/devices/current/invalidate`                                 | the app, before sign-out (increment 16) | session                                                                       | `push_tokens`: every live row of every kind on the caller's device row for the installation (increment 14)                                |
 | `GET /v1/flights/search`                                              | the app                                 | session (anonymous accepted), always read from the session row                | KV, `flight_designators`, then the DesignatorResolver (one provider call per designator and date) and caps                                |
 | `POST /v1/flights`, `GET /v1/flights[/:id]`, `DELETE /v1/flights/:id` | the app                                 | session, `Idempotency-Key` on the POST                                        | caps in `usage_counters`, the tracker's `subscribe` or `unsubscribe` under an 8 s deadline, then one transaction with the sync change row |
 | `POST /v1/flights/:id/refresh`                                        | the app                                 | session                                                                       | the per-user refresh budget, then the tracker's coalesced `forceRefresh`                                                                  |
@@ -111,8 +120,9 @@ to production (ADR 0005).
 | `POST /v1/events`                                                     | the app's analytics client              | none (install-scoped analytics id)                                            | `EVENTS_RL`, one `PRODUCT_EVENTS` point per accepted event, 202                                                                           |
 | `POST /v1/webhooks/{aerodatabox,aeroapi}/{token}`                     | the providers                           | 256-bit path token                                                            | enqueue on `provider-events` only                                                                                                         |
 | `POST /v1/webhooks/{apple,revenuecat}`                                | reserved (Apple, RevenueCat)            | none yet                                                                      | nothing: 501 until the Phase 1 handlers land                                                                                              |
-| `GET /admin`                                                          | the operator, through Cloudflare Access | `Cf-Access-Jwt-Assertion` validated                                           | read-only Postgres, the Analytics Engine SQL API, the Queues API                                                                          |
-| `GET`, `POST /admin/accounts/delete`                                  | the operator, through Cloudflare Access | the Access assertion; the POST also same-origin and the user id typed twice   | the one write action: `deleteAccount`, exactly as `POST /v1/me/delete`, with an audit row naming the operator                             |
+| `GET /admin`                                                          | the operator, through Cloudflare Access | `Cf-Access-Jwt-Assertion` validated                                           | read-only Postgres, the Analytics Engine SQL API, the Queues API, the `PushAuth` objects' status                                          |
+| `GET`, `POST /admin/accounts/delete`                                  | the operator, through Cloudflare Access | the Access assertion; the POST also same-origin and the user id typed twice   | a write action: `deleteAccount`, exactly as `POST /v1/me/delete`, with an audit row naming the operator                                   |
+| `GET`, `POST /admin/push/test`, `GET /admin/push/test/result`         | the operator, through Cloudflare Access | the Access assertion; the POST also same-origin; production: allow-listed ids | the other write action (increment 14): one test job on the `push` queue, an audit row, then the delivery row the persist consumer writes  |
 | `GET /account/delete`                                                 | Google Play's listing, anyone           | none                                                                          | a static page                                                                                                                             |
 
 Every non-2xx JSON answer under `/v1` is the envelope `{ error, message, requestId, ... }`
@@ -267,13 +277,89 @@ a number fails the message (retried, then dead-lettered with the ops alert), nev
 ## 8. Observability
 
 JSON log lines with the request id on every line (`src/observability/log.ts`); Sentry for
-exceptions and ops alerts (dead letters, kill switch, stuck outboxes, lifetime rejections), with
+exceptions and ops alerts (dead letters, kill switch, stuck outboxes, lifetime rejections, a push
+platform without usable credentials in production), with
 bodies, headers, queries and webhook tokens scrubbed; Analytics Engine for provider calls and
 product events; and the admin page (`/admin`, behind Cloudflare Access): provider calls per flight
 key and per provider per day, the Durable Object schema versions, the sync watermark lag (marked
 partial when the role lacks `pg_read_all_stats`), the queue depths, the sync horizon and epoch, and
-the last housekeeping runs. Its one write action is the operator account deletion
-(`/admin/accounts/delete`) for a request that reached the support inbox.
+the last housekeeping runs, and (increment 14) the push transport: its configuration, the
+`PushAuth` objects' last mints and failures, and every push attempt's outcome by reason over the
+last 24 hours. Its write actions are the operator account deletion (`/admin/accounts/delete`) for
+a request that reached the support inbox and the test push (`/admin/push/test`, section 9).
+
+## 9. The push path (increment 14)
+
+```
+ notify (increment 15)          push queue                         APNs  /3/device/{token}
+ or /admin/push/test  --job-->  (max_batch_size 5,  --6 in flight-->  (HTTP/2, ES256 bearer)
+ PushJobV1: <= 50 targets        batch wait 0)                      FCM   messages:send
+                                    |      ^                           (Bearer access token)
+                  outcome message   |      | retryable targets, each with its own delay
+                  (push_outcome)    v      | (same job id, attempt + 1)
+                              persist consumer                    PushAuth objects
+                              notification_deliveries upsert      apns:sandbox, apns:production,
+                              dead-token invalidation             fcm: mint, cache, expire
+```
+
+- **Transport.** `PushTransport` (`src/push/transport.ts`) has two implementations behind an
+  injected `fetch`, APNs and FCM HTTP v1, and maps every answer to `sent` (with the `apns-id` or the
+  FCM message name), `retry` (with a delay), `invalid_token` or `failed`. The request builders
+  (`src/push/payload.ts`) carry the payload contract: app data in a top-level APNs `body`
+  dictionary beside `aps`, flat string FCM `data` with no `body` key that repeats `tag` and
+  `channelId`, `thread-id` the flight key, `apns-collapse-id` and the Android tag
+  `{kind}:{flightKey}` (64 bytes at most), `interruption-level` time-sensitive only when the job
+  says so, `apns-expiration` and the FCM `ttl` at the job's `expiresAt`, every payload under 4,096
+  bytes. workerd has no HTTP/2 client, so every test injects `fetch`; APNs over Workers' `fetch`
+  is proven by the staging send (the admin page's test push). The Container relay, the designed
+  fallback, is described in the interface's comment and not built.
+- **Credentials.** `PushAuth` (one object per credential) mints the APNs ES256 provider token with
+  WebCrypto from the `.p8` and serves it for 30 minutes, never minting within 20 minutes of the
+  last mint, with `minted_at_ms` and the token in its SQLite storage so a restart keeps the rule;
+  it exchanges the FCM service account's RS256 assertion for an access token and serves it until
+  five minutes before it expires. Isolates cache what they were given until its window ends. APNs
+  `ExpiredProviderToken` and FCM 401 expire the refused token (never within the floor), and a
+  failed FCM exchange is not repeated within a minute of its start. The
+  secrets (`APNS_KEY_P8`, `APNS_KEY_ID`, `APNS_TEAM_ID`, `FCM_SERVICE_ACCOUNT_JSON`) are required
+  in production and optional in staging and locally; a platform without them is held.
+- **The `push` consumer** (`src/queues/push.ts`) first reads token liveness, once per batch and
+  before any send (review ruling R1, which amended the increment's "no Postgres": no Postgres
+  connection is in use while the sends wait, and `persist` stays the only writer): one statement
+  for the `push_tokens` rows of every target the batch could send, and a target is sent only when
+  its row is live and still its subject's, else it is `failed` `token_inactive` unsent; a failed
+  read sends nothing and re-enqueues after 60 s. It sends each job's targets with at most six
+  requests in flight (Workers' limit on connections waiting for headers), a 10-second timeout and
+  every body read or cancelled, then acknowledges the job and re-enqueues only its retryable
+  targets, grouped by delay in one `sendBatch` per job: FCM never sooner than 10 s, FCM 429
+  honours `Retry-After` or backs off exponentially from 60 s with jitter, APNs 429 60 s, APNs 5xx
+  15 minutes; a target past `expiresAt`, or whose retry would land after it, is dropped
+  (`expired`), and an unconfigured platform's targets are held (`not_configured`) every five
+  minutes until then, which in production raises the `push_not_configured` ops alert. The
+  outcomes go to `persist` as one `push_outcome` message per job.
+- **Deliveries and dead tokens** (`src/queues/push-outcomes.ts`, in the persist consumer): one
+  `notification_deliveries` row per notification and token (unique key; a test push keys by its
+  job id and is marked `is_test`), following the newest attempt, `sent` never undone, every
+  attempt's outcome and reason kept in `attempt_log`; a redelivered outcome writes nothing. A
+  token is invalidated only by APNs 410 `Unregistered` or `ExpiredToken` when it was registered
+  at or before Apple's timestamp, `BadDeviceToken` and `DeviceTokenNotForTopic`, FCM
+  `UNREGISTERED`, `SENDER_ID_MISMATCH`, and `INVALID_ARGUMENT` with an `FcmError` detail, and for
+  APNs only when the answer was about the row's own app id and environment. `last_used_at` is each
+  token's last accepted send, never written on an invalidated row.
+- **Registration.** `push_tokens` carries the `app_id` (the APNs topic; an old client's
+  registration is the production app's), `registered_at` (written on every registration, the 410
+  guard's comparison) and the permission state. A registration locks its device row, then
+  invalidates the device's other live rows of the same kind, so concurrent registrations leave one
+  live row; `POST /v1/devices/current/invalidate` invalidates every kind of the caller's
+  installation before sign-out, and nothing from a batch whose liveness read starts after that
+  commits reaches the phone (a batch already past its read can finish its sends, within seconds
+  usually and about seven minutes at worst, and a push the provider had already accepted can
+  still arrive until its `expiresAt`).
+- **Visibility.** The admin page's push section and "Send a test push" (section 8); the test push
+  is the plan's staging smoke, sent through the real queue, consumer, `PushAuth` and transport to a
+  registered, live token (in production only one of a user id in `PUSH_INJECT_ALLOWED_USER_IDS`).
+  Its result page shows Apple's `apns-unique-id` for a sandbox send (the key to the Push
+  Notifications Console's delivery log) and stops reloading once the job's window has passed
+  without an outcome.
 
 ## Refresh cadence
 

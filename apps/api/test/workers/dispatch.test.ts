@@ -84,6 +84,10 @@ describe('parseQueueName', () => {
     ['planeahead-housekeeping-local', 'housekeeping', false],
     ['planeahead-housekeeping', 'housekeeping', false],
     ['planeahead-housekeeping-dlq-staging', 'housekeeping', true],
+    // Increment 14: the push transport's queue and its dead letter queue.
+    ['planeahead-push-local', 'push', false],
+    ['planeahead-push', 'push', false],
+    ['planeahead-push-dlq-staging', 'push', true],
     ['something-else', 'unknown', false],
   ])('routes %s', (queueName, kind, deadLetter) => {
     expect(parseQueueName(queueName)).toEqual({ kind, deadLetter });
@@ -108,6 +112,8 @@ describe('queue()', () => {
     'planeahead-notify-local',
     'planeahead-provider-events-local',
     'planeahead-imports-local',
+    // Increment 14: a body that is not a push job is acknowledged, never sent or retried.
+    'planeahead-push-local',
   ])('acknowledges every message on %s', async (queueName) => {
     const result = await runQueue(queueName, [{ kind: 'x', provider: 'aerodatabox' }]);
 

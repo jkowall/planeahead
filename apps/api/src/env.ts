@@ -109,6 +109,29 @@ export interface WorkerSecrets {
   readonly CF_API_TOKEN?: string;
 
   /**
+   * The push transport's credentials (increment 14, ruling P7): REQUIRED in production (its
+   * `secrets.required`), OPTIONAL in staging and locally, so staging deploys before the Apple
+   * account exists. Without the three APNs names the `push` consumer holds APNs jobs as
+   * `not_configured`, without the service account it holds FCM jobs the same way, and the admin
+   * page says so. `PUSH_SECRET_NAMES` below lists them.
+   *
+   * `APNS_KEY_P8`: the APNs auth key (`.p8`), PKCS8 PEM with the newlines written as `\n`, like
+   * `APPLE_SIWA_P8`. One key per environment (plan section 3): a team-scoped Sandbox key on staging,
+   * a Production key on production. `APNS_KEY_ID`: its 10-character key id. `APNS_TEAM_ID`: the
+   * 10-character team id, the JWT's `iss`.
+   */
+  readonly APNS_KEY_P8?: string;
+  readonly APNS_KEY_ID?: string;
+  readonly APNS_TEAM_ID?: string;
+  /**
+   * The FCM HTTP v1 service account as its JSON key file (`type`, `project_id`, `private_key_id`,
+   * `private_key`, `client_email`): the project id names the send endpoint, the key signs the RS256
+   * assertion exchanged for an access token. A dedicated account holding only
+   * `cloudmessaging.messages.create` (R1 F39).
+   */
+  readonly FCM_SERVICE_ACCOUNT_JSON?: string;
+
+  /**
    * Test seams. Unset in every deployed environment, where the code falls back to the real
    * hosts; the Workers suite points them at `test/fake-providers.ts`.
    */
@@ -152,6 +175,18 @@ export const WORKER_SECRET_NAMES = [
  */
 export const OPTIONAL_SECRET_NAMES = [
   'CF_API_TOKEN',
+] as const satisfies readonly (keyof WorkerSecrets)[];
+
+/**
+ * The push transport's credentials (increment 14, ruling P7): in production's `secrets.required`
+ * after `WORKER_SECRET_NAMES`, in no other environment's. Listed in `.dev.vars.example`, given a
+ * dummy in `.dev.vars.test`, and covered by the secrets-in-logs test like the required names.
+ */
+export const PUSH_SECRET_NAMES = [
+  'APNS_KEY_P8',
+  'APNS_KEY_ID',
+  'APNS_TEAM_ID',
+  'FCM_SERVICE_ACCOUNT_JSON',
 ] as const satisfies readonly (keyof WorkerSecrets)[];
 
 /** Bindings that redirect an external endpoint at a test double. Never set in a deployment. */
@@ -205,6 +240,14 @@ export interface WorkerSettings {
    * build against staging), plus `APPLE_BUNDLE_ID`.
    */
   readonly APPLE_BUNDLE_IDS?: string;
+  /**
+   * The user ids whose tokens the admin page's "Send a test push" may target in production,
+   * comma separated (increment 14, ruling P8; the plan's event injector reads the same list in
+   * increment 15). Unset or empty in production means nobody's: the action refuses every token.
+   * Staging and local ignore it. Not a secret, but kept out of wrangler.jsonc: set it with
+   * `wrangler secret put` (or a `vars` entry) in production only.
+   */
+  readonly PUSH_INJECT_ALLOWED_USER_IDS?: string;
 }
 
 export const WORKER_SETTING_NAMES = [
@@ -213,6 +256,7 @@ export const WORKER_SETTING_NAMES = [
   'ADB_ALERTS_ENABLED',
   'REVENUECAT_DELETE_ENABLED',
   'APPLE_BUNDLE_IDS',
+  'PUSH_INJECT_ALLOWED_USER_IDS',
 ] as const satisfies readonly (keyof WorkerSettings)[];
 
 export type Env = Cloudflare.Env & WorkerSecrets & WorkerSettings;

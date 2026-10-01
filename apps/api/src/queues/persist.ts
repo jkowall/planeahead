@@ -1,6 +1,6 @@
 /**
  * `persist` queue consumer (increment 7; increment 8 adds the `live_tracked` bookkeeping and the
- * `merge` message).
+ * `merge` message; increment 14 the `push_outcome` message, src/queues/push-outcomes.ts).
  *
  * This is the only path from a Durable Object to Postgres (ADR 0007): a tracker appends outbox
  * rows, flushes them here, and this consumer writes `flight_instances`, `flight_events` and
@@ -81,6 +81,7 @@ import {
   AEROAPI_STATUS_PRICE_USD_MICROS,
   PersistMessageIdentityV1,
   PersistMessageV1,
+  PushOutcomeMessageV1,
   RPC_SCHEMA_VERSION,
   isInLiveWindow,
   parseFlightTrackerOrigin,
@@ -97,6 +98,7 @@ import { releaseCap, takeCap, userCap } from '../lib/caps';
 import { appendUserChange, subscriptionSyncRow } from '../lib/sync-rows';
 import { defaultTrackerFor as routeTrackerFor, type TrackerFor } from '../lib/trackers';
 import { handleMergeMessage, isMergeMessage } from './merge';
+import { isPushOutcomeMessage, recordPushOutcomes } from './push-outcomes';
 import { raiseOpsAlert, type CaptureMessage } from '../observability/ops-alert';
 import { errorFields, type Logger } from '../observability/log';
 import { providerCallRow } from '../providers/cost-log';
@@ -676,6 +678,28 @@ export async function handlePersistBatch(
           db: database(),
           trackerFor: deps.mergeTrackerFor ?? routeTrackerFor(env),
           log,
+        });
+        return;
+      }
+      if (isPushOutcomeMessage(message.body)) {
+        // The push consumer's outcomes (increment 14): deliveries and dead tokens. Not an outbox
+        // row, nothing to confirm; idempotent, so a failure throws and is retried.
+        const outcome = PushOutcomeMessageV1.safeParse(message.body);
+        if (!outcome.success) {
+          // No body on the line: it carries push token ids and subjects, and no retry helps.
+          log.error('push_outcome_invalid', {
+            message_id: message.id,
+            attempts: message.attempts,
+            issue: outcome.error.issues[0]?.message,
+          });
+          return;
+        }
+        const report = await recordPushOutcomes(database(), outcome.data);
+        log.info('push_outcome_recorded', {
+          job_id: outcome.data.jobId,
+          test: outcome.data.test,
+          results: outcome.data.results.length,
+          ...report,
         });
         return;
       }

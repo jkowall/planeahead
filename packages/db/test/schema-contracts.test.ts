@@ -2,13 +2,19 @@ import { readFileSync, readdirSync, statSync } from 'node:fs';
 import { join, relative, resolve } from 'node:path';
 import {
   ALERT_EVENTS,
+  APP_ID_RE,
   DISTANCE_UNITS,
   FLIGHT_STATUS_VALUES,
   IsoInstantSchema,
+  NOTIFICATION_KINDS,
   OPERATOR_SOURCES,
+  PRODUCTION_APP_ID,
   PROVIDER_CALL_RESULTS,
   PROVIDER_CALL_TRIGGERS,
   PROVIDER_IDS,
+  PUSH_ENVIRONMENTS,
+  PUSH_PERMISSION_STATES,
+  PUSH_TARGET_KINDS,
   SYNC_ENTITIES,
   TEMPERATURE_UNITS,
   TIME_FORMATS,
@@ -400,6 +406,30 @@ describe('column conventions', () => {
     );
   });
 
+  it('keys a delivery by notification and token, and gives push_tokens its routing columns (increment 14)', () => {
+    const deliveries = byName.get('notification_deliveries')!;
+    const key = deliveries.indexes['notification_deliveries_notification_id_push_token_id_key'];
+    expect(key?.isUnique).toBe(true);
+    expect(key?.columns.map((c) => c.expression)).toEqual(['notification_id', 'push_token_id']);
+    // The plain index the key leads with is gone; the key serves the same lookups.
+    expect(Object.keys(deliveries.indexes)).not.toContain(
+      'notification_deliveries_notification_id_idx',
+    );
+    expect(deliveries.columns['is_test']).toMatchObject({ type: 'boolean', notNull: true });
+    expect(deliveries.columns['attempt_log']).toMatchObject({ type: 'jsonb', notNull: true });
+    const tokens = byName.get('push_tokens')!;
+    expect(tokens.columns['app_id']).toMatchObject({ type: 'text', notNull: true });
+    expect(tokens.columns['app_id']?.default).toBe(`'${PRODUCTION_APP_ID}'`);
+    expect(tokens.columns['registered_at']).toMatchObject({
+      type: 'timestamp with time zone',
+      notNull: true,
+    });
+    expect(tokens.columns['permission']).toMatchObject({ type: 'text', notNull: false });
+    expect(Object.keys(tokens.checkConstraints)).toEqual(
+      expect.arrayContaining(['push_tokens_app_id_check', 'push_tokens_permission_check']),
+    );
+  });
+
   it('dedupes notifications per user and gives rate_limits a purge index', () => {
     const notifications = byName.get('notifications')!;
     const dedupe = notifications.indexes['notifications_user_id_dedupe_key_key'];
@@ -423,6 +453,18 @@ describe('agreement with @planeahead/shared', () => {
     expect([...schema.OPERATOR_SOURCES]).toEqual([...OPERATOR_SOURCES]);
     for (const provider of PROVIDER_IDS) {
       expect(schema.EVENT_SOURCES).toContain(provider);
+    }
+  });
+
+  it('push lists match the shared push contracts (increment 14)', () => {
+    expect([...schema.PUSH_ENVIRONMENTS]).toEqual([...PUSH_ENVIRONMENTS]);
+    expect([...schema.PUSH_PERMISSION_STATES]).toEqual([...PUSH_PERMISSION_STATES]);
+    expect([...schema.NOTIFICATION_KINDS]).toEqual([...NOTIFICATION_KINDS]);
+    expect(schema.DEFAULT_PUSH_APP_ID).toBe(PRODUCTION_APP_ID);
+    expect(APP_ID_RE.test(schema.DEFAULT_PUSH_APP_ID)).toBe(true);
+    // Every kind the push queue sends to is a device token kind the table accepts.
+    for (const kind of PUSH_TARGET_KINDS) {
+      expect(schema.PUSH_TOKEN_KINDS).toContain(kind);
     }
   });
 

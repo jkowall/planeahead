@@ -164,6 +164,22 @@ import {
   type ProductEventsBatchV1,
   type Uuidv7Generator,
   type WindowCallCount,
+  type NotificationKind,
+  type PushCredentialExpireRequestV1,
+  type PushCredentialFailure,
+  type PushCredentialName,
+  type PushCredentialRequestV1,
+  type PushDataV1,
+  type PushEnvironment,
+  type PushJobV1,
+  type PushJobV1Input,
+  type PushOutcome,
+  type PushOutcomeMessageV1,
+  type PushPermissionState,
+  type PushTargetKind,
+  type PushTargetResultV1,
+  type PushTargetV1,
+  type PushTargetV1Input,
 } from '../src/index';
 import { AA100_INPUT } from './fixtures';
 
@@ -294,6 +310,23 @@ interface TypeSurface {
   aircraftPositionProvider: AircraftPositionProvider;
   // provider-call-point
   providerCallPoint: ProviderCallPoint;
+  // push (increment 14)
+  notificationKind: NotificationKind;
+  pushCredentialExpireRequestV1: PushCredentialExpireRequestV1;
+  pushCredentialFailure: PushCredentialFailure;
+  pushCredentialName: PushCredentialName;
+  pushCredentialRequestV1: PushCredentialRequestV1;
+  pushDataV1: PushDataV1;
+  pushEnvironment: PushEnvironment;
+  pushJobV1: PushJobV1;
+  pushJobV1Input: PushJobV1Input;
+  pushOutcome: PushOutcome;
+  pushOutcomeMessageV1: PushOutcomeMessageV1;
+  pushPermissionState: PushPermissionState;
+  pushTargetKind: PushTargetKind;
+  pushTargetResultV1: PushTargetResultV1;
+  pushTargetV1: PushTargetV1;
+  pushTargetV1Input: PushTargetV1Input;
   // rpc
   subscribeRequestV1: SubscribeRequestV1;
   subscribeResponseV1: SubscribeResponseV1;

@@ -5,7 +5,7 @@
   //
   // Layout rules this file follows, all of them load bearing:
   //
-  //  1. `exports` is inheritable, so the five Durable Object classes are declared exactly once at
+  //  1. `exports` is inheritable, so the six Durable Object classes are declared exactly once at
   //     the top level. `exports` and `migrations` are mutually exclusive; there is no `migrations`
   //     array anywhere in this repository and there never will be.
   //  2. `exports` does NOT create the `env.*` binding. `durable_objects.bindings` is still
@@ -38,6 +38,8 @@
     "AirportState": { "type": "durable-object", "storage": "sqlite" },
     "UserInbox": { "type": "durable-object", "storage": "sqlite" },
     "ProviderBudget": { "type": "durable-object", "storage": "sqlite" },
+    // Increment 14: the push credentials (one object per APNs environment and one for FCM).
+    "PushAuth": { "type": "durable-object", "storage": "sqlite" },
   },
 
   // Queue consumers (increment 7): `max_concurrency: 10` on the persist consumer in every
@@ -81,6 +83,7 @@
       { "name": "AIRPORT_STATE", "class_name": "AirportState" },
       { "name": "USER_INBOX", "class_name": "UserInbox" },
       { "name": "PROVIDER_BUDGET", "class_name": "ProviderBudget" },
+      { "name": "PUSH_AUTH", "class_name": "PushAuth" },
     ],
   },
 
@@ -114,6 +117,7 @@
     "producers": [
       { "binding": "PERSIST_QUEUE", "queue": "planeahead-persist-local" },
       { "binding": "NOTIFY_QUEUE", "queue": "planeahead-notify-local" },
+      { "binding": "PUSH_QUEUE", "queue": "planeahead-push-local" },
       { "binding": "PROVIDER_EVENTS_QUEUE", "queue": "planeahead-provider-events-local" },
       { "binding": "IMPORTS_QUEUE", "queue": "planeahead-imports-local" },
       { "binding": "RECONCILE_QUEUE", "queue": "planeahead-reconcile-local" },
@@ -131,6 +135,17 @@
         "queue": "planeahead-notify-local",
         "max_retries": 5,
         "dead_letter_queue": "planeahead-notify-dlq-local",
+      },
+      // Push (increment 14): network bound, one Postgres read a batch before its sends (token
+      // liveness, review ruling R1). Five jobs a batch, no batch wait (a push is latency, not
+      // throughput), concurrency left to autoscale; each job's targets go out six at a time and
+      // retryable targets are re-enqueued with their own delay (src/queues/push.ts).
+      {
+        "queue": "planeahead-push-local",
+        "max_batch_size": 5,
+        "max_batch_timeout": 0,
+        "max_retries": 5,
+        "dead_letter_queue": "planeahead-push-dlq-local",
       },
       {
         "queue": "planeahead-provider-events-local",
@@ -163,6 +178,7 @@
       // without a consumer a thrice-failed message is deleted after four days without a trace.
       { "queue": "planeahead-persist-dlq-local", "max_retries": 2 },
       { "queue": "planeahead-notify-dlq-local", "max_retries": 2 },
+      { "queue": "planeahead-push-dlq-local", "max_retries": 2 },
       { "queue": "planeahead-provider-events-dlq-local", "max_retries": 2 },
       { "queue": "planeahead-imports-dlq-local", "max_retries": 2 },
       { "queue": "planeahead-reconcile-dlq-local", "max_retries": 2 },
@@ -199,7 +215,8 @@
 
       // Every secret the Worker reads (WORKER_SECRET_NAMES in src/env.ts; secrets-in-logs.test.ts
       // keeps the two lists equal). wrangler refuses a first deploy while one is unset. The block
-      // is not inherited and replaces .dev.vars inference, so it must be complete here.
+      // is not inherited and replaces .dev.vars inference, so it must be complete here. The push
+      // credentials (PUSH_SECRET_NAMES) are optional here and required in production.
       "secrets": {
         "required": [
           "SENTRY_DSN",
@@ -240,6 +257,7 @@
           { "name": "AIRPORT_STATE", "class_name": "AirportState" },
           { "name": "USER_INBOX", "class_name": "UserInbox" },
           { "name": "PROVIDER_BUDGET", "class_name": "ProviderBudget" },
+          { "name": "PUSH_AUTH", "class_name": "PushAuth" },
         ],
       },
 
@@ -265,6 +283,7 @@
         "producers": [
           { "binding": "PERSIST_QUEUE", "queue": "planeahead-persist-staging" },
           { "binding": "NOTIFY_QUEUE", "queue": "planeahead-notify-staging" },
+          { "binding": "PUSH_QUEUE", "queue": "planeahead-push-staging" },
           { "binding": "PROVIDER_EVENTS_QUEUE", "queue": "planeahead-provider-events-staging" },
           { "binding": "IMPORTS_QUEUE", "queue": "planeahead-imports-staging" },
           { "binding": "RECONCILE_QUEUE", "queue": "planeahead-reconcile-staging" },
@@ -282,6 +301,17 @@
             "queue": "planeahead-notify-staging",
             "max_retries": 5,
             "dead_letter_queue": "planeahead-notify-dlq-staging",
+          },
+          // Push (increment 14): network bound, one Postgres read a batch before its sends (token
+          // liveness, review ruling R1). Five jobs a batch, no batch wait (a push is latency, not
+          // throughput), concurrency left to autoscale; each job's targets go out six at a time and
+          // retryable targets are re-enqueued with their own delay (src/queues/push.ts).
+          {
+            "queue": "planeahead-push-staging",
+            "max_batch_size": 5,
+            "max_batch_timeout": 0,
+            "max_retries": 5,
+            "dead_letter_queue": "planeahead-push-dlq-staging",
           },
           {
             "queue": "planeahead-provider-events-staging",
@@ -314,6 +344,7 @@
           // without a consumer a thrice-failed message is deleted after four days without a trace.
           { "queue": "planeahead-persist-dlq-staging", "max_retries": 2 },
           { "queue": "planeahead-notify-dlq-staging", "max_retries": 2 },
+          { "queue": "planeahead-push-dlq-staging", "max_retries": 2 },
           { "queue": "planeahead-provider-events-dlq-staging", "max_retries": 2 },
           { "queue": "planeahead-imports-dlq-staging", "max_retries": 2 },
           { "queue": "planeahead-reconcile-dlq-staging", "max_retries": 2 },
@@ -342,9 +373,10 @@
 
       "routes": [{ "pattern": "api.planeahead.app", "custom_domain": true }],
 
-      // Every secret the Worker reads (WORKER_SECRET_NAMES in src/env.ts; secrets-in-logs.test.ts
-      // keeps the two lists equal). wrangler refuses a first deploy while one is unset. The block
-      // is not inherited and replaces .dev.vars inference, so it must be complete here.
+      // Every secret the Worker reads (WORKER_SECRET_NAMES in src/env.ts, then PUSH_SECRET_NAMES;
+      // secrets-in-logs.test.ts keeps the lists equal). wrangler refuses a first deploy while one
+      // is unset. The block is not inherited and replaces .dev.vars inference, so it must be
+      // complete here.
       "secrets": {
         "required": [
           "SENTRY_DSN",
@@ -364,6 +396,12 @@
           "WEBHOOK_TOKEN_AEROAPI",
           "DELETED_SUBJECT_HMAC_KEY",
           "IP_SALT_SECRET",
+          // The push transport's credentials (PUSH_SECRET_NAMES, increment 14, ruling P7):
+          // required here and optional in staging, which deploys before the Apple account exists.
+          "APNS_KEY_P8",
+          "APNS_KEY_ID",
+          "APNS_TEAM_ID",
+          "FCM_SERVICE_ACCOUNT_JSON",
         ],
       },
 
@@ -385,6 +423,7 @@
           { "name": "AIRPORT_STATE", "class_name": "AirportState" },
           { "name": "USER_INBOX", "class_name": "UserInbox" },
           { "name": "PROVIDER_BUDGET", "class_name": "ProviderBudget" },
+          { "name": "PUSH_AUTH", "class_name": "PushAuth" },
         ],
       },
 
@@ -410,6 +449,7 @@
         "producers": [
           { "binding": "PERSIST_QUEUE", "queue": "planeahead-persist" },
           { "binding": "NOTIFY_QUEUE", "queue": "planeahead-notify" },
+          { "binding": "PUSH_QUEUE", "queue": "planeahead-push" },
           { "binding": "PROVIDER_EVENTS_QUEUE", "queue": "planeahead-provider-events" },
           { "binding": "IMPORTS_QUEUE", "queue": "planeahead-imports" },
           { "binding": "RECONCILE_QUEUE", "queue": "planeahead-reconcile" },
@@ -427,6 +467,17 @@
             "queue": "planeahead-notify",
             "max_retries": 5,
             "dead_letter_queue": "planeahead-notify-dlq",
+          },
+          // Push (increment 14): network bound, one Postgres read a batch before its sends (token
+          // liveness, review ruling R1). Five jobs a batch, no batch wait (a push is latency, not
+          // throughput), concurrency left to autoscale; each job's targets go out six at a time and
+          // retryable targets are re-enqueued with their own delay (src/queues/push.ts).
+          {
+            "queue": "planeahead-push",
+            "max_batch_size": 5,
+            "max_batch_timeout": 0,
+            "max_retries": 5,
+            "dead_letter_queue": "planeahead-push-dlq",
           },
           {
             "queue": "planeahead-provider-events",
@@ -459,6 +510,7 @@
           // without a consumer a thrice-failed message is deleted after four days without a trace.
           { "queue": "planeahead-persist-dlq", "max_retries": 2 },
           { "queue": "planeahead-notify-dlq", "max_retries": 2 },
+          { "queue": "planeahead-push-dlq", "max_retries": 2 },
           { "queue": "planeahead-provider-events-dlq", "max_retries": 2 },
           { "queue": "planeahead-imports-dlq", "max_retries": 2 },
           { "queue": "planeahead-reconcile-dlq", "max_retries": 2 },

@@ -5,9 +5,16 @@
  * header-versus-body install id check, and (ruling F2) the increment 4 idempotency contract for
  * anonymous callers, which the route keeps: a keyed request replays under `X-Install-Id`, and
  * one without it is answered 400.
+ *
+ * Increment 14 (ruling P6): `appId` and `pushPermission` stored with the token (both optional, an
+ * old client's registration still accepted with the production app id), `registered_at` written on
+ * every registration and `last_used_at` no longer, the rotation that invalidates the device's other
+ * live rows of the same kind, and `POST /v1/devices/current/invalidate`, the sign-out half. The
+ * review round (ruling R4): concurrent registrations of one device serialize on its row, so the
+ * rotation leaves exactly one live row of the kind.
  */
 
-import { eq } from 'drizzle-orm';
+import { and, eq } from 'drizzle-orm';
 import { devices, pushTokens, withDb } from '@planeahead/db';
 import { describe, expect, it } from 'vitest';
 import {
@@ -368,5 +375,275 @@ describe('POST /v1/devices', () => {
     const response = await registerDevice(session, uniqueInstallId('limiter'));
 
     expect(response.status).toBe(200);
+  });
+});
+
+interface TokenRow {
+  readonly token: string;
+  readonly kind: string;
+  readonly appId: string;
+  readonly permission: string | null;
+  readonly registeredAt: string;
+  readonly lastUsedAt: string | null;
+  readonly invalidatedAt: string | null;
+}
+
+async function tokensOf(installId: string): Promise<TokenRow[]> {
+  return withDb(testEnv, (db) =>
+    db
+      .select({
+        token: pushTokens.token,
+        kind: pushTokens.kind,
+        appId: pushTokens.appId,
+        permission: pushTokens.permission,
+        registeredAt: pushTokens.registeredAt,
+        lastUsedAt: pushTokens.lastUsedAt,
+        invalidatedAt: pushTokens.invalidatedAt,
+      })
+      .from(pushTokens)
+      .innerJoin(devices, eq(devices.id, pushTokens.deviceId))
+      .where(eq(devices.installId, installId)),
+  );
+}
+
+function invalidate(
+  session: { readonly cookie: string; readonly ip: string } | null,
+  installId: string,
+  headers: Record<string, string> = {},
+): Promise<Response> {
+  return worker(
+    jsonRequest(
+      '/v1/devices/current/invalidate',
+      'POST',
+      { installId },
+      { ip: session?.ip ?? uniqueIp(), cookie: session?.cookie ?? null, headers },
+    ),
+  );
+}
+
+describe('POST /v1/devices, increment 14 fields (ruling P6)', () => {
+  it('stores the app id and the permission, and takes an old client without either', async () => {
+    const session = await signInAnonymously();
+    const modern = uniqueInstallId('p6-modern');
+    const legacy = uniqueInstallId('p6-legacy');
+
+    const withFields = await registerDevice(session, modern, {
+      pushTokenKind: 'apns',
+      pushToken: `apns-${crypto.randomUUID()}`,
+      pushEnvironment: 'sandbox',
+      appId: 'app.planeahead.mobile.dev',
+      pushPermission: 'provisional',
+    });
+    const old = await registerDevice(session, legacy, {
+      pushTokenKind: 'fcm',
+      pushToken: `fcm-${crypto.randomUUID()}`,
+    });
+
+    expect(withFields.status).toBe(200);
+    expect(old.status).toBe(200);
+    expect(await tokensOf(modern)).toMatchObject([
+      { appId: 'app.planeahead.mobile.dev', permission: 'provisional', lastUsedAt: null },
+    ]);
+    expect(await tokensOf(legacy)).toMatchObject([
+      { appId: 'app.planeahead.mobile', permission: null, lastUsedAt: null },
+    ]);
+  });
+
+  it('writes registered_at on every registration, keeps a permission the body does not name', async () => {
+    const session = await signInAnonymously();
+    const installId = uniqueInstallId('p6-registered');
+    const token = `apns-${crypto.randomUUID()}`;
+
+    await registerDevice(session, installId, {
+      pushTokenKind: 'apns',
+      pushToken: token,
+      pushPermission: 'denied',
+    });
+    const [first] = await tokensOf(installId);
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    await registerDevice(session, installId, { pushTokenKind: 'apns', pushToken: token });
+    const [second] = await tokensOf(installId);
+
+    expect(first?.registeredAt).toBeDefined();
+    expect(Date.parse(second?.registeredAt ?? '')).toBeGreaterThan(
+      Date.parse(first?.registeredAt ?? ''),
+    );
+    expect(second?.permission).toBe('denied');
+  });
+
+  it('refuses an app id that is not a bundle id and a permission it does not know', async () => {
+    const session = await signInAnonymously();
+    const installId = uniqueInstallId('p6-invalid');
+    const token = { pushTokenKind: 'apns', pushToken: `apns-${crypto.randomUUID()}` };
+
+    expect((await registerDevice(session, installId, { ...token, appId: 'nodots' })).status).toBe(
+      400,
+    );
+    expect(
+      (await registerDevice(session, installId, { ...token, pushPermission: 'maybe' })).status,
+    ).toBe(400);
+  });
+
+  it("rotates: a new token invalidates the device's other live rows of the same kind, nothing else", async () => {
+    const session = await signInAnonymously();
+    const installId = uniqueInstallId('p6-rotate');
+    const otherInstall = uniqueInstallId('p6-rotate-other');
+    const [first, second] = [`apns-${crypto.randomUUID()}`, `apns-${crypto.randomUUID()}`];
+    const pushToStart = `p2s-${crypto.randomUUID()}`;
+    const otherDevice = `apns-${crypto.randomUUID()}`;
+
+    await registerDevice(session, installId, { pushTokenKind: 'apns', pushToken: first });
+    await registerDevice(session, installId, {
+      pushTokenKind: 'apns_live_activity_push_to_start',
+      pushToken: pushToStart,
+    });
+    await registerDevice(session, otherInstall, { pushTokenKind: 'apns', pushToken: otherDevice });
+    await registerDevice(session, installId, { pushTokenKind: 'apns', pushToken: second });
+
+    const live = (rows: TokenRow[]) =>
+      rows
+        .filter((row) => row.invalidatedAt === null)
+        .map((row) => row.token)
+        .sort();
+    expect(live(await tokensOf(installId))).toEqual([pushToStart, second].sort());
+    expect(live(await tokensOf(otherInstall))).toEqual([otherDevice]);
+
+    // The first token comes back (a restore): it is live again, and the second rotates out.
+    await registerDevice(session, installId, { pushTokenKind: 'apns', pushToken: first });
+    expect(live(await tokensOf(installId))).toEqual([first, pushToStart].sort());
+  });
+
+  it("rotates nothing when the token was skipped as another user's", async () => {
+    const victim = await signInAnonymously();
+    const attacker = await signInAnonymously();
+    const victimToken = `apns-${crypto.randomUUID()}`;
+    const attackerInstall = uniqueInstallId('p6-attacker');
+    const attackerOwn = `apns-${crypto.randomUUID()}`;
+    await registerDevice(victim, uniqueInstallId('p6-victim'), {
+      pushTokenKind: 'apns',
+      pushToken: victimToken,
+    });
+    await registerDevice(attacker, attackerInstall, {
+      pushTokenKind: 'apns',
+      pushToken: attackerOwn,
+    });
+
+    const stolen = await registerDevice(attacker, attackerInstall, {
+      pushTokenKind: 'apns',
+      pushToken: victimToken,
+    });
+
+    expect((await stolen.json<{ pushTokenSkipped?: string }>()).pushTokenSkipped).toBe(
+      'owned_by_another_user',
+    );
+    expect(await tokensOf(attackerInstall)).toMatchObject([
+      { token: attackerOwn, invalidatedAt: null },
+    ]);
+  });
+});
+
+describe('POST /v1/devices/current/invalidate (ruling P6)', () => {
+  it('answers 401 without a session', async () => {
+    const response = await invalidate(null, uniqueInstallId('p6-nobody'));
+    expect(response.status).toBe(401);
+  });
+
+  it("invalidates every kind of the caller's installation and nothing of anyone else's", async () => {
+    const session = await signInAnonymously();
+    const other = await signInAnonymously();
+    const installId = uniqueInstallId('p6-signout');
+    const otherInstall = uniqueInstallId('p6-signout-other');
+    await registerDevice(session, installId, {
+      pushTokenKind: 'apns',
+      pushToken: `apns-${crypto.randomUUID()}`,
+    });
+    await registerDevice(session, installId, {
+      pushTokenKind: 'apns_live_activity_push_to_start',
+      pushToken: `p2s-${crypto.randomUUID()}`,
+    });
+    await registerDevice(session, otherInstall, {
+      pushTokenKind: 'fcm',
+      pushToken: `fcm-${crypto.randomUUID()}`,
+    });
+    // Another user whose device row names the same installation id (the id is no secret).
+    await registerDevice(other, installId, {
+      pushTokenKind: 'fcm',
+      pushToken: `fcm-${crypto.randomUUID()}`,
+    });
+
+    const response = await invalidate(session, installId, { 'x-install-id': installId });
+    const again = await invalidate(session, installId);
+
+    expect(response.status).toBe(200);
+    expect(await response.json()).toEqual({ invalidated: 2 });
+    expect(await again.json()).toEqual({ invalidated: 0 });
+    const mine = await withDb(testEnv, (db) =>
+      db
+        .select({ kind: pushTokens.kind, invalidatedAt: pushTokens.invalidatedAt })
+        .from(pushTokens)
+        .innerJoin(devices, eq(devices.id, pushTokens.deviceId))
+        .where(and(eq(devices.installId, installId), eq(devices.userId, session.userId))),
+    );
+    expect(mine).toHaveLength(2);
+    expect(mine.every((row) => row.invalidatedAt !== null)).toBe(true);
+    expect((await tokensOf(otherInstall))[0]?.invalidatedAt).toBeNull();
+    const theirs = await withDb(testEnv, (db) =>
+      db
+        .select({ invalidatedAt: pushTokens.invalidatedAt })
+        .from(pushTokens)
+        .where(eq(pushTokens.userId, other.userId)),
+    );
+    expect(theirs).toEqual([{ invalidatedAt: null }]);
+  });
+
+  it('answers 0 for an installation the caller never registered, 400 to a malformed or mismatched id', async () => {
+    const session = await signInAnonymously();
+    const installId = uniqueInstallId('p6-unknown');
+
+    const unknown = await invalidate(session, installId);
+    const malformed = await invalidate(session, 'x');
+    const mismatch = await invalidate(session, installId, {
+      'x-install-id': uniqueInstallId('p6-else'),
+    });
+
+    expect(await unknown.json()).toEqual({ invalidated: 0 });
+    expect(malformed.status).toBe(400);
+    expect(mismatch.status).toBe(400);
+    expect((await mismatch.json<{ error: string }>()).error).toBe('install_id_mismatch');
+  });
+
+  it('lets a later registration revive a signed-out token (sign in again on the same phone)', async () => {
+    const session = await signInAnonymously();
+    const installId = uniqueInstallId('p6-revive');
+    const token = `apns-${crypto.randomUUID()}`;
+    await registerDevice(session, installId, { pushTokenKind: 'apns', pushToken: token });
+    await invalidate(session, installId);
+
+    await registerDevice(session, installId, { pushTokenKind: 'apns', pushToken: token });
+
+    expect(await tokensOf(installId)).toMatchObject([{ token, invalidatedAt: null }]);
+  });
+});
+
+describe('concurrent registrations of one device (review ruling R4)', () => {
+  it('leave exactly one live row of the kind, round after round', async () => {
+    const session = await signInAnonymously();
+    const installId = uniqueInstallId('r4-race');
+    // The phone registered before (the device row exists), then registers new tokens at once.
+    await registerDevice(session, installId);
+
+    for (let round = 0; round < 2; round += 1) {
+      const tokens = Array.from({ length: 6 }, () => `apns-${crypto.randomUUID()}`);
+      const responses = await Promise.all(
+        tokens.map((token) =>
+          registerDevice(session, installId, { pushTokenKind: 'apns', pushToken: token }),
+        ),
+      );
+      expect(responses.map((response) => response.status)).toEqual(tokens.map(() => 200));
+
+      const live = (await tokensOf(installId)).filter((row) => row.invalidatedAt === null);
+      expect(live, `round ${String(round)}`).toHaveLength(1);
+      expect(tokens).toContain(live[0]?.token);
+    }
   });
 });

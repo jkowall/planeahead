@@ -1,7 +1,9 @@
 # Schema review: `@planeahead/db`
 
 Status: final for Phase 0 (increment 12, 2026-09-23); first complete draft increment 3
-(2026-09-20), amended by increments 6 to 11. Reviewers sign off in section 17.
+(2026-09-20), amended by increments 6 to 11, and by increment 14 (migration 0007, the push
+transport: `push_tokens.app_id`, `registered_at` and `permission`, and one
+`notification_deliveries` row per notification and token). Reviewers sign off in section 17.
 
 This document is the reference for the Postgres 18 schema in `packages/db/src/schema`, the
 migrations in `packages/db/migrations`, and the rules every later increment must keep. Where it
@@ -238,13 +240,13 @@ by design, pseudonymous). Rows: order of magnitude twelve months in, after reten
 
 ### Notifications
 
-| Table                      | Purpose                                          | Writer             | Readers      | PII | Enc                   | Retention                       | GDPR    | Rows 1k / 10k / 100k  |
-| -------------------------- | ------------------------------------------------ | ------------------ | ------------ | --- | --------------------- | ------------------------------- | ------- | --------------------- |
-| `notification_preferences` | Channels, quiet hours, per-event toggles (sync)  | API                | notify, sync | 1   | none                  | tombstoned, purged at 30 d      | cascade | 1k / 10k / 100k       |
-| `push_tokens`              | APNs and FCM device tokens                       | `POST /v1/devices` | notify       | 1   | none (routing handle) | invalidated rows purged at 30 d | cascade | 1.5k / 15k / 150k     |
-| `live_activities`          | ActivityKit activity per subscription per device | API                | notify       | 1   | none (routing handle) | ended rows purged at 7 d        | cascade | 500 / 5k / 50k active |
-| `notifications`            | In-app inbox rows with dedupe key                | notify consumer    | API          | 2   | none                  | 90 d                            | cascade | 60k / 600k / 6M       |
-| `notification_deliveries`  | Per-channel delivery evidence                    | notify consumer    | admin, abuse | 1   | none                  | 90 d                            | kept    | 60k / 600k / 6M       |
+| Table                      | Purpose                                                                                                          | Writer                                                                                                | Readers      | PII | Enc                   | Retention                       | GDPR    | Rows 1k / 10k / 100k  |
+| -------------------------- | ---------------------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------- | ------------ | --- | --------------------- | ------------------------------- | ------- | --------------------- |
+| `notification_preferences` | Channels, quiet hours, per-event toggles (sync)                                                                  | API                                                                                                   | notify, sync | 1   | none                  | tombstoned, purged at 30 d      | cascade | 1k / 10k / 100k       |
+| `push_tokens`              | APNs and FCM device tokens, their app id (the APNs topic), registration time and permission (increment 14)       | `POST /v1/devices` (registration, rotation, sign-out); persist consumer (dead tokens, `last_used_at`) | notify, push | 1   | none (routing handle) | invalidated rows purged at 30 d | cascade | 1.5k / 15k / 150k     |
+| `live_activities`          | ActivityKit activity per subscription per device                                                                 | API                                                                                                   | notify       | 1   | none (routing handle) | ended rows purged at 7 d        | cascade | 500 / 5k / 50k active |
+| `notifications`            | In-app inbox rows with dedupe key                                                                                | notify consumer                                                                                       | API          | 2   | none                  | 90 d                            | cascade | 60k / 600k / 6M       |
+| `notification_deliveries`  | Per-channel delivery evidence, one row per notification and token, every attempt in `attempt_log` (increment 14) | persist consumer, from the push outcome messages                                                      | admin, abuse | 1   | none                  | 90 d                            | kept    | 60k / 600k / 6M       |
 
 ### Import, calendar, sharing
 
@@ -301,8 +303,9 @@ Phase 0 writer:
 | `users` (anonymous, `deleting`)                           | deleted an hour after their merge, after the tracker lists are repaired                                                                                                                                                                                                                                                                            | 6    |
 
 Not built, because nothing writes the rows the retention would remove in Phase 0 (each arrives
-with its writer): `push_tokens` invalidated rows (Phase 1 sender), `live_activities` (Phase 1),
-`notification_deliveries` (Phase 1 notify), `provider_webhook_events` (the receivers only
+with its writer): `push_tokens` invalidated rows and `notification_deliveries` (their writer, the
+push transport, arrived in increment 14 but writes only the admin page's test pushes until
+increment 15 produces real jobs: the two purges belong with it), `live_activities` (Phase 1), `provider_webhook_events` (the receivers only
 enqueue), `inbound_messages`, `imports`, `share_link_views`, `email_extractions` (Phases 3 to 5),
 `airport_*` observations (Phase 2); and two whose window cannot elapse before 2027:
 `flight_instances` finished rows (13 months) and `audit_log` (2 years).
@@ -318,6 +321,8 @@ enqueue), `inbound_messages`, `imports`, `share_link_views`, `email_extractions`
 | A flight's airport code, airport row and zone describe one airport                                   | composite FKs `flight_instances_origin_airport_fk` and `_destination_airport_fk` on `airports (id, icao)`; `flight_instances_origin_tz_check`, `_destination_consistency_check`; writers use `resolveAirportEndpoint()`          |
 | Every stored ICAO, IATA, Mode S hex and flight-number code is upper-case and well formed             | format checks on all 37 code columns; `test/schema-contracts.test.ts` fails on a code column without one                                                                                                                         |
 | One notification per user per dedupe key (a fan-out reaches every subscriber once)                   | unique `(user_id, dedupe_key)`; a global key would let the first subscriber's row block the rest                                                                                                                                 |
+| One delivery row per notification and push token (a redelivered outcome is a no-op)                  | unique `(notification_id, push_token_id)` (migration 0007), upserted by the persist consumer; a test push keys by its job id                                                                                                     |
+| One live device token per device and kind                                                            | application rule: a `POST /v1/devices` registration invalidates the device's other live rows of the kind in its transaction (increment 14)                                                                                       |
 | An alert registration's event set is a subset of shared `ALERT_EVENTS`                               | `provider_alert_registrations_events_check` (jsonb containment); the constraint list is exactly the shared list (increment 6 dropped `hold_start` and `hold_end` and regenerated migration 0000), asserted by the contracts test |
 | A superseded instance always carries a reason and vice versa                                         | `flight_instances_superseded_consistency_check`                                                                                                                                                                                  |
 | One live subscription per user per instance                                                          | partial unique `(user_id, flight_instance_id) where deleted_at is null`                                                                                                                                                          |
@@ -490,7 +495,7 @@ Natural keys used for idempotent upserts by the seed loaders: `airports.icao`, `
 | Reference tables                                                                                                                 | seed loaders and the BTS import                                                               | read only                                                                                                                                |
 | `usage_counters`, `idempotency_keys`, `rate_limits`                                                                              | middleware                                                                                    | read only                                                                                                                                |
 | `audit_log`                                                                                                                      | every write path appends; nothing updates or deletes before the retention cron                | append only                                                                                                                              |
-| `notification_deliveries`                                                                                                        | notify consumer                                                                               | append only                                                                                                                              |
+| `notification_deliveries`                                                                                                        | persist consumer, from the push outcome messages (increment 14)                               | upserted per notification and token: status follows the newest attempt, `attempt_log` merged; never deleted before retention             |
 
 Durable Objects never write Postgres (ADR 0007).
 
