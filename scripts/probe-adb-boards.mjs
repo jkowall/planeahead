@@ -24,16 +24,20 @@
  *   U7  whether a window of exactly the page size is accepted, and whether `toLocal` is inclusive;
  *   the bill of ONE production call (review ruling R7): `u4-KATL-am` is the adapter's exact query
  *       on a 12-hour bucket, read between two counter readings, so `ADB_UNITS.fids` can be set
- *       to what AeroDataBox charges for it; a last reading gives the whole run's bill;
+ *       to what AeroDataBox charges for it once that figure is settled (what U2 and U3 imply
+ *       when they were read, else 2 or 4; the re-review's M4); a last reading gives the whole
+ *       run's bill;
  *   B7  whether codeshare rows days ahead carry a callsign or a registration, the keys the board
- *       groups codeshares by (review ruling R12; a row with neither joins the only operator row
- *       of its direction, minute and counterpart).
+ *       groups codeshares by (review ruling R12; a row with neither joins the only row of its
+ *       direction, minute and counterpart that is not a codeshare, when that row is `IsOperator`),
+ *       and how many rows are of unknown status (the re-review's M5).
  *
  * Billing (U2, U3, U6, the production call) is read from the account's unit counter. The direct
  * API has no endpoint for it (only the webhook credit balance), so at each checkpoint the script
- * asks for the counter as the AeroDataBox dashboard shows it (Enter skips; `--no-prompt` skips
- * all), and it records every response header that looks like a quota counter in case the gateway
- * sends one.
+ * asks for the counter as the AeroDataBox dashboard shows it once it has stopped moving (Enter
+ * skips; `--no-prompt` skips all; the dry run prints the running total each reading should
+ * reach), and it records every response header that looks like a quota counter in case the
+ * gateway sends one.
  *
  * What it keeps: booleans and counts only (status, latency, sizes, row counts, the counter
  * readings, quota-like headers), never a flight number, a time or a path (U1's windows are cut
@@ -203,6 +207,9 @@ export function planProbe({ date, pageHours = 24, emptyAirport = DEFAULT_EMPTY_A
         DEPARTURES_SHAPE,
       ),
       FIDS_UNITS,
+      // Its own reading (the re-review's M4): the four calls since `after-u6-too-wide` are read
+      // here, so `before-production` follows a counter that has settled, not one still moving.
+      { checkpoint: 'after-u5-180-days' },
     ),
   );
   for (const icao of HUBS) {
@@ -281,7 +288,17 @@ export function estimateUnits(plan) {
   };
 }
 
-/** The dry run's text: every planned call, its units, the checkpoints and the total. */
+/** What the calls made so far spend: as planned, then from errors free to Both billed twice. */
+function runningTotal(made) {
+  const sofar = estimateUnits(made);
+  return `running total ${String(sofar.expected)} units (${String(sofar.ifErrorsAreFree)} to ${String(sofar.ifBothBillsTwice)})`;
+}
+
+/**
+ * The dry run's text: every planned call and its units, each counter reading in the order the run
+ * asks for it with its running total, the units the counter should have moved by since `before`
+ * (the re-review's M4: a counter short of it has not caught up), and the total.
+ */
 export function describePlan(plan, { date, pageHours }) {
   const estimate = estimateUnits(plan);
   const lines = [
@@ -289,26 +306,38 @@ export function describePlan(plan, { date, pageHours }) {
     `Date ${date}, page size ${String(pageHours)} hours, base ${BASE_URL}`,
     '',
   ];
+  const made = [];
   for (const planned of plan) {
     const target = planned.path ?? '(chosen at run time from the u2-departure answer)';
     lines.push(
       `${planned.item.padEnd(3)} ${planned.id.padEnd(20)} ${String(planned.units)} units  GET ${target}`,
     );
     lines.push(`    ${planned.purpose}`);
-    if (planned.checkpointBefore !== null) {
-      lines.push(`    read the unit counter before this call (${planned.checkpointBefore})`);
+    // As the run reads them: `before` ahead of the first billed call, then the checkpoints.
+    if (planned.units > 0 && !made.some((earlier) => earlier.units > 0)) {
+      lines.push('    read the unit counter before this call (before)');
     }
+    if (planned.checkpointBefore !== null) {
+      lines.push(
+        `    read the unit counter before this call (${planned.checkpointBefore}), ${runningTotal(made)}`,
+      );
+    }
+    made.push(planned);
     if (planned.checkpoint !== null) {
-      lines.push(`    then read the unit counter (${planned.checkpoint})`);
+      lines.push(`    then read the unit counter (${planned.checkpoint}), ${runningTotal(made)}`);
     }
   }
   lines.push(
+    `Last, read the unit counter (end), ${runningTotal(made)}`,
     '',
     `Planned: ${String(estimate.calls)} calls, ${String(estimate.expected)} units expected ` +
       `(${String(estimate.ifErrorsAreFree)} if 204 and 400 are free, ` +
       `${String(estimate.ifBothBillsTwice)} if direction=Both bills both directions).`,
     'Counter readings: before the first billed call (before), at each checkpoint above, and ' +
       'after the last call (end).',
+    'A running total counts the units spent since (before): as planned, then the range from 204 ' +
+      'and 400 billing nothing to direction=Both billing both directions. At each prompt, type ' +
+      'the counter once it has stopped moving; one still short of the range has not caught up.',
   );
   return `${lines.join('\n')}\n`;
 }
@@ -487,6 +516,15 @@ function pause(ms) {
   });
 }
 
+/**
+ * The question at a counter reading. Once it has stopped moving (the re-review's M4): a counter
+ * typed while it still takes in earlier calls folds their units into the next difference, the
+ * production call's included.
+ */
+export function counterQuestion(name) {
+  return `[${name}] the API unit counter on the AeroDataBox dashboard, once it has stopped moving (Enter skips): `;
+}
+
 async function runPlan(options, apiKey) {
   const plan = planProbe(options);
   const readings = {};
@@ -499,9 +537,7 @@ async function runPlan(options, apiKey) {
       readings[name] = null;
       return;
     }
-    const typed = await prompts.question(
-      `[${name}] the API unit counter on the AeroDataBox dashboard (wait for it to update; Enter skips): `,
-    );
+    const typed = await prompts.question(counterQuestion(name));
     const value = Number(typed.replace(/[\s,]/g, ''));
     readings[name] = typed.trim() === '' || !Number.isFinite(value) ? null : value;
   };
@@ -553,8 +589,8 @@ function spent(readings, from, to) {
 
 /**
  * B7 (review ruling R12): how many of an answer's codeshare rows carry the keys the board groups
- * by, a callsign or a registration, and how many operator rows do. Counts only; null when the
- * call was not made or answered no JSON.
+ * by, a callsign or a registration, and how many operator rows and rows of unknown status do.
+ * Counts only; null when the call was not made or answered no JSON.
  */
 export function codeshareKeys(body) {
   if (body === null || body === undefined) {
@@ -564,8 +600,8 @@ export function codeshareKeys(body) {
     Array.isArray(side) ? side : [],
   );
   const filled = (value) => typeof value === 'string' && value.trim() !== '';
-  const count = (status) => {
-    const kept = rows.filter((row) => row?.codeshareStatus === status);
+  const count = (matches) => {
+    const kept = rows.filter((row) => matches(row?.codeshareStatus));
     const callSign = kept.filter((row) => filled(row.callSign));
     const registration = kept.filter((row) => filled(row.aircraft?.reg));
     const neither = kept.filter((row) => !filled(row.callSign) && !filled(row.aircraft?.reg));
@@ -576,12 +612,18 @@ export function codeshareKeys(body) {
       withNeither: neither.length,
     };
   };
-  const codeshared = count('IsCodeshared');
+  const codeshared = count((status) => status === 'IsCodeshared');
   const any = (n) => (codeshared.rows === 0 ? null : n > 0);
   return {
     rows: rows.length,
-    operator: count('IsOperator'),
+    operator: count((status) => status === 'IsOperator'),
     codeshared,
+    // The rows the board reads as `Unknown` (that status or any other string outside the enum):
+    // one in a keyless codeshare's slot is a second candidate operator (the re-review's M5).
+    unknownStatus: count(
+      (status) =>
+        typeof status === 'string' && status !== 'IsOperator' && status !== 'IsCodeshared',
+    ),
     codesharedCarryCallSign: any(codeshared.withCallSign),
     codesharedCarryRegistration: any(codeshared.withRegistration),
   };
@@ -615,6 +657,21 @@ export function findingsOf({ calls, bodies, readings, delayed }) {
     ]),
   ];
   const inTo1200 = twelve.filter((number) => hasDeparture(bodies.get('u7-to-1200'), number));
+  const u2 = {
+    bothUnits: spent(readings, 'before', 'after-u2-both'),
+    departureUnits: spent(readings, 'after-u2-both', 'after-u2-departure'),
+  };
+  const u3 = {
+    withLegUnits: spent(readings, 'after-u2-departure', 'after-u3-withleg'),
+    withLocationUnits: spent(readings, 'after-u3-withleg', 'after-u3-withlocation'),
+  };
+  // What U2 and U3 say the production query bills: `direction=Both`, plus what `withLeg` adds to
+  // the same single-direction call.
+  const implied =
+    u2.bothUnits === null || u2.departureUnits === null || u3.withLegUnits === null
+      ? null
+      : u2.bothUnits + u3.withLegUnits - u2.departureUnits;
+  const production = spent(readings, 'before-production', 'after-production');
   return {
     U1:
       delayed === null
@@ -624,14 +681,8 @@ export function findingsOf({ calls, bodies, readings, delayed }) {
             inRevisedWindow: hasDeparture(bodies.get('u1-revised-window'), delayed.number),
             inScheduledWindow: hasDeparture(bodies.get('u1-scheduled-window'), delayed.number),
           },
-    U2: {
-      bothUnits: spent(readings, 'before', 'after-u2-both'),
-      departureUnits: spent(readings, 'after-u2-both', 'after-u2-departure'),
-    },
-    U3: {
-      withLegUnits: spent(readings, 'after-u2-departure', 'after-u3-withleg'),
-      withLocationUnits: spent(readings, 'after-u3-withleg', 'after-u3-withlocation'),
-    },
+    U2: u2,
+    U3: u3,
     U4: Object.fromEntries(
       HUBS.map((icao) => [
         icao,
@@ -652,9 +703,18 @@ export function findingsOf({ calls, bodies, readings, delayed }) {
       toLocalInclusive: twelve.length === 0 ? null : inTo1200.length > 0,
     },
     // R7: what one production call bills, which `ADB_UNITS.fids` (packages/shared) must equal,
-    // and the whole run, first reading to last, against the plan's estimate.
+    // and the whole run, first reading to last, against the plan's estimate. Settled only at
+    // what U2 and U3 imply when they were read (the re-review's M4: a 2-unit straggler folded
+    // into a 2-unit call reads 4, which `direction=Both` billed twice would also explain), and
+    // without them only at a figure one call can bill: one Tier 2 call or Both billed twice.
+    // Anything else, or no reading, is no figure to set `ADB_UNITS.fids` from.
     bill: {
-      productionCallUnits: spent(readings, 'before-production', 'after-production'),
+      productionCallUnits: production,
+      productionCallSettled:
+        implied !== null && implied > 0
+          ? production === implied
+          : production === FIDS_UNITS || production === 2 * FIDS_UNITS,
+      impliedByU2AndU3: implied,
       runUnits: spent(readings, 'before', 'end'),
     },
     // R12: the same day's production call, the bucket days ahead, and the date 180 days out.

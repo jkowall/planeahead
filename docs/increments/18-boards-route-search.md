@@ -32,7 +32,7 @@ itself (a screen pushed from a sheet would open behind it), the add path now sen
 `origin`, and the board shows the route's default window only (no time or airline filter yet).
 The provider probe (B13) reads billing from the dashboard's unit counter, which it asks for at
 each checkpoint, because the direct API has no endpoint for it. The review round's own
-departures: ruling R1's `no-store` default reaches the Phase 0 routes too (every `/v1` answer);
+departures: ruling R1's `no-store` default reaches the Phase 0 routes too (every `/v1` route);
 production's `BOARDS_ENABLED` is `"false"` rather than absent (R8 as the orchestrator amended
 it); ruling R14 keeps an earlier flight only with live data behind its status; and one second
 skeptic read MA1 to MA4 together.
@@ -110,13 +110,13 @@ AeroDataBox budget that can never starve the flight trackers. No AeroAPI anywher
   (R3 F17). Both limits are constants beside the plan table in `config.ts`, settable later with
   the rest of the budget (increment 17). Tracker polls never see these limits.
 
-  Amended by the review round (ruling R2): that holds for the share and the hourly cap, not for
-  the rate. Board and tracker calls share ProviderBudget's per-second token bucket, and a refused
+  Amended by the review round (ruling R2): that holds for the share and the hourly cap, not for the
+  rate. Board and tracker calls share ProviderBudget's per-second token bucket, and a refused
   tracker poll loses its slot, so a board or route-search call, its free coverage check included,
   takes a token only while the bucket keeps `boardTokenFloor` more (half the burst, rounded down:
-  Starter 1, Growth 2, Scale 5); otherwise it is refused as `board_rate_floor`, with the wait
-  until it would pass, and AirportState waits that long. The free coverage check is no refresh:
-  it skips the share and the hourly cap (ruling R5), so checks alone never fill the cap.
+  Starter 1, Growth 2, Scale 5); otherwise it is refused as `board_rate_floor`, with the wait until
+  it would pass, and AirportState waits that long, at least a second. The free coverage check is no
+  refresh: it skips the share and the hourly cap (ruling R5), so checks alone never fill the cap.
 - **B6. Coverage (R3 D6).** Once per airport per day the object calls the free coverage endpoint
   (the existing `checkCoverage`) and keeps the answer. Neither schedules nor live coverage: a 404
   `board_not_covered` and no FIDS call. Schedules only: the board says so, and the screen shows
@@ -145,8 +145,8 @@ AeroDataBox budget that can never starve the flight trackers. No AeroAPI anywher
   in the time range by its scheduled or its best time, and one scheduled earlier stays while
   live data says it has not yet departed or arrived (ruling R14). `partial` marks only a bucket
   that could not be read, never one out of range (ruling R10). Every answer, the 304 included,
-  says `Cache-Control: no-store`, the default of every `/v1` answer (ruling R1), so no board
-  stays in the phone's HTTP cache.
+  says `Cache-Control: no-store`, the default of every answer the `/v1` chain produces (ruling
+  R1), so no board stays in the phone's HTTP cache.
 - **B8. Routes.** `GET /v1/airports/{code}/board?direction=departures|arrivals&from=&to=&airline=`
   and `GET /v1/airports/{origin}/flights/to/{destination}?date=YYYY-MM-DD` (the route search: the
   origin's two buckets of that origin-local date, departures whose arrival leg is the
@@ -159,11 +159,11 @@ AeroDataBox budget that can never starve the flight trackers. No AeroAPI anywher
 
   Amended by the review round: both routes answer 404 `boards_disabled` unless `BOARDS_ENABLED`
   is `"true"` (locally and on staging; production says `"false"` until AeroDataBox's written End
-  Use answer and the per-user caps of B9, rulings R8 and R3), before the session is read; the
-  session must be a session principal, never an API token (ruling R15). A board window may end at
-  most 72 hours ahead (a 422 `date_out_of_range` with `maxHoursAhead`, ruling R3): later dates are
-  the route search's, which is capped. The route search keeps only the departures of the
-  searched origin-local date (ruling R12).
+  Use answer and the per-user caps of B9, rulings R8 and R3), before the route's session checks,
+  brakes and lookups; the session must be a session principal, never an API token (ruling R15). A
+  board window may end at most 72 hours ahead (a 422 `date_out_of_range` with `maxHoursAhead`,
+  ruling R3): later dates are the route search's, which is capped. The route search keeps only
+  the departures of the searched origin-local date (ruling R12).
 - **B9. Access and caps (plan section 3, R3 D11).** A new rate-limit binding `BOARD_RL` (30 per 60
   seconds) is taken twice per board or route-search request, keyed by the user and by the client
   IP, in every environment (wrangler.jsonc, runbook step 2 if it lists bindings). Anonymous users
