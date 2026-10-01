@@ -164,6 +164,8 @@ async function getAdmin(
     createAdminRoutes({
       access: { fetch: fake.fetch, cache: options.cache ?? new Map(), now: options.now },
       fetch: fake.fetch,
+      // The file's handle: a client opened per call here holds its sockets until the file ends.
+      db: () => db(),
     }),
   );
   const ctx = createExecutionContext();

@@ -74,7 +74,8 @@ export async function notify(intents: readonly unknown[]): Promise<PushJobV1[]> 
     })),
   );
   const ctx = createExecutionContext();
-  await handleNotifyBatch(batch, { env: testEnv, ctx, log: quietLog }, { pushQueue });
+  // The file's handle, as `persist` passes: a client per call would live until the file ends.
+  await handleNotifyBatch(batch, { env: testEnv, ctx, log: quietLog }, { db: db(), pushQueue });
   expect((await getQueueResult(batch, ctx)).retryMessages).toEqual([]);
   return sent.map((body) => PushJobV1.parse(body));
 }

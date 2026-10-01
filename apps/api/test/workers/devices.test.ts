@@ -15,7 +15,7 @@
  */
 
 import { and, eq } from 'drizzle-orm';
-import { devices, pushTokens, withDb } from '@planeahead/db';
+import { devices, pushTokens } from '@planeahead/db';
 import { describe, expect, it } from 'vitest';
 import {
   IDEMPOTENCY_KEY_HEADER,
@@ -30,13 +30,14 @@ import {
   magicLinkTokenFor,
   registerDevice,
   signInAnonymously,
-  testEnv,
   uniqueEmail,
   uniqueInstallId,
   uniqueIp,
   verifyMagicLink,
   worker,
 } from './helpers/auth';
+// One client for the file: a `withDb` per helper call held a connection until the file ended.
+import { withFileDb } from './helpers/routes';
 
 interface DeviceBody {
   readonly device?: { id: string; installId: string; platform: string };
@@ -75,7 +76,7 @@ describe('POST /v1/devices', () => {
     expect(secondBody.device?.id).toBe(firstBody.device?.id);
     expect(firstBody.pushToken).toBeNull();
 
-    const rows = await withDb(testEnv, (db) =>
+    const rows = await withFileDb((db) =>
       db
         .select({
           userId: devices.userId,
@@ -108,7 +109,7 @@ describe('POST /v1/devices', () => {
     expect(aBody.pushToken?.kind).toBe('apns');
     expect(bBody.pushToken?.id).toBe(aBody.pushToken?.id);
 
-    const rows = await withDb(testEnv, (db) =>
+    const rows = await withFileDb((db) =>
       db
         .select({
           deviceId: pushTokens.deviceId,
@@ -152,7 +153,7 @@ describe('POST /v1/devices', () => {
     expect(pushToStart.status).toBe(200);
     expect(pushToStartBody.pushToken?.kind).toBe('apns_live_activity_push_to_start');
     expect(againBody.pushToken?.id).toBe(pushToStartBody.pushToken?.id);
-    const rows = await withDb(testEnv, (db) =>
+    const rows = await withFileDb((db) =>
       db
         .select({ kind: pushTokens.kind, environment: pushTokens.environment })
         .from(pushTokens)
@@ -254,7 +255,7 @@ describe('POST /v1/devices', () => {
     expect(movedBody.pushToken).not.toBeNull();
     expect(movedBody.pushTokenSkipped).toBeUndefined();
     expect(logEvents(lines, 'push_token_conflict')).toHaveLength(0);
-    const rows = await withDb(testEnv, (db) =>
+    const rows = await withFileDb((db) =>
       db
         .select({ userId: pushTokens.userId, deviceId: pushTokens.deviceId })
         .from(pushTokens)
@@ -305,7 +306,7 @@ describe('POST /v1/devices', () => {
     expect(again.status).toBe(200);
     expect(againBody.pushToken).not.toBeNull();
     expect(againBody.pushTokenSkipped).toBeUndefined();
-    const rows = await withDb(testEnv, (db) =>
+    const rows = await withFileDb((db) =>
       db
         .select({ userId: pushTokens.userId, deviceId: pushTokens.deviceId })
         .from(pushTokens)
@@ -342,7 +343,7 @@ describe('POST /v1/devices', () => {
     expect(warnings).toHaveLength(1);
     expect(JSON.stringify(warnings)).not.toContain(token);
 
-    const rows = await withDb(testEnv, (db) =>
+    const rows = await withFileDb((db) =>
       db.select({ userId: pushTokens.userId }).from(pushTokens).where(eq(pushTokens.token, token)),
     );
     expect(rows).toEqual([{ userId: victim.userId }]);
@@ -360,7 +361,7 @@ describe('POST /v1/devices', () => {
 
     expect(inModel.status).toBe(400);
     expect(inToken.status).toBe(400);
-    const rows = await withDb(testEnv, (db) =>
+    const rows = await withFileDb((db) =>
       db.select({ id: devices.id }).from(devices).where(eq(devices.installId, installId)),
     );
     expect(rows).toHaveLength(0);
@@ -389,7 +390,7 @@ interface TokenRow {
 }
 
 async function tokensOf(installId: string): Promise<TokenRow[]> {
-  return withDb(testEnv, (db) =>
+  return withFileDb((db) =>
     db
       .select({
         token: pushTokens.token,
@@ -577,7 +578,7 @@ describe('POST /v1/devices/current/invalidate (ruling P6)', () => {
     expect(response.status).toBe(200);
     expect(await response.json()).toEqual({ invalidated: 2 });
     expect(await again.json()).toEqual({ invalidated: 0 });
-    const mine = await withDb(testEnv, (db) =>
+    const mine = await withFileDb((db) =>
       db
         .select({ kind: pushTokens.kind, invalidatedAt: pushTokens.invalidatedAt })
         .from(pushTokens)
@@ -587,7 +588,7 @@ describe('POST /v1/devices/current/invalidate (ruling P6)', () => {
     expect(mine).toHaveLength(2);
     expect(mine.every((row) => row.invalidatedAt !== null)).toBe(true);
     expect((await tokensOf(otherInstall))[0]?.invalidatedAt).toBeNull();
-    const theirs = await withDb(testEnv, (db) =>
+    const theirs = await withFileDb((db) =>
       db
         .select({ invalidatedAt: pushTokens.invalidatedAt })
         .from(pushTokens)
