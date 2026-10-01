@@ -11,13 +11,7 @@
 
 import { createExecutionContext, createMessageBatch, getQueueResult } from 'cloudflare:test';
 import { and, eq } from 'drizzle-orm';
-import {
-  flightEvents,
-  flightInstances,
-  openDb,
-  providerCallDaily,
-  providerCalls,
-} from '@planeahead/db';
+import { flightEvents, flightInstances, providerCallDaily, providerCalls } from '@planeahead/db';
 import { afterEach, describe, expect, it } from 'vitest';
 import {
   NotifyIntentV1,
@@ -45,6 +39,8 @@ import {
   uniqueFlight,
   type TestFlight,
 } from './helpers/flights';
+// One client for the file: one per test or per batch held its connections until the file ended.
+import { db as fileDb } from './helpers/routes';
 
 afterEach(drainTouched);
 
@@ -144,7 +140,12 @@ async function run(
   await handlePersistBatch(
     batch,
     { env: options.env ?? testEnv, ctx, log: quietLog },
-    { capture: options.capture, trackerFor: options.trackerFor, notifyQueue: options.notifyQueue },
+    {
+      db: fileDb(),
+      capture: options.capture,
+      trackerFor: options.trackerFor,
+      notifyQueue: options.notifyQueue,
+    },
   );
   return getQueueResult(batch, ctx);
 }
@@ -187,7 +188,7 @@ function notifyIntentMessage(flight: TestFlight, seq: number): PersistMessageV1I
 describe('persist consumer', () => {
   it('applies instance rows monotonically under duplicate and reordered delivery', async () => {
     const flight = uniqueFlight();
-    const db = openDb(testEnv);
+    const db = fileDb();
     const v1 = message(flight, 1, {
       kind: 'flight_instance',
       flightKey: flight.flightKey,
@@ -228,7 +229,7 @@ describe('persist consumer', () => {
 
   it('inserts events and provider calls once, and retries an event whose instance is not there yet', async () => {
     const flight = uniqueFlight();
-    const db = openDb(testEnv);
+    const db = fileDb();
     const event = message(flight, 2, {
       kind: 'flight_event',
       flightKey: flight.flightKey,
@@ -393,11 +394,7 @@ describe('persist consumer', () => {
       })),
     );
     const ctx = createExecutionContext();
-    await handleNotifyBatch(batch, {
-      env: testEnv,
-      ctx,
-      log: quietLog,
-    });
+    await handleNotifyBatch(batch, { env: testEnv, ctx, log: quietLog }, { db: fileDb() });
     const notified = await getQueueResult(batch, ctx);
     expect(notified.retryMessages).toEqual([]);
     expect(notified.explicitAcks).toEqual(['n-0']);
@@ -437,7 +434,7 @@ describe('persist consumer', () => {
       seqs: [1, 2, 3],
     });
     expect(foreign).toMatchObject({ matched: false, deleted: 0 });
-    const db = openDb(testEnv);
+    const db = fileDb();
     const [row] = await db
       .select({ version: flightInstances.version, trackingState: flightInstances.trackingState })
       .from(flightInstances)
@@ -468,7 +465,7 @@ describe('persist consumer', () => {
     expect(first.explicitAcks).toEqual(['m-0', 'm-1']);
     expect(second.explicitAcks).toEqual(['m-0']);
     expect(points).toBe(1);
-    const db = openDb(testEnv);
+    const db = fileDb();
     const rows = await db
       .select({ id: providerCalls.id })
       .from(providerCalls)
@@ -501,7 +498,7 @@ describe('persist consumer', () => {
     const result = await run([daily(1, 60, 30), daily(0, 40, 20), daily(1, 60, 30)]);
 
     expect(result.explicitAcks).toEqual(['m-0', 'm-1', 'm-2']);
-    const db = openDb(testEnv);
+    const db = fileDb();
     const rows = await db
       .select({
         operation: providerCallDaily.operation,
@@ -520,7 +517,7 @@ describe('persist consumer', () => {
 
   it('ignores an older tracker lifetime and refuses a newer one for a finished instance (L9)', async () => {
     const flight = uniqueFlight();
-    const db = openDb(testEnv);
+    const db = fileDb();
     const lifetime = (
       epochMs: number,
       seq: number,
@@ -631,7 +628,7 @@ describe('persist consumer', () => {
     );
     expect(result.explicitAcks).toEqual(['m-0', 'm-1', 'm-2']);
     expect(captured).toEqual(['provider_kill_switch_tripped']);
-    const db = openDb(testEnv);
+    const db = fileDb();
     const rows = await db
       .select({
         calls: providerCallDaily.calls,

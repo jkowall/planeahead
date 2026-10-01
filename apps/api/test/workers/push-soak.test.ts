@@ -145,6 +145,8 @@ async function admin(call: AdminCall = {}): Promise<Response> {
     createAdminRoutes({
       access: { fetch: access.fetch, cache: new Map() },
       fetch: access.fetch,
+      // The file's handle: a client opened per call here holds its sockets until the file ends.
+      db: () => db(),
       ...call.options,
     }),
   );
