@@ -188,12 +188,17 @@ export function selectRecipients(
   return { recipients, pushed, dropped };
 }
 
-/** What a `notifications` row keeps of its intent (`data`), for the inbox. */
+/**
+ * What a `notifications` row keeps of its intent (`data`), for the inbox. `producedAt` orders a
+ * user's rows for the push consumer's supersession (ruling Q16): an intent notify reaches late
+ * (after an outage) is inserted after a newer one, but was produced before it.
+ */
 function notificationData(intent: NotifyIntentV1): Record<string, unknown> {
   const { kind, subject, value, previousValue, correction, firstAssignment } = intent.intent;
   return {
     v: 1,
     flightKey: intent.flightKey,
+    producedAt: intent.producedAt,
     kind,
     subject,
     value,

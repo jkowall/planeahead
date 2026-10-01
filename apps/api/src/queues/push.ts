@@ -25,7 +25,8 @@
  *      Otherwise it is not requested: `failed`, reason `token_inactive`, its attempt count
  *      unchanged, which `persist` records like any failed delivery and which invalidates nothing.
  *      The same statement answers which of the targets' notifications a newer `notifications`
- *      row for the same user, kind and flight has superseded (increment 15 ruling Q16): such a
+ *      row for the same user, kind and flight has superseded (increment 15 ruling Q16; newer by
+ *      the intent's `producedAt`, then the row's `created_at` and id): such a
  *      target is not requested either (`failed`, reason `superseded`), so a retried first push
  *      cannot land after its correction. A target with no notification (the admin page's test
  *      push) is never superseded.
@@ -210,12 +211,18 @@ export async function readLiveTokens(
 }
 
 /**
- * Ruling Q16: the rows among `ids` that a newer `notifications` row (later `created_at`, then the
- * uuidv7 id) for the same user, kind and flight has superseded, the inbox's own order. A test row
- * never supersedes a real one, so an injection cannot cancel a user's pending real push.
+ * Ruling Q16: the rows among `ids` that a newer `notifications` row for the same user, kind and
+ * flight has superseded. Newer is ordered by the intent's `producedAt` (kept in `data`), then
+ * `created_at`, then the uuidv7 id: notify inserts an intent when it gets to it, so an older
+ * intent that waited out an outage in notify's retries is inserted after a newer one, and must
+ * never supersede it (the orchestrator's ruling on part A2's caveat). A row without `producedAt`
+ * (none since that ruling) is placed at its `created_at`. A test row never supersedes a real one,
+ * so an injection cannot cancel a user's pending real push.
  */
 function supersededNotifications(db: Db, ids: readonly string[]) {
   const newer = alias(notifications, 'newer');
+  const newerAt = sql`coalesce((${newer.data} ->> 'producedAt')::timestamptz, ${newer.createdAt})`;
+  const rowAt = sql`coalesce((${notifications.data} ->> 'producedAt')::timestamptz, ${notifications.createdAt})`;
   const correction = db
     .select({ one: sql`1` })
     .from(newer)
@@ -225,7 +232,7 @@ function supersededNotifications(db: Db, ids: readonly string[]) {
         eq(newer.kind, notifications.kind),
         eq(newer.flightInstanceId, notifications.flightInstanceId),
         or(eq(newer.isTest, false), eq(notifications.isTest, true)),
-        sql`(${newer.createdAt}, ${newer.id}) > (${notifications.createdAt}, ${notifications.id})`,
+        sql`(${newerAt}, ${newer.createdAt}, ${newer.id}) > (${rowAt}, ${notifications.createdAt}, ${notifications.id})`,
       ),
     );
   return db

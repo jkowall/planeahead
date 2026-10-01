@@ -1177,7 +1177,9 @@ export class FlightTracker extends DurableObject<Env> {
    * injection id in their dedupe key. It stores NEITHER the synthetic snapshot NOR the state the
    * evaluation returns, so the next real poll diffs against real data and finds no change back;
    * the only rows it writes are its intents' dedupe and outbox rows. A replayed injection id
-   * writes nothing. The Access-protected admin route that calls it is src/routes/admin-inject.ts.
+   * writes nothing. It is ignored (`suspected`, `cancelled`) while the stored policy state holds a
+   * suspected cancellation or diversion, or the stored snapshot is cancelled (review ruling Q5).
+   * The Access-protected admin route that calls it is src/routes/admin-inject.ts.
    */
   async injectPolicyEvent(input: unknown): Promise<Exact<InjectPolicyEventResponseV1>> {
     const request = parseRpcRequest(InjectPolicyEventRequestV1, input);
@@ -1191,6 +1193,21 @@ export class FlightTracker extends DurableObject<Env> {
         this.#armAbsentCleanup(now);
       }
       const reason = row === null ? 'absent' : 'finished';
+      return { rpcVersion: RPC_SCHEMA_VERSION, outcome: 'ignored', reason, intents: [] };
+    }
+    // Review ruling Q5: an injection is confirmed by construction, so one into a suspected
+    // cancellation or diversion would decide the suspicion on synthetic data; and a stored
+    // snapshot that is cancelled has nothing left to change. Checked with no await before the
+    // transaction below, so no alarm can slip between the check and the evaluation.
+    const stored = this.#storedPolicyState(row);
+    const suspected =
+      stored?.cancellation.status === 'suspect' || stored?.diversion.status === 'suspect';
+    if (suspected || this.#snapshotOf(row).status === 'cancelled') {
+      const reason = suspected ? 'suspected' : 'cancelled';
+      this.#log.info('flight_tracker_policy_injection_refused', {
+        injection_id: request.injectionId,
+        reason,
+      });
       return { rpcVersion: RPC_SCHEMA_VERSION, outcome: 'ignored', reason, intents: [] };
     }
     const written = this.#tx((): WrittenIntent[] => {

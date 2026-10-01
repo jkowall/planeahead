@@ -777,20 +777,26 @@ describe('a production platform without usable credentials (review ruling R3)', 
   });
 });
 
-/** A `notifications` row of `userId` about `flightInstanceId`, created `agoMs` before now. */
+/**
+ * A `notifications` row of `userId` about `flightInstanceId`, created `agoMs` before now; with
+ * `producedAt`, its `data` keeps the intent's production instant as notify writes it.
+ */
 async function plantNotification(
   userId: string,
   flightInstanceId: string,
   kind: string,
   agoMs: number,
   isTest = false,
+  producedAt?: string,
 ): Promise<string> {
   const id = crypto.randomUUID();
+  const data = producedAt === undefined ? null : JSON.stringify({ v: 1, producedAt });
   await db().execute(sql`
     insert into notifications
-      (id, user_id, flight_instance_id, kind, dedupe_key, title, body, is_test, created_at)
+      (id, user_id, flight_instance_id, kind, dedupe_key, title, body, is_test, data, created_at)
     values (${id}::uuid, ${userId}::uuid, ${flightInstanceId}::uuid, ${kind}, ${`q16:${id}`},
-            'AA100', 'Gate B12', ${isTest}, now() - ${agoMs} * interval '1 millisecond')
+            'AA100', 'Gate B12', ${isTest}, ${data}::jsonb,
+            now() - ${agoMs} * interval '1 millisecond')
   `);
   return id;
 }
@@ -845,5 +851,50 @@ describe('a target superseded by a newer notification (increment 15 ruling Q16)'
     ]);
     expect(results[0]).toMatchObject({ requested: false, attempt: 0, notificationId: first });
     expect(outcome.requests).toHaveLength(5);
+  });
+
+  it('orders by the intent producedAt: an older intent inserted after a newer one never supersedes it', async () => {
+    const session = await signInAnonymously();
+    const token = await registeredToken(session, uniqueInstallId('q16-order'));
+    const flight = crypto.randomUUID();
+    // The newer intent (11:55) reached notify first; the older one (11:40) waited out an outage
+    // in notify's retries and was inserted 30 s later.
+    const newer = await plantNotification(
+      session.userId,
+      flight,
+      'gate_change',
+      60_000,
+      false,
+      '2026-10-02T11:55:00.000Z',
+    );
+    const older = await plantNotification(
+      session.userId,
+      flight,
+      'gate_change',
+      30_000,
+      false,
+      '2026-10-02T11:40:00.000Z',
+    );
+    const jobFor = (notificationId: string): PushJobV1Input => {
+      const base = target({
+        pushTokenId: token.pushTokenId,
+        subjectId: token.userId,
+        token: token.token,
+      });
+      return inOneHour({ targets: [{ ...base, notificationId }] });
+    };
+
+    const outcome = await run([jobFor(newer), jobFor(older)], () => apnsAnswer(200), {
+      liveTokens: 'database',
+    });
+
+    const results = outcome.outcomes.map((message) => message.results[0]);
+    expect(
+      results.map((result) => [result?.notificationId, result?.outcome, result?.reason]),
+    ).toEqual([
+      [newer, 'sent', null],
+      [older, 'failed', 'superseded'],
+    ]);
+    expect(outcome.requests).toHaveLength(1);
   });
 });

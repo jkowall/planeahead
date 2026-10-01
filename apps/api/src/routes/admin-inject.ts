@@ -15,7 +15,10 @@
  *     jobs); it stores neither the copy nor the policy state. The answer page lists each intent
  *     and whether it was written (false: a replay, whose dedupe key exists already), with a
  *     button that replays the same injection id, which must write nothing. An `audit_log` row
- *     names the operator.
+ *     names the operator: written before the tracker call with the outcome `pending`, and
+ *     settled after it as `written`, `ignored`, `timeout` or `error` (review ruling Q6). The
+ *     tracker ignores an injection, answered here with 409, while its stored policy state holds a
+ *     suspected cancellation or diversion or its stored snapshot is cancelled (review ruling Q5).
  *
  * On staging and locally any tracker may be injected; on production only a flight one of whose
  * live (not unsubscribed) subscribers is in `PUSH_INJECT_ALLOWED_USER_IDS`, else the form says
@@ -52,7 +55,7 @@ import { DeadlineExceededError, callWithDeadline } from '../lib/deadline';
 import { esc, renderPage, table } from '../lib/html';
 import { allowedTestPushUserIds } from '../lib/push-allow-list';
 import { TRACKER_LOCATION_HINT, isAbsentTrackerError, type TrackerRpc } from '../lib/trackers';
-import { createLogger } from '../observability/log';
+import { createLogger, errorFields } from '../observability/log';
 
 export const ADMIN_INJECT_PATH = '/admin/push/inject';
 
@@ -75,6 +78,23 @@ export type InjectedEvent =
 /** A delay the form accepts: up to a day. */
 export const INJECTED_DELAY_MAX_MINUTES = 1_440;
 const GATE_RE = /^[A-Za-z0-9-]{1,8}$/;
+
+/**
+ * The `outcome` of an injection's `audit_log` row (review ruling Q6): `pending` from just before
+ * the tracker call until it ends; `written` when the tracker answered (its intents and how many
+ * were written ride along: none for a replay), `ignored` when it refused (with its reason),
+ * `timeout` past the deadline (the call may still land), `error` when the call threw.
+ */
+export type InjectAuditOutcome = 'pending' | 'written' | 'ignored' | 'timeout' | 'error';
+
+/** The 409 page's text for each reason the tracker ignores an injection (Q5). */
+const IGNORED_MESSAGES: Record<NonNullable<InjectPolicyEventResponseV1['reason']>, string> = {
+  absent: 'The tracker holds no running flight to inject into.',
+  finished: 'The tracker holds no running flight to inject into.',
+  suspected:
+    'The tracker holds a suspected cancellation or diversion awaiting its re-read; an injection would decide it on synthetic data. Try again once the re-read has settled it.',
+  cancelled: 'The tracker holds a cancelled snapshot; there is nothing left to inject into.',
+};
 
 /** The two tracker RPCs the injector calls, narrowed so a test can hand in a fake. */
 export interface InjectorTracker extends Pick<TrackerRpc, 'getState'> {
@@ -350,9 +370,6 @@ function resultHtml(
   response: InjectPolicyEventResponseV1,
 ): string {
   const what = `<p>${esc(EVENT_LABELS[event.kind].replace(/ \(.*\)$/, ''))} injected into <code>${esc(flightKey)}</code> as injection <code>${esc(injectionId)}</code>.</p>`;
-  if (response.outcome === 'ignored') {
-    return `${what}<p class="unavailable">The tracker ignored it (${esc(response.reason ?? 'unknown')}): it holds no running flight.</p>`;
-  }
   if (response.intents.length === 0) {
     return `${what}<p class="meta">The policy produced no intents: the event is not a change it pushes here (outside its window, under its thresholds, or no change from the stored snapshot).</p>`;
   }
@@ -448,6 +465,45 @@ export async function injectSend(
     );
   }
   const injectionId = parsed.injectionId ?? uuidv7(() => now);
+  const identity = c.var.accessIdentity;
+  // Review ruling Q6: the audit row goes in BEFORE the tracker call, outcome `pending`, so an
+  // injection that times out or fails is on record too; `settle` records how the call ended.
+  const auditId = uuidv7();
+  const details = {
+    flight_key: flightKey,
+    injection_id: injectionId,
+    replay: parsed.injectionId !== null,
+    event,
+    operator_email: identity?.email ?? null,
+    operator_subject: identity?.subject ?? 'unknown',
+  };
+  await db.insert(auditLog).values({
+    id: auditId,
+    actorType: 'admin',
+    action: 'notify.injected',
+    targetType: 'flight_instance',
+    targetId: await flightInstanceId(db, flightKey),
+    requestId: c.var.requestId,
+    details: { ...details, outcome: 'pending' satisfies InjectAuditOutcome },
+  });
+  const settle = async (
+    outcome: Exclude<InjectAuditOutcome, 'pending'>,
+    extra: Record<string, unknown> = {},
+  ): Promise<void> => {
+    try {
+      await db
+        .update(auditLog)
+        .set({ details: { ...details, outcome, ...extra } })
+        .where(eq(auditLog.id, auditId));
+    } catch (error) {
+      // The tracker call has ended; its answer still goes to the operator, the row stays pending.
+      log.error('admin_inject_audit_unsettled', {
+        injection_id: injectionId,
+        outcome,
+        ...errorFields(error),
+      });
+    }
+  };
   let response: InjectPolicyEventResponseV1;
   try {
     response = InjectPolicyEventResponseV1.parse(
@@ -464,6 +520,7 @@ export async function injectSend(
     );
   } catch (error) {
     if (error instanceof DeadlineExceededError) {
+      await settle('timeout');
       // The call still completes: a replay of the same id shows what it wrote, and writes nothing.
       return again(
         `The tracker did not answer in time; injection ${injectionId} may still be written.`,
@@ -471,28 +528,22 @@ export async function injectSend(
         replayForm(form, injectionId),
       );
     }
+    await settle('error', { error_name: error instanceof Error ? error.name : 'unknown' });
     throw error;
   }
-  const written = response.intents.filter((intent) => intent.written).length;
-  const identity = c.var.accessIdentity;
-  await db.insert(auditLog).values({
-    actorType: 'admin',
-    action: 'notify.injected',
-    targetType: 'flight_instance',
-    targetId: await flightInstanceId(db, flightKey),
-    requestId: c.var.requestId,
-    details: {
+  if (response.outcome === 'ignored') {
+    // Q5: a suspected cancellation or diversion, or a cancelled snapshot; or the flight finished
+    // since `getState` answered. Every case is a conflict with the tracker's state.
+    await settle('ignored', { reason: response.reason ?? null });
+    log.warn('admin_inject_refused', {
+      reason: response.reason ?? 'unknown',
       flight_key: flightKey,
       injection_id: injectionId,
-      replay: parsed.injectionId !== null,
-      event,
-      outcome: response.outcome,
-      intents: response.intents.length,
-      written,
-      operator_email: identity?.email ?? null,
-      operator_subject: identity?.subject ?? 'unknown',
-    },
-  });
+    });
+    return again(IGNORED_MESSAGES[response.reason ?? 'finished'], 409);
+  }
+  const written = response.intents.filter((intent) => intent.written).length;
+  await settle('written', { intents: response.intents.length, written });
   log.info('admin_inject_done', {
     flight_key: flightKey,
     injection_id: injectionId,

@@ -23,7 +23,7 @@
  * user gets 401 `account_deleted` on its next call.
  */
 
-import { eq } from 'drizzle-orm';
+import { and, eq, isNull } from 'drizzle-orm';
 import { Hono } from 'hono';
 import { userPreferences, users } from '@planeahead/db';
 import {
@@ -65,12 +65,16 @@ function toPreferences(row: {
   return parsed.success ? parsed.data : { ...DEFAULT_USER_PREFERENCES };
 }
 
-/** The user's display preferences as `GET /v1/me` reports them (the defaults without a row). */
+/**
+ * The user's display preferences as `GET /v1/me/preferences` reports them (`GET /v1/me` reads
+ * the same through its own join): the defaults without a live row. A tombstoned row is ignored,
+ * as notify ignores it (review ruling Q18).
+ */
 async function readUserPreferences(db: DbOrTx, userId: string): Promise<UserPreferences> {
   const [row] = await db
     .select()
     .from(userPreferences)
-    .where(eq(userPreferences.userId, userId))
+    .where(and(eq(userPreferences.userId, userId), isNull(userPreferences.deletedAt)))
     .limit(1);
   return row === undefined ? { ...DEFAULT_USER_PREFERENCES } : toPreferences(row);
 }
@@ -98,7 +102,10 @@ export const meRoutes = new Hono<AppBindings>()
         settings: userPreferences.settings,
       })
       .from(users)
-      .leftJoin(userPreferences, eq(userPreferences.userId, users.id))
+      .leftJoin(
+        userPreferences,
+        and(eq(userPreferences.userId, users.id), isNull(userPreferences.deletedAt)),
+      )
       .where(eq(users.id, principal.id))
       .limit(1);
     if (row === undefined) {

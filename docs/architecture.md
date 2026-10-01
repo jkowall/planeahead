@@ -172,19 +172,22 @@ error handler maps SQLSTATE 23503 on a user foreign key, for a principal whose `
 - **Notification policy** (increment 15, section 10). Every stored snapshot is classified against
   the previous one and the `policy_state` column; an intent becomes a `notify_intent` outbox row
   in the same transaction. A delay reaching the line or a suspected cancellation or diversion
-  moves the next alarm to at most 5 minutes out for its re-read, and a suspected cancellation
-  holds the `cancelled` finish until that re-read confirms it.
+  moves the next alarm to at most 5 minutes out for its re-read. A suspected cancellation or
+  diversion is evidence, not state (review ruling Q11): the tracker stores the suspicion in its
+  policy state, keeps its snapshot, phase and version, and holds the finish only while fast
+  re-reads are left; then it finishes unconfirmed, without a push.
 - **Subscribers.** `subscribe` and `unsubscribe` are idempotent on the subscription id; Postgres is
   the record and the list only follows it. The nightly housekeeping reconciliation (section 7) lists
   every active tracker's subscribers and makes the list follow Postgres.
 - **Finish and deletion.** The flight finishes after the cadence's post-arrival tail poll, at the
   hard cap, or at `MAX_LIFETIME` (`min(scheduledIn + 6 h, actualOff + 2 x block)`); the object
   deletes itself 22 hours later, and never while an outbox row is unconfirmed.
-- Measured (increment 7, re-run in increments 12 and 15): 74 provider calls per A2 lifecycle,
-  1,205 rows written per flight including the schema DDL (budget 1,600; 1,203 before increment
-  15's migration 003), 16.3 per alarm on average, largest outbox message 1,657 bytes. Source: the
-  line `[lifecycle] polls=74 alarms=74 rows_written_lifetime=1205 ... per_alarm_avg=16.3 ...
-max_message_bytes=1657` that `test/workers/flight-tracker.lifecycle.test.ts` prints.
+- Measured (increment 7, re-run in increments 12 and 15 and its review round): 74 provider calls
+  per A2 lifecycle, 1,204 rows written per flight including the schema DDL (budget 1,600; 1,203
+  before increment 15's migration 003), 16.3 per alarm on average, largest outbox message 1,635
+  bytes. Source: the line `[lifecycle] polls=74 alarms=74 rows_written_lifetime=1204 ...
+per_alarm_avg=16.3 ... max_message_bytes=1635` that `test/workers/flight-tracker.lifecycle.test.ts`
+  prints.
 
 ## 5. The outbox and the persist path
 
@@ -334,8 +337,10 @@ from increment 15, the event injector (`/admin/push/inject`, section 10).
   before any send (review ruling R1, which amended the increment's "no Postgres": no Postgres
   connection is in use while the sends wait, and `persist` stays the only writer): one statement
   for the `push_tokens` rows of every target the batch could send, and a target is sent only when
-  its row is live and still its subject's, else it is `failed` `token_inactive` unsent; a failed
-  read sends nothing and re-enqueues after 60 s. It sends each job's targets with at most six
+  its row is live and still its subject's, else it is `failed` `token_inactive` unsent; since
+  increment 15 the same statement drops a target whose notification a newer one superseded
+  (`failed` `superseded`, section 10); a failed read sends nothing and re-enqueues after 60 s. It
+  sends each job's targets with at most six
   requests in flight (Workers' limit on connections waiting for headers), a 10-second timeout and
   every body read or cancelled, then acknowledges the job and re-enqueues only its retryable
   targets, grouped by delay in one `sendBatch` per job: FCM never sooner than 10 s, FCM 429
@@ -374,56 +379,101 @@ from increment 15, the event injector (`/admin/push/inject`, section 10).
  (alarm, refresh, reconcile, alert   -->  forwards the intent   -->  subscribers less the muted,
  merge, re-seed) -> evaluatePolicy        to NOTIFY_QUEUE, then      push off and toggled off:
  -> one notify_intent outbox row per      confirms the outbox row    one notifications row each;
- intent, in the state transaction,        (only after the send)      live_tracked ones only: push
- guarded by notif_dedupe                                             jobs (<= 50 targets) --> push
-        ^                                                            queue (section 9)
+ intent, in the state transaction,        (only after the send)      live-tracked at producedAt:
+ guarded by notif_dedupe                                             push jobs (<= 50 targets),
+        ^                                                            no token pushed twice -->
+        |                                                            push queue (section 9)
         | injectPolicyEvent: test intents, confirmed by construction, nothing stored
  /admin/push/inject (Access, same origin, an audit_log row naming the operator)
 ```
 
 - **The policy** (`packages/shared/src/notification-policy.ts`, pure and provider-neutral) turns a
-  pair of snapshots and the tracker's `PolicyState` into intents. A departure delay reaching 15
-  minutes is held for a settle re-read at most 5 minutes later and pushed with the re-read's
-  value only if it still stands; then a move of 15 minutes or more, a correction under 15, at
-  most one delay intent per 15 minutes, and an arrival intent only on a 15-minute band the last
+  pair of snapshots and the tracker's `PolicyState` into intents. A departure delay is measured
+  only from an actual or estimated out (unknown is not zero: no delay rule runs on it), and only
+  until out is observed. One reaching 15 minutes is held for a settle re-read at most 5 minutes
+  later and pushed with the re-read's value only if it still stands (after two failed settle
+  re-reads 5 minutes apart, the next cadence slot re-reads); then a move of 15 minutes or more, a
+  correction under 15 (its title states the new value), and at most one delay intent per 15
+  minutes, compared with 60 s of tolerance. The arrival delay, clamped at 0, moves up to its
+  15-minute band at once and leaves band b only below 15b minus 5 minutes
+  (`ARRIVAL_CORRECTION_MARGIN_MINUTES`); an arrival intent goes out only on a band the last
   departure intent did not imply. Origin gate changes count from T-6 h to out, destination gates
-  from off to in; a flap reverting inside one evaluation drops both halves, a return within 10
-  minutes of a pushed change is a correction, and a first assignment is pushed only to users who
-  opted in. A cancellation or a diversion is suspected, then confirmed by a re-read by designator
-  through the router (a cancellation's re-read goes to AeroDataBox) at the next alarm, at most 5
-  minutes later, retried every 5 minutes while it fails; an un-cancellation after a pushed
-  cancellation is confirmed the same way and pushed as a correction. An intent is time-sensitive
+  from off to in, gates compared without case or whitespace; a flap reverting inside one
+  evaluation drops both halves, a return within 10 minutes of a pushed change is a correction,
+  and a first assignment is pushed only to users who opted in. A cancellation or a diversion is
+  evidence, not state: the suspicion names the provider that raised it, and only that provider's
+  conclusive answer decides, re-read by designator on the window's own provider (past the
+  cadence's last slot, the last window's). `cancelled` confirms; a positively operating answer
+  clears; `unknown`, `statusUncertain` (AeroDataBox's `CanceledUncertain` and `Unknown`), not
+  found, an error or another provider's answer keeps the suspicion. Up to 3 fast re-reads 5
+  minutes apart, then one at the sooner of the next cadence slot or 60 minutes, within a budget
+  of 6 fast re-reads per flight; alert merges never confirm. An un-cancellation or un-diversion
+  after a pushed one is confirmed the same way and pushed as a correction (the un-cancellation is
+  unreachable while a confirmed cancellation finishes the tracker). An intent is time-sensitive
   within the hour before the departure's best estimate and before out; its `expiresAt` is the
   departure or arrival estimate, scheduled out plus 24 hours (cancellation) or the arrival plus 6
   hours (diversion), never less than 15 minutes after it was produced.
 - **In the tracker.** `flight.policy_state` (SQLite migration 003, `SCHEMA_VERSION` 3) rides on
-  the existing `UPDATE flight`, so the policy costs an on-time flight no row (1,205 rows a
+  the existing `UPDATE flight`, so the policy costs an on-time flight no row (1,204 rows a
   lifetime, section 4). The dedupe key `{flightKey}:{kind}:{dedupeValue}:v{version}` names the
   change sequence, so a retried alarm reproduces it and writes nothing, while a later return to a
-  value pushed before gets a new one. A suspected cancellation holds the `cancelled` finish until
-  its re-read (only while the flight still has cadence slots: a provider that never answers cannot
-  keep a tracker alive), and the instance row carries `cancelSuspect` so persist keeps the
-  live-tracking slots meanwhile.
+  value pushed before gets a new one; every instance row the tracker sends has its own version. A
+  snapshot showing only a suspected cancellation or diversion is not adopted: the tracker keeps
+  its stored snapshot, phase and version, writes a `cancel_suspect` or `diversion_suspect` event
+  and the policy state, and the alarm is the sooner of the cadence slot and the re-read. So the
+  app never shows an unconfirmed cancellation, and the live-tracking slots stay as they were. The
+  suspicion holds the finish only while fast re-reads are left, even past the cadence's last
+  slot; then the flight finishes with the cadence's reason, without a push, and logs
+  `cancel_unconfirmed` or `diversion_unconfirmed`. The hard cap and a key drift still end it.
 - **Persist** forwards each `NotifyIntentV1` to `NOTIFY_QUEUE` and confirms its outbox row only
-  after the send, so a finished tracker still deletes only with an empty outbox (ADR 0011).
+  after the send, so a finished tracker still deletes only with an empty outbox (ADR 0011). An
+  instance row that ends the live window (`arrived`, `cancelled` or terminal) clears
+  `live_tracked`, and the same UPDATE stamps `flight_subscriptions.live_tracked_released_at` with
+  the releasing row's own Durable Object instant (`finishedAt`, else `lastRefreshedAt`, from the
+  same clock as the intent's `producedAt`), never persist's wall clock; whatever takes a slot
+  (persist's entering pass, the subscribe route) sets it back to null. The column is Postgres
+  migration 0009 (ten migrations, `DB_SCHEMA_VERSION` 10; 0008 added `notifications.is_test`).
 - **The `notify` consumer** (`src/queues/notify.ts`, `src/notify/`; batch 10, wait 1 s,
   concurrency 5) reads the flight's live subscriptions with their preferences, in runs of 500,
   and drops the muted, the users with push off and those whose toggle for the kind is off (a test
   intent on production also every user outside `PUSH_INJECT_ALLOWED_USER_IDS`). Each user left
   gets one `notifications` row, unique per user and dedupe key (a redelivery inserts none and
-  reads back the first rows; `is_test` for an injection). Only subscriptions flagged
-  `live_tracked` are pushed (the free tier's two live-tracked flights; `docs/open-decisions.md`
-  section 8): one target per live `apns` or `fcm` token whose permission is not `denied` or
+  reads back the first rows; `is_test` for an injection; `data` keeps the intent's fields and its
+  `producedAt`). Only subscriptions live-tracked when the change happened are pushed: flagged
+  `live_tracked`, or released at or after the intent's `producedAt`, so the alarm that confirms a
+  cancellation and finishes the flight in the same flush still reaches its devices; a
+  subscription the cap refused is never stamped, so the free tier's cap holds
+  (`docs/open-decisions.md` section 8). A token that already has a `notification_deliveries` row
+  for its recipient's notification is skipped (logged `already_delivered`): the finished
+  tracker's +22 h re-send of an intent whose confirmation was lost pushes nothing again, while a
+  redelivery after a failed `sendBatch` (no delivery row yet) still sends. The rest get one
+  target per live `apns` or `fcm` token whose permission is not `denied` or
   `undetermined`, `subjectId` the token's user, in jobs of at most 50 targets per time format,
   each naming its kind's Android channel (`flight_changes`, or `flight_delays` for delays) and
   the collapse id `{kind}:{flightKey}`. The text is plain and self-contained, airport-local
-  times in the user's 12 or 24 hour clock. The jobs go out in as few `sendBatch` calls as 100
-  messages and 256 KB allow, and the intent is acknowledged after the last; a redelivery re-sends
-  every job, the duplicate push replaced on screen by the collapse id.
+  times in the user's 12 or 24 hour clock, the designator as the app writes it (`AA100`). The
+  jobs go out in as few `sendBatch` calls as 100 messages and 256 KB allow, and the intent is
+  acknowledged after the last.
+- **`notify`'s retries** are bounded by the intent's relevance (review ruling Q2): once persist
+  has confirmed the forward, the notify message is the only copy, so the queue's `max_retries` is
+  100 in every environment and a failure retries after `min(120, 2^attempts)` seconds (delivery
+  follows a recovery within two minutes; about 3.17 hours of runway). When the next attempt would
+  land past the intent's `expiresAt`, notify acknowledges and logs `notify_intent_expired`
+  instead; at attempt 6 it raises the `notify_intent_failing` ops alert once while the retries
+  continue. The dead-letter alert stays for poison; `dlq/notify/` is archived, never replayed (a
+  nightly replay would arrive 1 to 27 hours late).
+- **Superseded pushes** (review ruling Q16). The push consumer's one liveness read (section 9)
+  also answers which targets' notifications a newer row for the same user, kind and flight has
+  superseded; such a target is not requested (`failed`, reason `superseded`), so a first push
+  retried after an APNs 5xx cannot land after its correction. Newer is ordered by the intent's
+  `producedAt` from `data`, then `created_at` and the id, so an older intent that waited out an
+  outage in notify's retries never supersedes a newer one. A test row never supersedes a real
+  one, and the admin page's test push names no notification.
 - **Preferences.** `notification_preferences` holds `push_enabled` and the per-kind `events`
   toggles (delay, gate change, first gate assignment off by default, cancellation, diversion),
   read and written through `GET` and `PATCH /v1/me/preferences` (a nested `notifications` object
-  beside the display preferences); muting is the subscription's own flag.
+  beside the display preferences); a tombstoned preferences row reads as the defaults there, as
+  in notify (review ruling Q18); muting is the subscription's own flag.
 - **The event injector** (`/admin/push/inject`, src/routes/admin-inject.ts) reads a tracker's
   snapshot (`getState`), applies one event to a copy (an origin or destination gate, a departure
   delay of N minutes, a cancellation, a diversion), and calls `injectPolicyEvent` with a fresh
@@ -432,13 +482,17 @@ from increment 15, the event injector (`/admin/push/inject`, section 10).
   through the same outbox, and stores neither the copy nor the policy state, so the next real poll
   finds no change back. The answer lists each intent and whether it was written, with a button
   replaying the same id (which writes nothing). On production only a flight a live subscriber in
-  `PUSH_INJECT_ALLOWED_USER_IDS` follows is accepted.
+  `PUSH_INJECT_ALLOWED_USER_IDS` follows is accepted. The tracker ignores an injection, answered
+  409, while its policy state holds a suspected cancellation or diversion (an injection is
+  confirmed by construction and would decide it) or its stored snapshot is cancelled (review
+  ruling Q5). The `audit_log` row naming the operator is written `pending` before the tracker
+  call and settled after it as `written`, `ignored`, `timeout` or `error` (Q6).
 
 ## Refresh cadence
 
 Since increment 15 (ruling N8) A2's 15-minute band is anchored on the departure, not on boarding:
-it runs until actual out, or until `max(scheduled out, estimated out)` while out is not observed,
-and the 30-minute band starts there. An on-time flight keeps its 74 polls (24 and 6 around the
+it runs until actual out (else actual off, review ruling Q7), or until
+`max(scheduled out, estimated out)` while neither is observed, and the 30-minute band starts there. An on-time flight keeps its 74 polls (24 and 6 around the
 anchor instead of 22 and 8 around boarding); a ground delay of D minutes keeps the 15-minute polls
 running and costs about D/30 more polls than the boarding-anchored A2 would (`groundDelayPolls`,
 tested on the shared constants), and the landing gap widens from 10 to 30 minutes (R4's D3
