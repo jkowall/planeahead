@@ -11,11 +11,12 @@
  * The results are server data only (TanStack Query, never the offline store), with the same "as
  * of", stale, partial and schedules-only states as the board, in the same virtualised list (R13).
  * Tapping a result asks to confirm, then adds the flight through the app's one add path
- * (src/lib/boards.ts `addBoardRow`). A search made offline waits for the network and says so
- * instead of showing an empty list. A pull, or the same search again, asks the route only for a
- * failed or aged answer, and nothing on the screen invites a pull (R10): every search the route
- * answers costs a slot. While boards are off (404 `boards_disabled`, R8) the screen says route
- * search is not available yet, as news rather than as an error.
+ * (src/lib/boards.ts `addBoardRow`); the first add that succeeds offers the notification
+ * pre-prompt over the search (increment 16, ruling C1; review O1). A search made offline waits for
+ * the network and says so instead of showing an empty list. A pull, or the same search again, asks
+ * the route only for a failed or aged answer, and nothing on the screen invites a pull (R10): every
+ * search the route answers costs a slot. While boards are off (404 `boards_disabled`, R8) the
+ * screen says route search is not available yet, as news rather than as an error.
  */
 
 import type { BoardViewRow, RouteSearchResponse } from '@planeahead/shared';

@@ -1,0 +1,49 @@
+diff --git a/build/getDevicePushTokenAsync.js b/build/getDevicePushTokenAsync.js
+index f0875c5eaa84d45d646edd1ad5f21a962f68ab02..850386762271bae229b135bf543b51466840ea29 100644
+--- a/build/getDevicePushTokenAsync.js
++++ b/build/getDevicePushTokenAsync.js
+@@ -19,9 +19,17 @@ export async function getDevicePushTokenAsync() {
+     }
+     else {
+         // Create a new Promise and clear it afterwards
+-        nativeTokenPromise = PushTokenManager.getDevicePushTokenAsync();
+-        devicePushToken = await nativeTokenPromise;
+-        nativeTokenPromise = null;
++        const promise = PushTokenManager.getDevicePushTokenAsync();
++        nativeTokenPromise = promise;
++        try {
++            devicePushToken = await promise;
++        }
++        finally {
++            // Cleared on a rejection too, so the next call asks the native side again.
++            if (nativeTokenPromise === promise) {
++                nativeTokenPromise = null;
++            }
++        }
+     }
+     // @ts-ignore: TS thinks Platform.OS could be anything and can't decide what type is it
+     return { type: Platform.OS, data: devicePushToken };
+diff --git a/src/getDevicePushTokenAsync.ts b/src/getDevicePushTokenAsync.ts
+index 2ed08923e84fcc2dbcb0e4295bf5f1198cc60e58..fe3b5513c407ba9792b1f8f420c2823a9be149a2 100644
+--- a/src/getDevicePushTokenAsync.ts
++++ b/src/getDevicePushTokenAsync.ts
+@@ -23,9 +23,16 @@ export async function getDevicePushTokenAsync(): Promise<DevicePushToken> {
+     devicePushToken = await nativeTokenPromise;
+   } else {
+     // Create a new Promise and clear it afterwards
+-    nativeTokenPromise = PushTokenManager.getDevicePushTokenAsync();
+-    devicePushToken = await nativeTokenPromise;
+-    nativeTokenPromise = null;
++    const promise = PushTokenManager.getDevicePushTokenAsync();
++    nativeTokenPromise = promise;
++    try {
++      devicePushToken = await promise;
++    } finally {
++      // Cleared on a rejection too, so the next call asks the native side again.
++      if (nativeTokenPromise === promise) {
++        nativeTokenPromise = null;
++      }
++    }
+   }
+ 
+   // @ts-ignore: TS thinks Platform.OS could be anything and can't decide what type is it

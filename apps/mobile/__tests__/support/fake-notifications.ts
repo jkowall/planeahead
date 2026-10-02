@@ -127,7 +127,8 @@ export function fakeNotificationsModule() {
       return Promise.resolve(f.answer);
     },
     // Like expo, a successful read also reaches the token listeners (R2 fact 23), here before
-    // the caller's `await` resumes.
+    // the caller's `await` resumes. Every call answers afresh: the real wrapper's cache is
+    // push-token-read.test.ts's to cover (increment 16 review, A2).
     getDevicePushTokenAsync: () => {
       f.calls.push('getToken');
       const token = f.token;

@@ -13,9 +13,10 @@
  *
  * Tapping a row asks to confirm, then adds the flight through the app's one add path
  * (src/lib/boards.ts `addBoardRow`: `addFlight` with the row's designator, origin-local date and
- * origin, the outbox and the optimistic row as for a typed add). The board itself is server data
- * only: TanStack Query, never the offline store. Offline with nothing loaded, the screen says so
- * instead of showing an empty list.
+ * origin, the outbox and the optimistic row as for a typed add). The first add that succeeds offers
+ * the notification pre-prompt over the board, as the add sheet does (increment 16, ruling C1;
+ * review O1). The board itself is server data only: TanStack Query, never the offline store.
+ * Offline with nothing loaded, the screen says so instead of showing an empty list.
  *
  * The rows are a virtualised list (src/components/BoardList.tsx, R13): a hub's board is hundreds
  * of rows. While boards are off (404 `boards_disabled`, R8) the screen says they are not available

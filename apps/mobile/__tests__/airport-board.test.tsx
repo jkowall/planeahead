@@ -15,11 +15,13 @@
 
 import { onlineManager, QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import { act, fireEvent, render, screen, waitFor } from '@testing-library/react-native';
+import type { NotificationPermissionsStatus } from 'expo-notifications';
 import type { ReactElement } from 'react';
 import { Alert, View } from 'react-native';
 import AddFlightSheet from '../src/app/(app)/add';
 import AirportBoardScreen from '../src/app/(app)/airport/[code]';
 import { BoardRow } from '../src/components/BoardRow';
+import { KV_KEYS, kv } from '../src/lib/db/kv';
 import type { SqliteLike } from '../src/lib/db/sqlite-like';
 import { displayPrefsOf } from '../src/lib/display-prefs';
 import { useFlightNotices } from '../src/lib/flight-notices';
@@ -27,6 +29,11 @@ import * as format from '../src/lib/format';
 import { useSettings } from '../src/lib/settings';
 import { DARK, LIGHT } from '../src/theme/tokens';
 import { compactTree } from './support/compact-tree';
+import {
+  fakeNotifications,
+  permissionStatus,
+  resetFakeNotifications,
+} from './support/fake-notifications';
 import { createMemorySqlite, type MemorySqlite } from './support/memory-sqlite';
 import { NOW, json, scriptedFetch } from './support/flight-fixtures';
 import { boardAnswer, boardRow, departedRow, unaddableRow } from './support/board-fixtures';
@@ -48,6 +55,13 @@ jest.mock('react-native-safe-area-context', () => {
   const { View } = jest.requireActual<typeof import('react-native')>('react-native');
   return { SafeAreaView: View };
 });
+
+// The notification pre-prompt after the first add (increment 16, ruling C1; review O1).
+jest.mock('expo-notifications', () =>
+  jest
+    .requireActual<typeof import('./support/fake-notifications')>('./support/fake-notifications')
+    .fakeNotificationsModule(),
+);
 
 jest.mock('expo-network', () => ({
   addNetworkStateListener: jest.fn(() => ({ remove: jest.fn() })),
@@ -158,6 +172,14 @@ beforeEach(() => {
   mockRouter.replace.mockClear();
   useFlightNotices.getState().clear();
   useSettings.getState().reset();
+  // Decided already, so an add offers no pre-prompt unless a test says otherwise.
+  resetFakeNotifications();
+  fakeNotifications.permission = permissionStatus({
+    status: 'granted',
+    granted: true,
+    iosStatus: 2,
+  });
+  kv.removeItemSync(KV_KEYS.pushPromptOffered);
 });
 
 afterEach(() => {
@@ -425,6 +447,78 @@ describe('tap to add, through the one add path', () => {
     await fireEvent.press(unaddable);
     expect(Alert.alert).not.toHaveBeenCalled();
     expect(mockEdge.network.requests).toHaveLength(1);
+  });
+});
+
+describe('the notification pre-prompt after the first add (increment 16, ruling C1; review O1)', () => {
+  beforeEach(async () => {
+    fakeNotifications.permission = permissionStatus({ iosStatus: 0 });
+    mockEdge.network.answer(() => json(200, boardAnswer()));
+    await openBoard();
+    await screen.findByTestId('board-rows');
+  });
+
+  it('is offered over the board after the first add that succeeds, and never again', async () => {
+    mockEdge.network.answer(() => json(201, { created: true }));
+    await tapToAdd(AA100_ROW);
+    expect(await screen.findByText('Added AA100 on Wed 23 Sep to your flights.')).toBeTruthy();
+    await waitFor(() => {
+      expect(mockRouter.push).toHaveBeenCalledWith('/notifications');
+    });
+    // Over the board, which stays with the add's outcome.
+    expect(mockRouter.replace).not.toHaveBeenCalled();
+    expect(mockRouter.back).not.toHaveBeenCalled();
+
+    mockEdge.network.answer(() => json(201, { created: true }));
+    await tapToAdd(`board-row-${departedRow().id}`);
+    expect(await screen.findByText('Added DL1 on Wed 23 Sep to your flights.')).toBeTruthy();
+    expect(mockRouter.push).toHaveBeenCalledTimes(1);
+  });
+
+  it('is left for the next add when the board closes before it could show (review N5)', async () => {
+    const notifications =
+      jest.requireMock<typeof import('expo-notifications')>('expo-notifications');
+    let answer: (status: NotificationPermissionsStatus) => void = () => undefined;
+    const read = jest.spyOn(notifications, 'getPermissionsAsync').mockImplementationOnce(
+      () =>
+        new Promise((resolve) => {
+          answer = resolve;
+        }),
+    );
+    mockEdge.network.answer(() => json(201, { created: true }));
+    await tapToAdd(AA100_ROW);
+    await waitFor(() => {
+      expect(read).toHaveBeenCalled();
+    });
+    await screen.unmount();
+    await act(async () => {
+      answer(fakeNotifications.permission);
+      await new Promise<void>((resolve) => {
+        setImmediate(resolve);
+      });
+    });
+    expect(mockRouter.push).not.toHaveBeenCalled();
+    expect(kv.getItemSync(KV_KEYS.pushPromptOffered)).toBeNull();
+  });
+
+  it('is not offered after an add that was refused', async () => {
+    mockEdge.network.answer(() =>
+      json(403, { error: 'cap_exceeded', cap: 'active_subscriptions', limit: 3, message: 'm' }),
+    );
+    await tapToAdd(AA100_ROW);
+    expect(
+      await screen.findByText(
+        'The free plan tracks up to 3 flights at a time. Remove a flight to add another.',
+      ),
+    ).toBeTruthy();
+    // Anything the add would still do has run.
+    await act(async () => {
+      await new Promise<void>((resolve) => {
+        setImmediate(resolve);
+      });
+    });
+    expect(mockRouter.push).not.toHaveBeenCalled();
+    expect(kv.getItemSync(KV_KEYS.pushPromptOffered)).toBeNull();
   });
 });
 

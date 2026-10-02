@@ -3,9 +3,11 @@
  * token (C2) and the two Android channels (C4).
  *
  * Permission (C1; R2 design 2 and 17). Asked in context, once: the pre-prompt after the first
- * flight add (src/app/(app)/notifications.tsx), or Settings, never at launch. A request checks
- * first and asks for alert and sound only: no badge in Phase 1, no provisional. The state is one
- * of the API's four (`PushPermissionState`):
+ * flight add that succeeds, from the add sheet, an airport board or the route search
+ * (src/app/(app)/notifications.tsx), or Settings, never at launch. A request checks first and asks
+ * for alert and sound only: no badge in Phase 1, no provisional. Both records (asked, offered) are
+ * written after their outcome (review N5). The state is one of the API's four
+ * (`PushPermissionState`):
  *
  * - iOS reads `ios.status`, because expo reports only `.authorized` as granted: provisional (3)
  *   comes back `granted: false` (R2 fact 8). Here it is a quiet grant, registered as such and
@@ -19,7 +21,10 @@
  * token, and needs no permission on either platform (R2 facts 22 and 24). On Android the FCM token
  * comes from Firebase Messaging, which needs the app's `google-services.json` (spike 3, ADR 0001):
  * without it the read fails and this reports `unavailable`. A read also fires
- * `addPushTokenListener` (R2 fact 23); src/lib/push-registration.ts ignores that echo.
+ * `addPushTokenListener` (R2 fact 23); src/lib/push-registration.ts ignores that echo. A failed
+ * read is asked again on the next one: expo-notifications 57.0.20 kept a rejected native read for
+ * the life of the JS runtime, so one failure (an Android FCM fetch offline) failed every later
+ * read, and patches/expo-notifications@57.0.20.patch clears it (increment 16 review, A2).
  *
  * Channels (C4). Created at every app start and before any permission request (the request
  * creates them again first), from `ANDROID_CHANNEL_IDS`, the ids every push job names. Importance
@@ -29,6 +34,7 @@
 
 import * as Sentry from '@sentry/react-native';
 import { ANDROID_CHANNEL_IDS, type PushPermissionState } from '@planeahead/shared';
+import Constants from 'expo-constants';
 import {
   AndroidImportance,
   getDevicePushTokenAsync,
@@ -40,7 +46,7 @@ import {
   type NotificationPermissionsStatus,
 } from 'expo-notifications';
 import { useEffect, useState } from 'react';
-import { AppState, Platform } from 'react-native';
+import { AppState, Linking, Platform } from 'react-native';
 import { KV_KEYS, kv } from './db/kv';
 
 export type PushTokenKind = 'apns' | 'fcm';
@@ -105,21 +111,29 @@ export async function requestPushPermission(): Promise<PushPermission> {
   if (!current.canAsk) {
     return current;
   }
-  kv.setItemSync(KV_KEYS.pushPermissionRequested, '1');
   const answer = await requestPermissionsAsync({
     ios: { allowAlert: true, allowSound: true, allowBadge: false, allowProvisional: false },
     android: {},
   });
+  // Recorded once the request has answered: one that threw did not ask, and can ask again.
+  kv.setItemSync(KV_KEYS.pushPermissionRequested, '1');
   return permissionOf(answer, true);
 }
 
+function promptOffered(): boolean {
+  return kv.getItemSync(KV_KEYS.pushPromptOffered) === '1';
+}
+
 /**
- * Whether a flight add that just succeeded shows the pre-prompt (C1): once per installation, and
- * only while the system prompt can still show. Taking the offer records it, so a later add never
- * shows it again; after "Not now", Settings is the way back.
+ * The pre-prompt after a flight add that succeeded (C1), from any entry point (the add sheet, an
+ * airport board, the route search): once per installation, and only while the system prompt can
+ * still show. `show` opens it and answers whether it could (not once the screen that added has
+ * gone). The offer is recorded only when it was shown, so a later add never shows it again and an
+ * add whose screen closed first leaves it for the next one (review N5); after "Not now", Settings
+ * is the way back. Answers whether it was shown.
  */
-export async function takePushPromptOffer(): Promise<boolean> {
-  if (kv.getItemSync(KV_KEYS.pushPromptOffered) === '1') {
+export async function takePushPromptOffer(show: () => boolean): Promise<boolean> {
+  if (promptOffered()) {
     return false;
   }
   try {
@@ -128,6 +142,10 @@ export async function takePushPromptOffer(): Promise<boolean> {
     }
   } catch (error) {
     Sentry.captureException(error);
+    return false;
+  }
+  // Again: another add may have shown it while the permission was read.
+  if (promptOffered() || !show()) {
     return false;
   }
   kv.setItemSync(KV_KEYS.pushPromptOffered, '1');
@@ -170,6 +188,41 @@ export function usePushPermission(): readonly [
     };
   }, []);
   return [permission, setPermission];
+}
+
+/** Android's `Settings.ACTION_APP_NOTIFICATION_SETTINGS` and `EXTRA_APP_PACKAGE` (API 26). */
+const ANDROID_NOTIFICATION_SETTINGS = 'android.settings.APP_NOTIFICATION_SETTINGS';
+const ANDROID_EXTRA_APP_PACKAGE = 'android.provider.extra.APP_PACKAGE';
+/** UIKit's `openNotificationSettingsURLString` (iOS 16; the app's minimum is 16.4, R2 fact 6). */
+const IOS_NOTIFICATION_SETTINGS_URL = 'app-settings:notifications';
+
+/**
+ * Settings' link while notifications are denied (C1): this app's notification settings, one tap
+ * closer than its settings page (review N3). Android 8 and later name the app's package in the
+ * intent; an older Android, or a link the system refuses, opens the app's settings page instead.
+ * Never throws.
+ */
+export async function openNotificationSettings(): Promise<void> {
+  try {
+    if (Platform.OS === 'ios') {
+      await Linking.openURL(IOS_NOTIFICATION_SETTINGS_URL);
+      return;
+    }
+    const appPackage = Constants.expoConfig?.android?.package;
+    if (Platform.OS === 'android' && Number(Platform.Version) >= 26 && appPackage !== undefined) {
+      await Linking.sendIntent(ANDROID_NOTIFICATION_SETTINGS, [
+        { key: ANDROID_EXTRA_APP_PACKAGE, value: appPackage },
+      ]);
+      return;
+    }
+  } catch (error) {
+    Sentry.captureException(error);
+  }
+  try {
+    await Linking.openSettings();
+  } catch (error) {
+    Sentry.captureException(error);
+  }
 }
 
 /** A token as expo hands it over (a read, or the token listener), in this app's kinds. */
@@ -225,17 +278,18 @@ export const ANDROID_CHANNELS: readonly { readonly id: string; readonly name: st
 
 /**
  * Creates the channels, on Android: at every app start (src/app/_layout.tsx), and again before a
- * permission request, so the order holds even if the start-up call failed. Never throws.
+ * permission request, so the order holds even if the start-up call failed. Each on its own, so one
+ * that fails does not cost the other (review N4). Never throws.
  */
 export async function ensureAndroidChannels(): Promise<void> {
   if (Platform.OS !== 'android') {
     return;
   }
-  try {
-    for (const { id, name } of ANDROID_CHANNELS) {
+  for (const { id, name } of ANDROID_CHANNELS) {
+    try {
       await setNotificationChannelAsync(id, { name, importance: AndroidImportance.HIGH });
+    } catch (error) {
+      Sentry.captureException(error);
     }
-  } catch (error) {
-    Sentry.captureException(error);
   }
 }

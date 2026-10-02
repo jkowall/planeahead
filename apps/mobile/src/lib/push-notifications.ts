@@ -43,6 +43,7 @@ import {
 } from 'expo-notifications';
 import { useIsFocused } from 'expo-router';
 import { useEffect } from 'react';
+import { AppState } from 'react-native';
 import { z } from 'zod';
 import { create } from 'zustand';
 
@@ -206,7 +207,9 @@ export async function dismissFlightNotifications(
 
 /**
  * The flight detail screen (C6, C7): its flight is in front while the screen is focused, and its
- * presented notifications go when it opens or comes back into focus (once its key is loaded).
+ * presented notifications go when it opens or comes back into focus (once its key is loaded), and
+ * when the app returns to the foreground on it: what the OS displayed meanwhile is in the tray,
+ * and the screen already shows the change (review A6).
  */
 export function useFlightInFront(id: string, flightKey: string | null): void {
   const focused = useIsFocused();
@@ -225,10 +228,21 @@ export function useFlightInFront(id: string, flightKey: string | null): void {
 
   useEffect(() => {
     if (!focused || id === '' || flightKey === null) {
-      return;
+      return undefined;
     }
-    dismissFlightNotifications({ id, flightKey }).catch((error: unknown) => {
-      Sentry.captureException(error);
+    const dismiss = () => {
+      dismissFlightNotifications({ id, flightKey }).catch((error: unknown) => {
+        Sentry.captureException(error);
+      });
+    };
+    dismiss();
+    const subscription = AppState.addEventListener('change', (next) => {
+      if (next === 'active') {
+        dismiss();
+      }
     });
+    return () => {
+      subscription.remove();
+    };
   }, [focused, id, flightKey]);
 }
