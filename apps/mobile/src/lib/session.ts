@@ -15,19 +15,27 @@
  * Increment 16 (ruling C2): the registration carries the device token and the notification
  * permission, on each session start and each return to the foreground, and again when the token
  * listener reports a rotation (src/lib/push-registration.ts). A revoked Apple credential signs
- * out the way the Sign out button does (src/lib/sign-out.ts, ruling C3).
+ * out the way the Sign out button does (src/lib/sign-out.ts, ruling C3). A network return
+ * registers too while a sign-out's invalidation is queued, since a registration settles it first
+ * (review A1).
+ *
+ * Without a session (`useSignedOutWork`, review A1): what a sign-out left undone is retried on
+ * every return to the foreground and every network return, the foreground handler presents
+ * nothing, and opening the app clears the tray.
  */
 
 import * as Sentry from '@sentry/react-native';
 import { addNetworkStateListener } from 'expo-network';
-import { addPushTokenListener } from 'expo-notifications';
+import { addPushTokenListener, dismissAllNotificationsAsync } from 'expo-notifications';
 import { useEffect } from 'react';
 import { AppState } from 'react-native';
 import { create } from 'zustand';
 import { authClient } from './auth-client';
 import { runtimeConfig } from './config';
 import { KV_KEYS, kv } from './db/kv';
+import { deviceInvalidation, retrySignOutWork } from './device-invalidation';
 import { checkAppleCredential } from './native-signin/apple';
+import { setSignedOut } from './push-notifications';
 import { pushRegistrar } from './push-registration';
 import { services } from './services';
 import { signOut } from './sign-out';
@@ -136,6 +144,14 @@ export function useSessionWork(userId: string | null): void {
     const network = addNetworkStateListener((state) => {
       if (state.isInternetReachable === true) {
         void syncNow(userId);
+        // Only then: every foreground registers already, and a bare settle would invalidate this
+        // account's own token with nothing to register it again.
+        deviceInvalidation()
+          .queued()
+          .then((queued) => (queued ? pushRegistrar().register() : undefined))
+          .catch((error: unknown) => {
+            Sentry.captureException(error);
+          });
       }
     });
     const tokens = addPushTokenListener((token) => {
@@ -149,4 +165,45 @@ export function useSessionWork(userId: string | null): void {
       pushRegistrar().reset();
     };
   }, [userId]);
+}
+
+function clearTray(): void {
+  dismissAllNotificationsAsync().catch((error: unknown) => {
+    Sentry.captureException(error);
+  });
+}
+
+/**
+ * The root layout, while the session is known to be null (review A1). A sign-out that could not
+ * finish (src/lib/sign-out.ts) left a queued invalidation, an owed token deletion, or both, and
+ * the old account's alerts keep arriving until they are done: both are tried again on every
+ * return to the foreground and every network return (once each at a time, so repeats are cheap).
+ * The foreground handler presents nothing meanwhile, and the tray is cleared whenever the app
+ * opens signed out. Only while the app runs: JavaScript does not run in a killed, suspended or
+ * frozen app, so a phone never opened again keeps receiving until it is.
+ */
+export function useSignedOutWork(signedOut: boolean): void {
+  useEffect(() => {
+    setSignedOut(signedOut);
+    if (!signedOut) {
+      return undefined;
+    }
+    // Opened signed out, or just signed out (which tried both already, and the launch does too).
+    clearTray();
+    const appState = AppState.addEventListener('change', (next) => {
+      if (next === 'active') {
+        clearTray();
+        retrySignOutWork();
+      }
+    });
+    const network = addNetworkStateListener((state) => {
+      if (state.isInternetReachable === true) {
+        retrySignOutWork();
+      }
+    });
+    return () => {
+      appState.remove();
+      network.remove();
+    };
+  }, [signedOut]);
 }

@@ -11,20 +11,27 @@
  * installation that a second entry would need, and the retry can never invalidate a token
  * registered after it (which it would if the same account signed back in).
  *
- * Retried on the next launch (src/app/_layout.tsx) and before every registration. A 2xx settles
- * it. It is dropped, and reported, on a 4xx other than 408 and 429 or once the cookies have all
- * expired (the session is gone, and a retry can do no more), and after three 408, 429 or 5xx
- * answers. A network failure or the timeout keeps it. The next online registration re-points the
- * token anyway (upserts are keyed by kind and token, plan section 5).
+ * Retried on the next launch (src/app/_layout.tsx), before every registration, and while signed
+ * out on every return to the foreground and every network return (src/lib/session.ts
+ * `useSignedOutWork`; review A1); with a session, a network return registers while one is queued,
+ * which settles it first. A 2xx settles it. It is dropped, and reported, on a 4xx other than 408
+ * and 429 or once the cookies have all expired (the session is gone, and a retry can do no more),
+ * and after three 408, 429 or 5xx answers. A network failure or the timeout keeps it. The next
+ * online registration re-points the token anyway (upserts are keyed by kind and token, plan
+ * section 5).
+ *
+ * The device half of signing out is retried the same way: `tokenDeletion` below.
  */
 
 import * as Sentry from '@sentry/react-native';
 import { getCookie, storageAdapter } from '@better-auth/expo/client';
 import { onlineManager } from '@tanstack/react-query';
+import { unregisterForNotificationsAsync } from 'expo-notifications';
 import * as SecureStore from 'expo-secure-store';
 import { z } from 'zod';
 import { INSTALL_ID_HEADER } from './api-client';
 import { runtimeConfig } from './config';
+import { kv } from './db/kv';
 
 export const DEVICE_INVALIDATION_PATH = '/v1/devices/current/invalidate';
 /** A sign-out waits at most this long for the call before queueing it. */
@@ -66,6 +73,8 @@ export interface DeviceInvalidation {
   invalidate(installId: string, cookies: string | null): Promise<InvalidationOutcome>;
   /** Sends a queued call; throws while it stays queued. Concurrent calls share one attempt. */
   settle(): Promise<void>;
+  /** Whether a call is queued. */
+  queued(): Promise<boolean>;
 }
 
 type Answer = 'done' | 'refused' | 'retry';
@@ -177,6 +186,9 @@ export function createDeviceInvalidation(deps: DeviceInvalidationDeps): DeviceIn
       });
       return settling;
     },
+    async queued() {
+      return (await read()) !== null;
+    },
   };
 }
 
@@ -211,4 +223,122 @@ export function deviceInvalidation(): DeviceInvalidation {
 /** What every registration waits for first (src/lib/devices.ts). */
 export function settleQueuedInvalidation(): Promise<void> {
   return deviceInvalidation().settle();
+}
+
+/**
+ * Sign-out's token deletion, `unregisterForNotificationsAsync()` (review A1). On Android it deletes
+ * the FCM token over the network; offline it fails and the token stays live at FCM, which displays
+ * every push still sent to it. So it is recorded before it starts and forgotten once it succeeds,
+ * and one that failed or never finished (the app killed meanwhile) is run again: at launch and
+ * while signed out (`retrySignOutWork`), and at the next session in the registrar's run BEFORE its
+ * token read (src/lib/push-registration.ts), never after it, when it would kill the token the new
+ * session had just registered. That run waits for a deletion still running, at most
+ * `TOKEN_DELETION_WAIT_MS`, then forgets the record whatever the outcome: the token it reads next
+ * is the new session's.
+ */
+export interface TokenDeletion {
+  /** Sign-out: records the deletion and runs it, or joins the one running. */
+  start(): Promise<void>;
+  /** Runs a recorded deletion again, or joins the one running. */
+  retry(): Promise<void>;
+  /** A registration run, before it reads a token (see above). */
+  beforeRead(): Promise<void>;
+}
+
+export interface TokenDeletionDeps {
+  readonly unregister: () => Promise<void>;
+  /** The record: whether a deletion is owed. */
+  readonly owed: { read(): boolean; write(owed: boolean): void };
+  readonly onError?: (error: unknown) => void;
+  readonly waitMs?: number;
+}
+
+/** How long a run waits for a deletion still running before it reads a token. */
+export const TOKEN_DELETION_WAIT_MS = 10_000;
+
+export function createTokenDeletion(deps: TokenDeletionDeps): TokenDeletion {
+  const waitMs = deps.waitMs ?? TOKEN_DELETION_WAIT_MS;
+  let running: Promise<void> | null = null;
+
+  /** One deletion at a time; its success forgets the record, its failure goes to `onError`. */
+  function run(): Promise<void> {
+    running ??= deps
+      .unregister()
+      .then(
+        () => {
+          deps.owed.write(false);
+        },
+        (error: unknown) => {
+          deps.onError?.(error);
+        },
+      )
+      .finally(() => {
+        running = null;
+      });
+    return running;
+  }
+
+  const owed = () => running !== null || deps.owed.read();
+
+  return {
+    async start() {
+      deps.owed.write(true);
+      await run();
+    },
+    async retry() {
+      if (owed()) {
+        await run();
+      }
+    },
+    async beforeRead() {
+      if (!owed()) {
+        return;
+      }
+      let timer: ReturnType<typeof setTimeout> | undefined;
+      await Promise.race([
+        run(),
+        new Promise<void>((resolve) => {
+          timer = setTimeout(resolve, waitMs);
+        }),
+      ]);
+      clearTimeout(timer);
+      deps.owed.write(false);
+    },
+  };
+}
+
+/** The kv-store record of an owed deletion (no secret in it, so not SecureStore). */
+export const TOKEN_DELETION_KEY = 'planeahead.push_token_deletion_owed';
+
+let deletion: TokenDeletion | null = null;
+
+/** The app's: expo's unregister, the record in the kv-store, a failure to Sentry. */
+export function tokenDeletion(): TokenDeletion {
+  deletion ??= createTokenDeletion({
+    unregister: unregisterForNotificationsAsync,
+    owed: {
+      read: () => kv.getItemSync(TOKEN_DELETION_KEY) === '1',
+      write: (owed) => {
+        if (owed) {
+          kv.setItemSync(TOKEN_DELETION_KEY, '1');
+        } else {
+          kv.removeItemSync(TOKEN_DELETION_KEY);
+        }
+      },
+    },
+    onError: (error) => {
+      Sentry.captureException(error);
+    },
+  });
+  return deletion;
+}
+
+/**
+ * What a sign-out left undone, tried again: the queued call (it stays queued on a failure) and an
+ * owed token deletion. At launch, and while signed out on every return to the foreground and every
+ * network return (src/app/_layout.tsx, src/lib/session.ts).
+ */
+export function retrySignOutWork(): void {
+  settleQueuedInvalidation().catch(() => undefined);
+  void tokenDeletion().retry();
 }

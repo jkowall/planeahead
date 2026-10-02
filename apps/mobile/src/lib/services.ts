@@ -6,6 +6,7 @@
 
 import * as Sentry from '@sentry/react-native';
 import { onlineManager } from '@tanstack/react-query';
+import { dismissAllNotificationsAsync } from 'expo-notifications';
 import { createAnalytics, type Analytics } from './analytics';
 import { createApiClient, type ApiClient } from './api-client';
 import { authClient } from './auth-client';
@@ -17,6 +18,7 @@ import { clearReplacements } from './flight-replacements';
 import { flightOutboxHooks } from './flights';
 import { analyticsId, installId } from './identity';
 import { withPendingNotificationPatches, withPendingPatches } from './preference-mutations';
+import { pushRegistrar } from './push-registration';
 import { queryClient } from './query';
 import { useSettings } from './settings';
 import { createSyncClient, type SyncClient } from './sync/client';
@@ -38,19 +40,54 @@ export interface Services {
   readonly onAccountDeleted: () => Promise<void>;
 }
 
+export interface ForgetAccountOptions {
+  /**
+   * Whether Better Auth's `/sign-out` goes to the server (the default). False when a sign-out's
+   * invalidation was queued (src/lib/sign-out.ts, review A4): the session is cleared on the phone
+   * all the same, and the queued call ends it on the server, with this installation's tokens.
+   */
+  readonly endSession?: boolean;
+}
+
 /**
- * The local half of signing out, and what `401 account_deleted` ends in: the store and the
- * outbox are gone (the caller wiped them, or this does), the Better Auth client forgets its
- * cookies (its `/sign-out` hook clears SecureStore before the request is even sent, so it works
- * against a deleted account), the settings fall back to the defaults, and the record of where an
- * optimistic subscription went is dropped with the rows it named (src/lib/flight-replacements.ts).
- * The root layout then sees no session and routes to the sign-in group.
+ * `/sign-out` answered on the phone: the Expo plugin has cleared the stored cookies, its cached
+ * session and the session atom in its `init`, before any request, and this stands in for the
+ * request, so nothing leaves the phone.
  */
-export async function forgetAccount(store: Store | null): Promise<void> {
+const ANSWERED_ON_THE_PHONE = {
+  customFetchImpl: () =>
+    Promise.resolve(
+      new Response('{"success":true}', {
+        status: 200,
+        headers: { 'Content-Type': 'application/json' },
+      }),
+    ),
+};
+
+/**
+ * The local half of signing out, and what `401 account_deleted` ends in: the account's
+ * notifications leave the tray and a registration in flight posts nothing (review N1), the store
+ * and the outbox are gone (the caller wiped them, or this does), the Better Auth client forgets
+ * its cookies (its `/sign-out` hook clears SecureStore before the request is even sent, so it
+ * works against a deleted account), the settings fall back to the defaults, and the record of
+ * where an optimistic subscription went is dropped with the rows it named
+ * (src/lib/flight-replacements.ts). The root layout then sees no session and routes to the
+ * sign-in group.
+ */
+export async function forgetAccount(
+  store: Store | null,
+  options: ForgetAccountOptions = {},
+): Promise<void> {
+  dismissAllNotificationsAsync().catch((error: unknown) => {
+    Sentry.captureException(error);
+  });
+  pushRegistrar().reset();
   if (store !== null) {
     wipeLocalStore(store.sqlite);
   }
-  await authClient.signOut().catch(() => undefined);
+  await authClient
+    .signOut(options.endSession === false ? { fetchOptions: ANSWERED_ON_THE_PHONE } : undefined)
+    .catch(() => undefined);
   useSettings.getState().reset();
   useFlightNotices.getState().clear();
   kv.removeItemSync(KV_KEYS.appleUserId);

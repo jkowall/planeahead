@@ -3,25 +3,37 @@
  * signs out of, before `authClient.signOut()`; offline the call is queued and retried on the next
  * launch before any registration, with the signed-out session's cookies and never the current
  * one's; then the device unregisters (src/lib/device-invalidation.ts, src/lib/sign-out.ts).
+ *
+ * The review fixes: registration is paused for the whole sign-out (A3); a queued call clears the
+ * session on the phone without `/sign-out` (A4); the token deletion starts beside `forgetAccount`
+ * and is owed until it succeeds (A1, N7); a tap waiting for a session goes (N2).
+ * sign-out-lifecycle.test.tsx drives the retries while signed out and at the next session.
  */
 
 import { getCookie } from '@better-auth/expo/client';
 import * as Sentry from '@sentry/react-native';
 import { onlineManager } from '@tanstack/react-query';
 import type { ApiClient } from '../src/lib/api-client';
+import { kv } from '../src/lib/db/kv';
 import {
   DEVICE_INVALIDATION_MAX_FAILURES,
   DEVICE_INVALIDATION_PATH,
   DEVICE_INVALIDATION_TIMEOUT_MS,
+  TOKEN_DELETION_KEY,
+  TOKEN_DELETION_WAIT_MS,
   createDeviceInvalidation,
+  createTokenDeletion,
+  deviceInvalidation,
   type DeviceInvalidationDeps,
 } from '../src/lib/device-invalidation';
 import { registerDevice } from '../src/lib/devices';
+import { usePendingTap } from '../src/lib/push-notifications';
 import { signOut } from '../src/lib/sign-out';
 import {
   fakeNotifications,
   pushNotification,
   resetFakeNotifications,
+  tapOn,
 } from './support/fake-notifications';
 
 jest.mock('expo-notifications', () =>
@@ -61,15 +73,18 @@ jest.mock('../src/lib/auth-client', () => ({
   snapshotAuthCookies: () => Promise.resolve(mockSession.cookies),
 }));
 jest.mock('../src/lib/services', () => ({
-  forgetAccount: () => {
-    mockLog.push('forgetAccount');
+  forgetAccount: (_store: unknown, options?: { endSession?: boolean }) => {
+    mockLog.push(options?.endSession === false ? 'forgetAccount, no /sign-out' : 'forgetAccount');
     return Promise.resolve();
   },
 }));
 jest.mock('../src/lib/push-registration', () => ({
   pushRegistrar: () => ({
-    reset: () => {
-      mockLog.push('registrar.reset');
+    pause: () => {
+      mockLog.push('registrar.pause');
+    },
+    resume: () => {
+      mockLog.push('registrar.resume');
     },
     idle: () => {
       mockLog.push('registrar.idle');
@@ -77,6 +92,9 @@ jest.mock('../src/lib/push-registration', () => ({
     },
   }),
 }));
+jest.mock('../src/lib/db/kv', () =>
+  jest.requireActual<typeof import('./support/memory-kv')>('./support/memory-kv').memoryKvModule(),
+);
 
 const API = 'https://api.planeahead.test';
 const INSTALL = 'install-0123456789';
@@ -149,6 +167,7 @@ function build(
 beforeEach(() => {
   mockLog.length = 0;
   resetFakeNotifications();
+  kv.removeItemSync(TOKEN_DELETION_KEY);
 });
 
 describe('the invalidation at sign-out', () => {
@@ -301,6 +320,15 @@ describe('the queued call', () => {
     expect(mockLog).toHaveLength(1);
   });
 
+  it('says whether it waits, without sending it (a network return with a session asks)', async () => {
+    const { storage } = await queuedOffline();
+    const relaunch = build(storage, [200]);
+    await expect(relaunch.invalidation.queued()).resolves.toBe(true);
+    expect(mockLog).toEqual([]);
+    await relaunch.invalidation.settle();
+    await expect(relaunch.invalidation.queued()).resolves.toBe(false);
+  });
+
   it('is dropped when unreadable', async () => {
     const { box, storage } = memoryStorage();
     box.value = '{"installId":';
@@ -325,7 +353,7 @@ describe('signOut', () => {
     onlineManager.setOnline(true);
   });
 
-  it('stops registration, invalidates with the session, clears the tray, forgets the account, then unregisters', async () => {
+  it('pauses registration, invalidates with the session, then deletes the token beside forgetAccount and clears the tray after', async () => {
     mockSession.cookies = cookieMap('tok-a.sig');
     onlineManager.setOnline(true);
     globalThis.fetch = endpoint([200]).fetch as unknown as typeof fetch;
@@ -333,14 +361,57 @@ describe('signOut', () => {
     fakeNotifications.presented = [pushNotification('gate_change:AAL-100', { v: '1' })];
     await signOut(null);
     expect(mockLog).toEqual([
-      'registrar.reset',
+      'registrar.pause',
       'registrar.idle',
       'invalidate better-auth.session_token=tok-a.sig',
-      'dismissAll',
-      'forgetAccount',
+      'clearLastResponse',
       'unregister',
+      'forgetAccount',
+      'dismissAll',
+      'registrar.resume',
     ]);
     expect(fakeNotifications.presented).toEqual([]);
+    // The deletion succeeded: nothing is owed.
+    expect(kv.getItemSync(TOKEN_DELETION_KEY)).toBeNull();
+  });
+
+  it('drops a tap waiting for a session, and the last response (review N2)', async () => {
+    mockSession.cookies = cookieMap('tok-a.sig');
+    globalThis.fetch = endpoint([200]).fetch as unknown as typeof fetch;
+    const leaked = pushNotification('gate_change:AAL-100', { v: '1' });
+    fakeNotifications.lastResponse = tapOn(leaked);
+    usePendingTap.setState({ tap: { key: 'gate_change:AAL-100@1', flightId: 'flight-1' } });
+    await signOut(null);
+    expect(usePendingTap.getState().tap).toBeNull();
+    expect(fakeNotifications.lastResponse).toBeNull();
+  });
+
+  it('a token deletion that fails (Android offline) stays owed, and is reported (review A1)', async () => {
+    mockSession.cookies = cookieMap('tok-a.sig');
+    globalThis.fetch = endpoint([200]).fetch as unknown as typeof fetch;
+    const offline = new Error('SERVICE_NOT_AVAILABLE');
+    fakeNotifications.unregister = offline;
+    jest.mocked(Sentry.captureException).mockClear();
+    await signOut(null);
+    expect(kv.getItemSync(TOKEN_DELETION_KEY)).toBe('1');
+    expect(Sentry.captureException).toHaveBeenCalledWith(offline);
+  });
+
+  it('queued online (a 503): forgets the session without /sign-out, for the queued call to end it (review A4)', async () => {
+    mockSession.cookies = cookieMap('tok-a.sig');
+    globalThis.fetch = endpoint([503, 200]).fetch as unknown as typeof fetch;
+    await signOut(null);
+    expect(mockLog).toEqual([
+      'registrar.pause',
+      'registrar.idle',
+      'invalidate better-auth.session_token=tok-a.sig',
+      'forgetAccount, no /sign-out',
+      'registrar.resume',
+    ]);
+    // The session's end is the queued call, with its cookies.
+    mockLog.length = 0;
+    await deviceInvalidation().settle();
+    expect(mockLog).toEqual(['invalidate better-auth.session_token=tok-a.sig']);
   });
 
   it.each([
@@ -354,7 +425,7 @@ describe('signOut', () => {
     fakeNotifications.dismissAll = outcome;
     jest.mocked(Sentry.captureException).mockClear();
     await signOut(null);
-    expect(mockLog.slice(-3)).toEqual(['dismissAll', 'forgetAccount', 'unregister']);
+    expect(mockLog.slice(-3)).toEqual(['forgetAccount', 'dismissAll', 'registrar.resume']);
     expect(Sentry.captureException).toHaveBeenCalledTimes(outcome === 'pending' ? 0 : 1);
   });
 
@@ -365,11 +436,13 @@ describe('signOut', () => {
     fakeNotifications.calls = mockLog;
     await signOut(null);
     expect(mockLog).toEqual([
-      'registrar.reset',
+      'registrar.pause',
       'registrar.idle',
-      'dismissAll',
-      'forgetAccount',
+      'clearLastResponse',
       'unregister',
+      'forgetAccount, no /sign-out',
+      'dismissAll',
+      'registrar.resume',
     ]);
 
     // Online again, a new session registers: the signed-out session's call goes first, once.
@@ -384,5 +457,109 @@ describe('signOut', () => {
       'register',
       'register',
     ]);
+  });
+});
+
+describe('the token deletion (review A1)', () => {
+  /** A deletion over a scripted unregister and an in-memory record. */
+  function deletion(outcomes: ('ok' | 'fail' | 'hang')[]) {
+    const record = { owed: false };
+    const calls: boolean[] = [];
+    const errors: unknown[] = [];
+    let finish: () => void = () => undefined;
+    const instance = createTokenDeletion({
+      unregister: () => {
+        // Whether the deletion was recorded as owed when it started.
+        calls.push(record.owed);
+        const outcome = outcomes.shift() ?? 'ok';
+        if (outcome === 'hang') {
+          return new Promise<void>((resolve) => {
+            finish = resolve;
+          });
+        }
+        return outcome === 'ok'
+          ? Promise.resolve()
+          : Promise.reject(new Error('SERVICE_NOT_AVAILABLE'));
+      },
+      owed: {
+        read: () => record.owed,
+        write: (owed) => {
+          record.owed = owed;
+        },
+      },
+      onError: (error) => {
+        errors.push(error);
+      },
+    });
+    return { instance, record, calls, errors, finish: () => finish() };
+  }
+
+  it('is owed from before it starts until it succeeds; one that never finishes stays owed', async () => {
+    const done = deletion(['ok']);
+    await done.instance.start();
+    expect(done.calls).toEqual([true]);
+    expect(done.record.owed).toBe(false);
+
+    const unfinished = deletion(['hang']);
+    void unfinished.instance.start();
+    await Promise.resolve();
+    expect(unfinished.record.owed).toBe(true);
+    unfinished.finish();
+  });
+
+  it('a failure stays owed and is reported; a retry runs it again, and nothing once it is done', async () => {
+    const { instance, record, calls, errors } = deletion(['fail', 'fail', 'ok']);
+    await instance.start();
+    expect(record.owed).toBe(true);
+    await instance.retry();
+    expect(record.owed).toBe(true);
+    await instance.retry();
+    expect(record.owed).toBe(false);
+    await instance.retry();
+    expect(calls).toHaveLength(3);
+    expect(errors).toHaveLength(2);
+  });
+
+  it('runs one at a time: a retry or a start meanwhile joins it', async () => {
+    const { instance, record, calls, finish } = deletion(['hang']);
+    const joined = [instance.start(), instance.retry(), instance.start()];
+    expect(calls).toHaveLength(1);
+    finish();
+    await Promise.all(joined);
+    expect(record.owed).toBe(false);
+  });
+
+  it('before a read: nothing owed runs nothing; an owed one runs, and is forgotten even when it fails', async () => {
+    const { instance, record, calls } = deletion(['fail', 'fail']);
+    await instance.beforeRead();
+    expect(calls).toHaveLength(0);
+    await instance.start();
+    await instance.beforeRead();
+    expect(calls).toHaveLength(2);
+    expect(record.owed).toBe(false);
+    // From then on the token is the new session's: nothing deletes it.
+    await instance.retry();
+    await instance.beforeRead();
+    expect(calls).toHaveLength(2);
+  });
+
+  it(`before a read: one still running is waited for, at most ${String(TOKEN_DELETION_WAIT_MS)} ms`, async () => {
+    jest.useFakeTimers();
+    try {
+      const { instance, record, finish } = deletion(['hang']);
+      void instance.start();
+      let reading = false;
+      void instance.beforeRead().then(() => {
+        reading = true;
+      });
+      await jest.advanceTimersByTimeAsync(TOKEN_DELETION_WAIT_MS - 1);
+      expect(reading).toBe(false);
+      await jest.advanceTimersByTimeAsync(1);
+      expect(reading).toBe(true);
+      expect(record.owed).toBe(false);
+      finish();
+    } finally {
+      jest.useRealTimers();
+    }
   });
 });

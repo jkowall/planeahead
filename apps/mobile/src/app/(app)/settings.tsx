@@ -30,7 +30,7 @@ import {
 } from '@planeahead/shared';
 import Constants from 'expo-constants';
 import { useRouter } from 'expo-router';
-import { useState } from 'react';
+import { useRef, useState } from 'react';
 import { Alert, Linking } from 'react-native';
 import { Body, Button, Screen, Section, Title, Toggle } from '../../components/ui';
 import { errorCode } from '../../lib/api-client';
@@ -120,28 +120,47 @@ export default function SettingsScreen() {
   const unitSystem = unitSystemOf(preferences);
   const [notice, setNotice] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
+  const signingOut = useRef(false);
   const [permission, setPermission] = usePushPermission();
   const anonymous = isAnonymousSession(session);
   const config = runtimeConfig();
 
   const confirmSignOut = async () => {
-    const { store } = await services();
-    const pending = pendingCount(store.sqlite);
-    const go = async () => {
-      await signOut(store);
-    };
-    if (pending === 0) {
-      await go();
+    // One sign-out at a time (review N6): a tap while one runs, or while its confirmation is up,
+    // does nothing.
+    if (signingOut.current) {
       return;
     }
-    Alert.alert(
-      'Sign out?',
-      `${String(pending)} change(s) have not reached the server yet and will be lost.`,
-      [
-        { text: 'Cancel', style: 'cancel' },
-        { text: 'Sign out', style: 'destructive', onPress: () => void go() },
-      ],
-    );
+    signingOut.current = true;
+    const release = () => {
+      signingOut.current = false;
+    };
+    try {
+      const { store } = await services();
+      const pending = pendingCount(store.sqlite);
+      const go = () => {
+        setBusy(true);
+        return signOut(store).finally(() => {
+          setBusy(false);
+          release();
+        });
+      };
+      if (pending === 0) {
+        await go();
+        return;
+      }
+      Alert.alert(
+        'Sign out?',
+        `${String(pending)} change(s) have not reached the server yet and will be lost.`,
+        [
+          { text: 'Cancel', style: 'cancel', onPress: release },
+          { text: 'Sign out', style: 'destructive', onPress: () => void go() },
+        ],
+      );
+    } catch (error) {
+      release();
+      throw error;
+    }
   };
 
   const deleteAccount = () => {

@@ -19,10 +19,17 @@
  * is ignored, any other is debounced (`TOKEN_DEBOUNCE_MS`) and then registered as the listener
  * carried it, without a read. One registration runs at a time, and a trigger during it runs one
  * more after it (on iOS a second concurrent read rejects the first, R2 fact 21).
+ *
+ * Sign-out (review A3, src/lib/sign-out.ts). `reset()` starts a new epoch: a run that began before
+ * it posts nothing of what it read. `pause()` closes registration until the session is cleared:
+ * nothing starts, and the token listener is ignored. And a run first settles a token deletion
+ * that a sign-out left owed (`beforeRead`, src/lib/device-invalidation.ts `tokenDeletion`),
+ * before it reads a token, so a deletion can never kill the token the new session registers.
  */
 
 import * as Sentry from '@sentry/react-native';
 import type { DevicePushToken } from 'expo-notifications';
+import { tokenDeletion } from './device-invalidation';
 import { registerDevice, type DeviceRegistrationResult, type PushRegistration } from './devices';
 import {
   readDevicePushToken,
@@ -44,6 +51,8 @@ export interface PushRegistrarDeps {
   readonly onError: (error: unknown) => void;
   /** The API kept the device without the token (`pushTokenSkipped`), or there was no token. */
   readonly onNote?: (note: PushRegistrationNote, reason: string) => void;
+  /** First in every run, before the permission and token reads (a sign-out's owed deletion). */
+  readonly beforeRead?: () => Promise<void>;
   readonly debounceMs?: number;
 }
 
@@ -52,8 +61,14 @@ export interface PushRegistrar {
   register(): Promise<void>;
   /** The `addPushTokenListener` handler. */
   onToken(token: DevicePushToken): void;
-  /** Cancels a debounced token and a queued run, and forgets the last token (sign-out). */
+  /**
+   * Cancels a debounced token and a queued run, forgets the last token, and keeps a run in flight
+   * from posting what it read (a user change, sign-out, `forgetAccount`).
+   */
   reset(): void;
+  /** Sign-out: resets, and refuses every registration until as many `resume()` calls. */
+  pause(): void;
+  resume(): void;
   /** Resolves when the run in flight, if any, has finished. */
   idle(): Promise<void>;
 }
@@ -67,10 +82,16 @@ export function createPushRegistrar(deps: PushRegistrarDeps): PushRegistrar {
   /** The token last read or registered, whose echo the listener ignores. */
   let lastToken: string | null = null;
   let timer: ReturnType<typeof setTimeout> | null = null;
+  /** Bumped by `reset()`: a run posts only if none came since it began. */
+  let epoch = 0;
+  /** Open `pause()` calls: while any is, nothing registers. */
+  let pauses = 0;
 
   async function once(): Promise<void> {
+    const began = epoch;
     let push: PushRegistration | undefined;
     try {
+      await deps.beforeRead?.();
       const permission = await deps.readPermission();
       // Taken before the read, so a token the listener carries meanwhile waits for the next run.
       const fromListener = carried;
@@ -85,13 +106,31 @@ export function createPushRegistrar(deps: PushRegistrarDeps): PushRegistrar {
     } catch (error) {
       deps.onError(error);
     }
+    // A reset since this run began (a sign-out pauses with one): what it read is no one's now.
+    if (began !== epoch) {
+      return;
+    }
     const result = await deps.register(push);
     if (!result.registered) {
       deps.onNote?.('push_token_skipped', result.reason);
     }
   }
 
+  function reset(): void {
+    if (timer !== null) {
+      clearTimeout(timer);
+      timer = null;
+    }
+    carried = null;
+    lastToken = null;
+    again = false;
+    epoch += 1;
+  }
+
   function register(): Promise<void> {
+    if (pauses > 0) {
+      return Promise.resolve();
+    }
     if (running !== null) {
       again = true;
       return running;
@@ -118,7 +157,7 @@ export function createPushRegistrar(deps: PushRegistrarDeps): PushRegistrar {
     register,
     onToken(token) {
       const read = tokenRead(token);
-      if (read.kind !== 'token' || read.token === lastToken) {
+      if (pauses > 0 || read.kind !== 'token' || read.token === lastToken) {
         return;
       }
       if (timer !== null) {
@@ -132,14 +171,13 @@ export function createPushRegistrar(deps: PushRegistrarDeps): PushRegistrar {
         }
       }, debounceMs);
     },
-    reset() {
-      if (timer !== null) {
-        clearTimeout(timer);
-        timer = null;
-      }
-      carried = null;
-      lastToken = null;
-      again = false;
+    reset,
+    pause() {
+      pauses += 1;
+      reset();
+    },
+    resume() {
+      pauses = Math.max(0, pauses - 1);
     },
     idle() {
       return running ?? Promise.resolve();
@@ -155,6 +193,7 @@ export function pushRegistrar(): PushRegistrar {
     readPermission: readPushPermission,
     readToken: readDevicePushToken,
     register: async (push) => registerDevice((await services()).api, push),
+    beforeRead: () => tokenDeletion().beforeRead(),
     onError: (error) => {
       Sentry.captureException(error);
     },

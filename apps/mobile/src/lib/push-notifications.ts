@@ -12,7 +12,8 @@
  * in front, which is not presented; its arrival syncs the store instead, as every foreground push
  * naming a flight does (src/lib/push-routing.ts), and the screen's live query shows the change in
  * place. The handler answers synchronously from memory, never the network: well inside expo's 3
- * seconds (R2 fact 33).
+ * seconds (R2 fact 33). While the session is known to be null it presents nothing (review A1): a
+ * push still sent to a signed-out phone never banners over the sign-in screen.
  *
  * Taps (C7; R2 design 13). The root layout takes `getLastNotificationResponse()` at mount (a cold
  * start from a tap) and every response after; a tap waits in memory until a session exists, then
@@ -79,6 +80,21 @@ export function foregroundBehavior(
   };
 }
 
+const NOT_PRESENTED: NotificationBehavior = {
+  shouldShowBanner: false,
+  shouldShowList: false,
+  shouldPlaySound: false,
+  shouldSetBadge: false,
+};
+
+/** True while the session is known to be null (not while it loads), from the root layout. */
+let signedOut = false;
+
+/** The root layout's word on the session (src/lib/session.ts `useSignedOutWork`). */
+export function setSignedOut(value: boolean): void {
+  signedOut = value;
+}
+
 let handlerInstalled = false;
 
 /** Installs the foreground handler, once (the root layout calls it at module scope). */
@@ -89,7 +105,7 @@ export function installForegroundHandler(): void {
   handlerInstalled = true;
   setNotificationHandler({
     handleNotification: (notification) =>
-      Promise.resolve(foregroundBehavior(notification, flightInFront)),
+      Promise.resolve(signedOut ? NOT_PRESENTED : foregroundBehavior(notification, flightInFront)),
   });
 }
 

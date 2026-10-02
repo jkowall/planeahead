@@ -36,6 +36,8 @@ export interface FakeNotifications {
   presented: Notification[];
   /** How `dismissAllNotificationsAsync` ends: it empties `presented`, rejects, or never settles. */
   dismissAll: 'ok' | Error | 'pending';
+  /** How `unregisterForNotificationsAsync` ends: it resolves, rejects, or never settles. */
+  unregister: 'ok' | Error | 'pending';
   lastResponse: NotificationResponse | null;
   /** Every call, in order: `getPermissions`, `request`, `channel:<id>`, `getToken`, ... */
   calls: string[];
@@ -75,6 +77,7 @@ function initial(): FakeNotifications {
     token: { type: 'ios', data: 'a1'.repeat(32) },
     presented: [],
     dismissAll: 'ok',
+    unregister: 'ok',
     lastResponse: null,
     calls: [],
     requests: [],
@@ -145,7 +148,10 @@ export function fakeNotificationsModule() {
     },
     unregisterForNotificationsAsync: () => {
       f.calls.push('unregister');
-      return Promise.resolve();
+      if (f.unregister === 'pending') {
+        return new Promise<never>(() => undefined);
+      }
+      return f.unregister instanceof Error ? Promise.reject(f.unregister) : Promise.resolve();
     },
     setNotificationChannelAsync: (id: string, channel: NotificationChannelInput) => {
       f.calls.push(`channel:${id}`);

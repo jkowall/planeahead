@@ -208,7 +208,7 @@ describe('the token listener (rotation)', () => {
     expect(registered.map((push) => push?.token)).toEqual([TOKEN_A, TOKEN_B]);
   });
 
-  it('reset drops a debounced token and a queued run; idle waits for the run in flight', async () => {
+  it('reset drops a debounced token, a queued run and what the run in flight read; idle waits for it', async () => {
     const { registrar, deps } = harness();
     registrar.onToken({ type: 'android', data: 'fcm-rotated-token' });
     registrar.reset();
@@ -237,7 +237,86 @@ describe('the token listener (rotation)', () => {
     release();
     await jest.advanceTimersByTimeAsync(0);
     expect(idle).toBe(true);
+    // Its read began before the reset, so it posts nothing (review A3).
+    expect(deps.register).not.toHaveBeenCalled();
+    // The next run registers.
+    await registrar.register();
     expect(deps.register).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe('sign-out and the registrar (review A1, A3)', () => {
+  /** A registrar whose steps log in order; its `beforeRead` (an owed deletion) waits for `finish`. */
+  function ordered() {
+    const log: string[] = [];
+    let finish: () => void = () => undefined;
+    const registrar = createPushRegistrar({
+      beforeRead: () => {
+        log.push('beforeRead');
+        return new Promise<void>((resolve) => {
+          finish = resolve;
+        });
+      },
+      readPermission: () => {
+        log.push('readPermission');
+        return Promise.resolve({ state: 'granted', canAsk: false });
+      },
+      readToken: () => {
+        log.push('readToken');
+        return Promise.resolve(apns(TOKEN_A));
+      },
+      register: (push) => {
+        log.push(`register ${push?.token ?? 'none'}`);
+        return Promise.resolve({ registered: true as const });
+      },
+      onError: jest.fn(),
+    });
+    return { registrar, log, finish: () => finish() };
+  }
+
+  it('a run settles an owed token deletion before it reads anything', async () => {
+    const { registrar, log, finish } = ordered();
+    const run = registrar.register();
+    await flush();
+    expect(log).toEqual(['beforeRead']);
+    finish();
+    await run;
+    expect(log).toEqual(['beforeRead', 'readPermission', 'readToken', `register ${TOKEN_A}`]);
+  });
+
+  it('pause refuses every registration and the listener, until as many resumes', async () => {
+    const { registrar, log, finish } = ordered();
+    const run = registrar.register();
+    await flush();
+    // Sign-out begins while the run waits: it reads, and posts nothing.
+    registrar.pause();
+    registrar.pause();
+    await registrar.register();
+    finish();
+    await run;
+    expect(log).toEqual(['beforeRead', 'readPermission', 'readToken']);
+
+    jest.useFakeTimers();
+    try {
+      registrar.onToken({ type: 'ios', data: TOKEN_B });
+      await jest.advanceTimersByTimeAsync(TOKEN_DEBOUNCE_MS * 2);
+      registrar.resume();
+      await registrar.register();
+      expect(log).toHaveLength(3);
+      registrar.resume();
+      const next = registrar.register();
+      await jest.advanceTimersByTimeAsync(0);
+      finish();
+      await next;
+    } finally {
+      jest.useRealTimers();
+    }
+    expect(log.slice(3)).toEqual([
+      'beforeRead',
+      'readPermission',
+      'readToken',
+      `register ${TOKEN_A}`,
+    ]);
   });
 });
 
