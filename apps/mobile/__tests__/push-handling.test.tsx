@@ -8,6 +8,7 @@
 
 import { act, renderHook } from '@testing-library/react-native';
 import type { NotificationHandler } from 'expo-notifications';
+import { AppState, type AppStateStatus } from 'react-native';
 import { syncNow } from '../src/lib/session';
 import {
   dismissFlightNotifications,
@@ -341,6 +342,55 @@ describe('opening a flight dismisses its presented notifications (ruling C7)', (
       `dismiss:gate_change:${AA100_KEY}`,
       'getPresented',
     ]);
+    await screen.unmount();
+  });
+
+  it('and when the app returns to the foreground on it, while it is focused (review A6)', async () => {
+    const listeners = new Set<(status: AppStateStatus) => void>();
+    jest.spyOn(AppState, 'addEventListener').mockImplementation((_type, listener) => {
+      listeners.add(listener);
+      return {
+        remove: () => {
+          listeners.delete(listener);
+        },
+      };
+    });
+    const emit = async (status: AppStateStatus) => {
+      await act(() => {
+        for (const listener of [...listeners]) {
+          listener(status);
+        }
+      });
+      await flush();
+    };
+    /** A delay about AA100 that the OS displayed while the app was in the background. */
+    const delay = () =>
+      pushNotification(`delay:${AA100_KEY}`, appData(AA100_ID, { kind: 'delay' }));
+    const screen = await renderHook(
+      (props: { flightKey: string | null }) => {
+        useFlightInFront(AA100_ID, props.flightKey);
+      },
+      { initialProps: { flightKey: AA100_KEY } },
+    );
+    await flush();
+    expect(fakeNotifications.calls).toEqual(['getPresented']);
+    await emit('background');
+    fakeNotifications.presented = [delay()];
+    await emit('active');
+    expect(fakeNotifications.calls).toEqual([
+      'getPresented',
+      'getPresented',
+      `dismiss:delay:${AA100_KEY}`,
+    ]);
+    expect(fakeNotifications.presented).toEqual([]);
+
+    // Another screen in front: coming back to the app leaves the tray alone.
+    mockFocus.focused = false;
+    await screen.rerender({ flightKey: AA100_KEY });
+    fakeNotifications.presented = [delay()];
+    await emit('active');
+    expect(fakeNotifications.calls).toHaveLength(3);
+    expect(listeners.size).toBe(0);
     await screen.unmount();
   });
 });

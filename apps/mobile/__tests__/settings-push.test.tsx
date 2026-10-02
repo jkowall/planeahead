@@ -2,7 +2,8 @@
  * Increment 16, ruling C1 in Settings: the notification permission as it stands (read again on
  * every return to the foreground), "Turn on notifications" while the system prompt can still show
  * (alert and sound only, the answer registered at once), and the system settings once it is
- * denied. The real src/lib/push.ts over the expo-notifications fake.
+ * denied: the app's own notification settings (review N3). The real src/lib/push.ts over the
+ * expo-notifications fake.
  */
 
 import { act, fireEvent, render, screen } from '@testing-library/react-native';
@@ -108,8 +109,9 @@ describe('Settings, notifications (ruling C1)', () => {
     expect(screen.queryByTestId('settings-notifications')).toBeNull();
   });
 
-  it('denied: the system settings, and the state read again on the way back', async () => {
+  it("denied: the app's notification settings, and the state read again on the way back", async () => {
     const emit = captureAppState();
+    const openURL = jest.spyOn(Linking, 'openURL').mockResolvedValue(true);
     const openSettings = jest.spyOn(Linking, 'openSettings').mockResolvedValue();
     fakeNotifications.permission = permissionStatus({ status: 'denied', iosStatus: 1 });
     await render(<SettingsScreen />);
@@ -118,7 +120,9 @@ describe('Settings, notifications (ruling C1)', () => {
     );
     expect(screen.queryByTestId('settings-notifications')).toBeNull();
     await fireEvent.press(screen.getByTestId('settings-notifications-system'));
-    expect(openSettings).toHaveBeenCalledTimes(1);
+    // The notification settings themselves, not the app's settings page (review N3).
+    expect(openURL).toHaveBeenCalledWith('app-settings:notifications');
+    expect(openSettings).not.toHaveBeenCalled();
 
     // Turned on in the system settings, then back to the app.
     fakeNotifications.permission = GRANTED;

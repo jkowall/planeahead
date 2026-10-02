@@ -22,11 +22,17 @@ import type { ReactElement } from 'react';
 import { Alert } from 'react-native';
 import RouteSearchScreen from '../src/app/(app)/route-search';
 import { ROUTE_SEARCH_STALE_MS } from '../src/lib/boards';
+import { KV_KEYS, kv } from '../src/lib/db/kv';
 import type { SqliteLike } from '../src/lib/db/sqlite-like';
 import { useFlightNotices } from '../src/lib/flight-notices';
 import { useSettings } from '../src/lib/settings';
 import { DARK, LIGHT } from '../src/theme/tokens';
 import { compactTree } from './support/compact-tree';
+import {
+  fakeNotifications,
+  permissionStatus,
+  resetFakeNotifications,
+} from './support/fake-notifications';
 import { createMemorySqlite, type MemorySqlite } from './support/memory-sqlite';
 import { NOW, json, scriptedFetch } from './support/flight-fixtures';
 import { boardRow, routeAnswer } from './support/board-fixtures';
@@ -47,6 +53,13 @@ jest.mock('react-native-safe-area-context', () => {
   const { View } = jest.requireActual<typeof import('react-native')>('react-native');
   return { SafeAreaView: View };
 });
+
+// The notification pre-prompt after the first add (increment 16, ruling C1; review O1).
+jest.mock('expo-notifications', () =>
+  jest
+    .requireActual<typeof import('./support/fake-notifications')>('./support/fake-notifications')
+    .fakeNotificationsModule(),
+);
 
 jest.mock('expo-network', () => ({
   addNetworkStateListener: jest.fn(() => ({ remove: jest.fn() })),
@@ -155,6 +168,14 @@ beforeEach(() => {
   mockSession.current = { user: { id: 'anon-1', isAnonymous: true } };
   useFlightNotices.getState().clear();
   useSettings.getState().reset();
+  // Decided already, so an add offers no pre-prompt unless a test says otherwise.
+  resetFakeNotifications();
+  fakeNotifications.permission = permissionStatus({
+    status: 'granted',
+    granted: true,
+    iosStatus: 2,
+  });
+  kv.removeItemSync(KV_KEYS.pushPromptOffered);
 });
 
 afterEach(() => {
@@ -435,5 +456,79 @@ describe('tap to add', () => {
     expect(mockEdge.db.raw.prepare('SELECT added_as FROM flight_subscriptions').all()).toEqual([
       { added_as: 'AA100' },
     ]);
+  });
+});
+
+describe('the notification pre-prompt after the first add (increment 16, ruling C1; review O1)', () => {
+  /** A second flight on the route: BA112, 19:30 in New York. */
+  const BA112 = boardRow({
+    id: 'dep:BA112:2026-09-23T23:30:00Z',
+    designator: 'BA112',
+    airlineIata: 'BA',
+    airlineIcao: 'BAW',
+    operatingCarrierIcao: 'BAW',
+    operatingFlightNumber: '112',
+    codeshares: [],
+    scheduled: '2026-09-23T23:30:00Z',
+    estimated: '2026-09-23T23:30:00Z',
+    terminal: '7',
+    gate: '3',
+    counterpartScheduled: '2026-09-24T11:40:00Z',
+    add: { number: 'BA112', date: '2026-09-23', origin: 'KJFK' },
+  });
+
+  /** Presses a result, then the confirmation's `Add`. */
+  async function addResult(testID: string) {
+    await fireEvent.press(screen.getByTestId(testID));
+    const calls = jest.mocked(Alert.alert).mock.calls;
+    const add = calls[calls.length - 1]?.[2]?.find((button) => button.text === 'Add');
+    await act(() => {
+      add?.onPress?.();
+    });
+  }
+
+  beforeEach(async () => {
+    fakeNotifications.permission = permissionStatus({ iosStatus: 0 });
+    mockEdge.network.answer(() => json(200, routeAnswer({ flights: [boardRow(), BA112] })));
+    await openSearch();
+    await search('JFK', 'LHR');
+    await screen.findByTestId('route-search-results');
+  });
+
+  it('is offered over the search after the first add that succeeds, and never again', async () => {
+    mockEdge.network.answer(() => json(201, { created: true }));
+    await addResult(AA100_ROW);
+    expect(await screen.findByText('Added AA100 on Wed 23 Sep to your flights.')).toBeTruthy();
+    await waitFor(() => {
+      expect(mockRouter.push).toHaveBeenCalledWith('/notifications');
+    });
+    // Over the search, which stays with the add's outcome.
+    expect(mockRouter.replace).not.toHaveBeenCalled();
+    expect(mockRouter.back).not.toHaveBeenCalled();
+
+    mockEdge.network.answer(() => json(201, { created: true }));
+    await addResult(`board-row-${BA112.id}`);
+    expect(await screen.findByText('Added BA112 on Wed 23 Sep to your flights.')).toBeTruthy();
+    expect(mockRouter.push).toHaveBeenCalledTimes(1);
+  });
+
+  it('is not offered after an add that was refused', async () => {
+    mockEdge.network.answer(() =>
+      json(403, { error: 'cap_exceeded', cap: 'active_subscriptions', limit: 3, message: 'm' }),
+    );
+    await addResult(AA100_ROW);
+    expect(
+      await screen.findByText(
+        'The free plan tracks up to 3 flights at a time. Remove a flight to add another.',
+      ),
+    ).toBeTruthy();
+    // Anything the add would still do has run.
+    await act(async () => {
+      await new Promise<void>((resolve) => {
+        setImmediate(resolve);
+      });
+    });
+    expect(mockRouter.push).not.toHaveBeenCalled();
+    expect(kv.getItemSync(KV_KEYS.pushPromptOffered)).toBeNull();
   });
 });

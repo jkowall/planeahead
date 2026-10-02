@@ -14,9 +14,12 @@
  *
  * Adding a row's flight is the app's one add path: `addFlight` (the optimistic row and the queued
  * `POST /v1/flights` with the row's `add`: designator, origin-local date, origin) and the same
- * drain and refusal handling as the add sheet (src/app/(app)/add.tsx).
+ * drain and refusal handling as the add sheet (src/app/(app)/add.tsx). As there, the first add
+ * that succeeds offers the notification pre-prompt (increment 16, ruling C1; review O1), here over
+ * the board or the search, which stays open with the add's outcome.
  */
 
+import * as Sentry from '@sentry/react-native';
 import {
   AirportBoardResponseSchema,
   FREE_TIER_LIMITS,
@@ -30,6 +33,7 @@ import {
   type RouteSearchResponse,
 } from '@planeahead/shared';
 import { onlineManager, useQuery } from '@tanstack/react-query';
+import { useRouter } from 'expo-router';
 import { useCallback, useEffect, useRef, useState, useSyncExternalStore } from 'react';
 import { Alert } from 'react-native';
 import * as z from 'zod';
@@ -37,6 +41,7 @@ import type { ApiClient } from './api-client';
 import { useFlightNotices } from './flight-notices';
 import { addFlight, drainFor, normaliseDateInput, validateAddFlight } from './flights';
 import { formatIsoDate } from './format';
+import { takePushPromptOffer } from './push';
 import { services } from './services';
 
 /**
@@ -359,6 +364,8 @@ export function useRouteSearch(search: RouteSearchInput | null) {
 export interface BoardAddOutcome {
   readonly tone: 'info' | 'danger';
   readonly text: string;
+  /** The flight is in the list now: added, or queued until PlaneAhead can be reached. */
+  readonly added: boolean;
 }
 
 /**
@@ -378,6 +385,7 @@ export async function addBoardRow(
     return {
       tone: 'danger',
       text: `${row.designator} cannot be added from here. Add it by its flight number instead.`,
+      added: false,
     };
   }
   const { designator, date } = validation.value;
@@ -386,7 +394,7 @@ export async function addBoardRow(
     const { store, outbox } = await services();
     const added = addFlight(store.sqlite, { designator, date, origin: row.add.origin });
     if (added.kind === 'already_tracked') {
-      return { tone: 'info', text: `You already track ${on}.` };
+      return { tone: 'info', text: `You already track ${on}.`, added: false };
     }
     const drained = await drainFor(outbox, store.sqlite, added.outboxId);
     const refused = useFlightNotices.getState().take(added.subscriptionId);
@@ -397,16 +405,21 @@ export async function addBoardRow(
       return null;
     }
     if (refused !== null) {
-      return { tone: 'danger', text: refused.message };
+      return { tone: 'danger', text: refused.message, added: false };
     }
     return drained === 'queued'
       ? {
           tone: 'info',
           text: `${on} is in your flights. It is added as soon as PlaneAhead can be reached.`,
+          added: true,
         }
-      : { tone: 'info', text: `Added ${on} to your flights.` };
+      : { tone: 'info', text: `Added ${on} to your flights.`, added: true };
   } catch {
-    return { tone: 'danger', text: 'The flight could not be saved on this phone. Try again.' };
+    return {
+      tone: 'danger',
+      text: 'The flight could not be saved on this phone. Try again.',
+      added: false,
+    };
   }
 }
 
@@ -422,9 +435,11 @@ export interface RowAdd {
 
 /**
  * Tap to add, for the board and the route search: a confirmation first (an add takes one of the
- * free plan's few tracked flights, and a list of hundreds is easy to mis-tap), then `addBoardRow`.
+ * free plan's few tracked flights, and a list of hundreds is easy to mis-tap), then `addBoardRow`,
+ * and after the first add that succeeds the notification pre-prompt, over the screen (C1, O1).
  */
 export function useRowAdd(): RowAdd {
+  const router = useRouter();
   const [addingId, setAddingId] = useState<string | null>(null);
   const [outcome, setOutcome] = useState<BoardAddOutcome | null>(null);
   const running = useRef(false);
@@ -436,17 +451,33 @@ export function useRowAdd(): RowAdd {
     };
   }, []);
 
-  const run = useCallback(async (row: BoardViewRow) => {
-    running.current = true;
-    setOutcome(null);
-    setAddingId(row.id);
-    const result = await addBoardRow(row, () => mounted.current);
-    running.current = false;
-    if (mounted.current) {
+  const run = useCallback(
+    async (row: BoardViewRow) => {
+      running.current = true;
+      setOutcome(null);
+      setAddingId(row.id);
+      const result = await addBoardRow(row, () => mounted.current);
+      running.current = false;
+      if (!mounted.current) {
+        return;
+      }
       setAddingId(null);
       setOutcome(result);
-    }
-  }, []);
+      if (result?.added === true) {
+        await takePushPromptOffer(() => {
+          if (!mounted.current) {
+            return false;
+          }
+          router.push('/notifications');
+          return true;
+        }).catch((error: unknown) => {
+          Sentry.captureException(error);
+        });
+      }
+    },
+    // The router is expo-router's one instance, so `run`, and with it `confirm`, stay stable.
+    [router],
+  );
 
   // Stable across renders, so a screen's `onAdd` can be too and the memoised rows skip (R13).
   const confirm = useCallback(

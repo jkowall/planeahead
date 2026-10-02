@@ -113,7 +113,10 @@ catalog:
   expo-apple-authentication: ~57.0.2
   expo-crypto: ~57.0.3
   expo-standard-web-crypto: ~57.0.3
-  expo-notifications: ~57.0.20
+  # EXACT because it is patched (increment 16, review A2; patchedDependencies below). pnpm refuses
+  # an install whose patch matches no installed version (ERR_PNPM_UNUSED_PATCH), so a bump fails
+  # loudly until the patch is dropped (once upstream has the fix) or redone for the new version.
+  expo-notifications: 57.0.20
   # Applies `userInterfaceStyle: automatic` on Android (the root view background in dark mode).
   expo-system-ui: ~57.0.4
   # `isDevice`: the Apple credential-state call is skipped on the Simulator, where it always
@@ -198,3 +201,12 @@ allowBuilds:
   # @sentry/cli's postinstall checks that the platform binary (@sentry/cli-darwin, -linux-x64)
   # unpacked; the Sentry Xcode and Gradle build phases and the source-map upload step run it.
   '@sentry/cli': true
+
+# Dependency patches, made with `pnpm patch` and `pnpm patch-commit` (the files are in patches/).
+# Each key names an exact version, so a patch no installed version matches fails the install.
+patchedDependencies:
+  # Increment 16 (review A2): expo-notifications 57.0.20's getDevicePushTokenAsync caches a
+  # rejected native read for the life of the JS runtime, so one failed token read fails every
+  # later one. The patch clears the cached promise in a `finally` (build/ and src/); concurrent
+  # reads still share one native call. Drop it when upstream ships the fix.
+  expo-notifications@57.0.20: patches/expo-notifications@57.0.20.patch

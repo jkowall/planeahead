@@ -31,7 +31,7 @@ import {
 import Constants from 'expo-constants';
 import { useRouter } from 'expo-router';
 import { useRef, useState } from 'react';
-import { Alert, Linking } from 'react-native';
+import { Alert } from 'react-native';
 import { Body, Button, Screen, Section, Title, Toggle } from '../../components/ui';
 import { errorCode } from '../../lib/api-client';
 import { authClient, isAnonymousSession } from '../../lib/auth-client';
@@ -43,7 +43,7 @@ import {
   queuePreferencesPatch,
   type PreferencesPatch,
 } from '../../lib/preference-mutations';
-import { requestPushPermission, usePushPermission } from '../../lib/push';
+import { openNotificationSettings, requestPushPermission, usePushPermission } from '../../lib/push';
 import { pushRegistrar } from '../../lib/push-registration';
 import { forgetAccount, services } from '../../lib/services';
 import { APPEARANCES, useSettings, type Appearance } from '../../lib/settings';
@@ -321,7 +321,8 @@ export default function SettingsScreen() {
             title="Open system settings"
             variant="secondary"
             onPress={() => {
-              void Linking.openSettings();
+              // The app's own notification settings, not its settings page (review N3).
+              void openNotificationSettings();
             }}
           />
         ) : null}
