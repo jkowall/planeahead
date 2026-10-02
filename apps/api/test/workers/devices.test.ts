@@ -14,8 +14,8 @@
  * rotation leaves exactly one live row of the kind.
  */
 
-import { and, eq } from 'drizzle-orm';
-import { devices, pushTokens } from '@planeahead/db';
+import { and, eq, sql } from 'drizzle-orm';
+import { devices, pushTokens, sessions } from '@planeahead/db';
 import { describe, expect, it } from 'vitest';
 import {
   IDEMPOTENCY_KEY_HEADER,
@@ -30,6 +30,7 @@ import {
   magicLinkTokenFor,
   registerDevice,
   signInAnonymously,
+  signInWithMagicLink,
   uniqueEmail,
   uniqueInstallId,
   uniqueIp,
@@ -422,6 +423,13 @@ function invalidate(
   );
 }
 
+/** A user's live session rows. */
+function sessionsOf(userId: string): Promise<{ id: string }[]> {
+  return withFileDb((db) =>
+    db.select({ id: sessions.id }).from(sessions).where(eq(sessions.userId, userId)),
+  );
+}
+
 describe('POST /v1/devices, increment 14 fields (ruling P6)', () => {
   it('stores the app id and the permission, and takes an old client without either', async () => {
     const session = await signInAnonymously();
@@ -573,11 +581,13 @@ describe('POST /v1/devices/current/invalidate (ruling P6)', () => {
     });
 
     const response = await invalidate(session, installId, { 'x-install-id': installId });
+    // The call ended the caller's session (rulings A3 and A4): a second one is refused.
     const again = await invalidate(session, installId);
 
     expect(response.status).toBe(200);
     expect(await response.json()).toEqual({ invalidated: 2 });
-    expect(await again.json()).toEqual({ invalidated: 0 });
+    expect(again.status).toBe(401);
+    expect((await again.json<{ error: string }>()).error).toBe('unauthenticated');
     const mine = await withFileDb((db) =>
       db
         .select({ kind: pushTokens.kind, invalidatedAt: pushTokens.invalidatedAt })
@@ -601,28 +611,140 @@ describe('POST /v1/devices/current/invalidate (ruling P6)', () => {
     const session = await signInAnonymously();
     const installId = uniqueInstallId('p6-unknown');
 
-    const unknown = await invalidate(session, installId);
+    // The refusals first: a refused call ends nothing, so the same session asks again.
     const malformed = await invalidate(session, 'x');
     const mismatch = await invalidate(session, installId, {
       'x-install-id': uniqueInstallId('p6-else'),
     });
+    expect(await sessionsOf(session.userId)).toHaveLength(1);
+    const unknown = await invalidate(session, installId);
 
-    expect(await unknown.json()).toEqual({ invalidated: 0 });
     expect(malformed.status).toBe(400);
     expect(mismatch.status).toBe(400);
     expect((await mismatch.json<{ error: string }>()).error).toBe('install_id_mismatch');
+    expect(await unknown.json()).toEqual({ invalidated: 0 });
+    expect(await sessionsOf(session.userId)).toEqual([]);
   });
 
   it('lets a later registration revive a signed-out token (sign in again on the same phone)', async () => {
-    const session = await signInAnonymously();
+    const email = uniqueEmail('p6-revive');
+    const before = await signInWithMagicLink(email);
     const installId = uniqueInstallId('p6-revive');
     const token = `apns-${crypto.randomUUID()}`;
-    await registerDevice(session, installId, { pushTokenKind: 'apns', pushToken: token });
-    await invalidate(session, installId);
+    const phone = { cookie: before.cookie, ip: uniqueIp() };
+    await registerDevice(phone, installId, { pushTokenKind: 'apns', pushToken: token });
+    await invalidate(phone, installId);
 
-    await registerDevice(session, installId, { pushTokenKind: 'apns', pushToken: token });
+    // The same account signs in again on the phone: a new session, the same token.
+    const after = await signInWithMagicLink(email);
+    expect(after.userId).toBe(before.userId);
+    const again = { cookie: after.cookie, ip: uniqueIp() };
+    expect(
+      (await registerDevice(again, installId, { pushTokenKind: 'apns', pushToken: token })).status,
+    ).toBe(200);
 
     expect(await tokensOf(installId)).toMatchObject([{ token, invalidatedAt: null }]);
+  });
+});
+
+describe('the invalidation ends the calling session (increment 16 review, rulings A3 and A4)', () => {
+  const fcm = () => ({
+    platform: 'android',
+    pushTokenKind: 'fcm',
+    pushToken: `fcm-${crypto.randomUUID()}`,
+  });
+  /** Better Auth's own sign-out, the app's `authClient.signOut()`. */
+  const signOut = (session: { readonly cookie: string; readonly ip: string }) =>
+    worker(jsonRequest('/api/auth/sign-out', 'POST', {}, session));
+  const states = async (installId: string) =>
+    (await tokensOf(installId)).map((row) => (row.invalidatedAt === null ? 'live' : 'invalidated'));
+
+  it("ends the caller's session in the same call and none of the user's others", async () => {
+    const email = uniqueEmail('a4-only');
+    const onPhone = await signInWithMagicLink(email);
+    const onTablet = await signInWithMagicLink(email);
+    const phone = { cookie: onPhone.cookie, ip: uniqueIp() };
+    const tablet = { cookie: onTablet.cookie, ip: uniqueIp() };
+    const phoneInstall = uniqueInstallId('a4-phone');
+    const tabletInstall = uniqueInstallId('a4-tablet');
+    await registerDevice(phone, phoneInstall, fcm());
+    await registerDevice(tablet, tabletInstall, fcm());
+    expect(await sessionsOf(onPhone.userId)).toHaveLength(2);
+
+    const response = await invalidate(phone, phoneInstall);
+
+    expect(response.status).toBe(200);
+    expect(await response.json()).toEqual({ invalidated: 1 });
+    expect(await sessionsOf(onPhone.userId)).toHaveLength(1);
+    // A registration with the phone's cookie afterwards is refused, and revives nothing.
+    expect((await registerDevice(phone, phoneInstall, fcm())).status).toBe(401);
+    expect(await states(phoneInstall)).toEqual(['invalidated']);
+    // The tablet's session, its token and its writes are untouched.
+    expect((await registerDevice(tablet, tabletInstall)).status).toBe(200);
+    expect(await states(tabletInstall)).toEqual(['live']);
+  });
+
+  it('a sign-out with the same cookie still answers 200; a registration after both gets 401', async () => {
+    const session = await signInAnonymously();
+    const installId = uniqueInstallId('a4-online');
+    const token = fcm();
+    expect((await registerDevice(session, installId, token)).status).toBe(200);
+
+    expect((await invalidate(session, installId)).status).toBe(200);
+    expect(await sessionsOf(session.userId)).toEqual([]);
+    // The app's sign-out then finds the session gone: Better Auth answers 200 all the same.
+    expect((await signOut(session)).status).toBe(200);
+    const late = await registerDevice(session, installId, token);
+
+    expect(late.status).toBe(401);
+    expect(await states(installId)).toEqual(['invalidated']);
+  });
+
+  it('a replay after a revoke answers 401 and leaves the row live (why a queued call skips /sign-out)', async () => {
+    const session = await signInAnonymously();
+    const installId = uniqueInstallId('a4-revoked');
+    expect((await registerDevice(session, installId, fcm())).status).toBe(200);
+    // The invalidation never committed, and Better Auth's sign-out revoked the session.
+    expect((await signOut(session)).status).toBe(200);
+
+    const replay = await invalidate(session, installId);
+
+    expect(replay.status).toBe(401);
+    expect(await states(installId)).toEqual(['live']);
+  });
+
+  it('ends both or neither: a session that cannot be deleted leaves the tokens live', async () => {
+    const session = await signInAnonymously();
+    const installId = uniqueInstallId('a4-atomic');
+    expect((await registerDevice(session, installId, fcm())).status).toBe(200);
+    const [own] = await sessionsOf(session.userId);
+    // A trigger that refuses to delete this one session row; no other file's row matches it.
+    const name = `a4_refuse_${crypto.randomUUID().replaceAll('-', '')}`;
+    await withFileDb(async (db) => {
+      await db.execute(
+        sql.raw(
+          `create function ${name}() returns trigger language plpgsql as $$ begin raise exception 'refused by the test'; end $$`,
+        ),
+      );
+      await db.execute(
+        sql.raw(
+          `create trigger ${name} before delete on sessions for each row when (old.id = '${own?.id ?? ''}') execute function ${name}()`,
+        ),
+      );
+    });
+    let status = 0;
+    try {
+      status = (await invalidate(session, installId)).status;
+    } finally {
+      await withFileDb(async (db) => {
+        await db.execute(sql.raw(`drop trigger ${name} on sessions`));
+        await db.execute(sql.raw(`drop function ${name}()`));
+      });
+    }
+
+    expect(status).toBe(500);
+    expect(await states(installId)).toEqual(['live']);
+    expect(await sessionsOf(session.userId)).toHaveLength(1);
   });
 });
 

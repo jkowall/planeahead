@@ -20,7 +20,7 @@ import {
 } from 'cloudflare:test';
 import { sql } from 'drizzle-orm';
 import { SignJWT, exportJWK, generateKeyPair } from 'jose';
-import { PushJobV1, createUuidv7Generator } from '@planeahead/shared';
+import { ANDROID_CHANNEL_IDS, PushJobV1, createUuidv7Generator } from '@planeahead/shared';
 import { describe, expect, it } from 'vitest';
 import { createApp } from '../../src/app';
 import type { Env } from '../../src/env';
@@ -328,6 +328,8 @@ describe('Send a test push (ruling P8)', () => {
       kind: 'push_job',
       test: true,
       notificationKind: 'system',
+      // One of the app's two channels (review A5), never one it does not create.
+      channelId: ANDROID_CHANNEL_IDS.flightChanges,
       title: 'PlaneAhead test push',
       targets: [
         {
