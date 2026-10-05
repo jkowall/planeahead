@@ -2,11 +2,16 @@
  * The transport soak (increment 16, ruling C9; plan section 4, "Transport gate and soak"). On
  * staging, for the hours an operator chooses on `/admin/push/soak` (src/routes/admin-soak.ts), a
  * five-minute tick injects a synthetic event into one test flight the owner's test devices follow,
- * and once an hour a canary sends two test pushes whose provider tokens are asked of `PushAuth` at
- * the same instant. The admin page counts what the providers answered from the delivery attempt
- * log (src/queues/push-outcomes.ts): every 403 and 429 reason, edge 52x answers without an
- * `apns-id`, and the sends. A clean soak settles R1 U2; a failing one ships the relay
- * (src/push/transport.ts).
+ * and once an hour a canary sends two test pushes whose provider tokens are asked of `PushAuth`
+ * together. The admin page counts what the providers answered from the delivery attempt log
+ * (src/queues/push-outcomes.ts): every 403 and 429 reason, edge 52x answers without an
+ * `apns-id`, and the sends. What that measures (review M1): edge 52x without an `apns-id` over
+ * the soak's hours (R1 U1); `UnrelatedKeyIdInToken` on the sandbox host at staging's volume; and
+ * `TooManyProviderTokenUpdates` from `PushAuth`'s own rotation, which normal rotation cannot
+ * cause, so such a row points at rotation, clock skew or a `PushAuth` fault before the relay. It
+ * does not settle R1 U2: no canary built from one team's keys can provoke the cross-account
+ * error, and this one sends one token twice. U2 stays open until Cloudflare answers. A failing
+ * soak points at the relay (src/push/transport.ts).
  *
  * The record is one JSON value in `CONFIG` KV (`PUSH_SOAK_KV_KEY`), where the ProviderBudget's
  * manual kill switch already lives: the soak's id, test flight, hours, start and end, the stop if
@@ -20,27 +25,36 @@
  * inside the soak (from its start, before its end and any stop) plans and nothing else (ruling
  * W1): an `inject` message on the `housekeeping` queue, whose consumer already runs cron-planned
  * work one message at a time on one Neon connection, and on every twelfth tick from the start,
- * the first included, a `canary` message. The ids a step writes under (the injection id, the
- * canary's job ids) are minted at the tick, so a redelivered message replays them, and the
- * tracker writes nothing for a replayed injection id.
+ * the first included, a `canary` message. Each step makes its own ids. The injection id is
+ * derived from the soak id and the slot (`soakInjectionId`, review n2), so a redelivered step, or
+ * a tick the cron delivered twice, injects once per slot: the tracker writes nothing for an
+ * injection id it has seen, and the repeat leaves an audit row with nothing written. The canary's
+ * job ids are minted when its step runs (review n6), so the result page's ten-minute window,
+ * which starts at a job id's instant, starts at the send however long the step queued.
  *
  * The injection is increment 15's injector path (`injectSyntheticEvent`) as `system`, its audit
  * row naming the soak and the operator who started it: a departure delay of 30, 60, 90 or 120
  * minutes in turn. The policy pushes a delay at any distance from departure (a gate change counts
  * only from six hours before it), and it reads as routine on the test devices every five minutes,
  * as a cancellation or a diversion would not. The values are 30 minutes apart, so a real delay
- * pushed meanwhile blocks at most one in four (the policy's 15-minute step). Every tick leaves an
- * audit row, a refusal before the tracker call included, so the 409s a suspicion causes count.
+ * pushed meanwhile blocks at most one value in four (the policy's 15-minute step); and for 15
+ * minutes after each real delay intent the injected ones push nothing, up to three ticks (the
+ * policy's interval between delay intents, review n3). Every run of a step leaves an audit row,
+ * a refusal before the tracker call included, so the 409s a suspicion causes count.
  *
  * The canary is increment 14's test push (`testPushJob`) to the token the operator chose, sent
  * twice at once through the push consumer's own batch handler, each job a batch of one with an
- * empty token cache of its own, the first token request of each held until both arrive, so both
- * ask `PushAuth` in the same instant as two cold isolates would. Two queue messages would not do
- * it: Queues raises consumer concurrency only after a batch has finished (R1 F46), so they run one
- * after the other, and the push queue runs a batch's jobs one after the other, the second finding
- * the isolate's token cache warm. Which isolate runs an invocation is Cloudflare's to choose; the
- * two sends share this invocation's. Retries go to the push queue like any job's, and the outcomes
- * to persist, so each canary job has its delivery row and its `/admin/push/test/result` page.
+ * empty token cache of its own, the first token request of each held at a gate until both arrive
+ * (or `PUSH_SOAK_GATE_TIMEOUT_MS` after the first). What it checks is that concurrent cold asks
+ * of `PushAuth` get one token; it cannot show connection pooling (review M1): both sends share
+ * this invocation and one token, while R1 U2's canary needs two different tokens from two
+ * isolates. Two queue messages would not even ask together: Queues raises consumer concurrency
+ * only after a batch has finished (R1 F46), so they run one after the other, and the push queue
+ * runs a batch's jobs one after the other, the second finding the isolate's token cache warm. Its
+ * audit row records how the gate opened (`gate`: `together`, `timeout`, or `unused` when no send
+ * asked) and whether the two sends' first asks got the same token (`tokens_matched`, a boolean,
+ * null unless both asked; never a token). Retries go to the push queue like any job's, and the
+ * outcomes to persist, so each canary job has its delivery row and its result page.
  */
 
 import { eq } from 'drizzle-orm';
@@ -48,9 +62,11 @@ import { z } from 'zod';
 import { auditLog, type Db } from '@planeahead/db';
 import {
   PUSH_TARGET_KINDS,
+  createUuidv7Generator,
   isFlightKey,
   isUuidv7,
   uuidv7,
+  uuidv7Timestamp,
   type FlightKey,
   type PushJobV1Input,
   type PushOutcomeMessageV1,
@@ -109,9 +125,23 @@ export const PushSoakRecordSchema = z.object({
 });
 export type PushSoakRecord = z.output<typeof PushSoakRecordSchema>;
 
-/** The soak record; null when there is none or it does not parse (a start replaces it). */
+/**
+ * The soak record; null when there is none, or when it is not JSON or not a record (a start
+ * replaces it). Read as text and parsed here: KV's own `'json'` read throws on a value that is not
+ * JSON, which only a hand-written value can be, and that must not fail the page, a start and
+ * every tick until someone deletes the key (review n4).
+ */
 export async function readPushSoak(kv: Pick<KVNamespace, 'get'>): Promise<PushSoakRecord | null> {
-  const value: unknown = await kv.get(PUSH_SOAK_KV_KEY, 'json');
+  const text = await kv.get(PUSH_SOAK_KV_KEY, 'text');
+  if (text === null) {
+    return null;
+  }
+  let value: unknown;
+  try {
+    value = JSON.parse(text);
+  } catch {
+    return null;
+  }
   const parsed = PushSoakRecordSchema.safeParse(value);
   return parsed.success ? parsed.data : null;
 }
@@ -166,16 +196,37 @@ const SoakMessageBase = {
   runId: z.string().min(1).max(64),
 };
 
-/** One step of one tick, on the `housekeeping` queue. */
+/**
+ * One step of one tick, on the `housekeeping` queue. It carries no ids: the inject step derives
+ * its injection id from the soak and the slot, and the canary step mints its job ids when it runs
+ * (reviews n2 and n6). A message queued before that still parses; the ids it carries are dropped.
+ */
 export const PushSoakMessageV1 = z.discriminatedUnion('step', [
-  z.object({ ...SoakMessageBase, step: z.literal('inject'), injectionId: Uuidv7Schema }),
-  z.object({
-    ...SoakMessageBase,
-    step: z.literal('canary'),
-    jobIds: z.array(Uuidv7Schema).length(PUSH_SOAK_CANARY_SENDS),
-  }),
+  z.object({ ...SoakMessageBase, step: z.literal('inject') }),
+  z.object({ ...SoakMessageBase, step: z.literal('canary') }),
 ]);
 export type PushSoakMessageV1 = z.input<typeof PushSoakMessageV1>;
+
+/**
+ * A slot's injection id (review n2): a UUIDv7 that depends on the soak id and the slot alone, so
+ * every run of the slot's inject step, a redelivery or a tick delivered twice, names the same
+ * injection and the tracker writes it once. Its instant is the slot's (the soak id's own plus
+ * the slot's ticks); the rest is SHA-256 of `push_soak:{soak id}:{slot}`, version and variant set.
+ */
+export async function soakInjectionId(soakId: string, slot: number): Promise<string> {
+  const seed = `push_soak:${soakId}:${String(slot)}`;
+  const bytes = new Uint8Array(
+    await crypto.subtle.digest('SHA-256', new TextEncoder().encode(seed)),
+  ).slice(0, 16);
+  const view = new DataView(bytes.buffer);
+  const ms = uuidv7Timestamp(soakId) + slot * PUSH_SOAK_TICK_MS;
+  view.setUint32(0, Math.floor(ms / 0x10000));
+  view.setUint16(4, ms % 0x10000);
+  view.setUint8(6, 0x70 | (view.getUint8(6) & 0x0f));
+  view.setUint8(8, 0x80 | (view.getUint8(8) & 0x3f));
+  const hex = [...bytes].map((byte) => byte.toString(16).padStart(2, '0')).join('');
+  return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${hex.slice(16, 20)}-${hex.slice(20)}`;
+}
 
 /** Whether a `housekeeping` queue message is the soak's (src/queues/housekeeping.ts). */
 export function isPushSoakMessage(body: unknown): boolean {
@@ -211,10 +262,9 @@ export async function planPushSoak(
   }
   const base = { kind: 'push_soak', soakId: record.id, slot: position.slot } as const;
   const runId = new Date(at).toISOString();
-  const steps: PushSoakMessageV1[] = [{ ...base, runId, step: 'inject', injectionId: uuidv7() }];
+  const steps: PushSoakMessageV1[] = [{ ...base, runId, step: 'inject' }];
   if (position.canary) {
-    const jobIds = Array.from({ length: PUSH_SOAK_CANARY_SENDS }, () => uuidv7());
-    steps.push({ ...base, runId, step: 'canary', jobIds });
+    steps.push({ ...base, runId, step: 'canary' });
   }
   await (deps.sink ?? env.HOUSEKEEPING_QUEUE).sendBatch(steps.map((body) => ({ body })));
   log.info('cron_push_soak_planned', {
@@ -248,8 +298,9 @@ function soakDetails(record: PushSoakRecord, message: SoakStep): Record<string, 
 
 /**
  * One step of one tick, from the `housekeeping` queue. Acknowledged unless a write it must make
- * first fails (then retried, replaying the tick's ids): a step of a soak since stopped or
- * replaced does nothing, and neither does any step in production.
+ * first fails (then retried: an injection names its slot's id again, a canary mints new job ids):
+ * a step of a soak since stopped or replaced does nothing, and neither does any step in
+ * production.
  */
 export async function runPushSoakMessage(
   body: unknown,
@@ -309,7 +360,7 @@ async function soakInject(
     tracker: (deps.injectorFor ?? defaultInjectorFor)(env)(flightKey),
     flightKey,
     event: { kind: 'departure_delay', minutes },
-    injectionId: message.injectionId,
+    injectionId: await soakInjectionId(record.id, message.slot),
     now: deps.now ?? Date.now,
     waitUntil: (promise) => {
       ctx.waitUntil(promise);
@@ -357,11 +408,7 @@ async function soakCanary(
           ? 'token_kind_changed'
           : null;
   const auditId = uuidv7();
-  const details = {
-    ...soakDetails(record, message),
-    job_ids: message.jobIds,
-    kind: record.canary.kind,
-  };
+  const refusedDetails = { ...soakDetails(record, message), kind: record.canary.kind };
   const audit = {
     id: auditId,
     subjectId: row?.user_id ?? null,
@@ -375,21 +422,27 @@ async function soakCanary(
     // Nothing is sent: the operator registers the token again, or starts a soak with another.
     await db.insert(auditLog).values({
       ...audit,
-      details: { ...details, outcome: 'refused' satisfies PushSoakCanaryOutcome, refusal },
+      details: { ...refusedDetails, outcome: 'refused' satisfies PushSoakCanaryOutcome, refusal },
     });
     log.warn('push_soak_canary_refused', { refusal });
     return;
   }
+  // Review n6: the job ids are minted here, at the send, from the instant `expiresAt` counts
+  // from, so the result page's window (from a job id's instant) is the job's. A generator of its
+  // own: the shared one would carry a later instant over from its last id.
   const now = (deps.now ?? Date.now)();
+  const mint = createUuidv7Generator(() => now);
+  const jobIds = Array.from({ length: PUSH_SOAK_CANARY_SENDS }, () => mint());
+  const details = { ...refusedDetails, job_ids: jobIds };
   const at = new Date(now).toISOString().slice(11, 19);
-  const jobs = message.jobIds.map((jobId, index) =>
+  const jobs = jobIds.map((jobId, index) =>
     testPushJob({
       row,
       jobId,
       now,
       appId: row.app_id,
       title: 'PlaneAhead soak canary',
-      body: `Canary ${String(index + 1)} of ${String(message.jobIds.length)} from the ${environmentName(env)} transport soak at ${at} UTC (job ${jobId.slice(-8)}).`,
+      body: `Canary ${String(index + 1)} of ${String(jobIds.length)} from the ${environmentName(env)} transport soak at ${at} UTC (job ${jobId.slice(-8)}).`,
     }),
   );
   // Like the injector's (Q6): the row goes in before anything is sent, and is settled after.
@@ -407,14 +460,19 @@ async function soakCanary(
       log.error('push_soak_audit_unsettled', { outcome, ...errorFields(error) });
     }
   };
+  const { gateTimeoutMs, ...canaryDeps } = deps.canary ?? {};
+  const round = canaryRound(jobs.length, gateTimeoutMs ?? PUSH_SOAK_GATE_TIMEOUT_MS);
   try {
-    const sends = await sendCanary(jobs, context, deps.canary);
-    await settle('sent', { sends });
-    log.info('push_soak_canary_sent', { sends });
+    const sends = await sendCanary(jobs, context, round, canaryDeps);
+    await settle('sent', { sends, ...round.summary() });
+    log.info('push_soak_canary_sent', { sends, ...round.summary() });
   } catch (error) {
     // Not retried: a later copy would not be two sends at once, and the next canary is due in
     // an hour. The pushes already sent were reported to persist as they went.
-    await settle('error', { error_name: error instanceof Error ? error.name : 'unknown' });
+    await settle('error', {
+      error_name: error instanceof Error ? error.name : 'unknown',
+      ...round.summary(),
+    });
     log.error('push_soak_canary_failed', errorFields(error));
   }
 }
@@ -439,43 +497,95 @@ export interface PushSoakCanarySend {
   readonly settled: 'acked' | 'retried' | 'unsettled';
 }
 
+/** How a canary's gate opened: every send arrived, the wait ran out, or no send asked at all. */
+export type PushSoakGateOpening = 'together' | 'timeout' | 'unused';
+
+export interface PushSoakGate {
+  /** Waits until every party has arrived, or `timeoutMs` after the first. */
+  pass(): Promise<void>;
+  /** How the gate opened; `unused` while no party has come. */
+  opening(): PushSoakGateOpening;
+}
+
 /**
  * A gate `parties` callers pass together: once the last has arrived, or `timeoutMs` after the
  * first (a send that never asks, its token found inactive, must not hold the other for ever).
+ * It remembers which of the two opened it.
  */
-export function gateTogether(parties: number, timeoutMs: number): () => Promise<void> {
+export function gateTogether(parties: number, timeoutMs: number): PushSoakGate {
   let arrived = 0;
+  let opening: PushSoakGateOpening = 'unused';
   let open: () => void = () => undefined;
   const opened = new Promise<void>((resolve) => {
     open = resolve;
   });
-  let timer: ReturnType<typeof setTimeout> | undefined;
-  return async () => {
-    arrived += 1;
-    if (arrived >= parties) {
-      clearTimeout(timer);
-      open();
-    } else {
-      timer ??= setTimeout(open, timeoutMs);
+  const openAs = (how: PushSoakGateOpening) => {
+    if (opening === 'unused') {
+      opening = how;
     }
-    await opened;
+    open();
+  };
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  return {
+    async pass() {
+      arrived += 1;
+      if (arrived >= parties) {
+        clearTimeout(timer);
+        openAs('together');
+      } else {
+        timer ??= setTimeout(() => {
+          openAs('timeout');
+        }, timeoutMs);
+      }
+      await opened;
+    },
+    opening: () => opening,
   };
 }
 
-/** `source`, its first token request held at `gate`. */
-function askingTogether(source: PushCredentialSource, gate: () => Promise<void>) {
-  let waited = false;
-  return {
-    async token(name) {
-      if (!waited) {
-        waited = true;
-        await gate();
-      }
-      return source.token(name);
-    },
-    expire: (name, token) => source.expire(name, token),
-  } satisfies PushCredentialSource;
+/** What a canary round's audit row adds besides its sends (review M1). */
+export interface PushSoakCanaryRound {
+  readonly gate: PushSoakGateOpening;
+  /** Whether every send's first token request got the same token; null unless every one asked. */
+  readonly tokens_matched: boolean | null;
 }
+
+/**
+ * A canary round: its gate, and the token each send's first request got, kept only to compare
+ * them and never recorded or logged.
+ */
+export function canaryRound(parties: number, timeoutMs: number) {
+  const gate = gateTogether(parties, timeoutMs);
+  const firsts: (string | null)[] = Array.from({ length: parties }, () => null);
+  return {
+    /** Send `index`'s credentials: `source`, its first token request held at the gate. */
+    credentials(index: number, source: PushCredentialSource): PushCredentialSource {
+      let waited = false;
+      return {
+        async token(name) {
+          if (waited) {
+            return source.token(name);
+          }
+          waited = true;
+          await gate.pass();
+          const token = await source.token(name);
+          firsts[index] = token;
+          return token;
+        },
+        expire: (name, token) => source.expire(name, token),
+      };
+    },
+    summary(): PushSoakCanaryRound {
+      const asked = firsts.filter((token): token is string => token !== null);
+      return {
+        gate: gate.opening(),
+        tokens_matched:
+          asked.length === parties ? asked.every((token) => token === asked[0]) : null,
+      };
+    },
+  };
+}
+export type PushSoakCanaryRoundState = ReturnType<typeof canaryRound>;
 
 /** One job as the push queue delivers it, to the consumer's own batch handler. */
 function batchOfOne(body: PushJobV1Input) {
@@ -508,28 +618,28 @@ function batchOfOne(body: PushJobV1Input) {
 
 /**
  * The canary's sends, all at once: each job a batch of one through `handlePushBatch` with its own
- * empty token cache, the first token request of each held at one gate, so every send asks
- * `PushAuth` in the same instant. The outcome messages go on to persist as the consumer sends
- * them; the first attempt of each is read off on the way.
+ * empty token cache, the first token request of each held at the round's gate, so the sends ask
+ * `PushAuth` together. The outcome messages go on to persist as the consumer sends them; the
+ * first attempt of each is read off on the way.
  */
 async function sendCanary(
   jobs: readonly PushJobV1Input[],
   context: SoakContext,
-  deps: PushSoakCanaryDeps = {},
+  round: PushSoakCanaryRoundState,
+  deps: Omit<PushSoakCanaryDeps, 'gateTimeoutMs'>,
 ): Promise<PushSoakCanarySend[]> {
   const { env } = context;
-  const { pushAuth, gateTimeoutMs, ...consumer } = deps;
-  const gate = gateTogether(jobs.length, gateTimeoutMs ?? PUSH_SOAK_GATE_TIMEOUT_MS);
+  const { pushAuth, ...consumer } = deps;
   // Never the isolate's cache: each send asks `PushAuth` as a cold isolate would.
   const coldSource = () => durableCredentialSource(env, { cache: new Map(), stubFor: pushAuth });
   const persistQueue = consumer.persistQueue ?? env.PERSIST_QUEUE;
   return Promise.all(
-    jobs.map(async (job): Promise<PushSoakCanarySend> => {
+    jobs.map(async (job, index): Promise<PushSoakCanarySend> => {
       const reported: PushOutcomeMessageV1[] = [];
       const { batch, settled } = batchOfOne(job);
       await handlePushBatch(batch, context, {
         ...consumer,
-        credentials: askingTogether(coldSource(), gate),
+        credentials: round.credentials(index, coldSource()),
         persistQueue: {
           send: (body, options) => {
             reported.push(body as PushOutcomeMessageV1);

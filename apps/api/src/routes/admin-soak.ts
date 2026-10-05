@@ -268,8 +268,8 @@ async function injectionsHtml(db: Db, record: PushSoakRecord): Promise<string> {
     group by 1, 2
     order by n desc, 1, 2
   `);
-  return `<p class="meta">One audit row per tick. ignored with suspected or cancelled is the tracker's 409 (a suspicion open, or a cancelled snapshot); refused is no tracker call at all; written with no intents is the policy's verdict.</p>${table(
-    ['Outcome', 'Reason or refusal', 'Ticks'],
+  return `<p class="meta">One audit row per run of a tick's injection, so the rows can outnumber the ticks: a step the queue delivers again names its slot's injection again, which the tracker writes once, and adds a written row with nothing written. ignored with suspected or cancelled is the tracker's 409 (a suspicion open, or a cancelled snapshot); refused is no tracker call at all; written with no intents is the policy's verdict.</p>${table(
+    ['Outcome', 'Reason or refusal', 'Rows'],
     rows.map((row) => [row.outcome, row.reason, row.n]),
   )}`;
 }

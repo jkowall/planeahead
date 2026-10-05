@@ -45,6 +45,7 @@ import { sql } from 'drizzle-orm';
 import type { Context } from 'hono';
 import { auditLog, openDb, type Db } from '@planeahead/db';
 import {
+  ANDROID_CHANNEL_IDS,
   AppIdSchema,
   PUSH_CREDENTIAL_NAMES,
   PUSH_TARGET_KINDS,
@@ -71,10 +72,12 @@ export const ADMIN_PUSH_RESULT_PATH = '/admin/push/test/result';
 /** A test push is worth sending for ten minutes; then the consumer drops it (`expired`). */
 export const TEST_PUSH_TTL_MS = 10 * 60_000;
 /**
- * The Android channel a test push names. Increment 16 creates the app's channels; until one with
- * this id exists, Android shows the push on the manifest's default channel (R1 F33).
+ * The Android channel a test push (and so the soak's canary) names: `flight_changes`, one of the
+ * two channels the app creates (increment 16, C4), where kind `system` posts. A channel the app
+ * never creates would leave the push on the manifest's default in the background and, in the
+ * foreground, make expo create a permanent "Miscellaneous" channel of its own (review A5).
  */
-export const TEST_PUSH_CHANNEL_ID = 'test_push';
+export const TEST_PUSH_CHANNEL_ID = ANDROID_CHANNEL_IDS.flightChanges;
 
 /** The `status` RPC of a `PushAuth` object, narrowed so a test can hand in a fake. */
 export interface PushAuthStatusStub {
@@ -303,8 +306,9 @@ export async function readTestPushToken(
 }
 
 /**
- * One test job to one registered token (ruling P8): `test: true`, kind `system`, the test channel,
- * relevant for `TEST_PUSH_TTL_MS` from `now`, the instant `jobId` (a UUIDv7) embeds.
+ * One test job to one registered token (ruling P8): `test: true`, kind `system`, on the app's
+ * `flight_changes` channel (`TEST_PUSH_CHANNEL_ID`), relevant for `TEST_PUSH_TTL_MS` from `now`,
+ * the instant `jobId` (a UUIDv7) embeds.
  */
 export function testPushJob(input: {
   readonly row: TestPushTokenRow;

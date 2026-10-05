@@ -7,7 +7,10 @@
  * consumer and the real `PushAuth`, both asking it in the same instant past a warm isolate
  * cache); the staging-only guard (production refuses the start, its tick and its steps do
  * nothing, and wrangler.jsonc gives it no soak cron); and the counts by reason the page draws from
- * the delivery attempt logs, with the injector's 409s for an open suspicion counted.
+ * the delivery attempt logs, with the injector's 409s for an open suspicion counted. The review
+ * fixes: a slot's injection id derived from the soak and the slot, so a repeated step injects
+ * once (n2); a record that is not JSON read as none (n4); the canary's job ids minted at its step
+ * (n6); and its audit row saying how the gate opened and whether the tokens matched (M1).
  */
 
 import {
@@ -22,7 +25,9 @@ import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { auditLog, devices, notificationDeliveries, pushTokens, users } from '@planeahead/db';
 import {
   RPC_SCHEMA_VERSION,
+  isUuidv7,
   uuidv7,
+  uuidv7Timestamp,
   type FlightKey,
   type PushCredentialName,
   type PushOutcomeMessageV1,
@@ -42,13 +47,17 @@ import {
   durableCredentialSource,
   defaultPushAuthStub,
   type PushAuthStub,
+  type PushCredentialSource,
 } from '../../src/push/credentials';
 import {
   PUSH_SOAK_KV_KEY,
+  PUSH_SOAK_TICK_MS,
+  canaryRound,
   gateTogether,
   planPushSoak,
   pushSoakPosition,
   readPushSoak,
+  soakInjectionId,
   writePushSoak,
   type PushSoakCanaryDeps,
   type PushSoakDeps,
@@ -220,6 +229,39 @@ async function canaryToken(): Promise<CanaryToken> {
     appId: 'app.planeahead.mobile.dev',
   });
   return { userId, pushTokenId, token };
+}
+
+/**
+ * The canary's seams but `PushAuth`: APNs answering 200, the queues captured, and the two sends'
+ * liveness reads, the second answering `secondReadMs` after the first.
+ */
+function canarySeams(canary: CanaryToken, secondReadMs = 0) {
+  let reads = 0;
+  const apns = fakeFetch(() => apnsAnswer(200));
+  const persistQueue = capturingQueue();
+  const pushQueue = capturingQueue();
+  const deps: PushSoakCanaryDeps = {
+    liveTokens: async () => {
+      reads += 1;
+      await new Promise((resolve) => setTimeout(resolve, reads === 1 ? 0 : secondReadMs));
+      return {
+        tokens: new Map([[canary.pushTokenId, canary.userId]]),
+        superseded: new Set<string>(),
+      };
+    },
+    fetch: apns.fetch,
+    persistQueue: persistQueue.queue,
+    pushQueue: pushQueue.queue,
+  };
+  return { deps, apns, persistQueue, pushQueue };
+}
+
+/** The canary audit rows of one soak, oldest first, with their details as the step wrote them. */
+async function canaryRows(soakId: string) {
+  return (await auditFor('push.soak_canary', soakId)).map((row) => ({
+    ...row,
+    details: row.details as { readonly job_ids?: readonly string[] } & Record<string, unknown>,
+  }));
 }
 
 /** A running soak's record, written straight to KV (the route is tested on its own). */
@@ -513,6 +555,19 @@ describe('starting and stopping a soak (C9)', () => {
     expect(await readPushSoak(testEnv.CONFIG)).toBeNull();
     expect(await startRowsFor(flight.flightKey)).toEqual([]);
   });
+
+  it('reads a record that is not JSON as none: the page, a start and a tick still work (review n4)', async () => {
+    // Only a hand-written value can be this; KV's own JSON read would throw on it.
+    await testEnv.CONFIG.put(PUSH_SOAK_KV_KEY, '{"v":1,"id":');
+
+    expect(await readPushSoak(testEnv.CONFIG)).toBeNull();
+    expect(await tick(Date.now())).toEqual({ steps: [], events: ['cron_push_soak_idle'] });
+    const page = await admin();
+    expect(page.status).toBe(200);
+    const html = await page.text();
+    expect(html).toContain('No soak has run here yet.');
+    expect(html).toContain('<input type="hidden" name="action" value="start">');
+  });
 });
 
 describe('the schedule (C9)', () => {
@@ -547,7 +602,9 @@ describe('the schedule (C9)', () => {
       channelId: 'flight_delays',
     });
     expect(run.jobs[0]?.targets.map((target) => target.subjectId)).toEqual([live]);
-    const injectionId = inject?.step === 'inject' ? inject.injectionId : '';
+    // The message carries no id: the step derives the slot's (review n2).
+    expect(inject).not.toHaveProperty('injectionId');
+    const injectionId = await soakInjectionId(record.id, 0);
     expect(await auditFor('notify.injected', record.id)).toMatchObject([
       {
         actorType: 'system',
@@ -563,17 +620,34 @@ describe('the schedule (C9)', () => {
       },
     ]);
 
-    // A redelivered step replays the tick's injection id: the tracker writes nothing more.
+    // A redelivered step, and the same tick delivered twice (its plan run again), name the slot's
+    // injection again: the tracker writes nothing more, and each repeat leaves a row with nothing
+    // written beside the first.
     await runStep(inject);
+    const twice = await tick(start + 3 * MINUTE_MS);
+    expect(twice.steps.map((step) => step.step)).toEqual(['inject', 'canary']);
+    await runStep(twice.steps[0]);
     expect((await pipeline(tracker)).jobs).toEqual([]);
+    const repeat = { outcome: 'written', intents: 1, written: 0, injection_id: injectionId };
+    expect(await auditFor('notify.injected', record.id)).toMatchObject([
+      { details: { written: 1, injection_id: injectionId } },
+      { details: { ...repeat, soak_slot: 0 } },
+      { details: { ...repeat, soak_slot: 0 } },
+    ]);
 
-    // The next tick: no canary, the next delay in turn, another push.
+    // The next tick: no canary, the next delay in turn, another push, under the next slot's id.
     const second = await tick(start + 8 * MINUTE_MS);
     expect(second.steps).toMatchObject([{ step: 'inject', slot: 1 }]);
     await runStep(second.steps[0]);
     expect((await pipeline(tracker)).jobs).toHaveLength(1);
     expect((await auditFor('notify.injected', record.id)).at(-1)).toMatchObject({
-      details: { outcome: 'written', written: 1, soak_slot: 1, event: { minutes: 60 } },
+      details: {
+        outcome: 'written',
+        written: 1,
+        soak_slot: 1,
+        event: { minutes: 60 },
+        injection_id: await soakInjectionId(record.id, 1),
+      },
     });
   });
 
@@ -618,6 +692,19 @@ describe('the schedule (C9)', () => {
     expect(replaced.events).toContain('push_soak_skipped');
     expect(calls).toEqual([]);
     expect(await auditFor('notify.injected', record.id)).toEqual([]);
+  });
+
+  it("derives a slot's injection id from the soak and the slot alone (review n2)", async () => {
+    const soakId = uuidv7();
+    const id = await soakInjectionId(soakId, 3);
+
+    expect(isUuidv7(id)).toBe(true);
+    expect(await soakInjectionId(soakId, 3)).toBe(id);
+    // Its instant is the slot's; another slot, or another soak, names another injection.
+    expect(uuidv7Timestamp(id)).toBe(uuidv7Timestamp(soakId) + 3 * PUSH_SOAK_TICK_MS);
+    expect([await soakInjectionId(soakId, 4), await soakInjectionId(uuidv7(), 3)]).not.toContain(
+      id,
+    );
   });
 
   it('adds the canary to every twelfth tick from the start, the first included: once an hour', () => {
@@ -670,35 +757,15 @@ describe('the schedule (C9)', () => {
       };
     };
     // The two sends' liveness reads answer 80 ms apart: only the gate can make the asks meet.
-    let reads = 0;
-    const liveTokens = async () => {
-      reads += 1;
-      await new Promise((resolve) => setTimeout(resolve, reads === 1 ? 0 : 80));
-      return {
-        tokens: new Map([[canary.pushTokenId, canary.userId]]),
-        superseded: new Set<string>(),
-      };
-    };
-    const apns = fakeFetch(() => apnsAnswer(200));
-    const persistQueue = capturingQueue();
-    const pushQueue = capturingQueue();
-    const deps: PushSoakCanaryDeps = {
-      pushAuth,
-      liveTokens,
-      fetch: apns.fetch,
-      persistQueue: persistQueue.queue,
-      pushQueue: pushQueue.queue,
-    };
-    const jobIds = [uuidv7(), uuidv7()];
+    const { deps, apns, persistQueue, pushQueue } = canarySeams(canary, 80);
     const step: PushSoakMessageV1 = {
       kind: 'push_soak',
       step: 'canary',
       soakId: record.id,
       slot: 12,
       runId: iso(Date.now()),
-      jobIds,
     };
-    const ran = await runStep(step, { canary: deps });
+    const ran = await runStep(step, { canary: { ...deps, pushAuth } });
     expect(ran.acked).toHaveLength(1);
     expect(ran.events).toContain('push_soak_canary_sent');
 
@@ -714,19 +781,57 @@ describe('the schedule (C9)', () => {
       apns.requests.every((request) => request.url.endsWith(`/3/device/${canary.token}`)),
     ).toBe(true);
     // Each job's outcome went to persist as a test, so each has its delivery row; no retry.
+    const rows = await canaryRows(record.id);
+    const jobIds = rows[0]?.details.job_ids ?? [];
+    expect(jobIds).toHaveLength(2);
     const outcomes = persistQueue.sent.map((entry) => entry.body as PushOutcomeMessageV1);
     expect(outcomes.map((outcome) => outcome.jobId).sort()).toEqual([...jobIds].sort());
     expect(outcomes.every((outcome) => outcome.test)).toBe(true);
     expect(outcomes.map((outcome) => outcome.results[0]?.outcome)).toEqual(['sent', 'sent']);
     expect(pushQueue.sent).toEqual([]);
     const sent = { outcome: 'sent', reason: null, http_status: 200, settled: 'acked' };
-    expect(await auditFor('push.soak_canary', record.id)).toMatchObject([
+    expect(rows).toMatchObject([
       {
         actorType: 'system',
         targetId: canary.pushTokenId,
         subjectId: canary.userId,
-        details: { outcome: 'sent', soak_slot: 12, job_ids: jobIds, sends: [sent, sent] },
+        details: {
+          outcome: 'sent',
+          soak_slot: 12,
+          job_ids: jobIds,
+          sends: [sent, sent],
+          // Review M1: the gate opened with both sends, and their first asks got one token.
+          gate: 'together',
+          tokens_matched: true,
+        },
       },
+    ]);
+    // Whether the tokens matched, never a token.
+    expect(JSON.stringify(rows)).not.toContain(String(token));
+  });
+
+  it('records a gate opened by its timeout, and still whether the two tokens matched (review M1)', async () => {
+    const canary = await canaryToken();
+    const record = await soakRecord({
+      flightKey: uniqueFlight().flightKey,
+      canary: { pushTokenId: canary.pushTokenId, kind: 'apns' },
+    });
+    // The second send reaches the gate 80 ms after the first, past a 10 ms wait.
+    const { deps, apns } = canarySeams(canary, 80);
+    const step: PushSoakMessageV1 = {
+      kind: 'push_soak',
+      step: 'canary',
+      soakId: record.id,
+      slot: 0,
+      runId: iso(Date.now()),
+    };
+
+    const ran = await runStep(step, { canary: { ...deps, gateTimeoutMs: 10 } });
+
+    expect(ran.events).toContain('push_soak_canary_sent');
+    expect(apns.requests).toHaveLength(2);
+    expect(await canaryRows(record.id)).toMatchObject([
+      { details: { outcome: 'sent', gate: 'timeout', tokens_matched: true } },
     ]);
   });
 
@@ -747,18 +852,88 @@ describe('the schedule (C9)', () => {
       soakId: record.id,
       slot: 0,
       runId: iso(Date.now()),
-      jobIds: [uuidv7(), uuidv7()],
     };
     const ran = await runStep(step, { canary: { fetch: apns.fetch } });
     expect(ran.events).toContain('push_soak_canary_refused');
     expect(apns.requests).toEqual([]);
-    expect(await auditFor('push.soak_canary', record.id)).toMatchObject([
-      { details: { outcome: 'refused', refusal: 'token_invalidated' } },
-    ]);
+    const rows = await canaryRows(record.id);
+    expect(rows).toMatchObject([{ details: { outcome: 'refused', refusal: 'token_invalidated' } }]);
+    // Nothing was sent, so no job was minted.
+    expect(rows[0]?.details).not.toHaveProperty('job_ids');
   });
 
-  it("lets a canary send ask alone once the gate's wait ends", async () => {
-    await expect(gateTogether(2, 10)()).resolves.toBeUndefined();
+  it('mints the canary job ids when its step runs, not at the tick (review n6)', async () => {
+    const canary = await canaryToken();
+    const start = Date.now() - 30 * MINUTE_MS;
+    const record = await soakRecord({
+      flightKey: uniqueFlight().flightKey,
+      startedAt: iso(start),
+      canary: { pushTokenId: canary.pushTokenId, kind: 'apns' },
+    });
+    // The tick plans the canary with no ids.
+    const planned = (await tick(start + MINUTE_MS)).steps[1];
+    expect(planned).toEqual({
+      kind: 'push_soak',
+      step: 'canary',
+      soakId: record.id,
+      slot: 0,
+      runId: iso(start + MINUTE_MS),
+    });
+    // Its step runs 27 minutes later (queued behind other work); a message queued before the
+    // change still carries ids, which the step drops.
+    const stepAt = start + 28 * MINUTE_MS;
+    const queued = [uuidv7(), uuidv7()];
+    const { deps } = canarySeams(canary);
+
+    const ran = await runStep({ ...planned, jobIds: queued }, { now: () => stepAt, canary: deps });
+
+    expect(ran.events).toContain('push_soak_canary_sent');
+    const jobIds = (await canaryRows(record.id))[0]?.details.job_ids ?? [];
+    expect(new Set(jobIds).size).toBe(2);
+    // The result page's window starts at a job id's instant: the step's, the send's.
+    expect(jobIds.map((jobId) => uuidv7Timestamp(jobId))).toEqual([stepAt, stepAt]);
+    expect(jobIds.filter((jobId) => queued.includes(jobId))).toEqual([]);
+  });
+
+  it("lets a canary send ask alone once the gate's wait ends, and records how it opened", async () => {
+    const alone = gateTogether(2, 10);
+    expect(alone.opening()).toBe('unused');
+    await expect(alone.pass()).resolves.toBeUndefined();
+    expect(alone.opening()).toBe('timeout');
+    // The other arriving late passes at once and does not rewrite how the gate opened.
+    await alone.pass();
+    expect(alone.opening()).toBe('timeout');
+    const both = gateTogether(2, 60_000);
+    await Promise.all([both.pass(), both.pass()]);
+    expect(both.opening()).toBe('together');
+  });
+
+  it("compares only each send's first token, and records whether they matched (review M1)", async () => {
+    const source = (tokens: string[]): PushCredentialSource => ({
+      token: () => Promise.resolve(tokens.shift() ?? 'spare'),
+      expire: () => Promise.resolve(0),
+    });
+    // Two sends asking together and given different tokens; a later ask is not compared.
+    const differ = canaryRound(2, 60_000);
+    const first = differ.credentials(0, source(['token-a', 'token-c']));
+    const second = differ.credentials(1, source(['token-b']));
+    expect(await Promise.all([first.token('apns:sandbox'), second.token('apns:sandbox')])).toEqual([
+      'token-a',
+      'token-b',
+    ]);
+    expect(await first.token('apns:sandbox')).toBe('token-c');
+    expect(differ.summary()).toEqual({ gate: 'together', tokens_matched: false });
+    // The same token on both sends matches.
+    const same = canaryRound(2, 60_000);
+    await Promise.all(
+      [0, 1].map((index) => same.credentials(index, source(['t'])).token('apns:sandbox')),
+    );
+    expect(same.summary()).toEqual({ gate: 'together', tokens_matched: true });
+    // One send never asks (its token found inactive): the other asks alone after the wait.
+    const alone = canaryRound(2, 10);
+    await alone.credentials(0, source(['token-a'])).token('apns:sandbox');
+    expect(alone.summary()).toEqual({ gate: 'timeout', tokens_matched: null });
+    expect(canaryRound(2, 10).summary()).toEqual({ gate: 'unused', tokens_matched: null });
   });
 });
 
@@ -792,6 +967,40 @@ function parseJsonc(text: string): unknown {
 interface Triggers {
   readonly triggers?: { readonly crons: readonly string[] };
 }
+
+describe('a tick the injector refuses (increment 16 review, m3)', () => {
+  it('records the injection refused not_running when the tracker holds no running flight', async () => {
+    const flight = uniqueFlight();
+    const record = await soakRecord({ flightKey: flight.flightKey });
+    const injected: unknown[] = [];
+    const ran = await runStep(
+      { kind: 'push_soak', step: 'inject', soakId: record.id, slot: 0, runId: iso(Date.now()) },
+      {
+        injectorFor: () => () => ({
+          getState: () =>
+            Promise.resolve({
+              rpcVersion: RPC_SCHEMA_VERSION,
+              flightKey: flight.flightKey,
+              phase: 'finished',
+              snapshot: null,
+              nextRefreshAt: null,
+              doSchemaVersion: 3,
+              subscriberCount: 0,
+            }),
+          injectPolicyEvent: (input: unknown) => {
+            injected.push(input);
+            return Promise.reject(new Error('the tracker call must not run'));
+          },
+        }),
+      },
+    );
+    expect(ran.acked).toHaveLength(1);
+    expect(injected).toEqual([]);
+    expect(await auditFor('notify.injected', record.id)).toMatchObject([
+      { details: { outcome: 'refused', refusal: 'not_running' } },
+    ]);
+  });
+});
 
 describe('staging only (C9)', () => {
   it('production refuses to start a soak; its page has no form, its tick and its steps do nothing', async () => {
@@ -831,7 +1040,6 @@ describe('staging only (C9)', () => {
         soakId: record.id,
         slot: 0,
         runId: iso(Date.now()),
-        injectionId: uuidv7(),
       },
       {
         injectorFor: () => () => {
@@ -964,7 +1172,6 @@ describe('the counts by reason (C9)', () => {
       soakId: record.id,
       slot,
       runId: at(slot * 5),
-      injectionId: uuidv7(),
     });
     await runStep(step(0));
     const suspected = answeringTracker(tracker, {
@@ -1013,7 +1220,8 @@ describe('the counts by reason (C9)', () => {
       'Unregistered',
       '1',
     ]);
-    // One row per tick; the 409 is counted as the tracker gave it.
+    // One row per run of a tick's injection (each ran once here); the 409 is counted as the
+    // tracker gave it.
     expect(sorted(tableAfter(html, '<h2>Injections</h2>'))).toEqual(
       sorted([
         ['written', '', '1'],
