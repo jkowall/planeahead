@@ -1,18 +1,31 @@
 # Increment 16: client push
 
-Status: built (2026-10-01) in four parts; review pending. Part 1 (`82b1543`): the app's push
-lifecycle, C1 to C4, C6 and C7. Part 2 (`e4754d6`): the notification icon and the time-sensitive
-entitlement, C5, C8 and the plugin's default channel. Part 3a (`47fc437`, built on its own branch
-and merged as `741ec86`): notification settings, the overrides contract and the tray at sign-out,
-C11 and C12. Part 3b (`ac113d7`): the transport soak harness, C9. A test-only fix (`de4237c`) then
-stopped the API suite exhausting Postgres connections, which main shares. Part 4: the documents.
-What ran, the measurements, the findings, the departures and what stays unverified, with the steps
-that settle it, are in `docs/increments/16-verification.md`. Spec written 2026-10-01, revised after
-increment 15 merged (58d7774). Builder: Opus 5.5, in parts. Reviewers: two Opus 5.5 lenses (the
-mobile client's push lifecycle on both platforms; the soak, the API changes and their tests) plus
-the orchestrator's read; two skeptics on every serious finding. Branch `inc16-client-push` from main
-at 58d7774 (increment 15 merged), built while increment 18's review fixes finish on their own
-branch; whichever merges second takes main in.
+Status: built (2026-10-01) in four parts, reviewed, and the review round's rulings applied
+(2026-10-02 to 2026-10-05). Part 1 (`82b1543`): the app's push lifecycle, C1 to C4, C6 and C7.
+Part 2 (`e4754d6`): the notification icon and the time-sensitive entitlement, C5, C8 and the
+plugin's default channel. Part 3a (`47fc437`, built on its own branch and merged as `741ec86`):
+notification settings, the overrides contract and the tray at sign-out, C11 and C12. Part 3b
+(`ac113d7`): the transport soak harness, C9. A test-only fix (`de4237c`) then stopped the API suite
+exhausting Postgres connections, which main shares. Part 4: the documents. The review found no
+blocker and three majors (A1: an offline sign-out left the old account's alerts arriving while the
+app ran signed out; A2: one failed token read failed every later read in the process; M1: the
+soak's canary cannot show the pooling R1 U2 asks about, which the documents said a clean soak
+settles), with minors and nits, all accepted. Fix parts: F1a (`df11589`: the sign-out lifecycle),
+F1b (`363142a`, merged as `1f38465`: the token read, through the repository's first dependency
+patch, and the screens), F2a (`47c10f5`: the invalidation ends the caller's session, the soak's
+fixes) and F2b (`89ba245`: the overrides contract, the test cluster, the injector's refusals),
+merged as `dfad10d`; the close-out's native smoke fix (`c5639b6`); F3a and F3b, the documents. The
+rulings amend C1 (the pre-prompt from every add entry point, O1), C2 (the patched token read, A2),
+C3 (sign-out's order, its retries while signed out and the session it ends: A1, A3, A4, N1, N2,
+N7), C9 (what the soak measures; U2 stays open, M1) and C12 (`notificationOverrides` left the
+request contract, m1), and departure 1 is back with the owner. What ran, the measurements, the
+findings, the departures and what stays unverified, with the steps that settle it, are in
+`docs/increments/16-verification.md` (the round's changes in its Review round section). Spec written
+2026-10-01, revised after increment 15 merged (58d7774). Builder: Opus 5.5, in parts (F2b the
+orchestrator's). Reviewers: two Opus 5.5 lenses (the mobile client's push lifecycle on both
+platforms; the soak, the API changes and their tests) plus the orchestrator's read; two skeptics on
+every serious finding. Branch `inc16-client-push` from main at 58d7774 (increment 15 merged), with
+main (increment 18) merged in as `b42b0a8` before the fix round.
 
 Departures from these rulings, each with its reason in the verification file: the hourly canary
 sends its two test pushes from one invocation, each with a cold token cache, held so both ask

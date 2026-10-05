@@ -178,9 +178,12 @@ deploy waits for them.
 ## Unverified
 
 - **APNs over Workers `fetch` (R1 U1).** Every test injects `fetch`; workerd has no HTTP/2 client.
-  The staging send above is the proof, and the 24 to 48 hour soak of increment 16 (403 and 429
-  reasons, edge answers without an `apns-id`) the proof of pooling (R1 U2); the relay is designed in
-  `src/push/transport.ts` and not built.
+  The staging send above is the proof. Increment 16's 24 to 48 hour soak then measures edge 52x
+  answers without an `apns-id` over its hours (U1), `UnrelatedKeyIdInToken` on the sandbox host at
+  staging's volume, and `TooManyProviderTokenUpdates` from `PushAuth`'s own rotation; it does not
+  settle how Cloudflare pools the connections (R1 U2: increment 16's review, M1), which stays open
+  until Cloudflare answers the support ticket opened when the soak starts (owner action 7). The
+  relay is designed in `src/push/transport.ts` and not built.
 - **A real `.p8` (R1 U8).** The suite's key has Apple's shape (PKCS#8, the P-256 named curve) and
   imports on workerd; a key Apple issued is imported for the first time by the staging send.
 - **FCM for real.** The service-account exchange and the send were checked against the documented
