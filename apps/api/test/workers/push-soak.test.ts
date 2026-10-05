@@ -968,6 +968,40 @@ interface Triggers {
   readonly triggers?: { readonly crons: readonly string[] };
 }
 
+describe('a tick the injector refuses (increment 16 review, m3)', () => {
+  it('records the injection refused not_running when the tracker holds no running flight', async () => {
+    const flight = uniqueFlight();
+    const record = await soakRecord({ flightKey: flight.flightKey });
+    const injected: unknown[] = [];
+    const ran = await runStep(
+      { kind: 'push_soak', step: 'inject', soakId: record.id, slot: 0, runId: iso(Date.now()) },
+      {
+        injectorFor: () => () => ({
+          getState: () =>
+            Promise.resolve({
+              rpcVersion: RPC_SCHEMA_VERSION,
+              flightKey: flight.flightKey,
+              phase: 'finished',
+              snapshot: null,
+              nextRefreshAt: null,
+              doSchemaVersion: 3,
+              subscriberCount: 0,
+            }),
+          injectPolicyEvent: (input: unknown) => {
+            injected.push(input);
+            return Promise.reject(new Error('the tracker call must not run'));
+          },
+        }),
+      },
+    );
+    expect(ran.acked).toHaveLength(1);
+    expect(injected).toEqual([]);
+    expect(await auditFor('notify.injected', record.id)).toMatchObject([
+      { details: { outcome: 'refused', refusal: 'not_running' } },
+    ]);
+  });
+});
+
 describe('staging only (C9)', () => {
   it('production refuses to start a soak; its page has no form, its tick and its steps do nothing', async () => {
     const flight = uniqueFlight();

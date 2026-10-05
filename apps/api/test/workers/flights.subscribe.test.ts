@@ -362,38 +362,34 @@ describe('POST /v1/flights', () => {
   });
 });
 
-describe('notificationOverrides carry muted only (increment 16, ruling C12)', () => {
+describe('the subscribe request carries no notificationOverrides (increment 16 review, m1)', () => {
   /** What the tracker stored for each subscriber, from its SQLite storage. */
-  async function trackerOverrides(
+  async function trackerSubscribers(
     flightKey: FlightKey,
-  ): Promise<{ id: string; overrides: string | null }[]> {
+  ): Promise<{ id: string; muted: number; overrides: string | null }[]> {
     return runInDurableObject(trackerStub(flightKey), (_instance, state) =>
       state.storage.sql
-        .exec<{ id: string; overrides: string | null }>(
-          'SELECT subscription_id AS id, overrides FROM subscribers ORDER BY subscription_id',
+        .exec<{ id: string; muted: number; overrides: string | null }>(
+          'SELECT subscription_id AS id, muted, overrides FROM subscribers ORDER BY subscription_id',
         )
         .toArray(),
     );
   }
 
-  async function storedOverrides(userId: string): Promise<unknown[]> {
-    const rows = await db().execute<{ overrides: unknown }>(sql`
-      select notification_overrides as overrides from flight_subscriptions
+  /** The subscription's own mute (the column `notify` reads) and its stored bag. */
+  async function storedPrefs(userId: string): Promise<{ muted: boolean; overrides: unknown }[]> {
+    return db().execute<{ muted: boolean; overrides: unknown }>(sql`
+      select muted, notification_overrides as overrides from flight_subscriptions
       where user_id = ${userId}::uuid order by created_at
     `);
-    return rows.map((row) => row.overrides);
   }
 
-  it('the subscribe route refuses events and unknown keys, and stores and relays muted', async () => {
+  it('refuses notificationOverrides in any shape, and the top-level muted is the mute notify reads', async () => {
     const flight = seededFlightFor();
     await seedTracker(flight);
     const session = await signInAnonymously();
 
-    for (const notificationOverrides of [
-      { events: ['gate_change'] },
-      { muted: true, events: [] },
-      { muted: true, quietHours: '22:00' },
-    ]) {
+    for (const notificationOverrides of [{ muted: true }, {}, { events: ['gate_change'] }]) {
       const refused = await subscribe(session, {
         flightKey: flight.flightKey,
         notificationOverrides,
@@ -401,32 +397,29 @@ describe('notificationOverrides carry muted only (increment 16, ruling C12)', ()
       const body = await refused.json<ErrorBody>();
       expect(refused.status).toBe(400);
       expect(body.error).toBe('validation_failed');
-      expect(body.issues?.map((issue) => issue.path.join('.'))).toEqual(['notificationOverrides']);
+      expect(JSON.stringify(body.issues)).toContain('notificationOverrides');
     }
     expect(await subscriptionRows(session.userId)).toEqual([]);
     expect(await subscriberCount(flight.flightKey)).toBe(0);
     expect(await counterValue('user', session.userId, 'active_subscriptions')).toBe(0);
 
-    const accepted = await subscribe(session, {
-      flightKey: flight.flightKey,
-      notificationOverrides: { muted: true },
-    });
+    const accepted = await subscribe(session, { flightKey: flight.flightKey, muted: true });
     const created = await accepted.json<SubscribeBody>();
     expect(accepted.status).toBe(201);
-    expect(await storedOverrides(session.userId)).toEqual([{ muted: true }]);
-    expect(await trackerOverrides(flight.flightKey)).toEqual([
-      { id: created.subscription.id, overrides: '{"muted":true}' },
+    expect(await storedPrefs(session.userId)).toEqual([{ muted: true, overrides: {} }]);
+    expect(await trackerSubscribers(flight.flightKey)).toEqual([
+      { id: created.subscription.id, muted: 1, overrides: null },
     ]);
   });
 
-  it('a repair relays the stored overrides narrowed to muted, so the tracker accepts them', async () => {
+  it('a repair relays no stored overrides, whatever the column holds', async () => {
     const flight = seededFlightFor();
     await seedTracker(flight);
     const session = await signInAnonymously();
     const created = await (
       await subscribe(session, { flightKey: flight.flightKey })
     ).json<SubscribeBody>();
-    // A bag the contract now refuses whole, as a row written before it narrowed would hold.
+    // A bag written before the contract dropped it, or by hand.
     await db().execute(sql`
       update flight_subscriptions
       set notification_overrides = '{"muted": true, "events": ["delay"]}'::jsonb
@@ -441,8 +434,8 @@ describe('notificationOverrides carry muted only (increment 16, ruling C12)', ()
     const again = await subscribe(session, { flightKey: flight.flightKey });
 
     expect(again.status).toBe(200);
-    expect(await trackerOverrides(flight.flightKey)).toEqual([
-      { id: created.subscription.id, overrides: '{"muted":true}' },
+    expect(await trackerSubscribers(flight.flightKey)).toEqual([
+      { id: created.subscription.id, muted: 0, overrides: null },
     ]);
   });
 });

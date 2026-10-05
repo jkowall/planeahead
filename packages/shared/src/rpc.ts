@@ -104,9 +104,12 @@ export function parseRpcRequest<S extends z.ZodType>(schema: S, input: unknown):
 }
 
 /**
- * Per-subscription notification overrides: `muted` only (increment 16, ruling C12). Phase 1 offers
- * no per-flight event lists, so `events` left the contract, and no other key passes either: the
- * subscribe route (`POST /v1/flights`) and the tracker's `subscribe` refuse one.
+ * Per-subscription notification overrides on the tracker's `subscribe`: `muted` only (increment
+ * 16, ruling C12), and no other key passes. Since the review (finding m1) no route sends them: the
+ * subscribe route no longer accepts `notificationOverrides` (the subscription's own `muted` is the
+ * per-flight mute, the one `notify` reads), and the re-subscribes relay none. The field stays
+ * optional so a tracker keeps accepting a call that names it; the tracker stores it and reads it
+ * nowhere.
  */
 export const NotificationOverridesSchema = z.strictObject({
   muted: z.boolean().optional(),

@@ -26,7 +26,6 @@ import type { MergeJobMessage } from '../auth/merge';
 import { callWithDeadline } from '../lib/deadline';
 import {
   isAbsentTrackerError,
-  storedOverrides,
   subscribeTracker,
   unsubscribeTracker,
   type TrackerFor,
@@ -71,7 +70,6 @@ async function currentRow(db: Db, id: string) {
       userId: flightSubscriptions.userId,
       deletedAt: flightSubscriptions.deletedAt,
       muted: flightSubscriptions.muted,
-      notificationOverrides: flightSubscriptions.notificationOverrides,
     })
     .from(flightSubscriptions)
     .where(eq(flightSubscriptions.id, id))
@@ -125,7 +123,6 @@ export async function handleMergeMessage(
     ) {
       continue;
     }
-    const overrides = storedOverrides(row.notificationOverrides);
     const ok = await call(
       'subscribe',
       moved.flightKey,
@@ -133,7 +130,6 @@ export async function handleMergeMessage(
         subscriptionId: moved.id,
         userId: message.to,
         muted: row.muted,
-        ...(overrides === undefined ? {} : { overrides }),
       }),
     );
     if (ok) {
