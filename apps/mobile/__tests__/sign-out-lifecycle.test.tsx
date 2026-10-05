@@ -461,4 +461,23 @@ describe('a registration racing sign-out (review A3; the race probe, the invalid
     await next;
     expect(mockLog.slice(2)).toEqual(['POST /v1/devices fcm-2 as tok-b.sig t=10200']);
   });
+
+  it('a session started while the token deletion still runs registers: the pause ends with the old session (re-review R1)', async () => {
+    fakeNotifications.unregister = 'pending';
+    const done = signOut(null);
+    await jest.advanceTimersByTimeAsync(1_000);
+    expect(mockLog).toEqual([
+      'invalidate better-auth.session_token=tok-a.sig t=0',
+      'forgetAccount t=800',
+    ]);
+    // A quick next session ("continue without an account"), 200 ms after the old one was cleared.
+    mockSession.cookies = cookieMap('tok-b.sig');
+    const next = pushRegistrar().register();
+    await jest.advanceTimersByTimeAsync(15_000);
+    await next;
+    await done;
+    expect(mockLog.slice(2)).toEqual([
+      expect.stringMatching(/^POST \/v1\/devices .* as tok-b\.sig/),
+    ]);
+  });
 });

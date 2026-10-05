@@ -3,8 +3,8 @@
  * a revoked Apple credential forces (src/lib/session.ts).
  *
  * 1. Registration stops until the session is cleared (review A3, src/lib/push-registration.ts):
- *    nothing starts, a run that has not posted yet posts nothing, and a debounced token or a
- *    queued run is dropped. A `POST /v1/devices` already sent is waited for, at most the
+ *    nothing starts, a run that has not reached `registerDevice` posts nothing, and a debounced
+ *    token or a queued run is dropped. A `POST /v1/devices` already sent is waited for, at most the
  *    invalidation's timeout; one that reaches the server after step 2 gets 401, since the
  *    invalidation also ends the session there (review A4, apps/api/src/routes/devices.ts).
  * 2. `POST /v1/devices/current/invalidate` with this installation's id and the session's cookies,
@@ -23,8 +23,10 @@
  *    alone, without `/sign-out`, so the session lives on for the queued call to end, with its
  *    tokens: a `/sign-out` that landed while the invalidation never did would leave the tokens
  *    live and the queued call refused (review A4).
- * 5. The deletion is waited for, a bounded time, then the tray is cleared once more, for a push
- *    that arrived meanwhile (review N7). The next session's registration reads a token again.
+ * 5. Registration resumes as soon as the session is cleared, so a session started meanwhile
+ *    registers; its first run waits for the deletion before it reads a token. The deletion is
+ *    waited for here too, a bounded time, then the tray is cleared once more, for a push that
+ *    arrived meanwhile (review N7).
  *
  * What none of this recalls is a push the provider accepted before step 2 reached the server
  * (docs/increments/14-push-transport.md, ruling R1), which no device can test here.
@@ -69,6 +71,13 @@ async function atMost(work: Promise<unknown>, ms: number): Promise<void> {
 export async function signOut(store: Store | null): Promise<void> {
   const registrar = pushRegistrar();
   registrar.pause();
+  let paused = true;
+  const resume = (): void => {
+    if (paused) {
+      paused = false;
+      registrar.resume();
+    }
+  };
   try {
     await atMost(registrar.idle(), DEVICE_INVALIDATION_TIMEOUT_MS);
     let outcome: InvalidationOutcome | null = null;
@@ -81,12 +90,15 @@ export async function signOut(store: Store | null): Promise<void> {
     clearLastNotificationResponse();
     const deletion = tokenDeletion().start();
     await forgetAccount(store, { endSession: outcome !== 'queued' });
+    // The session is gone, so the next one may register at once (the re-review's R1): its first
+    // run waits for this deletion before it reads a token (`tokenDeletion().beforeRead()`).
+    resume();
     // Android's token deletion is a network call: the sign-out waits for it a bounded time.
     await atMost(deletion, DEVICE_INVALIDATION_TIMEOUT_MS);
     dismissAllNotificationsAsync().catch((error: unknown) => {
       Sentry.captureException(error);
     });
   } finally {
-    registrar.resume();
+    resume();
   }
 }

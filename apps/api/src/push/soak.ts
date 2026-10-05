@@ -7,8 +7,10 @@
  * (src/queues/push-outcomes.ts): every 403 and 429 reason, edge 52x answers without an
  * `apns-id`, and the sends. What that measures (review M1): edge 52x without an `apns-id` over
  * the soak's hours (R1 U1); `UnrelatedKeyIdInToken` on the sandbox host at staging's volume; and
- * `TooManyProviderTokenUpdates` from `PushAuth`'s own rotation, which normal rotation cannot
- * cause, so such a row points at rotation, clock skew or a `PushAuth` fault before the relay. It
+ * `TooManyProviderTokenUpdates` from `PushAuth`'s own rotation, which rotation with agreeing
+ * clocks does not cause; an isolate's clock skew at a rotation, or an `ExpiredProviderToken`, can
+ * (review M1's skeptics), so such a row points at rotation, clock skew or a `PushAuth` fault
+ * before the relay. It
  * does not settle R1 U2: no canary built from one team's keys can provoke the cross-account
  * error, and this one sends one token twice. U2 stays open until Cloudflare answers. A failing
  * soak points at the relay (src/push/transport.ts).

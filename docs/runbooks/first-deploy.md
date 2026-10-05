@@ -641,8 +641,8 @@ the exit test on production, the last items below.
       stop one. It passes with both answer tables empty for the whole soak and every canary round
       `sent`; any row there is a finding (plan section 11 item 8: the relay). A
       `TooManyProviderTokenUpdates` row points at `PushAuth`'s rotation, clock skew between
-      isolates or a `PushAuth` fault before it points at the relay, since normal rotation cannot
-      cause it. A pass does not settle R1 U2 (Cloudflare's answer to the ticket above is the
+      isolates or a `PushAuth` fault before it points at the relay: rotation with agreeing clocks
+      does not cause it. A pass does not settle R1 U2 (Cloudflare's answer to the ticket above is the
       evidence there): the canary checks only that two cold asks of `PushAuth` made together get
       one token. Each round's audit row says how its gate opened (`gate`: `together`; `timeout` when the asks never met; `unused` when no send
       asked) and whether the two sends got the same token (`tokens_matched`, a boolean), in the

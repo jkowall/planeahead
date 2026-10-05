@@ -367,8 +367,8 @@ describe('signOut', () => {
       'clearLastResponse',
       'unregister',
       'forgetAccount',
-      'dismissAll',
       'registrar.resume',
+      'dismissAll',
     ]);
     expect(fakeNotifications.presented).toEqual([]);
     // The deletion succeeded: nothing is owed.
@@ -425,7 +425,7 @@ describe('signOut', () => {
     fakeNotifications.dismissAll = outcome;
     jest.mocked(Sentry.captureException).mockClear();
     await signOut(null);
-    expect(mockLog.slice(-3)).toEqual(['forgetAccount', 'dismissAll', 'registrar.resume']);
+    expect(mockLog.slice(-3)).toEqual(['forgetAccount', 'registrar.resume', 'dismissAll']);
     expect(Sentry.captureException).toHaveBeenCalledTimes(outcome === 'pending' ? 0 : 1);
   });
 
@@ -441,8 +441,8 @@ describe('signOut', () => {
       'clearLastResponse',
       'unregister',
       'forgetAccount, no /sign-out',
-      'dismissAll',
       'registrar.resume',
+      'dismissAll',
     ]);
 
     // Online again, a new session registers: the signed-out session's call goes first, once.

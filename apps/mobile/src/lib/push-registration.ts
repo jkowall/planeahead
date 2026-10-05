@@ -21,7 +21,9 @@
  * more after it (on iOS a second concurrent read rejects the first, R2 fact 21).
  *
  * Sign-out (review A3, src/lib/sign-out.ts). `reset()` starts a new epoch: a run that began before
- * it posts nothing of what it read. `pause()` closes registration until the session is cleared:
+ * it posts nothing of what it read, checked before it calls `registerDevice` (which first settles
+ * a queued call, so a POST already under way is the server's to refuse: after the invalidation the
+ * session is gone and it answers 401). `pause()` closes registration until the session is cleared:
  * nothing starts, and the token listener is ignored. And a run first settles a token deletion
  * that a sign-out left owed (`beforeRead`, src/lib/device-invalidation.ts `tokenDeletion`),
  * before it reads a token, so a deletion can never kill the token the new session registers.

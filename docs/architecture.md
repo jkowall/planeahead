@@ -683,8 +683,9 @@ counts the provider answers while a soak runs.
   reason, edge 52x answers without an `apns-id`, then the injections by outcome and the canary
   rounds. What a clean 24 to 48 hours measures (review ruling M1): edge 52x without an `apns-id`
   (R1 U1); `UnrelatedKeyIdInToken` on the sandbox host at staging's volume; and
-  `TooManyProviderTokenUpdates` from `PushAuth`'s own rotation, which normal rotation cannot cause,
-  so such a row points at rotation, clock skew or a `PushAuth` fault before the relay. The canary
+  `TooManyProviderTokenUpdates` from `PushAuth`'s own rotation, which rotation with agreeing clocks
+  does not cause (an isolate's clock skew at a rotation, or an `ExpiredProviderToken`, can), so
+  such a row points at rotation, clock skew or a `PushAuth` fault before the relay. The canary
   checks only that concurrent cold asks get one token: it cannot show connection pooling (one
   invocation and one token, where R1 U2's canary needs two different tokens from two isolates),
   and no canary built from one team's keys can provoke the cross-account `UnrelatedKeyIdInToken`.

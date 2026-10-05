@@ -574,7 +574,9 @@ channels and the icon in step 18).
 
   Record the rounds by `gate` and `tokens_matched`. Expected: `sent` rounds with `together` and
   `true`. `timeout` means the asks did not meet within 5 s and each send asked alone, so `false`
-  there can be a legal rotation between the asks; `together` with `false` is a `PushAuth` fault;
+  there can be a legal rotation between the asks; `together` with `false` points at a `PushAuth`
+  fault, unless a rotation landed between the two asks (rare: the gate holds them together, so
+  only a token served at the very end of its window can do it);
   `unused` means no send asked, and a `refused` row (the token gone, invalidated or of another
   kind) has neither field.
 - **R1 U2, how Cloudflare pools Worker subrequest connections.** Open: no canary built from one
@@ -632,6 +634,11 @@ channels and the icon in step 18).
   that does not allow PlaneAhead, inject a delay inside the hour before the flight's departure,
   where the intent is time-sensitive (increment 15's N5). Pass: it breaks through, marked Time
   Sensitive.
+- **N3, the notification settings links** (the re-review's R6; tested only with `Linking`
+  mocked). Deny notifications, then tap "Open system settings" in Settings: on the iPhone it opens
+  PlaneAhead's Notifications page (`app-settings:notifications`), on an Android 8 or later phone
+  the app's notification settings (`APP_NOTIFICATION_SETTINGS` with the package). The fallback,
+  the app's settings page, is the behaviour before the round.
 - **The Android channels, the copy, the accent colour and the icon** are the owner's to confirm
   (`docs/open-decisions.md`, section 8); the channels before the first Android build that reaches a
   tester, since a channel's importance cannot change once created (runbook step 18).
@@ -1139,3 +1146,49 @@ In this repository the same hunk is `patches/expo-notifications@57.0.20.patch`, 
 repro above is F3a's, run against the store's unpatched 57.0.20 (it fails as quoted) and the patched
 copy (it passes); the fuller test is `apps/mobile/__tests__/push-token-read.test.ts`, 4 of whose 5
 tests fail on the unpatched package (What ran, above).
+
+## Re-review of the fix round, and the close-out
+
+An Opus 5.5 re-review of the fix round (`git diff b42b0a8 94c5e45`, 2026-10-05) found no blocker or
+major: every ruling applied as ruled or as its accepted interpretation (m1 proven in two halves, the
+round's recorded departure), one minor and six nits. It probed the server session (only the
+caller's session ends, in the invalidation's transaction; the queued path sends no `/sign-out`
+against the real Expo client; the replay works), an offline launch signed in (the cached session
+hydrates first, so neither the signed-out handler nor the tray clear trips), the patch (byte-equal
+to the skeptic's, its SHA-256 the lockfile's hash, loaded by Metro and Jest, `ERR_PNPM_UNUSED_PATCH`
+confirmed, EAS on the same pnpm 12.5.1), the fingerprints (recomputed, equal), the overrides
+(nothing old breaks), and the soak's derived ids and canary fields. Findings and what the close-out
+did:
+
+- **R1 (minor): the sign-out pause outlived the session by up to 5 s.** `registrar.resume()` ran
+  only in the `finally`, after the token deletion's bounded wait, so a session started in that
+  window (a quick "continue without an account" on Android with a slow FCM deletion) had its first
+  registration refused and no device row until its next foreground. Fixed: the pause ends right
+  after `forgetAccount` (`apps/mobile/src/lib/sign-out.ts`), once, with the `finally` as the
+  fallback for an error; the new session's first run already waits for the running deletion before
+  it reads a token. Test: sign-out-lifecycle, a session started while the deletion still runs
+  registers (fails with the early resume removed); four sign-out tests re-pinned for the new order
+  (the resume before the last tray clear).
+- **R2 (nit): the 10 s wait before a read is a bound, not a guarantee.** A deletion still running
+  past it can land after the read and kill the token the new session just registered; that session
+  registers a fresh token at its next foreground. Recorded here and in `device-invalidation.ts`'s
+  comment, which no longer claims more.
+- **R3 (nit):** the orchestrator's decisions note still said "still measure" and "catches";
+  corrected (it lives in the orchestrator's scratchpad, not in the repository).
+- **R4 (nit): "normal rotation cannot cause it" was too strong.** Rotation with agreeing clocks
+  does not cause `TooManyProviderTokenUpdates`; an isolate's clock skew at a rotation, or an
+  `ExpiredProviderToken`, can (review M1's skeptics). Reworded in `apps/api/src/push/soak.ts`,
+  `docs/architecture.md` and runbook step 19; and `together` with `false` above now allows a
+  rotation landing between the two asks.
+- **R5 (nit):** "a run that has not posted posts nothing" overstated the epoch check, which runs
+  before `registerDevice` settles a queued call and posts; a POST already under way is the server's
+  to refuse (401 after the invalidation). Reworded in `push-registration.ts` and `sign-out.ts`.
+- **R6 (nit):** N3's two links are now on the device checklist (Unverified, above).
+- **R7 (nit, recorded): a SecureStore failure in `invalidate()`** (the queued record cannot be
+  written) leaves nothing queued, so the sign-out sends `/sign-out` and the tokens stay live until
+  the provider reports them dead. Rare; recorded as a residual.
+
+What ran for the close-out: apps/mobile `sign-out-lifecycle` 10 of 10, `sign-out` 27,
+`push-registration` 17, `forget-account` 3, `settings-sign-out` 2; the R1 mutant (the early resume
+removed) fails the new test; typecheck, lint and Prettier on the changed files. The full check of
+the final tree is in `docs/build-log.md`, increment 16.

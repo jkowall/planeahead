@@ -233,8 +233,10 @@ export function settleQueuedInvalidation(): Promise<void> {
  * while signed out (`retrySignOutWork`), and at the next session in the registrar's run BEFORE its
  * token read (src/lib/push-registration.ts), never after it, when it would kill the token the new
  * session had just registered. That run waits for a deletion still running, at most
- * `TOKEN_DELETION_WAIT_MS`, then forgets the record whatever the outcome: the token it reads next
- * is the new session's.
+ * `TOKEN_DELETION_WAIT_MS`, then forgets the record whatever the outcome. A deletion still running
+ * past that bound (Android, a slow network) can still land after the read and kill the token the
+ * new session just registered; that session registers a fresh one at its next foreground (the
+ * re-review's R2, a recorded residual).
  */
 export interface TokenDeletion {
   /** Sign-out: records the deletion and runs it, or joins the one running. */
