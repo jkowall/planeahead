@@ -379,32 +379,55 @@ to a phone that was offline at sign-out; and a sign-out made offline, until the 
 invalidate call lands (below).
 
 Increment 16 builds the app's half (`apps/mobile/src/lib/sign-out.ts` and `device-invalidation.ts`,
-ruling C3), for the Sign out button and a revoked Apple credential alike: registration stops;
+ruling C3), for the Sign out button and a revoked Apple credential alike: registration pauses (a
+run that has not posted posts nothing, and a registration already sent is waited for, at most 5 s);
 `POST /v1/devices/current/invalidate` goes with the session's cookies and the install id, waited for
-at most 5 s; the tray is cleared; `forgetAccount` runs, its `authClient.signOut()` revoking the
-session; then `unregisterForNotificationsAsync()` (Android deletes its FCM token, which FCM then
-refuses; iOS unregisters from APNs).
+at most 5 s; `unregisterForNotificationsAsync()` starts (Android deletes its FCM token, which FCM
+then refuses; iOS unregisters from APNs) beside `forgetAccount`, which clears the tray, wipes the
+store and calls `authClient.signOut()`; the deletion is waited for at most 5 s, then the tray is
+cleared again.
+
+Since increment 16's review (rulings A3 and A4) the invalidation also deletes the caller's session
+row, that one only, in the same transaction as the tokens: the sign-out is one atomic server step,
+and a write with that cookie whose session read follows the commit, a late registration included,
+gets 401 (writes never use the cookie cache, section 1.5). The app's `authClient.signOut()` after it
+only clears the client's half (Better Auth answers 200 for a session already gone). Only this call
+ties a session's end to the tokens: a session that expires, or that the merge revokes, leaves them
+alone, since they belong to the device, not to a session.
 
 **The queued invalidation keeps the signed-out session's cookies.** Offline, past the timeout, or on
 a 408, 429 or 5xx, the call is queued in SecureStore (through the Expo client's chunked adapter, the
 store and protection the live session has) with the signed-out session's whole cookie map, because
-the route invalidates only the CALLER's rows for the installation: replayed with the next session's
-cookies it would reach nothing of the signed-out account, or, if the same account signed back in,
-invalidate the token it had just registered. Its bounds: one record, the first kept (while it waits
+the route acts only for the CALLER's session and rows for the installation: replayed with the next
+session's cookies it would reach nothing of the signed-out account, or, if the same account signed
+back in, invalidate the token it had just registered. When the call is queued the app clears the
+session on the phone alone and sends no `/sign-out` (ruling A4), so the server session lives on for
+the replay to end with its tokens: a `/sign-out` that landed while the invalidation never did would
+leave the tokens live and the replay refused. Its bounds: one record, the first kept (while it waits
 every registration waits too, so a later session has registered nothing a second record would need);
-retried at launch and before every registration, and at no other time; cleared by a 2xx, by any
-other 4xx (a 401 once the session is revoked), by cookies that have all expired (the map keeps their
-expiries; Better Auth's session lasts at most 30 days) and by a third 408, 429 or 5xx; kept, without
-counting, through a network failure. Each drop is reported to Sentry by its reason, never with the
-cookies. While it waits the record is a bearer credential for the signed-out session: after an
-offline sign-out the server never heard `signOut`, so that session stays valid until it expires, and
+retried at launch, while the app runs signed out on every return to the foreground and every network
+return (ruling A1), and before every registration; cleared by a 2xx, by any other 4xx (a 401 once
+the session is gone), by cookies that have all expired (the map keeps their expiries; Better Auth's
+session lasts at most 30 days) and by a third 408, 429 or 5xx; kept, without counting, through a
+network failure. Each drop is reported to Sentry by its reason, never with the cookies. While it
+waits the record is a bearer credential for the signed-out session: after an offline sign-out the
+server has heard nothing, so that session stays valid until the replay ends it or it expires, and
 the record is its only copy left on the phone. Routes under `/v1` never refresh a session or set a
-cookie (section 1.5), so a retry cannot extend it.
+cookie (section 1.5), so a retry cannot extend it. A second sign-out while an older call is still
+queued (a later session whose own invalidation failed too, which needs a partly failing server) is
+not queued and sends no `/sign-out`, so that later session stays valid until it expires, with no
+cookie left on the phone and no token under it (its registrations waited behind the record).
 
-**The tray is cleared at sign-out.** `dismissAllNotificationsAsync()` removes every notification the
-app has presented, so the signed-out account's flights leave the lock screen and the shade, and none
-can be opened from a tap. It runs right after the invalidation step, never awaited, and a failure
-goes to Sentry.
+**The tray is cleared at sign-out, and while signed out.** `dismissAllNotificationsAsync()` removes
+every notification the app has presented, so the signed-out account's flights leave the lock screen
+and the shade, and none can be opened from a tap. `forgetAccount` runs it (so an account deletion
+and a `401 account_deleted` clear the tray too, review N1), sign-out runs it again after the token
+deletion's bounded wait (N7), and every opening of the app while signed out runs it (A1); never
+awaited, a failure to Sentry. While the session is known to be null the foreground handler presents
+nothing, so a push that still arrives never banners over the sign-in screen. Sign-out drops a tap
+waiting for a session and the last response (N2); a tap on a notification made while already signed
+out is still held, and routed in the next session to home after one sync, since the wiped store does
+not know the flight.
 
 **What a sign-out still cannot recall.** First, a push APNs or FCM accepted before the invalidation
 committed: the provider holds it for a phone that is offline until the job's `expiresAt` and then
@@ -412,14 +435,28 @@ delivers it. Whether the app's unregister stops such a push from displaying is i
 nor Google's documentation as R2 read it (`docs/increments/16-verification.md`, Unverified, has the
 device check); the push names a flight and its change on the lock screen, though a tap on it opens
 nothing of the old account (the store is wiped, so the next session's sync does not know the id: one
-sync, then home). Second, an offline sign-out until its queued call lands, at the next launch from
-cold or the next sign-in, since nothing retries it while the app runs signed out: the token row
-stays live for the signed-out user, `notify` keeps sending to it, and Android's token deletion, a
-network call, has failed too. Third, a queued call that is dropped: when the invalidation is queued
-at sign-out (a 408, 429 or 5xx, or no answer within 5 s) and the session revoke that follows
-succeeds, the retry gets 401 and is dropped, so the row stays live until APNs or FCM reports the
-token dead (FCM does, after Android's deletion) or the next session's registration re-points it. The
-candidate fixes are open items (section 9).
+sync, then home). Second, an offline sign-out, until the app is next opened online: the token row
+stays live for the signed-out user and `notify` keeps sending to it, and on Android the token
+deletion, a network call that fails offline and leaves the token live at FCM, is owed too, so FCM
+displays what it is sent, lock screen included. The app retries both at launch and, while it runs
+signed out, on every return to the foreground and every network return, and the next session runs
+an owed deletion before its first token read (review A1); but JavaScript runs only while the app is
+open (a process FCM starts to display a message runs none, and iOS suspends and Android 14 freezes a
+cached app), so nothing shortens the window for a phone that is not opened. If it is opened only
+after the signed-out session's cookies have expired (at most 30 days), the queued call is dropped
+unsent, the row stays live until the provider reports the token dead or a sign-in re-points it, and
+only the device-side deletion, retried at that opening, stops display. A phone handed on and never
+opened keeps showing the old account's alerts (flight, route, gate, terminal and times, with sound;
+no name or email); whether to close that tail is the owner's decision (`docs/open-decisions.md`
+section 8). On iOS the unregister is local and works offline, so the server window is the same and
+whether iOS still displays what APNs sends to an unregistered token is the recorded device check.
+Third, a race with a registration: one already sent when the sign-out begins is waited for at most
+5 s, so one still running past that wait whose session read came before the commit can land after
+it and leave the row live; the Live Activity push-to-start registration is not paused at all
+(harmless while Phase 1 sends no push-to-start, and one that reads its session after the commit
+gets 401). The window a dropped queued call left before the review (an invalidation queued at an
+online sign-out whose revoke then succeeded, so the replay got 401 with the tokens live) is closed:
+a queued call sends no `/sign-out`, and its replay ends the session with the tokens.
 
 ## 2. Envelope encryption
 
@@ -584,7 +621,9 @@ canary) or stops one, each audited `pending` before its record in `CONFIG` KV ch
 answers both with 403 and shows no form, the soak's cron is declared in staging's `triggers` alone,
 and every step it plans refuses in production too, so a record put in production's KV by hand runs
 nothing. The record keeps the canary's `push_tokens` row id, never the device token, and the page
-shows counts by reason.
+shows counts by reason. Each canary round's audit row records whether its two sends got the same
+provider token as a boolean (`tokens_matched`, increment 16's review, M1), never a provider or a
+device token.
 
 ### 3.4 The public account-deletion page (increment 12)
 
@@ -792,9 +831,11 @@ root restarts the anonymous per-IP caps.
 - The residual windows of the re-enabled cookie cache (section 1.5): a revoked session keeps the
   read-only paths for up to 300 s; tombstoning revoked sessions too, not only deleted accounts',
   would close it (`docs/open-decisions.md`).
-- Push at sign-out (section 1.8, increment 16): the server could invalidate an installation's push
-  tokens when its session is revoked, closing the window a dropped queued invalidation leaves (a
-  question for increment 16's review); and the queued call could replay the sign-out as well, so
-  that an offline sign-out also ends the server session rather than leaving it valid until it
-  expires.
+- Push at sign-out (section 1.8, increment 16). Increment 16's review settled both earlier items
+  (ruling A4): rather than the server invalidating tokens when a session is revoked, the
+  invalidation ends the caller's session in the same transaction, and a queued call sends no
+  `/sign-out`, so its replay ends an offline sign-out's session with the tokens; a session that
+  expires or that the merge revokes leaves the device's tokens alone. Open: the phone that is never
+  opened after an offline sign-out (section 1.8, "Second"), the owner's decision in
+  `docs/open-decisions.md` section 8.
 - Share-link and MCP threats (Phases 5 and 6), App Attest and Play Integrity (columns reserved).

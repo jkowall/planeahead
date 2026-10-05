@@ -587,11 +587,12 @@ the exit test on production, the last items below.
       Simulator shows the notification. Any other answer is a result too: record it in
       `docs/increments/14-verification.md`.
 - [ ] If the send, or later the admin page's outcomes by reason during the soak, shows `edge_52x`
-      answers without an `apns-id`: check the HTTP/2 to Origin setting above first, and only then
-      open the Cloudflare support ticket asking how Worker subrequests to third-party origins are
-      pooled and whether they speak HTTP/2 (R1 U2 and U3, owner action 7). That the setting
-      governs Worker subrequests is unverified, so a setting found on does not close the question.
-      Record the setting's state and the answer in `docs/increments/14-verification.md`.
+      answers without an `apns-id`: check the HTTP/2 to Origin setting above first, then add the
+      edge answers to the Cloudflare support ticket (owner action 7), opening it now if the soak
+      has not started (its start opens it anyway, below). That the setting governs Worker
+      subrequests is unverified, so a setting found on does not close the question. Record the
+      setting's state and Cloudflare's answer on HTTP/2 in `docs/increments/14-verification.md`
+      (R1 U3).
 - [ ] The transport soak's devices (increment 16, ruling C9; staging only), once the staging send
       passes. Staging is the development variant's API, and a development-signed build registers
       with sandbox APNs, the environment staging's key covers: the Simulator build of the staging
@@ -600,9 +601,11 @@ the exit test on production, the last items below.
       or phone with `GOOGLE_SERVICES_JSON` naming the development app's file (`pnpm android`). Sign
       all of them in to one account and follow one flight that stays live-tracked for the whole
       soak: inside its live window (from 48 hours before scheduled departure; a free account has two
-      live-tracked flights) and departing after the soak ends, since an injected delay changes
-      nothing once the flight is out. For 24 hours, a flight departing 24 to 48 hours after the
-      start; for 48 hours, one departing just after the end, whose ticks before it enters its window
+      live-tracked flights) and still before arrival when the soak ends, since an injected delay
+      pushes until the flight arrives, after out as an arrival delay (the arrival rule reads the
+      injected estimate). For 24 hours, a flight departing 24 to 48 hours after the start, or an earlier one
+      that lands after the end; for 48 hours, one departing in the soak's last hours that lands
+      after the end, or one departing just after the end, whose ticks before it enters its window
       reach the inbox only. Its key and the iPhone's token, in the Neon SQL editor on `staging`:
 
   ```sql
@@ -616,17 +619,44 @@ the exit test on production, the last items below.
       to 48; the form takes 1 to 72), the iPhone's token, kind APNs (iOS), then **Start the soak**.
       Every five minutes a synthetic departure delay (30, 60, 90 and 120 minutes in turn) goes to
       every device that follows the flight, each replacing the last on screen, and once an hour two
-      canary test pushes go to the iPhone in the same instant. Read the same page while it runs:
-      **Sent** by channel; **403 and 429 answers, by reason** and **Edge 52x answers without an
-      apns-id**, which a clean soak leaves empty; **Every attempt**; **Injections** by outcome
-      (`ignored` with `suspected` or `cancelled` is the tracker's 409, `refused` a tick that never
-      called it); **Canaries**, each round's outcome and each send's first answer, with links to the
-      last round's result pages. The counts cover every push sent in the soak's window, not only the
-      soak's.
+      canary test pushes go to the iPhone in the same instant. A real delay pushed meanwhile blocks
+      at most one value in four (the policy's 15-minute step), and for 15 minutes after each real
+      delay intent the injected ones push nothing, up to three ticks (the policy's interval between
+      delay intents). Read the same page while it runs: **Sent** by channel; **403 and 429
+      answers, by reason** and **Edge 52x answers without an apns-id**, which a clean soak leaves
+      empty; **Every attempt**; **Injections** by outcome (`ignored` with `suspected` or
+      `cancelled` is the tracker's 409, `refused` a tick that never called it, `written` with no
+      intents a tick the policy blocked); **Canaries**, each round's outcome and each send's first
+      answer, with links to the last round's result pages. The counts cover every push sent in the
+      soak's window, not only the soak's.
+- [ ] When the soak starts, whatever it later shows, open the Cloudflare support ticket (owner
+      action 7; review ruling M1): how Worker subrequests to a third-party origin such as Apple's
+      push hosts are pooled (whether one connection carries several isolates' requests, or several
+      Cloudflare accounts') and whether they speak HTTP/2 (R1 U2 and U3). It is the only direct
+      evidence on R1 U2: no canary built from one team's keys can provoke `UnrelatedKeyIdInToken`,
+      the cross-account error, and the soak's canary sends one token twice from one invocation, so
+      a clean soak cannot settle U2. Record the answer under R1 U2 in
+      `docs/increments/16-verification.md` (Unverified).
 - [ ] Stop it with **Stop the soak**, or let it end at its hours; production refuses to start or
       stop one. It passes with both answer tables empty for the whole soak and every canary round
-      `sent`; any row there is a finding (plan section 11 item 8: the relay). Record the counts in
-      `docs/increments/16-verification.md` (its Unverified section says what to note).
+      `sent`; any row there is a finding (plan section 11 item 8: the relay). A
+      `TooManyProviderTokenUpdates` row points at `PushAuth`'s rotation, clock skew between
+      isolates or a `PushAuth` fault before it points at the relay, since normal rotation cannot
+      cause it. A pass does not settle R1 U2 (Cloudflare's answer to the ticket above is the
+      evidence there): the canary checks only that two cold asks of `PushAuth` made together get
+      one token. Each round's audit row says how its gate opened (`gate`: `together`; `timeout` when the asks never met; `unused` when no send
+      asked) and whether the two sends got the same token (`tokens_matched`, a boolean), in the
+      Neon SQL editor on `staging`:
+
+  ```sql
+  select created_at, details->>'soak_id' as soak, details->>'outcome' as outcome,
+  details->>'gate' as gate, details->>'tokens_matched' as tokens_matched from audit_log
+  where action = 'push.soak_canary' order by created_at desc limit 72;
+  ```
+
+  Record the counts and the rounds in `docs/increments/16-verification.md` (its Unverified section
+  says what to note).
+
 - [ ] Production, after the first TestFlight install (increment 16): `PUSH_INJECT_ALLOWED_USER_IDS`
       set to your own user id, then the same test push to your iPhone's token.
 - [ ] The exit test (increment 16; plan section 8, row 16), once step 18's builds are installed: the

@@ -135,7 +135,7 @@ to production (ADR 0005).
 | `GET /.well-known/*`                                                  | Apple's and Google's crawlers           | none                                                                                                                                                                                         | the association files from vars                                                                                                                                                                                                                                                  |
 | `GET /v1/me`, `PATCH /v1/me/preferences`, `POST /v1/me/delete`        | the app                                 | session                                                                                                                                                                                      | Postgres; the deletion unsubscribes trackers, revokes at Apple, deletes in one transaction, writes KV session tombstones                                                                                                                                                         |
 | `POST /v1/devices`                                                    | the app                                 | session                                                                                                                                                                                      | `devices`, `push_tokens` (increment 14: `appId`, permission, `registered_at`, rotation of the device's other rows of the kind)                                                                                                                                                   |
-| `POST /v1/devices/current/invalidate`                                 | the app, before sign-out (increment 16) | session                                                                                                                                                                                      | `push_tokens`: every live row of every kind on the caller's device row for the installation (increment 14)                                                                                                                                                                       |
+| `POST /v1/devices/current/invalidate`                                 | the app, before sign-out (increment 16) | session                                                                                                                                                                                      | `push_tokens`: every live row of every kind on the caller's device row for the installation (increment 14); `sessions`: the caller's session row, deleted in the same transaction (increment 16's review, A4)                                                                    |
 | `GET /v1/flights/search`                                              | the app                                 | session (anonymous accepted), always read from the session row                                                                                                                               | KV, `flight_designators`, then the DesignatorResolver (one provider call per designator and date) and caps                                                                                                                                                                       |
 | `GET /v1/airports/{code}/board`                                       | the app (increment 18)                  | `BOARDS_ENABLED` (else 404 `boards_disabled`; `"false"` in production); a session principal; anonymous only for airports of its live subscriptions; `BOARD_RL` by user, `BOARD_IP_RL` by /64 | the airport resolved in Postgres through KV, then the bucket cache (KV, else `AirportState`, the only FIDS caller); a window ending at most 72 h ahead; each flight once, codeshares grouped, kept by scheduled or best time, filtered after the cache; ETag and 304, `no-store` |
 | `GET /v1/airports/{origin}/flights/to/{destination}`                  | the app (increment 18)                  | `BOARDS_ENABLED`; a session principal (anonymous accepted), always read from the session row; `BOARD_RL` by user, `BOARD_IP_RL` by /64                                                       | the origin's two buckets of the date, its departures of that date to the destination; `route_searches` caps (per user, and per salted IP when anonymous; the 403 names its `scope`); ETag and 304, `no-store`                                                                    |
@@ -424,18 +424,21 @@ counts the provider answers while a soak runs.
   guard's comparison) and the permission state. A registration locks its device row, then
   invalidates the device's other live rows of the same kind, so concurrent registrations leave one
   live row; `POST /v1/devices/current/invalidate` invalidates every kind of the caller's
-  installation before sign-out, and nothing from a batch whose liveness read starts after that
-  commits reaches the phone (a batch already past its read can finish its sends, within seconds
-  usually and about seven minutes at worst, and a push the provider had already accepted can still
-  arrive until its `expiresAt`). The app's side of registration and sign-out, from increment 16, is
+  installation before sign-out and, since increment 16's review (ruling A4), deletes the caller's
+  session row in the same transaction, that session only, so a registration that reads its session
+  after the commit gets 401. Nothing from a batch whose liveness read starts after that commit
+  reaches the phone (a batch already past its read can finish its sends, within seconds usually
+  and about seven minutes at worst, and a push the provider had already accepted can still arrive
+  until its `expiresAt`). The app's side of registration and sign-out, from increment 16, is
   section 11.
 - **Visibility.** The admin page's push section and "Send a test push" (section 8); the test push
   is the plan's staging smoke, sent through the real queue, consumer, `PushAuth` and transport to a
   registered, live token (in production only one of a user id in `PUSH_INJECT_ALLOWED_USER_IDS`).
   Its result page shows Apple's `apns-unique-id` for a sandbox send (the key to the Push
   Notifications Console's delivery log) and stops reloading once the job's window has passed without
-  an outcome. On staging the transport soak (section 11) sends the plan's canary through the same
-  consumer and counts every attempt's answer by reason while it runs.
+  an outcome. On staging the transport soak (section 11) sends an hourly canary through the same
+  consumer (not the plan's two-isolate canary) and counts every attempt's answer by reason while
+  it runs.
 
 ## 10. Notifications end to end (increment 15)
 
@@ -539,10 +542,11 @@ counts the provider answers while a soak runs.
   toggles (delay, gate change, first gate assignment off by default, cancellation, diversion),
   read and written through `GET` and `PATCH /v1/me/preferences` (a nested `notifications` object
   beside the display preferences); a tombstoned preferences row reads as the defaults there, as in
-  notify (review ruling Q18); muting is the subscription's own flag, set at the subscribe and
-  API-only in Phase 1 (`notificationOverrides` carries `muted` alone since increment 16's ruling
-  C12). The app reads the toggles from the sync feed's `notification_preferences` row and writes
-  them with that `PATCH` through its outbox (section 11).
+  notify (review ruling Q18); muting is the subscription's own `muted`, the one per-flight mute
+  `notify` reads, set at the subscribe and API-only in Phase 1 (the subscribe request takes no
+  `notificationOverrides` since increment 16's review, finding m1). The app reads the toggles from
+  the sync feed's `notification_preferences` row and writes them with that `PATCH` through its
+  outbox (section 11).
 - **The event injector** (`/admin/push/inject`, src/routes/admin-inject.ts) reads a tracker's
   snapshot (`getState`), applies one event to a copy (an origin or destination gate, a departure
   delay of N minutes, a cancellation, a diversion), and calls `injectPolicyEvent` with a fresh
@@ -560,14 +564,21 @@ counts the provider answers while a soak runs.
 ## 11. Push on the app, and the transport soak (increment 16)
 
 ```
- app start         the Android channels, the foreground handler, a queued invalidation settled
- session start,    registrar: the permission and the raw token  -->  POST /v1/devices
- foreground,         (appId and pushPermission in every state; one run at a time, one queued;
- token rotation       a queued invalidation settled first; listener echo ignored, 1 s debounce)
- push received     shown unless its flight is in front; a push naming a flight syncs the store
+ app start         the Android channels, the foreground handler; a queued invalidation and an
+                   owed token deletion retried
+ session start,    registrar: an owed token deletion first, then the permission and the raw
+ foreground,         token  -->  POST /v1/devices (appId and pushPermission in every state; one
+ token rotation      run at a time, one queued; a queued invalidation settled first; listener
+                     echo ignored, 1 s debounce)
+ push received     shown unless its flight is in front, and never while signed out; a push
+                   naming a flight syncs the store
  tap               held until a session exists, then /flight/{id} (unknown: one sync, else home)
- sign-out          registration stopped -> invalidate, or queue it -> the tray cleared
-                   -> forgetAccount (authClient.signOut) -> unregisterForNotificationsAsync
+ sign-out          registration paused -> invalidate (which ends the session), or queue it
+                   -> the waiting tap dropped -> unregisterForNotificationsAsync (owed until it
+                   succeeds) beside forgetAccount (the tray, the registrar, authClient.signOut,
+                   no /sign-out when queued) -> the tray cleared again
+ signed out        every foreground and network return: the queued invalidation and an owed
+                   token deletion retried; opening the app clears the tray
 ```
 
 - **Permission** (ruling C1, `apps/mobile/src/lib/push.ts`). Asked in context, once: after the first
@@ -585,7 +596,17 @@ counts the provider answers while a soak runs.
   token row, and `notify` skips a token that is `denied` or `undetermined`. Without a token the
   device still registers. One registration runs at a time with at most one more queued;
   `addPushTokenListener` also fires on reads, so its echo of the last token is ignored, and a
-  rotation is debounced 1 s and registered as the listener carried it.
+  rotation is debounced 1 s and registered as the listener carried it. A run first settles a token
+  deletion that a sign-out left owed, before its read (review ruling A1, below). The read goes
+  through the repository's first dependency patch (review ruling A2): expo-notifications 57.0.20
+  kept a rejected read's promise for the life of the JS runtime, so one failed read (on Android,
+  fetching a missing or stale FCM token without a network) failed every later one, and a
+  permission granted later in that process never reached the server.
+  `patches/expo-notifications@57.0.20.patch` (pnpm `patchedDependencies`) clears the promise in a
+  `finally`, concurrent reads still sharing one native call; the catalog pins expo-notifications
+  to exactly `57.0.20`, so a bump fails the install until the patch is dropped or redone
+  (`docs/open-decisions.md` section 8), and `__tests__/push-token-read.test.ts` loads the real
+  wrapper.
 - **Channels, the icon and the entitlement** (C4, C5, C8). At every start, and again before any
   permission request, the app creates `flight_changes` ("Flight changes") and `flight_delays`
   ("Delays") from `ANDROID_CHANNEL_IDS`, both HIGH. The expo-notifications plugin names
@@ -597,7 +618,8 @@ counts the provider answers while a soak runs.
 - **In the foreground** (C6, `src/lib/push-notifications.ts`). `setNotificationHandler` is installed
   once, at the root layout's module scope, and answers synchronously from memory: banner, list and
   sound, except for a push about the flight whose detail screen is focused, which is not presented
-  at all. Every push received in the foreground that names a flight starts a sync
+  at all, and every push while the session is known to be null (review ruling A1; while it loads,
+  pushes present as usual). Every push received in the foreground that names a flight starts a sync
   (`src/lib/push-routing.ts`), which is how the open screen updates in place.
 - **Taps and dismissal** (C7). The root layout takes `getLastNotificationResponse()` at mount (a
   cold start) and every response after, once each; the `(app)` layout routes the tap once a session
@@ -607,24 +629,40 @@ counts the provider answers while a soak runs.
   ids (`{kind}:{flightKey}`), the only handle on a notification FCM displayed itself, which expo
   reads back without its app data.
 - **Sign-out** (C3, `src/lib/sign-out.ts`, `src/lib/device-invalidation.ts`), from the button and on
-  a revoked Apple credential alike. Registration stops (a run in flight is waited for, 5 s at most);
-  `POST /v1/devices/current/invalidate` goes with the session's cookies and `X-Install-Id` (5 s at
-  most); the tray is cleared (`dismissAllNotificationsAsync`, never awaited); `forgetAccount` runs,
-  `authClient.signOut()` included; then `unregisterForNotificationsAsync()`, which on Android
-  deletes the FCM token (5 s at most). Offline, past the timeout, or on a 408, 429 or 5xx, the call
-  is queued in SecureStore with the signed-out session's cookie map, because the route invalidates
-  the caller's tokens and only that session is the caller; one record, the first kept. It is retried
-  at launch and before every registration: a 2xx settles it; any other 4xx, cookies that have all
-  expired, or a third 408, 429 or 5xx drop it; a network failure keeps it. An account deletion ends
-  in `forgetAccount` alone. What a sign-out cannot recall is in `docs/security/threat-model.md`,
-  section 1.8.
+  a revoked Apple credential alike. Registration pauses until the session is cleared (review ruling
+  A3): nothing starts, the token listener is ignored, a run that began before posts nothing of what
+  it read (the registrar's epoch), and a `POST /v1/devices` already sent is waited for, 5 s at
+  most. `POST /v1/devices/current/invalidate` goes with the session's cookies and `X-Install-Id`
+  (5 s at most) and, since the review, also ends that session on the server (A4, section 9). Then
+  the tap waiting for a session and the last response are dropped (N2);
+  `unregisterForNotificationsAsync()` starts, which on Android deletes the FCM token over the
+  network, recorded as owed (a kv flag) until it succeeds (A1); and beside it `forgetAccount`
+  clears the tray (`dismissAllNotificationsAsync`, never awaited), resets the registrar, wipes the
+  store and calls `authClient.signOut()`, or, when the invalidation was queued, clears the session
+  on the phone alone without `/sign-out`, so the server session lives on for the queued call to end
+  with its tokens (A4). The deletion is waited for 5 s at most, then the tray is cleared once more
+  (N7). An account deletion and `401 account_deleted` end in `forgetAccount` alone, the tray and
+  the registrar included (N1).
+- **The queued invalidation and the owed deletion** (A1). Offline, past the timeout, or on a 408,
+  429 or 5xx, the call is queued in SecureStore with the signed-out session's cookie map, because
+  the route acts for the caller's session only; one record, the first kept. Both are retried at
+  launch, while signed out on every return to the foreground and every network return
+  (`useSignedOutWork`, `src/lib/session.ts`), and before every registration: with a session a
+  network return registers only while a call is queued (the registration settles it first), and a
+  registrar run settles an owed deletion before its token read, never after it (when it would kill
+  the token just registered), waiting 10 s at most for one still running and forgetting the record
+  whatever the outcome. A 2xx settles the call; any other 4xx, cookies that have all expired, or a
+  third 408, 429 or 5xx drop it; a network failure keeps it. While signed out, opening the app
+  clears the tray. What a sign-out cannot recall is in `docs/security/threat-model.md`, section
+  1.8.
 - **Settings** (C11, C12). Settings shows the permission state and the account's notification
   preferences: "Flight alerts" (`pushEnabled`) and the five per-kind toggles, first gate assignment
   off by default. They are read from the sync feed's `notification_preferences` row with the
   defaults filled in, change at once, and are queued as `PATCH /v1/me/preferences` with
   `{ notifications }` through the outbox, a queued change holding over older sync pages; they stay
   editable whatever the permission, and with "Flight alerts" off the five are greyed out. A
-  subscription's overrides carry `muted` only.
+  flight's mute is its subscription's own `muted`; the subscribe request no longer takes
+  `notificationOverrides` (review finding m1, section 10).
 - **The transport soak** (C9, staging only; `apps/api/src/push/soak.ts`,
   `src/routes/admin-soak.ts`). `/admin/push/soak`, behind Access, starts a soak (a test flight the
   owner's devices follow, 1 to 72 hours, a canary token) and stops it, each with an `audit_log` row
@@ -633,13 +671,26 @@ counts the provider answers while a soak runs.
   the canary's `push_tokens` row id, never the token. `PUSH_SOAK_CRON` (`*/5 * * * *`, in staging's
   `triggers` only) plans each tick inside the soak onto `housekeeping` (section 7): an injection
   through increment 15's injector as `system`, a departure delay of 30, 60, 90 and 120 minutes in
-  turn (a `notify.injected` row naming the soak and its operator), and on every twelfth tick from
-  the start a canary: two test pushes from one invocation through the push consumer's batch handler,
-  each with an empty token cache, held so both ask `PushAuth` in the same instant (a
-  `push.soak_canary` row). The page counts every delivery attempt in the soak's window from
+  turn (a `notify.injected` row naming the soak and its operator), its id derived from the soak and
+  the tick's slot, so a redelivered or repeated tick injects once (review n2); and on every twelfth
+  tick from the start a canary: two test pushes on `flight_changes` (A5) from one invocation
+  through the push consumer's batch handler, each with an empty token cache, held so both ask
+  `PushAuth` in the same instant, their job ids minted at the send (n6). Its `push.soak_canary` row
+  records how the hold opened (`gate`: `together`, `timeout`, or `unused`) and whether the two
+  sends got the same token (`tokens_matched`, a boolean, never a token; M1), read by SQL, not on
+  the page. The page counts every delivery attempt in the soak's window from
   `notification_deliveries.attempt_log`: the sends by channel, every 403 and 429 by status and
   reason, edge 52x answers without an `apns-id`, then the injections by outcome and the canary
-  rounds. A clean 24 to 48 hours settles R1 U2; a failing one ships the relay
+  rounds. What a clean 24 to 48 hours measures (review ruling M1): edge 52x without an `apns-id`
+  (R1 U1); `UnrelatedKeyIdInToken` on the sandbox host at staging's volume; and
+  `TooManyProviderTokenUpdates` from `PushAuth`'s own rotation, which normal rotation cannot cause,
+  so such a row points at rotation, clock skew or a `PushAuth` fault before the relay. The canary
+  checks only that concurrent cold asks get one token: it cannot show connection pooling (one
+  invocation and one token, where R1 U2's canary needs two different tokens from two isolates),
+  and no canary built from one team's keys can provoke the cross-account `UnrelatedKeyIdInToken`.
+  So a clean soak does not settle R1 U2, which stays open until Cloudflare answers the ticket
+  opened when the soak starts (owner action 7, runbook step 19); the plan's two-isolate canary is
+  an open decision (`docs/open-decisions.md` section 8). A failing soak points at the relay
   (`src/push/transport.ts`).
 
 ## Refresh cadence
