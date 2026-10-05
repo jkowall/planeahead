@@ -292,9 +292,19 @@ exports[`settings in light and dark renders in dark 1`] = `
                 },
                 {
                   "children": [
+                    "Notifications are not turned on yet.",
+                  ],
+                  "style": {
+                    "color": "#F2F4F8",
+                  },
+                  "testID": "settings-notifications-state",
+                  "type": "Text",
+                },
+                {
+                  "children": [
                     {
                       "children": [
-                        "Allow notifications",
+                        "Turn on notifications",
                       ],
                       "style": {
                         "color": "#F2F4F8",
@@ -302,7 +312,7 @@ exports[`settings in light and dark renders in dark 1`] = `
                       "type": "Text",
                     },
                   ],
-                  "label": "Allow notifications",
+                  "label": "Turn on notifications",
                   "style": {
                     "backgroundColor": "#171B22",
                     "borderColor": "#2A303A",
@@ -310,11 +320,144 @@ exports[`settings in light and dark renders in dark 1`] = `
                   "testID": "settings-notifications",
                   "type": "View",
                 },
+                {
+                  "children": [
+                    {
+                      "children": [
+                        "Flight alerts",
+                      ],
+                      "style": {
+                        "color": "#F2F4F8",
+                      },
+                      "type": "Text",
+                    },
+                    {
+                      "label": "Flight alerts",
+                      "style": {
+                        "backgroundColor": "#707A8C",
+                      },
+                      "testID": "settings-notify-push",
+                      "type": "RCTSwitch",
+                    },
+                  ],
+                  "type": "View",
+                },
+                {
+                  "children": [
+                    {
+                      "children": [
+                        "Delays",
+                      ],
+                      "style": {
+                        "color": "#F2F4F8",
+                      },
+                      "type": "Text",
+                    },
+                    {
+                      "label": "Delays",
+                      "style": {
+                        "backgroundColor": "#707A8C",
+                      },
+                      "testID": "settings-notify-delay",
+                      "type": "RCTSwitch",
+                    },
+                  ],
+                  "type": "View",
+                },
+                {
+                  "children": [
+                    {
+                      "children": [
+                        "Gate changes",
+                      ],
+                      "style": {
+                        "color": "#F2F4F8",
+                      },
+                      "type": "Text",
+                    },
+                    {
+                      "label": "Gate changes",
+                      "style": {
+                        "backgroundColor": "#707A8C",
+                      },
+                      "testID": "settings-notify-gate_change",
+                      "type": "RCTSwitch",
+                    },
+                  ],
+                  "type": "View",
+                },
+                {
+                  "children": [
+                    {
+                      "children": [
+                        "First gate assignment",
+                      ],
+                      "style": {
+                        "color": "#F2F4F8",
+                      },
+                      "type": "Text",
+                    },
+                    {
+                      "label": "First gate assignment",
+                      "style": {
+                        "backgroundColor": "#707A8C",
+                      },
+                      "testID": "settings-notify-first_gate_assignment",
+                      "type": "RCTSwitch",
+                    },
+                  ],
+                  "type": "View",
+                },
+                {
+                  "children": [
+                    {
+                      "children": [
+                        "Cancellations",
+                      ],
+                      "style": {
+                        "color": "#F2F4F8",
+                      },
+                      "type": "Text",
+                    },
+                    {
+                      "label": "Cancellations",
+                      "style": {
+                        "backgroundColor": "#707A8C",
+                      },
+                      "testID": "settings-notify-cancellation",
+                      "type": "RCTSwitch",
+                    },
+                  ],
+                  "type": "View",
+                },
+                {
+                  "children": [
+                    {
+                      "children": [
+                        "Diversions",
+                      ],
+                      "style": {
+                        "color": "#F2F4F8",
+                      },
+                      "type": "Text",
+                    },
+                    {
+                      "label": "Diversions",
+                      "style": {
+                        "backgroundColor": "#707A8C",
+                      },
+                      "testID": "settings-notify-diversion",
+                      "type": "RCTSwitch",
+                    },
+                  ],
+                  "type": "View",
+                },
               ],
               "style": {
                 "backgroundColor": "#171B22",
                 "borderColor": "#2A303A",
               },
+              "testID": "settings-notifications-section",
               "type": "View",
             },
             {
@@ -651,9 +794,19 @@ exports[`settings in light and dark renders in light 1`] = `
                 },
                 {
                   "children": [
+                    "Notifications are not turned on yet.",
+                  ],
+                  "style": {
+                    "color": "#101418",
+                  },
+                  "testID": "settings-notifications-state",
+                  "type": "Text",
+                },
+                {
+                  "children": [
                     {
                       "children": [
-                        "Allow notifications",
+                        "Turn on notifications",
                       ],
                       "style": {
                         "color": "#101418",
@@ -661,7 +814,7 @@ exports[`settings in light and dark renders in light 1`] = `
                       "type": "Text",
                     },
                   ],
-                  "label": "Allow notifications",
+                  "label": "Turn on notifications",
                   "style": {
                     "backgroundColor": "#F2F4F8",
                     "borderColor": "#D6DAE1",
@@ -669,11 +822,144 @@ exports[`settings in light and dark renders in light 1`] = `
                   "testID": "settings-notifications",
                   "type": "View",
                 },
+                {
+                  "children": [
+                    {
+                      "children": [
+                        "Flight alerts",
+                      ],
+                      "style": {
+                        "color": "#101418",
+                      },
+                      "type": "Text",
+                    },
+                    {
+                      "label": "Flight alerts",
+                      "style": {
+                        "backgroundColor": "#7D8591",
+                      },
+                      "testID": "settings-notify-push",
+                      "type": "RCTSwitch",
+                    },
+                  ],
+                  "type": "View",
+                },
+                {
+                  "children": [
+                    {
+                      "children": [
+                        "Delays",
+                      ],
+                      "style": {
+                        "color": "#101418",
+                      },
+                      "type": "Text",
+                    },
+                    {
+                      "label": "Delays",
+                      "style": {
+                        "backgroundColor": "#7D8591",
+                      },
+                      "testID": "settings-notify-delay",
+                      "type": "RCTSwitch",
+                    },
+                  ],
+                  "type": "View",
+                },
+                {
+                  "children": [
+                    {
+                      "children": [
+                        "Gate changes",
+                      ],
+                      "style": {
+                        "color": "#101418",
+                      },
+                      "type": "Text",
+                    },
+                    {
+                      "label": "Gate changes",
+                      "style": {
+                        "backgroundColor": "#7D8591",
+                      },
+                      "testID": "settings-notify-gate_change",
+                      "type": "RCTSwitch",
+                    },
+                  ],
+                  "type": "View",
+                },
+                {
+                  "children": [
+                    {
+                      "children": [
+                        "First gate assignment",
+                      ],
+                      "style": {
+                        "color": "#101418",
+                      },
+                      "type": "Text",
+                    },
+                    {
+                      "label": "First gate assignment",
+                      "style": {
+                        "backgroundColor": "#7D8591",
+                      },
+                      "testID": "settings-notify-first_gate_assignment",
+                      "type": "RCTSwitch",
+                    },
+                  ],
+                  "type": "View",
+                },
+                {
+                  "children": [
+                    {
+                      "children": [
+                        "Cancellations",
+                      ],
+                      "style": {
+                        "color": "#101418",
+                      },
+                      "type": "Text",
+                    },
+                    {
+                      "label": "Cancellations",
+                      "style": {
+                        "backgroundColor": "#7D8591",
+                      },
+                      "testID": "settings-notify-cancellation",
+                      "type": "RCTSwitch",
+                    },
+                  ],
+                  "type": "View",
+                },
+                {
+                  "children": [
+                    {
+                      "children": [
+                        "Diversions",
+                      ],
+                      "style": {
+                        "color": "#101418",
+                      },
+                      "type": "Text",
+                    },
+                    {
+                      "label": "Diversions",
+                      "style": {
+                        "backgroundColor": "#7D8591",
+                      },
+                      "testID": "settings-notify-diversion",
+                      "type": "RCTSwitch",
+                    },
+                  ],
+                  "type": "View",
+                },
               ],
               "style": {
                 "backgroundColor": "#F2F4F8",
                 "borderColor": "#D6DAE1",
               },
+              "testID": "settings-notifications-section",
               "type": "View",
             },
             {

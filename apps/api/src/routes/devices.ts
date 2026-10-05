@@ -46,8 +46,16 @@
  * `POST /v1/devices/current/invalidate` needs a session and takes the installation's id (body
  * `installId`, which must agree with `X-Install-Id` when both are sent): it invalidates every
  * live token of every kind registered to the CALLER's device row for that installation, and
- * answers how many. The app calls it before `authClient.signOut()` (increment 16). What that
- * guarantees (review ruling R1): the push consumer reads every target's token row once per batch,
+ * answers how many. In the same transaction it deletes the caller's session row, that session
+ * only and never the user's others (increment 16 review, rulings A3 and A4): the sign-out is one
+ * atomic server step; a write with that cookie whose session read comes after the commit gets
+ * 401, a registration included (one that read its session just before can still land after it,
+ * which the app's registrar prevents); and a call the app queued while offline ends, when it is
+ * replayed, the session that sign-out left behind. The app's `authClient.signOut()` afterwards
+ * only clears the client's half (Better Auth answers 200 for a session already gone). Only this
+ * call ends a session here: a session that expires, or that the merge revokes, leaves the tokens
+ * alone, since they belong to the device. What the invalidation guarantees (review ruling R1):
+ * the push consumer reads every target's token row once per batch,
  * before the batch's first send (first attempts included), so nothing from a batch whose read
  * starts after the invalidation (or an account switch's re-point above) commits reaches the
  * phone; a batch already past its read can still finish its sends, usually within seconds and at
@@ -57,8 +65,9 @@
  * that was offline at sign-out; and a sign-out made offline, until the app's call succeeds
  * (increment 16 builds the call, its retry, and the device-side half). Tokens registered to
  * another user's device row for the same installation are that user's and are not touched; the
- * install id is not a secret. Idempotent: a second call, or a call for an installation the caller
- * never registered, answers 0.
+ * install id is not a secret. A call for an installation the caller never registered answers 0
+ * and still ends the session; a second call with the same cookie answers 401 (the session is
+ * gone), no longer 0. A refused call (a 400) ends nothing.
  */
 
 import { and, eq, inArray, isNull, ne, sql } from 'drizzle-orm';
@@ -69,6 +78,7 @@ import {
   PUSH_TOKEN_KINDS,
   devices,
   pushTokens,
+  sessions,
 } from '@planeahead/db';
 import {
   AppIdSchema,
@@ -264,18 +274,35 @@ export const devicesRoutes = new Hono<AppBindings>()
         .select({ id: devices.id })
         .from(devices)
         .where(and(eq(devices.userId, user.id), eq(devices.installId, body.installId)));
-      const invalidated = await db
-        .update(pushTokens)
-        .set({ invalidatedAt: new Date().toISOString() })
-        .where(
-          and(
-            eq(pushTokens.userId, user.id),
-            inArray(pushTokens.deviceId, ownDevices),
-            isNull(pushTokens.invalidatedAt),
-          ),
-        )
-        .returning({ id: pushTokens.id, kind: pushTokens.kind });
-      log.info('push_tokens_invalidated', { reason: 'sign_out', count: invalidated.length });
+      const { invalidated, sessionEnded } = await db.transaction(async (tx) => {
+        const rows = await tx
+          .update(pushTokens)
+          .set({ invalidatedAt: new Date().toISOString() })
+          .where(
+            and(
+              eq(pushTokens.userId, user.id),
+              inArray(pushTokens.deviceId, ownDevices),
+              isNull(pushTokens.invalidatedAt),
+            ),
+          )
+          .returning({ id: pushTokens.id, kind: pushTokens.kind });
+        // Review rulings A3 and A4: the sign-out's server half ends the caller's session too, and
+        // only that one. Tokens first, then the session, the merge's order (src/auth/merge.ts),
+        // so the two transactions never wait on each other in a cycle.
+        const ended =
+          user.kind === 'session'
+            ? await tx
+                .delete(sessions)
+                .where(eq(sessions.id, user.sessionId))
+                .returning({ id: sessions.id })
+            : [];
+        return { invalidated: rows, sessionEnded: ended.length > 0 };
+      });
+      log.info('push_tokens_invalidated', {
+        reason: 'sign_out',
+        count: invalidated.length,
+        session_ended: sessionEnded,
+      });
       return c.json({ invalidated: invalidated.length }, 200);
     },
   );

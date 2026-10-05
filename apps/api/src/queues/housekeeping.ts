@@ -56,6 +56,12 @@
  * And `ae_rollup` (ruling W3): one UTC day of `PROVIDER_CALLS` per message, per provider, into
  * `provider_call_daily` (src/lib/provider-rollup.ts). Without `CF_ACCOUNT_ID` and `CF_API_TOKEN`
  * the message is acknowledged with a `skipped` audit row, never retried.
+ *
+ * Increment 16 (ruling C9) adds the transport soak's steps on staging, `push_soak` messages its
+ * five-minute cron plans: an injection, or the hourly canary. They are cron-planned work like the
+ * steps above and run one at a time on this queue's one connection (the canary's two sends each
+ * hold one more for their liveness read); `runPushSoakMessage` (src/push/soak.ts) runs them and
+ * writes their own audit rows.
  */
 
 import { and, gt, like, ne, sql, type SQL } from 'drizzle-orm';
@@ -91,6 +97,7 @@ import {
 } from '../lib/sync-purge';
 import { TRACKER_LOCATION_HINT, type SubscriberListingTracker } from '../lib/trackers';
 import { errorFields, type Logger } from '../observability/log';
+import { isPushSoakMessage, runPushSoakMessage, type PushSoakDeps } from '../push/soak';
 import { consumeBatch } from './consume';
 import type { QueueContext } from './index';
 
@@ -179,6 +186,8 @@ export interface HousekeepingDeps {
   readonly wallBudgetMs?: number | undefined;
   readonly pageSize?: number | undefined;
   readonly deleteBatch?: number | undefined;
+  /** The transport soak's seams, for its messages on this queue (src/push/soak.ts). */
+  readonly pushSoak?: PushSoakDeps | undefined;
 }
 
 /** What one message did: its counts, and where a continuation starts (null when done). */
@@ -759,6 +768,10 @@ export async function handleHousekeepingBatch(
     batch,
     async (message) => {
       db ??= openDb(context.env);
+      if (isPushSoakMessage(message.body)) {
+        await runPushSoakMessage(message.body, context, db, deps.pushSoak);
+        return;
+      }
       await runHousekeepingMessage(message.body, context, db, deps);
     },
     context.log,

@@ -5,17 +5,25 @@
  * itself on the real kv-store statements) and queues `PATCH /v1/me/preferences` through the
  * outbox. A sync page carrying the account's older preferences cannot flip the choice back while
  * that PATCH is still queued. Light and dark snapshots of the screen.
+ *
+ * Increment 16: the notification toggles queue the same PATCH (settings-notifications.test.tsx has
+ * the screen), and each overlay reads only its own part of a queued body.
  */
 
 import { fireEvent, render, screen, waitFor } from '@testing-library/react-native';
 import SettingsScreen from '../src/app/(app)/settings';
 import { createApiClient } from '../src/lib/api-client';
 import { KV_KEYS, zustandKvStorage } from '../src/lib/db/kv';
-import { queuePreferencesPatch, withPendingPatches } from '../src/lib/preference-mutations';
+import {
+  queueNotificationsPatch,
+  queuePreferencesPatch,
+  withPendingNotificationPatches,
+  withPendingPatches,
+} from '../src/lib/preference-mutations';
 import { useSettings } from '../src/lib/settings';
 import { ApplyGate } from '../src/lib/sync/gate';
 import { createOutbox } from '../src/lib/sync/outbox';
-import { DEFAULT_USER_PREFERENCES } from '@planeahead/shared';
+import { DEFAULT_NOTIFICATION_PREFERENCES, DEFAULT_USER_PREFERENCES } from '@planeahead/shared';
 import { compactTree } from './support/compact-tree';
 import { json, scriptedFetch } from './support/flight-fixtures';
 import { createMemorySqlite, type MemorySqlite } from './support/memory-sqlite';
@@ -63,8 +71,16 @@ jest.mock('../src/lib/services', () => ({
   services: () => Promise.resolve(mockServices.current),
   forgetAccount: jest.fn(),
 }));
-jest.mock('../src/lib/devices', () => ({ registerDevice: jest.fn() }));
-jest.mock('../src/lib/push', () => ({ readDevicePushToken: jest.fn() }));
+// Increment 16: the permission as a phone that has not been asked yet (settings-push.test.tsx
+// covers the section itself).
+jest.mock('../src/lib/push', () => ({
+  usePushPermission: () => [{ state: 'undetermined', canAsk: true }, jest.fn()],
+  requestPushPermission: jest.fn(),
+}));
+jest.mock('../src/lib/push-registration', () => ({
+  pushRegistrar: () => ({ register: jest.fn() }),
+}));
+jest.mock('../src/lib/sign-out', () => ({ signOut: jest.fn() }));
 
 function harness(): { db: MemorySqlite; network: ReturnType<typeof scriptedFetch> } {
   const db = createMemorySqlite();
@@ -176,7 +192,29 @@ describe('withPendingPatches', () => {
     expect(() => {
       queuePreferencesPatch(db, {});
     }).toThrow();
+    expect(() => {
+      queueNotificationsPatch(db, {});
+    }).toThrow();
+    expect(() => {
+      queueNotificationsPatch(db, { events: {} });
+    }).toThrow();
     expect(db.raw.prepare('SELECT count(*) AS n FROM outbox').get()).toEqual({ n: 0 });
+  });
+
+  it('lays each queued body over its own part: display fields, then notifications (ruling C11)', () => {
+    const db = createMemorySqlite();
+    queuePreferencesPatch(db, { timeFormat: '24h' });
+    queueNotificationsPatch(db, { events: { delay: false, first_gate_assignment: true } });
+    queueNotificationsPatch(db, { pushEnabled: false });
+    queueNotificationsPatch(db, { events: { delay: true } });
+    expect(withPendingPatches(db, DEFAULT_USER_PREFERENCES)).toEqual({
+      ...DEFAULT_USER_PREFERENCES,
+      timeFormat: '24h',
+    });
+    expect(withPendingNotificationPatches(db, DEFAULT_NOTIFICATION_PREFERENCES)).toEqual({
+      pushEnabled: false,
+      events: { ...DEFAULT_NOTIFICATION_PREFERENCES.events, first_gate_assignment: true },
+    });
   });
 });
 

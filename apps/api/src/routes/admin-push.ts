@@ -45,6 +45,7 @@ import { sql } from 'drizzle-orm';
 import type { Context } from 'hono';
 import { auditLog, openDb, type Db } from '@planeahead/db';
 import {
+  ANDROID_CHANNEL_IDS,
   AppIdSchema,
   PUSH_CREDENTIAL_NAMES,
   PUSH_TARGET_KINDS,
@@ -71,10 +72,12 @@ export const ADMIN_PUSH_RESULT_PATH = '/admin/push/test/result';
 /** A test push is worth sending for ten minutes; then the consumer drops it (`expired`). */
 export const TEST_PUSH_TTL_MS = 10 * 60_000;
 /**
- * The Android channel a test push names. Increment 16 creates the app's channels; until one with
- * this id exists, Android shows the push on the manifest's default channel (R1 F33).
+ * The Android channel a test push (and so the soak's canary) names: `flight_changes`, one of the
+ * two channels the app creates (increment 16, C4), where kind `system` posts. A channel the app
+ * never creates would leave the push on the manifest's default in the background and, in the
+ * foreground, make expo create a permanent "Miscellaneous" channel of its own (review A5).
  */
-export const TEST_PUSH_CHANNEL_ID = 'test_push';
+export const TEST_PUSH_CHANNEL_ID = ANDROID_CHANNEL_IDS.flightChanges;
 
 /** The `status` RPC of a `PushAuth` object, narrowed so a test can hand in a fake. */
 export interface PushAuthStatusStub {
@@ -271,7 +274,8 @@ export async function pushTestPage(c: Context<AppBindings>, style: string): Prom
   return pushPage(style, `${notes}${testForm()}`, { form: true });
 }
 
-interface TokenRow extends Record<string, unknown> {
+/** A registered `push_tokens` row as a test push reads it. */
+export interface TestPushTokenRow extends Record<string, unknown> {
   readonly id: string;
   readonly user_id: string;
   readonly kind: string;
@@ -279,6 +283,63 @@ interface TokenRow extends Record<string, unknown> {
   readonly environment: string;
   readonly app_id: string;
   readonly invalidated_at: string | null;
+}
+
+/**
+ * The registered token of a kind and value (the form), or the row of an id (increment 16's soak
+ * canary, which keeps the row id rather than the device token); undefined when there is none.
+ */
+export async function readTestPushToken(
+  db: Db,
+  where: { readonly kind: string; readonly token: string } | { readonly id: string },
+): Promise<TestPushTokenRow | undefined> {
+  const condition =
+    'id' in where
+      ? sql`id = ${where.id}::uuid`
+      : sql`kind = ${where.kind} and token = ${where.token}`;
+  const [row] = await db.execute<TestPushTokenRow>(sql`
+    select id::text as id, user_id::text as user_id, kind, token, environment, app_id,
+           invalidated_at::text as invalidated_at
+    from push_tokens where ${condition}
+  `);
+  return row;
+}
+
+/**
+ * One test job to one registered token (ruling P8): `test: true`, kind `system`, on the app's
+ * `flight_changes` channel (`TEST_PUSH_CHANNEL_ID`), relevant for `TEST_PUSH_TTL_MS` from `now`,
+ * the instant `jobId` (a UUIDv7) embeds.
+ */
+export function testPushJob(input: {
+  readonly row: TestPushTokenRow;
+  readonly jobId: string;
+  readonly now: number;
+  readonly appId: string;
+  readonly title: string;
+  readonly body: string;
+}): PushJobV1Input {
+  const { row } = input;
+  return {
+    kind: 'push_job',
+    jobId: input.jobId,
+    test: true,
+    notificationKind: 'system',
+    title: input.title,
+    body: input.body,
+    channelId: TEST_PUSH_CHANNEL_ID,
+    expiresAt: new Date(input.now + TEST_PUSH_TTL_MS).toISOString(),
+    targets: [
+      {
+        pushTokenId: row.id,
+        subjectId: row.user_id,
+        kind: row.kind as PushTargetKind,
+        token: row.token,
+        environment: row.environment === 'sandbox' ? 'sandbox' : 'production',
+        appId: input.appId,
+        attempt: 0,
+      },
+    ],
+  };
 }
 
 export async function pushTestSend(
@@ -316,11 +377,7 @@ export async function pushTestSend(
 
   const env = c.env;
   const db = (options.db ?? openDb)(env);
-  const [row] = await db.execute<TokenRow>(sql`
-    select id::text as id, user_id::text as user_id, kind, token, environment, app_id,
-           invalidated_at::text as invalidated_at
-    from push_tokens where kind = ${kind} and token = ${token}
-  `);
+  const row = await readTestPushToken(db, { kind, token });
   if (row === undefined) {
     return again(
       'No registered token of that kind. Register the device first (the app registers its token with POST /v1/devices).',
@@ -348,27 +405,14 @@ export async function pushTestSend(
   // The id embeds the instant the ten-minute window starts from (the result page reads it back).
   const jobId = uuidv7(() => now);
   const sendAppId = appId?.data ?? row.app_id;
-  const job: PushJobV1Input = {
-    kind: 'push_job',
+  const job = testPushJob({
+    row,
     jobId,
-    test: true,
-    notificationKind: 'system',
+    now,
+    appId: sendAppId,
     title: 'PlaneAhead test push',
     body: `Sent from the ${environment} admin page at ${new Date(now).toISOString().slice(11, 19)} UTC (job ${jobId.slice(-8)}).`,
-    channelId: TEST_PUSH_CHANNEL_ID,
-    expiresAt: new Date(now + TEST_PUSH_TTL_MS).toISOString(),
-    targets: [
-      {
-        pushTokenId: row.id,
-        subjectId: row.user_id,
-        kind: kind as PushTargetKind,
-        token: row.token,
-        environment: row.environment === 'sandbox' ? 'sandbox' : 'production',
-        appId: sendAppId,
-        attempt: 0,
-      },
-    ],
-  };
+  });
   const parsed = PushJobV1.safeParse(job);
   if (!parsed.success) {
     return again(

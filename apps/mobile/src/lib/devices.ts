@@ -8,14 +8,21 @@
  * `pushTokenSkipped` (apps/api/src/routes/devices.ts). `registerDevice` returns that outcome
  * (increment 11 review, ruling Z4); increment 9's callers, which send no token or report nothing,
  * may ignore it.
+ *
+ * Increment 16. A token goes with the app id of this variant (its bundle or package id, the APNs
+ * topic; ruling C2), and a device token with the notification permission the app holds, which
+ * the API stores on the token and sends by. Every registration first settles a sign-out's queued
+ * invalidation (ruling C3, src/lib/device-invalidation.ts), so none can precede it.
  */
 
+import { AppIdSchema, type PushPermissionState } from '@planeahead/shared';
 import { isDevice, modelName, osVersion } from 'expo-device';
 import Constants from 'expo-constants';
 import { Platform } from 'react-native';
 import type { ApiClient } from './api-client';
 import { ApiError } from './api-client';
 import { runtimeConfig } from './config';
+import { settleQueuedInvalidation } from './device-invalidation';
 import { installId } from './identity';
 import type { PushTokenKind } from './push';
 
@@ -32,6 +39,8 @@ export type DeviceTokenKind = PushTokenKind | typeof LIVE_ACTIVITY_PUSH_TO_START
 export interface PushRegistration {
   readonly kind: DeviceTokenKind;
   readonly token: string;
+  /** A device token's notification permission (src/lib/push.ts); none for push-to-start. */
+  readonly permission?: PushPermissionState;
 }
 
 /**
@@ -58,6 +67,16 @@ function isApnsKind(kind: DeviceTokenKind): boolean {
   return kind === 'apns' || kind === LIVE_ACTIVITY_PUSH_TO_START_KIND;
 }
 
+/**
+ * This variant's bundle id (iOS) or package name (Android), from the build's own config; absent
+ * when unreadable, which the API takes as the production app's.
+ */
+function readAppId(): string | undefined {
+  const config = Constants.expoConfig;
+  const id = Platform.OS === 'ios' ? config?.ios?.bundleIdentifier : config?.android?.package;
+  return AppIdSchema.safeParse(id).success ? id : undefined;
+}
+
 function text(value: string | null | undefined, max: number): string | undefined {
   if (value === null || value === undefined) {
     return undefined;
@@ -70,12 +89,14 @@ export async function registerDevice(
   api: ApiClient,
   push?: PushRegistration,
 ): Promise<DeviceRegistrationResult> {
+  await settleQueuedInvalidation();
   const platform = Platform.OS === 'ios' ? 'ios' : 'android';
   const osVersionText = text(osVersion ?? String(Platform.Version), 64);
   const appVersion = text(Constants.expoConfig?.version, 64);
   const model = text(isDevice ? modelName : `${modelName ?? 'unknown'} (simulator)`, 128);
   const locale = text(Intl.DateTimeFormat().resolvedOptions().locale, 32);
   const timezone = text(Intl.DateTimeFormat().resolvedOptions().timeZone, 64);
+  const variantAppId = readAppId();
   const response = await api.v1.devices.$post({
     json: {
       installId: installId(),
@@ -86,6 +107,8 @@ export async function registerDevice(
       ...(locale === undefined ? {} : { locale }),
       ...(timezone === undefined ? {} : { timezone }),
       ...(push === undefined ? {} : { pushTokenKind: push.kind, pushToken: push.token }),
+      ...(push === undefined || variantAppId === undefined ? {} : { appId: variantAppId }),
+      ...(push?.permission === undefined ? {} : { pushPermission: push.permission }),
       // APNs tokens only (the device token and the Live Activity push-to-start token), from the
       // build's `aps-environment` entitlement, which follows its signing: development builds
       // register with the sandbox, ad hoc preview and store builds with production

@@ -1,8 +1,9 @@
 /**
  * `GET /admin`: the operator page (increment 12, ruling W5), behind Cloudflare Access
- * (src/middleware/access.ts) on every `/admin` path, read-only except THREE write actions (the
- * account deletion below, from increment 14 the test push, and from increment 15 the event
- * injector, src/routes/admin-inject.ts), server-rendered HTML with no
+ * (src/middleware/access.ts) on every `/admin` path, read-only except FOUR write actions (the
+ * account deletion below, from increment 14 the test push, from increment 15 the event
+ * injector, src/routes/admin-inject.ts, and from increment 16 starting and stopping the transport
+ * soak on staging, src/routes/admin-soak.ts), server-rendered HTML with no
  * client framework and no script (src/lib/html.ts: a strict CSP, `no-store`).
  *
  * One page, one section per question, each loaded on its own so a failing source shows as
@@ -27,6 +28,7 @@
  *     objects' last mints, and the outcomes of the last 24 hours by reason (src/routes/admin-push.ts,
  *     which also serves the second write action, "Send a test push", ruling P8), with the link
  *     to the third, "Inject a flight event" (increment 15, ruling N11);
+ *   - (increment 16, ruling C9) the transport soak's state, linking to its page and its counts.
  *   - (increment 18, ruling B11) boards and route search: the boards share spent today against its
  *     cap, the distinct airports refreshed this hour against theirs, the airports kept live (a
  *     bucket refreshed in the last hour) and the board and route-search calls by result
@@ -73,6 +75,7 @@ import {
 import { defaultTrackerFor, type TrackerFor } from '../lib/trackers';
 import { accessMiddleware, type AccessOptions } from '../middleware/access';
 import { createLogger, errorFields, type Logger } from '../observability/log';
+import { pushSoakPosition, readPushSoak } from '../push/soak';
 import { boardsSection, type AdminBoardsOptions } from './admin-boards';
 import { injectFormPage, injectSend, type AdminInjectOptions } from './admin-inject';
 import {
@@ -82,6 +85,7 @@ import {
   pushTransportSection,
   type AdminPushOptions,
 } from './admin-push';
+import { ADMIN_SOAK_PATH, soakAction, soakPageGet, type AdminSoakOptions } from './admin-soak';
 import { DO_SCHEMA_VERSIONS } from './health';
 
 const STYLE = `
@@ -123,7 +127,7 @@ export function environmentQueueNames(environment: EnvironmentName): string[] {
 }
 
 export interface AdminRoutesOptions
-  extends AdminPushOptions, AdminInjectOptions, AdminBoardsOptions {
+  extends AdminPushOptions, AdminInjectOptions, AdminSoakOptions, AdminBoardsOptions {
   readonly access?: AccessOptions | undefined;
   /** The Cloudflare API's fetch (Analytics Engine SQL, Queues). */
   readonly fetch?: typeof fetch | undefined;
@@ -539,6 +543,20 @@ async function accountDeletion(c: Context<AppBindings>, options: AdminRoutesOpti
   );
 }
 
+/** The transport soak's state, linking to its page (increment 16, ruling C9). */
+async function soakSummary(env: Env, options: AdminRoutesOptions): Promise<string> {
+  if (environmentName(env) === 'production') {
+    return '<p class="meta">Staging only: production refuses to start a soak.</p>';
+  }
+  const record = await readPushSoak((options.soakKv ?? ((e: Env) => e.CONFIG))(env));
+  const position = pushSoakPosition(record, (options.now ?? Date.now)());
+  const state =
+    record === null
+      ? 'No soak has run here yet.'
+      : `Soak ${record.id}: ${position.state}, test flight ${record.flightKey}, from ${record.startedAt} to ${record.stoppedAt ?? record.endsAt}.`;
+  return `<p>${esc(state)} <a href="${ADMIN_SOAK_PATH}">The soak's page</a> has its counts by reason and the form to start or stop one.</p>`;
+}
+
 export function createAdminRoutes(options: AdminRoutesOptions = {}) {
   const app = new Hono<AppBindings>();
   app.use('*', accessMiddleware(options.access));
@@ -549,12 +567,14 @@ export function createAdminRoutes(options: AdminRoutesOptions = {}) {
   app.get('/push/test/result', (c) => pushTestResult(c, options, STYLE));
   app.get('/push/inject', (c) => injectFormPage(c, STYLE));
   app.post('/push/inject', (c) => injectSend(c, options, STYLE, apiOrigin(c.env)));
+  app.get('/push/soak', (c) => soakPageGet(c, options, STYLE));
+  app.post('/push/soak', (c) => soakAction(c, options, STYLE, apiOrigin(c.env)));
   app.get('/', async (c) => {
     const log = createLogger({ request_id: c.var.requestId, admin: true });
     const env = c.env;
     const db = (options.db ?? openDb)(env);
     const access = cloudflareApiAccess(env.CF_ACCOUNT_ID, env.CF_API_TOKEN, options.fetch ?? fetch);
-    const [flights, days, today, watermarkSection, queueSection, sync, audit, push, boards] =
+    const [flights, days, today, watermarkSection, queueSection, sync, audit, push, soak, boards] =
       await Promise.all([
         section(log, 'per_flight', () => perFlight(db)),
         section(log, 'per_provider_day', () => perProviderDay(db)),
@@ -564,12 +584,13 @@ export function createAdminRoutes(options: AdminRoutesOptions = {}) {
         section(log, 'sync_state', () => syncState(db)),
         section(log, 'housekeeping', () => housekeeping(db)),
         section(log, 'push', () => pushTransportSection(env, db, options)),
+        section(log, 'push_soak', () => soakSummary(env, options)),
         section(log, 'boards', () => boardsSection(env, db, options)),
       ]);
     const identity = c.var.accessIdentity;
     const body = [
       '<h1>PlaneAhead operations</h1>',
-      `<p class="meta">${esc(environmentName(env))}, read-only except the account deletion, the test push and the event injector below. Signed in through Cloudflare Access as ${esc(
+      `<p class="meta">${esc(environmentName(env))}, read-only except the account deletion, the test push, the event injector and the transport soak below. Signed in through Cloudflare Access as ${esc(
         identity?.email ?? identity?.subject ?? 'unknown',
       )}. Generated ${esc(new Date().toISOString())}.</p>`,
       sectionHtml('Provider calls per flight key (last 7 days, provider_calls)', flights),
@@ -587,6 +608,7 @@ export function createAdminRoutes(options: AdminRoutesOptions = {}) {
       sectionHtml('Sync horizon and epoch', sync),
       sectionHtml('Last housekeeping runs (audit_log)', audit),
       sectionHtml('Push transport', push),
+      sectionHtml('Transport soak (staging)', soak),
       sectionHtml('Boards and route search (AeroDataBox FIDS)', boards),
       sectionHtml('Operator account deletion', {
         ok: true,

@@ -102,14 +102,7 @@ interface LiveRow {
   readonly id: string;
   readonly userId: string;
   readonly muted: boolean;
-  readonly notificationOverrides: unknown;
   readonly updatedAt: string;
-}
-
-function overridesOf(value: unknown): Record<string, unknown> | undefined {
-  return typeof value === 'object' && value !== null && !Array.isArray(value)
-    ? (value as Record<string, unknown>)
-    : undefined;
 }
 
 async function liveRowsFor(db: Db, instanceId: string): Promise<LiveRow[]> {
@@ -118,7 +111,6 @@ async function liveRowsFor(db: Db, instanceId: string): Promise<LiveRow[]> {
       id: flightSubscriptions.id,
       userId: flightSubscriptions.userId,
       muted: flightSubscriptions.muted,
-      notificationOverrides: flightSubscriptions.notificationOverrides,
       updatedAt: flightSubscriptions.updatedAt,
     })
     .from(flightSubscriptions)
@@ -243,7 +235,6 @@ export async function reconcileTrackerSubscribers(
         });
         continue;
       }
-      const overrides = overridesOf(row.notificationOverrides);
       if (
         await call(
           'subscribe',
@@ -252,7 +243,6 @@ export async function reconcileTrackerSubscribers(
             subscriptionId: row.id,
             userId: row.userId,
             muted: row.muted,
-            ...(overrides === undefined ? {} : { overrides }),
           }),
         )
       ) {
@@ -272,7 +262,6 @@ export async function reconcileTrackerSubscribers(
         counts.young += 1;
         continue;
       }
-      const overrides = overridesOf(row.notificationOverrides);
       if (
         await call(
           'subscribe',
@@ -281,7 +270,6 @@ export async function reconcileTrackerSubscribers(
             subscriptionId: row.id,
             userId: row.userId,
             muted: row.muted,
-            ...(overrides === undefined ? {} : { overrides }),
           }),
         )
       ) {

@@ -23,6 +23,11 @@
  *
  * The date field keeps the number pad: the sheet inserts the hyphens as the digits are typed and
  * the validation reads eight bare digits as a date (increment 10 review).
+ *
+ * Increment 16 (ruling C1): the first add that succeeds gives way to the notification pre-prompt,
+ * once, while the system prompt can still show; the permission is otherwise already decided here
+ * (expo-notifications is the shared fake). The review round (N5): a sheet closed before the
+ * pre-prompt could show leaves the offer for the next add.
  */
 
 import * as Sentry from '@sentry/react-native';
@@ -33,7 +38,8 @@ import {
   type FlightKey,
 } from '@planeahead/shared';
 import { onlineManager } from '@tanstack/react-query';
-import { fireEvent, render, screen, waitFor } from '@testing-library/react-native';
+import { act, fireEvent, render, screen, waitFor } from '@testing-library/react-native';
+import type { NotificationPermissionsStatus } from 'expo-notifications';
 import { StyleSheet } from 'react-native';
 import AddFlightSheet from '../src/app/(app)/add';
 import { KV_KEYS, kv } from '../src/lib/db/kv';
@@ -47,6 +53,11 @@ import { forgetAccount, services } from '../src/lib/services';
 import { useSettings } from '../src/lib/settings';
 import { DARK, LIGHT } from '../src/theme/tokens';
 import { compactTree } from './support/compact-tree';
+import {
+  fakeNotifications,
+  permissionStatus,
+  resetFakeNotifications,
+} from './support/fake-notifications';
 import { createMemorySqlite, type MemorySqlite } from './support/memory-sqlite';
 import {
   AA100_ID,
@@ -71,6 +82,12 @@ jest.mock('expo-router', () => ({
   useRouter: () => mockRouter,
   useLocalSearchParams: () => ({}),
 }));
+
+jest.mock('expo-notifications', () =>
+  jest
+    .requireActual<typeof import('./support/fake-notifications')>('./support/fake-notifications')
+    .fakeNotificationsModule(),
+);
 
 jest.mock('react-native-safe-area-context', () => {
   const { View } = jest.requireActual<typeof import('react-native')>('react-native');
@@ -204,6 +221,14 @@ beforeEach(() => {
   mockSession.current = { user: { id: 'user-1', isAnonymous: false } };
   useFlightNotices.getState().clear();
   useSettings.getState().reset();
+  resetFakeNotifications();
+  fakeNotifications.permission = permissionStatus({
+    status: 'granted',
+    granted: true,
+    iosStatus: 2,
+  });
+  kv.removeItemSync(KV_KEYS.pushPromptOffered);
+  kv.removeItemSync(KV_KEYS.pushPermissionRequested);
 });
 
 afterEach(() => {
@@ -791,6 +816,112 @@ describe('the sheet, through the real outbox', () => {
     );
     expect(mockEdge.network.requests).toHaveLength(1);
     expect(outboxRows(mockEdge.db)).toEqual([]);
+  });
+});
+
+describe('notifications are asked for in context (increment 16, ruling C1)', () => {
+  function answerCreated() {
+    mockEdge.network.answer((request) =>
+      json(201, {
+        subscription: serverRow(subscriptionIdOf(request)),
+        flight: flightView(),
+        created: true,
+      }),
+    );
+  }
+
+  it('the first add that succeeds gives way to the pre-prompt; a later add never shows it', async () => {
+    fakeNotifications.permission = permissionStatus({ iosStatus: 0 });
+    answerCreated();
+    await openSheet();
+    await submit('aa 100');
+    await waitFor(() => {
+      expect(mockRouter.replace).toHaveBeenCalledWith('/notifications');
+    });
+    expect(mockRouter.back).not.toHaveBeenCalled();
+    // Only the pre-prompt asks: nothing has been requested yet.
+    expect(fakeNotifications.calls).toEqual(['getPermissions']);
+
+    // Another add, on a fresh store: the permission is still undetermined, and nothing is offered.
+    mockEdge.db = createMemorySqlite();
+    answerCreated();
+    await openSheet();
+    await submit('aa 100');
+    await waitFor(() => {
+      expect(mockRouter.back).toHaveBeenCalled();
+    });
+    expect(mockRouter.replace).toHaveBeenCalledTimes(1);
+  });
+
+  it('closes as before when the permission is already decided, and asks for nothing', async () => {
+    fakeNotifications.permission = permissionStatus({ status: 'denied', iosStatus: 1 });
+    answerCreated();
+    await openSheet();
+    await submit('aa 100');
+    await waitFor(() => {
+      expect(mockRouter.back).toHaveBeenCalled();
+    });
+    expect(mockRouter.replace).not.toHaveBeenCalled();
+    expect(kv.getItemSync(KV_KEYS.pushPromptOffered)).toBeNull();
+  });
+
+  it('a refused add offers nothing', async () => {
+    fakeNotifications.permission = permissionStatus({ iosStatus: 0 });
+    mockEdge.network.answer(() =>
+      json(404, {
+        error: 'flight_not_found',
+        message: 'the provider knows no such flight on those dates',
+        requestId: 'req-c1',
+        triedDates: ['2026-09-23'],
+        suggestions: [],
+      }),
+    );
+    await openSheet();
+    await submit('AA9999');
+    expect(await screen.findByTestId('add-flight-message')).toBeTruthy();
+    expect(mockRouter.replace).not.toHaveBeenCalled();
+    expect(mockRouter.back).not.toHaveBeenCalled();
+    expect(fakeNotifications.calls).toEqual([]);
+  });
+
+  it('a sheet closed before the pre-prompt could show leaves it for the next add (review N5)', async () => {
+    fakeNotifications.permission = permissionStatus({ iosStatus: 0 });
+    const notifications =
+      jest.requireMock<typeof import('expo-notifications')>('expo-notifications');
+    let answer: (status: NotificationPermissionsStatus) => void = () => undefined;
+    const read = jest.spyOn(notifications, 'getPermissionsAsync').mockImplementationOnce(
+      () =>
+        new Promise((resolve) => {
+          answer = resolve;
+        }),
+    );
+    answerCreated();
+    const sheet = await render(<AddFlightSheet />);
+    await submit('aa 100');
+    // The add is done and the offer is reading the permission when the sheet is closed.
+    await waitFor(() => {
+      expect(read).toHaveBeenCalled();
+    });
+    await sheet.unmount();
+    await act(async () => {
+      answer(fakeNotifications.permission);
+      await new Promise<void>((resolve) => {
+        setImmediate(resolve);
+      });
+    });
+    expect(mockRouter.replace).not.toHaveBeenCalled();
+    expect(mockRouter.back).not.toHaveBeenCalled();
+    expect(kv.getItemSync(KV_KEYS.pushPromptOffered)).toBeNull();
+
+    // The next add that succeeds offers it.
+    mockEdge.db = createMemorySqlite();
+    answerCreated();
+    await openSheet();
+    await submit('aa 100');
+    await waitFor(() => {
+      expect(mockRouter.replace).toHaveBeenCalledWith('/notifications');
+    });
+    expect(kv.getItemSync(KV_KEYS.pushPromptOffered)).toBe('1');
   });
 });
 

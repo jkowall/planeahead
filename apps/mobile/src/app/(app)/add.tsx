@@ -12,6 +12,12 @@
  * digits as a date too (`normaliseDateInput`), so any date can be typed, not only the three chips
  * (increment 10 review).
  *
+ * Increment 16 (ruling C1): the first add that succeeds (added, or queued offline) is where the app
+ * asks for notifications, in context: the sheet gives way to the pre-prompt, once per installation
+ * and only while the system prompt can still show (src/lib/push.ts `takePushPromptOffer`; a board
+ * and the route search offer it the same way, src/lib/boards.ts `useRowAdd`). It counts as offered
+ * only once shown, so a sheet closed before that leaves it for the next add (review N5).
+ *
  * Increment 18 (ruling B12): "Search by route" opens the route search over the sheet (for
  * everyone: it is the onboarding path for an anonymous install), and signed-in users get an
  * airport field that opens that airport's board in place of the sheet. An anonymous account may
@@ -29,6 +35,7 @@ import { validateAirportCode } from '../../lib/boards';
 import { useFlightNotices } from '../../lib/flight-notices';
 import { addFlight, drainFor, validateAddFlight, type AddFlightErrors } from '../../lib/flights';
 import { addDays, formatDateInput, formatIsoDate, localDate } from '../../lib/format';
+import { takePushPromptOffer } from '../../lib/push';
 import { services } from '../../lib/services';
 import { useTheme } from '../../theme/useTheme';
 
@@ -106,7 +113,16 @@ export default function AddFlightSheet() {
         return;
       }
       // Added, or queued until the phone is back online: either way the list shows it now.
-      router.back();
+      const offered = await takePushPromptOffer(() => {
+        if (!mounted.current) {
+          return false;
+        }
+        router.replace('/notifications');
+        return true;
+      });
+      if (!offered && mounted.current) {
+        router.back();
+      }
     } catch {
       if (mounted.current) {
         setPhase('editing');

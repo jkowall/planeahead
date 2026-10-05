@@ -18,6 +18,7 @@ import {
   CRON_HANDLERS,
   type CronHandlers,
   HOUSEKEEPING_CRON,
+  PUSH_SOAK_CRON,
   RECONCILE_CRON,
   runCron,
   scheduled,
@@ -183,6 +184,8 @@ describe('runCron()', () => {
   it.each([
     [RECONCILE_CRON, ['cron_reconcile']],
     [HOUSEKEEPING_CRON, ['cron_housekeeping_planned', 'cron_ae_rollup_planned']],
+    // Staging only (increment 16): with no soak started it reads its record and plans nothing.
+    [PUSH_SOAK_CRON, ['cron_push_soak_idle']],
   ])('routes %s', async (cron, events) => {
     const { lines, log } = capture();
     const captured = envWithCapturedQueues();
@@ -261,7 +264,9 @@ describe('runCron()', () => {
   });
 
   it('routes through the table the Worker itself uses', () => {
-    expect(Object.keys(CRON_HANDLERS).sort()).toEqual([HOUSEKEEPING_CRON, RECONCILE_CRON].sort());
+    expect(Object.keys(CRON_HANDLERS).sort()).toEqual(
+      [HOUSEKEEPING_CRON, RECONCILE_CRON, PUSH_SOAK_CRON].sort(),
+    );
   });
 });
 

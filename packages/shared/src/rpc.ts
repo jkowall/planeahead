@@ -103,11 +103,18 @@ export function parseRpcRequest<S extends z.ZodType>(schema: S, input: unknown):
   return parsed.data;
 }
 
-/** Per-subscription notification overrides; the shape is owned by the notification domain. */
-export const NotificationOverridesSchema = z.looseObject({
+/**
+ * Per-subscription notification overrides on the tracker's `subscribe`: `muted` only (increment
+ * 16, ruling C12), and no other key passes. Since the review (finding m1) no route sends them: the
+ * subscribe route no longer accepts `notificationOverrides` (the subscription's own `muted` is the
+ * per-flight mute, the one `notify` reads), and the re-subscribes relay none. The field stays
+ * optional so a tracker keeps accepting a call that names it; the tracker stores it and reads it
+ * nowhere.
+ */
+export const NotificationOverridesSchema = z.strictObject({
   muted: z.boolean().optional(),
-  events: z.array(z.string()).optional(),
 });
+export type NotificationOverrides = z.infer<typeof NotificationOverridesSchema>;
 
 /**
  * `subscribe` and `getState` on a tracker that holds no flight (never seeded, or finished and

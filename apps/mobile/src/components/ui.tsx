@@ -10,6 +10,7 @@ import {
   Pressable,
   ScrollView,
   StyleSheet,
+  Switch,
   Text,
   TextInput,
   View,
@@ -211,6 +212,47 @@ export function Button({
   );
 }
 
+/**
+ * A labelled on/off switch, a settings row. The switch carries the label for a screen reader, so
+ * the visible text is hidden from it rather than read twice. Its tracks, `inputBorder` off and
+ * `accent` on, clear 3:1 against the section surface a row sits on (__tests__/theme.test.ts).
+ */
+export function Toggle({
+  label,
+  value,
+  onValueChange,
+  testID,
+  disabled = false,
+}: {
+  label: string;
+  value: boolean;
+  onValueChange: (value: boolean) => void;
+  testID?: string;
+  disabled?: boolean;
+}) {
+  const { color, space, font } = useTheme();
+  return (
+    <View style={[styles.toggle, { gap: space.md }]}>
+      <Text
+        accessibilityElementsHidden
+        importantForAccessibility="no-hide-descendants"
+        style={{ color: disabled ? color.textMuted : color.text, fontSize: font.body, flex: 1 }}
+      >
+        {label}
+      </Text>
+      <Switch
+        testID={testID}
+        accessibilityLabel={label}
+        value={value}
+        disabled={disabled}
+        onValueChange={onValueChange}
+        trackColor={{ false: color.inputBorder, true: color.accent }}
+        ios_backgroundColor={color.inputBorder}
+      />
+    </View>
+  );
+}
+
 /** A labelled text input with its validation message underneath. */
 export function TextField({
   label,
@@ -330,6 +372,7 @@ const styles = StyleSheet.create({
     paddingHorizontal: 16,
   },
   buttonText: { fontWeight: '600' },
+  toggle: { flexDirection: 'row', alignItems: 'center', minHeight: 48 },
   input: {
     minHeight: 48,
     borderWidth: 1,

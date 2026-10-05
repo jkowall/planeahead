@@ -3,7 +3,6 @@ import { IATA_AIRPORT_RE, ICAO_AIRPORT_RE } from './airports';
 import type { ValidationIssue } from './errors';
 import { FlightKeySchema, parseDesignator, type FlightKey } from './flight-key';
 import { IsoDateSchema, type FlightStatus } from './flight-status';
-import { NotificationOverridesSchema } from './rpc';
 
 /**
  * Request contracts of the `/v1` flight routes (increment 8), shared so the mobile add-flight
@@ -51,8 +50,12 @@ export const SubscriptionPrefsSchema = z.object({
   label: z.string().trim().min(1).max(80).optional(),
   seat: z.string().trim().min(1).max(8).optional(),
   cabin: z.enum(SUBSCRIPTION_CABINS).optional(),
+  /**
+   * The one per-flight mute: `notify` skips a muted subscription. `notificationOverrides` left this
+   * contract in increment 16's review (finding m1): its `muted` was stored but read by nothing, so
+   * a client using it still got every push. The request is strict, so a body naming it is refused.
+   */
   muted: z.boolean().optional(),
-  notificationOverrides: NotificationOverridesSchema.optional(),
 });
 
 /**

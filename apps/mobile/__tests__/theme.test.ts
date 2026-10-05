@@ -55,6 +55,13 @@ describe.each([
     expect(contrastRatio(color.inputBorder, color.surfaceRaised)).toBeGreaterThanOrEqual(NON_TEXT);
   });
 
+  it("keeps a switch's tracks at 3:1 against the section it sits on (increment 16)", () => {
+    const { color } = tokens;
+    // The settings toggles (ui.tsx `Toggle`): off is inputBorder, on is accent.
+    expect(contrastRatio(color.inputBorder, color.surface)).toBeGreaterThanOrEqual(NON_TEXT);
+    expect(contrastRatio(color.accent, color.surface)).toBeGreaterThanOrEqual(NON_TEXT);
+  });
+
   it('keeps the timeline rail and every step marker at 3:1 where the timeline sits', () => {
     const { color } = tokens;
     // The timeline is inside a section (surface); an open marker is filled with the background.

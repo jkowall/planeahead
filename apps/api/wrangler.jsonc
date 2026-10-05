@@ -51,7 +51,8 @@
   // 30 seconds of CPU on the Paid plan, which is why the reconcile handler pages and fans out to
   // a queue rather than doing the work inline (increment 7). The daily expression runs both the
   // housekeeping and the Analytics Engine rollup planners, which only enqueue onto the
-  // `housekeeping` queue (increment 12, src/cron/index.ts).
+  // `housekeeping` queue (increment 12, src/cron/index.ts). Staging declares its own block with a
+  // third, the transport soak's tick (increment 16); production inherits these two.
   "triggers": {
     "crons": ["*/15 * * * *", "0 3 * * *"],
   },
@@ -230,6 +231,15 @@
       },
 
       "routes": [{ "pattern": "api-staging.planeahead.app", "custom_domain": true }],
+
+      // Staging's own crons (increment 16, ruling C9): `triggers` is inheritable, so this block
+      // replaces the top level's and repeats its two, then adds "*/5 * * * *", the transport
+      // soak's tick (PUSH_SOAK_CRON in src/cron/index.ts). It does nothing unless an operator
+      // started a soak on /admin/push/soak; production has no such block, keeps the top level's
+      // two, and refuses to start a soak (test/workers/push-soak.test.ts holds all three lists).
+      "triggers": {
+        "crons": ["*/15 * * * *", "0 3 * * *", "*/5 * * * *"],
+      },
 
       // Every secret the Worker reads (WORKER_SECRET_NAMES in src/env.ts; secrets-in-logs.test.ts
       // keeps the two lists equal). wrangler refuses a first deploy while one is unset. The block

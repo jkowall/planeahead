@@ -4,8 +4,12 @@
  * screen are all evaluated again, exactly as after a process restart; the SQLite database behind
  * the kv-store (Node's `node:sqlite`, through the `SqliteLike` fake) is the only thing that
  * survives, as the file on disk does. The second launch has no network at all.
+ *
+ * Increment 16 (ruling C11): the notification toggles persist with the rest, and a state written
+ * before them (no `notifications`) still hydrates, with their defaults.
  */
 
+import { DEFAULT_NOTIFICATION_PREFERENCES, DEFAULT_USER_PREFERENCES } from '@planeahead/shared';
 import type * as RNTL from '@testing-library/react-native/pure';
 import type * as ReactModule from 'react';
 import type { ComponentType } from 'react';
@@ -58,8 +62,16 @@ jest.mock('../src/lib/config', () => ({
 }));
 
 jest.mock('../src/lib/services', () => ({ services: jest.fn(), forgetAccount: jest.fn() }));
-jest.mock('../src/lib/devices', () => ({ registerDevice: jest.fn() }));
-jest.mock('../src/lib/push', () => ({ readDevicePushToken: jest.fn() }));
+// Increment 16: the permission as a phone that has not been asked yet (settings-push.test.tsx
+// covers the section itself).
+jest.mock('../src/lib/push', () => ({
+  usePushPermission: () => [{ state: 'undetermined', canAsk: true }, jest.fn()],
+  requestPushPermission: jest.fn(),
+}));
+jest.mock('../src/lib/push-registration', () => ({
+  pushRegistrar: () => ({ register: jest.fn() }),
+}));
+jest.mock('../src/lib/sign-out', () => ({ signOut: jest.fn() }));
 
 interface Launch {
   readonly rntl: typeof RNTL;
@@ -130,6 +142,8 @@ describe('settings', () => {
         showLocalTimes: false,
         settings: {},
       });
+      // Increment 16 (ruling C11): a notification toggle, persisted the same way.
+      first.useSettings.getState().updateNotifications({ events: { first_gate_assignment: true } });
     });
     expect(
       first.rntl.screen.getByTestId('settings-appearance-dark').props.accessibilityState,
@@ -138,7 +152,11 @@ describe('settings', () => {
 
     // The value is in the SQLite table, not in memory.
     expect(storedSettings()).toMatchObject({
-      state: { appearance: 'dark', preferences: { timeFormat: '24h', distanceUnit: 'km' } },
+      state: {
+        appearance: 'dark',
+        preferences: { timeFormat: '24h', distanceUnit: 'km' },
+        notifications: { pushEnabled: true, events: { first_gate_assignment: true } },
+      },
     });
 
     // Relaunch with no network: hydration is synchronous, so the store has the values before
@@ -159,6 +177,9 @@ describe('settings', () => {
     expect(
       second.rntl.screen.getByTestId('settings-appearance-system').props.accessibilityState,
     ).toMatchObject({ selected: false });
+    expect(
+      second.rntl.screen.getByTestId('settings-notify-first_gate_assignment').props.value,
+    ).toBe(true);
     expect(fetchMock).not.toHaveBeenCalled();
     await second.rntl.cleanup();
   });
@@ -170,5 +191,26 @@ describe('settings', () => {
     const fourth = launch();
     expect(fourth.useSettings.getState().appearance).toBe('system');
     expect(fourth.useSettings.getState().preferences.timeFormat).toBe('12h');
+    expect(fourth.useSettings.getState().notifications).toEqual(DEFAULT_NOTIFICATION_PREFERENCES);
+  });
+
+  it('a state persisted before increment 16 keeps its values and takes the notification defaults', () => {
+    mockDisk.run(
+      'INSERT INTO storage (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value;',
+      [
+        'planeahead.settings',
+        JSON.stringify({
+          state: {
+            appearance: 'light',
+            preferences: { ...DEFAULT_USER_PREFERENCES, timeFormat: '24h' },
+          },
+          version: 1,
+        }),
+      ],
+    );
+    const fifth = launch();
+    expect(fifth.useSettings.getState().appearance).toBe('light');
+    expect(fifth.useSettings.getState().preferences.timeFormat).toBe('24h');
+    expect(fifth.useSettings.getState().notifications).toEqual(DEFAULT_NOTIFICATION_PREFERENCES);
   });
 });

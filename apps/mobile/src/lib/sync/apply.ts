@@ -43,12 +43,14 @@
  */
 
 import {
+  effectiveNotificationPreferences,
   FlightSubscriptionRowV1,
   PreferenceSettingsSchema,
   SyncChangeV1,
   SyncEnvelopeV1,
   SyncFlightV1,
   UserPreferencesSchema,
+  type NotificationPreferences,
   type UserPreferences,
 } from '@planeahead/shared';
 import { z } from 'zod';
@@ -87,6 +89,11 @@ export interface ApplyOutcome {
   readonly cursor: string;
   /** The last `user_preferences` upsert of the page, for the settings store. */
   readonly preferences: UserPreferences | null;
+  /**
+   * The last `notification_preferences` upsert of the page, for the settings store: the effective
+   * preferences, as `GET /v1/me/preferences` answers them (a tombstoned row is the defaults).
+   */
+  readonly notifications: NotificationPreferences | null;
   /** True when the page was a snapshot that replaced the synced rows. */
   readonly replaced: boolean;
 }
@@ -109,7 +116,22 @@ export const PreferencesRow = UserPreferencesSchema.extend({
   deletedAt: z.string().nullable(),
 });
 
-/** The loosely kept entities: stored whole, read by later increments. */
+/**
+ * What the settings store reads of a `notification_preferences` row (increment 16, ruling C11);
+ * the row itself is still kept whole. `events` is the stored bag, defaults filled in on reading.
+ */
+export const NotificationPreferencesRow = z.looseObject({
+  id: z.string().min(1),
+  pushEnabled: z.boolean(),
+  events: z.unknown(),
+  deletedAt: z.string().nullable(),
+});
+
+/**
+ * The loosely kept entities: stored whole, read by later increments. A `notification_preferences`
+ * row is parsed first (`NotificationPreferencesRow`) and skipped when it does not parse, as a
+ * `user_preferences` row is: the settings store reads it from the page.
+ */
 const OPAQUE_TABLES = {
   notification_preferences: 'notification_preferences',
   trips: 'trips',
@@ -311,6 +333,7 @@ export function applySyncPage(
     (): ApplyOutcome => {
       const skipped: SkippedElement[] = [];
       let preferences: UserPreferences | null = null;
+      let notifications: NotificationPreferences | null = null;
       let changes = 0;
       let flights = 0;
 
@@ -358,6 +381,21 @@ export function applySyncPage(
           upsertPreferences(db, row.data);
           const { distanceUnit, temperatureUnit, timeFormat, showLocalTimes, settings } = row.data;
           preferences = { distanceUnit, temperatureUnit, timeFormat, showLocalTimes, settings };
+        } else if (change.entity === 'notification_preferences') {
+          const row = NotificationPreferencesRow.safeParse(change.row);
+          if (!row.success || row.data.id !== change.id) {
+            skipped.push({
+              entity: change.entity,
+              id: change.id,
+              field: row.success ? 'row.id' : `row.${firstField(row.error)}`,
+            });
+            continue;
+          }
+          upsertOpaque(db, OPAQUE_TABLES[change.entity], change);
+          const { pushEnabled, events, deletedAt } = row.data;
+          notifications = effectiveNotificationPreferences(
+            deletedAt === null ? { pushEnabled, events } : null,
+          );
         } else {
           upsertOpaque(db, OPAQUE_TABLES[change.entity], change);
         }
@@ -399,7 +437,15 @@ export function applySyncPage(
         ownerUserId: options.ownerUserId ?? null,
         storeVersion: options.storeVersion ?? null,
       });
-      return { changes, flights, skipped, cursor: page.cursor, preferences, replaced: replace };
+      return {
+        changes,
+        flights,
+        skipped,
+        cursor: page.cursor,
+        preferences,
+        notifications,
+        replaced: replace,
+      };
     },
     { behavior: 'immediate' },
   );

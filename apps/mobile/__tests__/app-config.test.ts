@@ -8,9 +8,13 @@
  * react-native.config.js, fingerprint.config.js (the Google services file stays out of the
  * runtime version, re-review expo-correctness-1) and the package scripts. Increment 13's review
  * round: `IOS_DEVELOPMENT_TEAM` (G6), the Google iOS client id a store build must carry (G5) and
- * ExpoFileSystem built from source until SDK 58 (F5).
+ * ExpoFileSystem built from source until SDK 58 (F5). Increment 16: the time-sensitive
+ * entitlement in every variant (C8), and the expo-notifications plugin's Android icon, colour and
+ * default channel (C4, C5), the icon a white-on-transparent PNG that
+ * scripts/gen-notification-icon.mjs draws.
  */
 
+import { ANDROID_CHANNEL_IDS } from '@planeahead/shared';
 import type { ConfigContext, ExpoConfig } from 'expo/config';
 import appConfig, {
   apnsEnvironment,
@@ -29,8 +33,10 @@ declare const require: ((id: string) => unknown) & {
 
 const fs = jest.requireActual<{
   readFileSync(path: string, encoding: 'utf8'): string;
+  readFileSync(path: string): Uint8Array;
   realpathSync(path: string): string;
 }>('fs');
+const zlib = jest.requireActual<{ inflateSync(data: Uint8Array): Uint8Array }>('zlib');
 const path = jest.requireActual<{
   resolve(...parts: string[]): string;
   relative(from: string, to: string): string;
@@ -84,12 +90,62 @@ function pluginNames(config: ExpoConfig): string[] {
   );
 }
 
+/**
+ * The size and pixels of an 8-bit RGBA PNG that is not interlaced, whichever of the five row
+ * filters its encoder chose (PNG specification, section 9), so the icon checks below hold for
+ * any such file, the owner's own icon included.
+ */
+function decodeRgbaPng(png: Uint8Array): { width: number; height: number; rgba: Uint8Array } {
+  const view = new DataView(png.buffer, png.byteOffset, png.byteLength);
+  let [width, height] = [0, 0];
+  const parts: Uint8Array[] = [];
+  for (let offset = 8; offset < png.length; offset += 12 + view.getUint32(offset)) {
+    const type = String.fromCharCode(...png.subarray(offset + 4, offset + 8));
+    if (type === 'IHDR') {
+      [width, height] = [view.getUint32(offset + 8), view.getUint32(offset + 12)];
+      // Bit depth 8, colour type 6 (RGBA), deflate, the standard filters, not interlaced.
+      expect([...png.subarray(offset + 16, offset + 21)]).toEqual([8, 6, 0, 0, 0]);
+    } else if (type === 'IDAT') {
+      parts.push(png.subarray(offset + 8, offset + 8 + view.getUint32(offset)));
+    }
+  }
+  const compressed = new Uint8Array(parts.reduce((total, part) => total + part.length, 0));
+  let written = 0;
+  for (const part of parts) {
+    compressed.set(part, written);
+    written += part.length;
+  }
+  const scanlines = zlib.inflateSync(compressed);
+  const byte = (array: Uint8Array, index: number): number => array[index] ?? 0;
+  const stride = width * 4;
+  const rgba = new Uint8Array(height * stride);
+  for (let y = 0; y < height; y += 1) {
+    const filter = byte(scanlines, y * (stride + 1));
+    for (let x = 0; x < stride; x += 1) {
+      const left = x >= 4 ? byte(rgba, y * stride + x - 4) : 0;
+      const up = y > 0 ? byte(rgba, (y - 1) * stride + x) : 0;
+      const upLeft = x >= 4 && y > 0 ? byte(rgba, (y - 1) * stride + x - 4) : 0;
+      const estimate = left + up - upLeft;
+      const toLeft = Math.abs(estimate - left);
+      const toUp = Math.abs(estimate - up);
+      const toUpLeft = Math.abs(estimate - upLeft);
+      const paeth = toLeft <= toUp && toLeft <= toUpLeft ? left : toUp <= toUpLeft ? up : upLeft;
+      const predictor = [0, left, up, (left + up) >> 1, paeth][filter];
+      if (predictor === undefined) {
+        throw new Error(`row ${y} has filter type ${filter}, which PNG does not define`);
+      }
+      rgba[y * stride + x] = (byte(scanlines, y * (stride + 1) + 1 + x) + predictor) & 0xff;
+    }
+  }
+  return { width, height, rgba };
+}
+
 describe('app.config.ts', () => {
   it.each([
-    ['production', 'app.planeahead.mobile', 'PlaneAhead', 'production'],
-    ['preview', 'app.planeahead.mobile.preview', 'PlaneAhead Preview', 'production'],
-    ['development', 'app.planeahead.mobile.dev', 'PlaneAhead Dev', 'development'],
-  ])('builds the %s variant as its EAS profile does', (variant, bundleId, name, aps) => {
+    ['production', 'app.planeahead.mobile', 'PlaneAhead', 'production', '#1C4FD6'],
+    ['preview', 'app.planeahead.mobile.preview', 'PlaneAhead Preview', 'production', '#6D28D9'],
+    ['development', 'app.planeahead.mobile.dev', 'PlaneAhead Dev', 'development', '#B45309'],
+  ])('builds the %s variant as its EAS profile does', (variant, bundleId, name, aps, accent) => {
     const profileEnv = easJson().build[variant]?.env ?? {};
     // GOOGLE_IOS_CLIENT_ID comes from the EAS environment, which every store build has.
     const config = configFor(variant, {
@@ -103,11 +159,23 @@ describe('app.config.ts', () => {
     expect(config.ios?.entitlements).toEqual({
       'com.apple.security.application-groups': [`group.${bundleId}`],
       'aps-environment': aps,
+      // Ruling C8: a time-sensitive push breaks through Focus and the summary in every variant.
+      'com.apple.developer.usernotifications.time-sensitive': true,
     });
     expect(config.extra?.['variant']).toBe(variant);
     expect(config.extra?.['apnsEnvironment']).toBe(aps);
     const plugins = config.plugins ?? [];
-    expect(plugins).toContainEqual(['expo-notifications', { mode: aps }]);
+    // Rulings C4 and C5: the Android icon, the variant's own colour as the accent, and the
+    // channel FCM falls back to, which is one of the two the app creates (packages/shared).
+    expect(plugins).toContainEqual([
+      'expo-notifications',
+      {
+        mode: aps,
+        icon: './assets/notification-icon.png',
+        color: accent,
+        defaultChannel: ANDROID_CHANNEL_IDS.flightChanges,
+      },
+    ]);
     expect(plugins.at(-1)).toEqual(['./plugins/withApsEnvironment.ts', { apsEnvironment: aps }]);
   });
 
@@ -418,7 +486,15 @@ describe('app.config.ts', () => {
       enableSceneSupport: true,
       privacyManifestAggregationEnabled: true,
     });
-    expect(config.plugins?.[7]).toEqual(['expo-notifications', { mode: 'production' }]);
+    expect(config.plugins?.[7]).toEqual([
+      'expo-notifications',
+      {
+        mode: 'production',
+        icon: './assets/notification-icon.png',
+        color: '#1C4FD6',
+        defaultChannel: 'flight_changes',
+      },
+    ]);
   });
 
   it('leaves the Google services file out of the runtime fingerprint, wherever the build put it', () => {
@@ -527,6 +603,48 @@ describe('app.config.ts', () => {
     } finally {
       delete env['GOOGLE_SERVICES_JSON'];
     }
+  });
+
+  it('gives Android notifications a white icon on transparent, drawn by the committed script (C5)', () => {
+    const notifications = configFor('production').plugins?.find(
+      (plugin): plugin is [string, { icon: string }] =>
+        Array.isArray(plugin) && plugin[0] === 'expo-notifications',
+    );
+    const icon = path.resolve(APP_ROOT, notifications?.[1].icon ?? 'no icon named');
+    const { width, height, rgba } = decodeRgbaPng(fs.readFileSync(icon));
+    // The xxxhdpi size of the 24 dp status-bar icon; the plugin scales it to the other densities.
+    expect([width, height]).toEqual([96, 96]);
+    // Android draws the alpha channel alone, tinted with the plugin's colour: white wherever the
+    // icon is not transparent, an empty 1 dp edge, and a glyph, neither empty nor a filled block.
+    const notWhite: string[] = [];
+    const onTheEdge: string[] = [];
+    let opaque = 0;
+    for (let y = 0; y < height; y += 1) {
+      for (let x = 0; x < width; x += 1) {
+        const at = (y * width + x) * 4;
+        const [red, green, blue, alpha] = rgba.subarray(at, at + 4);
+        if (alpha !== 0 && (red !== 255 || green !== 255 || blue !== 255)) {
+          notWhite.push(`${x},${y}`);
+        }
+        if (alpha !== 0 && Math.min(x, y, width - 1 - x, height - 1 - y) < 4) {
+          onTheEdge.push(`${x},${y}`);
+        }
+        opaque += alpha === 255 ? 1 : 0;
+      }
+    }
+    expect(notWhite).toEqual([]);
+    expect(onTheEdge).toEqual([]);
+    expect(opaque / (width * height)).toBeGreaterThan(0.05);
+    expect(opaque / (width * height)).toBeLessThan(0.5);
+    // And it is what scripts/gen-notification-icon.mjs draws, until the owner's own icon replaces
+    // it (R2 owner action 5).
+    const script = path.resolve(APP_ROOT, '..', '..', 'scripts', 'gen-notification-icon.mjs');
+    expect(
+      childProcess.execFileSync(nodeBinary, [script, '--check'], {
+        cwd: APP_ROOT,
+        encoding: 'utf8',
+      }),
+    ).toMatch(/^gen-notification-icon: up to date/);
   });
 
   it('uses the fingerprint runtime version, the React Compiler off, NSSupportsLiveActivities on', () => {

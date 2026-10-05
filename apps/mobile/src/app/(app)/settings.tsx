@@ -1,29 +1,53 @@
 /**
  * Settings: appearance (a device preference, persisted in the kv-store and so available offline
- * on the next launch), the account (upgrade, sign out, delete), notifications (permission and
- * the raw device token only; no push service in Phase 0) and what this build talks to.
+ * on the next launch), the account (upgrade, sign out, delete), notifications and what this build
+ * talks to.
  *
  * Increment 10 (ruling T6): the units (metric, imperial) and time-format (12 h, 24 h) toggles.
  * They are the account's preferences: the settings store changes at once and persists through the
  * kv-store, and a `PATCH /v1/me/preferences` is queued through the outbox for the account and
  * its other devices (src/lib/preference-mutations.ts).
+ *
+ * Increment 16. Notifications show the permission state, read again on every return to the
+ * foreground; "Turn on notifications" while the system prompt can still show, and the system
+ * settings once it is denied (ruling C1). Registration no longer waits for this screen: it runs on
+ * every launch and foreground (ruling C2). Sign out invalidates this installation's push tokens
+ * first (ruling C3, src/lib/sign-out.ts).
+ *
+ * Ruling C11: the account's alerts switch (`pushEnabled`) and its five per-kind toggles, first gate
+ * assignment off by default, taking the units' path: the settings store at once, then
+ * `PATCH /v1/me/preferences` with `{ notifications }` through the outbox. They are the account's,
+ * not this phone's, so they stay editable whatever the permission, beside the system settings link
+ * while it is denied; with alerts off the five are greyed out and keep their values.
  */
 
 import * as Sentry from '@sentry/react-native';
+import {
+  NOTIFICATION_EVENT_PREFERENCES,
+  type NotificationEventPreference,
+  type NotificationPreferencesPatch,
+  type PushPermissionState,
+} from '@planeahead/shared';
 import Constants from 'expo-constants';
 import { useRouter } from 'expo-router';
-import { useState } from 'react';
+import { useRef, useState } from 'react';
 import { Alert } from 'react-native';
-import { Body, Button, Screen, Section, Title } from '../../components/ui';
+import { Body, Button, Screen, Section, Title, Toggle } from '../../components/ui';
 import { errorCode } from '../../lib/api-client';
 import { authClient, isAnonymousSession } from '../../lib/auth-client';
 import { runtimeConfig } from '../../lib/config';
-import { registerDevice } from '../../lib/devices';
+import type { SqliteLike } from '../../lib/db/sqlite-like';
 import { unitSystemOf, unitSystemPatch, type TimeFormat, type UnitSystem } from '../../lib/format';
-import { queuePreferencesPatch, type PreferencesPatch } from '../../lib/preference-mutations';
-import { readDevicePushToken } from '../../lib/push';
+import {
+  queueNotificationsPatch,
+  queuePreferencesPatch,
+  type PreferencesPatch,
+} from '../../lib/preference-mutations';
+import { openNotificationSettings, requestPushPermission, usePushPermission } from '../../lib/push';
+import { pushRegistrar } from '../../lib/push-registration';
 import { forgetAccount, services } from '../../lib/services';
 import { APPEARANCES, useSettings, type Appearance } from '../../lib/settings';
+import { signOut } from '../../lib/sign-out';
 import { pendingCount } from '../../lib/sync/outbox';
 
 const APPEARANCE_LABELS: Readonly<Record<Appearance, string>> = {
@@ -42,17 +66,48 @@ const TIME_FORMAT_CHOICES: readonly { readonly value: TimeFormat; readonly label
   { value: '24h', label: '24-hour (15:50)' },
 ];
 
-/** Applies a preferences choice here now, and queues it for the account through the outbox. */
-function choosePreferences(patch: PreferencesPatch): void {
-  useSettings.getState().updatePreferences(patch);
+const NOTIFICATION_STATES: Readonly<Record<PushPermissionState, string>> = {
+  granted: 'Notifications are on for this phone.',
+  provisional: 'Notifications arrive quietly in Notification Center.',
+  denied: 'Notifications are off for PlaneAhead in the system settings.',
+  undetermined: 'Notifications are not turned on yet.',
+};
+
+/** The per-kind toggles (ruling C11), in the order increment 15 names them. */
+const NOTIFICATION_EVENT_LABELS: Readonly<Record<NotificationEventPreference, string>> = {
+  delay: 'Delays',
+  gate_change: 'Gate changes',
+  first_gate_assignment: 'First gate assignment',
+  cancellation: 'Cancellations',
+  diversion: 'Diversions',
+};
+
+/** Queues a choice for the account through the outbox, and starts a drain. */
+function queueForAccount(queue: (db: SqliteLike) => void): void {
   void services()
     .then(({ store, outbox }) => {
-      queuePreferencesPatch(store.sqlite, patch);
+      queue(store.sqlite);
       return outbox.drain();
     })
     .catch((error: unknown) => {
       Sentry.captureException(error);
     });
+}
+
+/** Applies a preferences choice here now, and queues it for the account through the outbox. */
+function choosePreferences(patch: PreferencesPatch): void {
+  useSettings.getState().updatePreferences(patch);
+  queueForAccount((db) => {
+    queuePreferencesPatch(db, patch);
+  });
+}
+
+/** The same for a notification toggle: `{ notifications: patch }` (ruling C11). */
+function chooseNotifications(patch: NotificationPreferencesPatch): void {
+  useSettings.getState().updateNotifications(patch);
+  queueForAccount((db) => {
+    queueNotificationsPatch(db, patch);
+  });
 }
 
 export default function SettingsScreen() {
@@ -61,30 +116,51 @@ export default function SettingsScreen() {
   const appearance = useSettings((state) => state.appearance);
   const setAppearance = useSettings((state) => state.setAppearance);
   const preferences = useSettings((state) => state.preferences);
+  const notifications = useSettings((state) => state.notifications);
   const unitSystem = unitSystemOf(preferences);
   const [notice, setNotice] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
+  const signingOut = useRef(false);
+  const [permission, setPermission] = usePushPermission();
   const anonymous = isAnonymousSession(session);
   const config = runtimeConfig();
 
-  const signOut = async () => {
-    const { store } = await services();
-    const pending = pendingCount(store.sqlite);
-    const go = async () => {
-      await forgetAccount(store);
-    };
-    if (pending === 0) {
-      await go();
+  const confirmSignOut = async () => {
+    // One sign-out at a time (review N6): a tap while one runs, or while its confirmation is up,
+    // does nothing.
+    if (signingOut.current) {
       return;
     }
-    Alert.alert(
-      'Sign out?',
-      `${String(pending)} change(s) have not reached the server yet and will be lost.`,
-      [
-        { text: 'Cancel', style: 'cancel' },
-        { text: 'Sign out', style: 'destructive', onPress: () => void go() },
-      ],
-    );
+    signingOut.current = true;
+    const release = () => {
+      signingOut.current = false;
+    };
+    try {
+      const { store } = await services();
+      const pending = pendingCount(store.sqlite);
+      const go = () => {
+        setBusy(true);
+        return signOut(store).finally(() => {
+          setBusy(false);
+          release();
+        });
+      };
+      if (pending === 0) {
+        await go();
+        return;
+      }
+      Alert.alert(
+        'Sign out?',
+        `${String(pending)} change(s) have not reached the server yet and will be lost.`,
+        [
+          { text: 'Cancel', style: 'cancel', onPress: release },
+          { text: 'Sign out', style: 'destructive', onPress: () => void go() },
+        ],
+      );
+    } catch (error) {
+      release();
+      throw error;
+    }
   };
 
   const deleteAccount = () => {
@@ -122,20 +198,15 @@ export default function SettingsScreen() {
     );
   };
 
-  const enableNotifications = async () => {
+  const turnOnNotifications = async () => {
     setBusy(true);
     try {
-      const read = await readDevicePushToken();
-      if (read.kind === 'token') {
-        await registerDevice((await services()).api, { kind: read.tokenKind, token: read.token });
-        setNotice('Notifications are allowed on this device.');
-      } else if (read.kind === 'denied') {
-        setNotice('Notifications are off for PlaneAhead in the system settings.');
-      } else {
-        setNotice(`This build cannot receive notifications yet (${read.reason}).`);
-      }
-    } catch {
-      setNotice('Notifications could not be set up. Try again when you are online.');
+      setPermission(await requestPushPermission());
+      // The answer reaches the server now, not at the next foreground.
+      void pushRegistrar().register();
+    } catch (error) {
+      Sentry.captureException(error);
+      setNotice('Notifications could not be turned on. Try again.');
     } finally {
       setBusy(false);
     }
@@ -217,7 +288,7 @@ export default function SettingsScreen() {
           variant="secondary"
           disabled={busy}
           onPress={() => {
-            void signOut();
+            void confirmSignOut();
           }}
         />
         <Button
@@ -229,16 +300,53 @@ export default function SettingsScreen() {
         />
       </Section>
 
-      <Section title="Notifications">
-        <Button
-          testID="settings-notifications"
-          title="Allow notifications"
-          variant="secondary"
-          disabled={busy}
-          onPress={() => {
-            void enableNotifications();
+      <Section title="Notifications" testID="settings-notifications-section">
+        {permission === null ? null : (
+          <Body testID="settings-notifications-state">{NOTIFICATION_STATES[permission.state]}</Body>
+        )}
+        {permission?.canAsk === true ? (
+          <Button
+            testID="settings-notifications"
+            title="Turn on notifications"
+            variant="secondary"
+            disabled={busy}
+            onPress={() => {
+              void turnOnNotifications();
+            }}
+          />
+        ) : null}
+        {permission?.state === 'denied' ? (
+          <Button
+            testID="settings-notifications-system"
+            title="Open system settings"
+            variant="secondary"
+            onPress={() => {
+              // The app's own notification settings, not its settings page (review N3).
+              void openNotificationSettings();
+            }}
+          />
+        ) : null}
+        <Toggle
+          testID="settings-notify-push"
+          label="Flight alerts"
+          value={notifications.pushEnabled}
+          onValueChange={(pushEnabled) => {
+            chooseNotifications({ pushEnabled });
           }}
         />
+        {NOTIFICATION_EVENT_PREFERENCES.map((name) => (
+          <Toggle
+            key={name}
+            testID={`settings-notify-${name}`}
+            label={NOTIFICATION_EVENT_LABELS[name]}
+            value={notifications.events[name]}
+            // Alerts off: what each kind would do is kept, and is moot until they are back on.
+            disabled={!notifications.pushEnabled}
+            onValueChange={(on) => {
+              chooseNotifications({ events: { [name]: on } });
+            }}
+          />
+        ))}
       </Section>
 
       {notice === null ? null : <Body testID="settings-notice">{notice}</Body>}

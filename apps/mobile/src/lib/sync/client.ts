@@ -24,7 +24,7 @@
  * waits for the pull in flight, then starts its own.
  */
 
-import type { UserPreferences } from '@planeahead/shared';
+import type { NotificationPreferences, UserPreferences } from '@planeahead/shared';
 import { errorCode } from '../api-client';
 import type { SqliteLike } from '../db/sqlite-like';
 import { applySyncPage, SyncPageShell, type ApplyOutcome } from './apply';
@@ -43,6 +43,8 @@ export interface SyncDeps {
   readonly gate: ApplyGate;
   readonly onAccountDeleted: () => Promise<void> | void;
   readonly onPreferences?: (preferences: UserPreferences) => void;
+  /** A page carried `notification_preferences` (its last upsert, the defaults filled in). */
+  readonly onNotifications?: (notifications: NotificationPreferences) => void;
   readonly onSkipped?: (skipped: ApplyOutcome['skipped']) => void;
   readonly now?: () => Date;
   /** A runaway guard, far above any real feed: 1000 pages of 200 rows. */
@@ -157,6 +159,9 @@ async function pull(deps: SyncDeps, userId: string): Promise<SyncResult> {
     }
     if (outcome.preferences !== null) {
       deps.onPreferences?.(outcome.preferences);
+    }
+    if (outcome.notifications !== null) {
+      deps.onNotifications?.(outcome.notifications);
     }
     if (!page.data.hasMore) {
       return { kind: 'synced', pages, changes, resets };

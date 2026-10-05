@@ -129,6 +129,15 @@ export async function startEmbeddedPostgres(
       // schema-review.md section 12) do.
       '-c',
       'timezone=UTC',
+      // Twice the default 100 (increment 16 review, m2). A postgres.js client opened in a
+      // Workers-pool test file keeps its sockets until that file's isolate ends, so the API suite's
+      // connections are the sum over the files running at once: after increment 16's fix about 55
+      // in the worst order seen, but a simulation of 5,000 orders on this 18-core machine put the
+      // 95th percentile at 111. CI's postgres:18 service keeps 100 with its few workers (at most
+      // about 65). A real leak can still exhaust it: a file that opens a client per call keeps
+      // climbing.
+      '-c',
+      'max_connections=200',
     ],
     onLog: (message) => {
       log.push(message);

@@ -28,10 +28,15 @@
  *   rollup (one message per day, src/cron/ae-rollup.ts), both on the `housekeeping` queue. The
  *   spec gives both the same expression, and a Worker routes a cron by expression, so they share
  *   one handler rather than two triggers.
+ *   `PUSH_SOAK_CRON` (every five minutes, increment 16, ruling C9): the transport soak's tick, in
+ *   staging's `triggers` only; production keeps the two above. Inside a soak an operator started
+ *   on `/admin/push/soak` it plans one injection, and once an hour the canary, onto the
+ *   `housekeeping` queue (src/push/soak.ts); otherwise it reads one KV value and logs.
  */
 
 import type { Env } from '../env';
 import { type Logger, createLogger, errorFields } from '../observability/log';
+import { pushSoakCron } from '../push/soak';
 import { aeRollupCron } from './ae-rollup';
 import { housekeepingCron } from './housekeeping';
 import { reconcileCron } from './reconcile';
@@ -40,6 +45,8 @@ export const RECONCILE_CRON = '*/15 * * * *';
 export const HOUSEKEEPING_CRON = '0 3 * * *';
 /** The daily expression, housekeeping and the Analytics Engine rollup together. */
 export const DAILY_CRON = HOUSEKEEPING_CRON;
+/** The transport soak's tick (staging only). */
+export const PUSH_SOAK_CRON = '*/5 * * * *';
 
 export interface CronContext {
   readonly env: Env;
@@ -82,6 +89,7 @@ export const dailyCron: CronHandler = allOf(housekeepingCron, aeRollupCron);
 export const CRON_HANDLERS: CronHandlers = {
   [RECONCILE_CRON]: reconcileCron,
   [DAILY_CRON]: dailyCron,
+  [PUSH_SOAK_CRON]: pushSoakCron,
 };
 
 /** Routes one cron expression. Exported so a test can drive it without a ScheduledController. */

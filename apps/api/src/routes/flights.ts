@@ -408,7 +408,6 @@ async function resubscribeQuietly(
   flightKey: FlightKey,
   row: FlightSubscriptionRecord,
 ): Promise<void> {
-  const overrides = row.notificationOverrides;
   try {
     await callWithDeadline(
       'subscribe',
@@ -416,9 +415,6 @@ async function resubscribeQuietly(
         subscriptionId: row.id,
         userId: row.userId,
         muted: row.muted,
-        ...(typeof overrides === 'object' && overrides !== null && !Array.isArray(overrides)
-          ? { overrides }
-          : {}),
       }),
       ctx.deadlineMs,
       { waitUntil: ctx.waitUntil },
@@ -642,9 +638,6 @@ export function createFlightRoutes(options: FlightRoutesOptions = {}) {
             subscriptionId,
             userId: user.id,
             ...(body.muted === undefined ? {} : { muted: body.muted }),
-            ...(body.notificationOverrides === undefined
-              ? {}
-              : { overrides: body.notificationOverrides }),
           });
           let subscribed: DeadlineResult<SubscribeResponseV1>;
           try {
@@ -709,7 +702,8 @@ export function createFlightRoutes(options: FlightRoutesOptions = {}) {
                 seat: body.seat ?? null,
                 cabin: body.cabin ?? null,
                 muted: body.muted ?? false,
-                notificationOverrides: body.notificationOverrides ?? {},
+                // Review m1: the request carries no overrides; the column keeps an empty bag.
+                notificationOverrides: {},
                 liveTracked: ledger.has('live_tracked'),
                 // Ruling Q1: a subscribe starts with no recorded release, so a restored row's
                 // old stamp cannot make notify push it an intent produced before this subscribe.

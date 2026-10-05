@@ -414,6 +414,44 @@ describe('the injector and an unsettled tracker (review ruling Q5)', () => {
   });
 });
 
+describe("the injector's refusals before the tracker call (increment 16 review, m3)", () => {
+  it('answers 504 when the tracker does not answer in time, and 409 when it holds no running flight', async () => {
+    const flight = uniqueFlight();
+    const form = { flight_key: flight.flightKey, event: 'cancellation' };
+    const injected: unknown[] = [];
+    const withState = (getState: () => Promise<unknown>) => ({
+      injectorFor: () => () => ({
+        getState,
+        injectPolicyEvent: (input: unknown) => {
+          injected.push(input);
+          return Promise.reject(new Error('the tracker call must not run'));
+        },
+      }),
+    });
+    const late = await admin({
+      form,
+      options: withState(() => Promise.reject(new DeadlineExceededError('getState', 5_000))),
+    });
+    expect(late.status).toBe(504);
+    expect(await late.text()).toContain('did not answer in time');
+    const state = (phase: string, snapshot: null) => ({
+      rpcVersion: RPC_SCHEMA_VERSION,
+      flightKey: flight.flightKey,
+      phase,
+      snapshot,
+      nextRefreshAt: null,
+      doSchemaVersion: 3,
+      subscriberCount: 0,
+    });
+    for (const answer of [state('finished', null), state('expected', null)]) {
+      const refused = await admin({ form, options: withState(() => Promise.resolve(answer)) });
+      expect(refused.status).toBe(409);
+      expect(await refused.text()).toContain('holds no running flight');
+    }
+    expect(injected).toEqual([]);
+  });
+});
+
 describe("the injector's audit row (review ruling Q6)", () => {
   it('is written pending before the tracker call, and settled as timeout or error after it', async () => {
     const flight = uniqueFlight();

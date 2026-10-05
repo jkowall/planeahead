@@ -38,6 +38,13 @@ jest.mock('react-native-safe-area-context', () => {
   return { SafeAreaView: View };
 });
 
+// Loaded through src/lib/session.ts since increment 16; nothing here touches push.
+jest.mock('expo-notifications', () =>
+  jest
+    .requireActual<typeof import('./support/fake-notifications')>('./support/fake-notifications')
+    .fakeNotificationsModule(),
+);
+
 jest.mock('expo-apple-authentication', () => {
   const { Pressable, Text } = jest.requireActual<typeof import('react-native')>('react-native');
   return {

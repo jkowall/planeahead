@@ -37,7 +37,8 @@
       // reads the native sources, the ADRs, the workflows and the smoke script. The review round:
       // app-config.test.ts reads fingerprint.config.js (its extra sources and ignore paths).
       // Increment 13: store-bundles.test.ts runs a real prebuild of a copy of the config, the
-      // plugins, the target configs and the icons (assets/).
+      // plugins, the target configs and the icons (assets/). Increment 16: app-config.test.ts
+      // runs scripts/gen-notification-icon.mjs --check against assets/notification-icon.png.
       "inputs": [
         "src/**",
         "__tests__/**",
@@ -59,6 +60,7 @@
         "../../.github/workflows/mobile-preview.yml",
         "../../.github/workflows/native-smoke.yml",
         "../../scripts/native-smoke.sh",
+        "../../scripts/gen-notification-icon.mjs",
         "../../docs/adr/**",
         "../../docs/increments/11-verification.md",
         "../../docs/increments/13-verification.md",
