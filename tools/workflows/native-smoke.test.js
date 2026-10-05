@@ -339,7 +339,7 @@ describe('native-smoke.yml', () => {
 
   it('builds the release APK too and launches it, not the dev launcher (ruling Z5)', () => {
     expect(script).toMatch(/\.\/gradlew assembleDebug assembleRelease /);
-    expect(script).toContain("grep -qx 'assets/index.android.bundle'");
+    expect(script).toContain("grep -cx 'assets/index.android.bundle'");
     const launch = script.slice(script.indexOf('android_launch() {'));
     expect(launch).toMatch(/adb install -r "\$APK_RELEASE"/);
     expect(launch).not.toMatch(/app-debug\.apk|\$APK_DEBUG/);
@@ -1846,5 +1846,17 @@ describe('native-smoke.sh store checks (review ruling F2)', () => {
       },
       60_000,
     );
+  });
+});
+
+describe('native-smoke.sh pipelines', () => {
+  const script = readFileSync(join(repoRoot, 'scripts', 'native-smoke.sh'), 'utf8');
+
+  it('ends no pipeline in `grep -q`, which pipefail reports as a failure on a match', () => {
+    // `grep -q` exits at its first match; the command writing into it then dies of SIGPIPE, and
+    // `set -o pipefail` reports the pipeline as failed (141). The release-bundle check did this on
+    // a 1,343-line APK listing in increment 16's local smoke; a count (`grep -c`) reads to the end.
+    const code = script.split('\n').filter((line) => !/^\s*#/.test(line));
+    expect(code.filter((line) => /\|\s*grep\s+-[a-zA-Z]*q/.test(line))).toEqual([]);
   });
 });

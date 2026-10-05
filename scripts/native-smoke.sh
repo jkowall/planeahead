@@ -642,7 +642,9 @@ android_archive() {
   echo "native-smoke: ok: app and Wear APKs built, stub module and Tile compiled in"
 
   # The release APK runs the app's JavaScript, which the launch step relies on (ruling Z5).
-  unzip -l "$APK_RELEASE" | awk '{ print $4 }' | grep -qx 'assets/index.android.bundle' ||
+  # A count, not `grep -q`: `-q` stops at the first match, awk then dies of SIGPIPE writing the
+  # rest of the listing, and pipefail reports the pipeline as failed with the bundle present.
+  [ "$(unzip -l "$APK_RELEASE" | awk '{ print $4 }' | grep -cx 'assets/index.android.bundle')" -gt 0 ] ||
     fail "the release APK embeds no JavaScript bundle"
   echo "native-smoke: ok: the release APK embeds index.android.bundle"
 
